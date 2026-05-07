@@ -466,20 +466,49 @@ func (p *Parser) parseMulDiv() Expr {
 func (p *Parser) parsePostfix() Expr {
 	expr := p.parsePrimary()
 
-	for p.current.Type == TOKEN_LBRACKET {
-		p.advance()
+	for {
+		switch p.current.Type {
+		case TOKEN_DOT:
+			p.advance()
 
-		index := p.parseExpression()
+			if p.current.Type != TOKEN_IDENT {
+				langError(ErrorSyntax, "expected property name after dot")
+			}
 
-		p.expect(TOKEN_RBRACKET)
+			name := p.current.Literal
+			p.advance()
 
-		expr = IndexExpr{
-			Array: expr,
-			Index: index,
+			// Method/builtin call: core.println(...)
+			if p.current.Type == TOKEN_LPAREN {
+				p.advance()
+
+				args := p.parseArgumentList()
+
+				p.expect(TOKEN_RPAREN)
+
+				if ident, ok := expr.(IdentExpr); ok {
+					expr = MemberCallExpr{
+						Object: ident.Name,
+						Method: name,
+						Args:   args,
+					}
+				} else {
+					langError(ErrorSyntax, "method calls currently only support module.method(...)")
+				}
+
+				continue
+			}
+
+			// Property access: user.name
+			expr = PropertyExpr{
+				Object: expr,
+				Name:   name,
+			}
+
+		default:
+			return expr
 		}
 	}
-
-	return expr
 }
 
 func (p *Parser) parseArrayLiteral() Expr {
@@ -508,6 +537,45 @@ func (p *Parser) parseArrayLiteral() Expr {
 	return ArrayExpr{Elements: elements}
 }
 
+func (p *Parser) parseObjectLiteral() Expr {
+	p.expect(TOKEN_LBRACE)
+
+	var fields []ObjectField
+
+	if p.current.Type == TOKEN_RBRACE {
+		p.expect(TOKEN_RBRACE)
+		return ObjectExpr{Fields: fields}
+	}
+
+	for {
+		if p.current.Type != TOKEN_IDENT && p.current.Type != TOKEN_STRING {
+			langError(ErrorSyntax, "expected object field name")
+		}
+
+		name := p.current.Literal
+		p.advance()
+
+		p.expect(TOKEN_COLON)
+
+		value := p.parseExpression()
+
+		fields = append(fields, ObjectField{
+			Name:  name,
+			Value: value,
+		})
+
+		if p.current.Type != TOKEN_COMMA {
+			break
+		}
+
+		p.advance()
+	}
+
+	p.expect(TOKEN_RBRACE)
+
+	return ObjectExpr{Fields: fields}
+}
+
 func (p *Parser) parsePrimary() Expr {
 	switch p.current.Type {
 	case TOKEN_NUMBER:
@@ -527,7 +595,6 @@ func (p *Parser) parsePrimary() Expr {
 		name := p.current.Literal
 		p.advance()
 
-		// Normal function call: add(1, 2)
 		if p.current.Type == TOKEN_LPAREN {
 			p.advance()
 
@@ -538,30 +605,6 @@ func (p *Parser) parsePrimary() Expr {
 			return CallExpr{
 				Name: name,
 				Args: args,
-			}
-		}
-
-		// Member call: core.halt()
-		if p.current.Type == TOKEN_DOT {
-			p.advance()
-
-			if p.current.Type != TOKEN_IDENT {
-				langError(ErrorSyntax, "expected method name after dot")
-			}
-
-			method := p.current.Literal
-			p.advance()
-
-			p.expect(TOKEN_LPAREN)
-
-			args := p.parseArgumentList()
-
-			p.expect(TOKEN_RPAREN)
-
-			return MemberCallExpr{
-				Object: name,
-				Method: method,
-				Args:   args,
 			}
 		}
 
@@ -587,6 +630,9 @@ func (p *Parser) parsePrimary() Expr {
 		p.advance()
 
 		return parseInterpolatedString(value)
+
+	case TOKEN_LBRACE:
+		return p.parseObjectLiteral()
 
 	case TOKEN_TRUE:
 		p.advance()

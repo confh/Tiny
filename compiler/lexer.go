@@ -153,6 +153,9 @@ func (l *Lexer) NextToken() Token {
 	case '.':
 		l.pos++
 		return Token{Type: TOKEN_DOT, Literal: "."}
+	case ':':
+		l.pos++
+		return Token{Type: TOKEN_COLON, Literal: ":"}
 	case '[':
 		l.pos++
 		return Token{Type: TOKEN_LBRACKET, Literal: "["}

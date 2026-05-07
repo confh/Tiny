@@ -201,6 +201,22 @@ func (c *Compiler) compileExpr(expr Expr) {
 	case UndefinedExpr:
 		c.emit(OP_CONST, UndefinedValue{})
 
+	case ObjectExpr:
+		names := make([]string, len(e.Fields))
+
+		for i, field := range e.Fields {
+			names[i] = field.Name
+			c.compileExpr(field.Value)
+		}
+
+		c.emit(OP_OBJECT, ObjectInfo{
+			Names: names,
+		})
+
+	case PropertyExpr:
+		c.compileExpr(e.Object)
+		c.emit(OP_GET_PROPERTY, e.Name)
+
 	case ArrayExpr:
 		for _, element := range e.Elements {
 			c.compileExpr(element)

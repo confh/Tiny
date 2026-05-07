@@ -85,6 +85,24 @@ type BoolExpr struct {
 
 func (e BoolExpr) exprNode() {}
 
+type ObjectField struct {
+	Name  string
+	Value Expr
+}
+
+type ObjectExpr struct {
+	Fields []ObjectField
+}
+
+func (e ObjectExpr) exprNode() {}
+
+type PropertyExpr struct {
+	Object Expr
+	Name   string
+}
+
+func (e PropertyExpr) exprNode() {}
+
 type NullExpr struct{}
 
 func (e NullExpr) exprNode() {}

@@ -47,6 +47,7 @@ const (
 	TOKEN_COMMA    TokenType = ","
 	TOKEN_SEMI     TokenType = ";"
 	TOKEN_DOT      TokenType = "."
+	TOKEN_COLON    TokenType = ":"
 )
 
 type Token struct {

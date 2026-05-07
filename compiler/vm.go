@@ -260,6 +260,39 @@ func (vm *VM) Run() {
 
 			vm.push(result)
 
+		case OP_OBJECT:
+			info := instr.Value.(ObjectInfo)
+
+			values := make([]Value, len(info.Names))
+
+			for i := len(info.Names) - 1; i >= 0; i-- {
+				values[i] = vm.pop()
+			}
+
+			object := ObjectValue{}
+
+			for i, name := range info.Names {
+				object[name] = values[i]
+			}
+
+			vm.push(object)
+
+		case OP_GET_PROPERTY:
+			name := instr.Value.(string)
+			objectValue := vm.pop()
+
+			object, ok := objectValue.(ObjectValue)
+			if !ok {
+				langError(ErrorType, "expected object, got %s", typeName(objectValue))
+			}
+
+			value, exists := object[name]
+			if !exists {
+				langError(ErrorName, "object has no property: %s", name)
+			}
+
+			vm.push(value)
+
 		case OP_HALT:
 			return
 

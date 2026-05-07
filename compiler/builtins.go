@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -14,6 +15,51 @@ func (vm *VM) callBuiltin(object string, method string, argCount int) {
 	}
 
 	switch method {
+	case "toPrettyJSON":
+		if argCount != 1 {
+			langError(ErrorRuntime, "core.toPrettyJSON expects 1 argument")
+		}
+
+		value := vm.pop()
+
+		jsonValue := valueToJSONCompatible(value)
+
+		bytes, err := json.MarshalIndent(jsonValue, "", "  ")
+		if err != nil {
+			langError(ErrorRuntime, "failed to convert value to JSON: %v", err)
+		}
+
+		vm.push(string(bytes))
+	case "toJSON":
+		if argCount != 1 {
+			langError(ErrorRuntime, "core.toJSON expects 1 argument")
+		}
+
+		value := vm.pop()
+
+		jsonValue := valueToJSONCompatible(value)
+
+		bytes, err := json.Marshal(jsonValue)
+		if err != nil {
+			langError(ErrorRuntime, "failed to convert value to JSON: %v", err)
+		}
+
+		vm.push(string(bytes))
+	case "has":
+		if argCount != 2 {
+			langError(ErrorRuntime, "core.has expects 2 arguments")
+		}
+
+		key := asString(vm.pop())
+		objectValue := vm.pop()
+
+		object, ok := objectValue.(ObjectValue)
+		if !ok {
+			langError(ErrorType, "core.has expected object, got %s", typeName(objectValue))
+		}
+
+		_, exists := object[key]
+		vm.push(exists)
 	case "len":
 		if argCount != 1 {
 			langError(ErrorRuntime, "core.len expects 1 argument")

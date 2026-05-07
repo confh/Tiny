@@ -3,10 +3,12 @@ package main
 type OpCode string
 
 const (
-	OP_CONST       OpCode = "CONST"
-	OP_INTERPOLATE OpCode = "INTERPOLATE"
-	OP_ARRAY       OpCode = "ARRAY"
-	OP_INDEX       OpCode = "INDEX"
+	OP_CONST        OpCode = "CONST"
+	OP_INTERPOLATE  OpCode = "INTERPOLATE"
+	OP_ARRAY        OpCode = "ARRAY"
+	OP_INDEX        OpCode = "INDEX"
+	OP_OBJECT       OpCode = "OBJECT"
+	OP_GET_PROPERTY OpCode = "GET_PROPERTY"
 
 	OP_ASSIGN_LOCAL  OpCode = "ASSIGN_LOCAL"
 	OP_ASSIGN_GLOBAL OpCode = "ASSIGN_GLOBAL"
@@ -77,4 +79,8 @@ type BuiltinCallInfo struct {
 type VariableInfo struct {
 	Name     string
 	Constant bool
+}
+
+type ObjectInfo struct {
+	Names []string
 }

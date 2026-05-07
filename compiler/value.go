@@ -12,6 +12,8 @@ type UndefinedValue struct{}
 
 type ArrayValue []Value
 
+type ObjectValue map[string]Value
+
 type Value any
 
 func asInt(value Value) int {
@@ -42,6 +44,71 @@ func asInt(value Value) int {
 	}
 }
 
+func typeName(value Value) string {
+	switch value.(type) {
+	case int:
+		return "number"
+	case string:
+		return "string"
+	case bool:
+		return "bool"
+	case ArrayValue:
+		return "array"
+	case NullValue:
+		return "null"
+	case UndefinedValue:
+		return "undefined"
+	case nil:
+		return "nil"
+	default:
+		return fmt.Sprintf("%T", value)
+	}
+}
+
+func valueToJSONCompatible(value Value) any {
+	switch v := value.(type) {
+	case int:
+		return v
+
+	case string:
+		return v
+
+	case bool:
+		return v
+
+	case ObjectValue:
+		result := map[string]any{}
+
+		for key, item := range v {
+			result[key] = valueToJSONCompatible(item)
+		}
+
+		return result
+
+	case ArrayValue:
+		result := make([]any, len(v))
+
+		for i, item := range v {
+			result[i] = valueToJSONCompatible(item)
+		}
+
+		return result
+
+	case NullValue:
+		return nil
+
+	case UndefinedValue:
+		return nil
+
+	case nil:
+		return nil
+
+	default:
+		langError(ErrorType, "cannot convert %s to JSON", typeName(value))
+		return nil
+	}
+}
+
 func valueToString(value Value) string {
 	switch v := value.(type) {
 	case string:
@@ -68,6 +135,14 @@ func valueToString(value Value) string {
 		return "undefined"
 	case nil:
 		return "nil"
+	case ObjectValue:
+		parts := []string{}
+
+		for key, item := range v {
+			parts = append(parts, key+": "+valueToString(item))
+		}
+
+		return "{" + strings.Join(parts, ", ") + "}"
 	default:
 		return fmt.Sprintf("%v", v)
 	}
