@@ -1,0 +1,639 @@
+package main
+
+import (
+	"fmt"
+	"strconv"
+)
+
+func findInterpolationStart(input string) int {
+	for i := 0; i < len(input)-1; i++ {
+		if input[i] == '$' && input[i+1] == '{' {
+			return i
+		}
+	}
+
+	return -1
+}
+
+func findClosingBrace(input string, start int) int {
+	depth := 0
+
+	for i := start; i < len(input); i++ {
+		switch input[i] {
+		case '{':
+			depth++
+		case '}':
+			if depth == 0 {
+				return i
+			}
+			depth--
+		}
+	}
+
+	return -1
+}
+
+func parseInterpolatedString(input string) Expr {
+	var parts []InterpolatedStringPart
+
+	for len(input) > 0 {
+		start := findInterpolationStart(input)
+
+		if start == -1 {
+			if input != "" {
+				parts = append(parts, InterpolatedStringPart{
+					Text: input,
+				})
+			}
+			break
+		}
+
+		if start > 0 {
+			parts = append(parts, InterpolatedStringPart{
+				Text: input[:start],
+			})
+		}
+
+		end := findClosingBrace(input, start+2)
+		if end == -1 {
+			panic("unterminated interpolation")
+		}
+
+		exprSource := input[start+2 : end]
+
+		lexer := NewLexer(exprSource)
+		parser := NewParser(lexer)
+		expr := parser.parseExpression()
+
+		if parser.current.Type != TOKEN_EOF {
+			panic("unexpected tokens inside interpolation")
+		}
+
+		parts = append(parts, InterpolatedStringPart{
+			Expr:   expr,
+			IsExpr: true,
+		})
+
+		input = input[end+1:]
+	}
+
+	return InterpolatedStringExpr{Parts: parts}
+}
+
+type Parser struct {
+	lexer *Lexer
+
+	current Token
+	next    Token
+}
+
+func NewParser(lexer *Lexer) *Parser {
+	p := &Parser{lexer: lexer}
+
+	p.advance()
+	p.advance()
+
+	return p
+}
+
+func (p *Parser) advance() {
+	p.current = p.next
+	p.next = p.lexer.NextToken()
+}
+
+func (p *Parser) ParseProgram() Program {
+	var statements []Stmt
+
+	for p.current.Type != TOKEN_EOF {
+		stmt := p.parseStatement()
+		statements = append(statements, stmt)
+	}
+
+	return Program{Statements: statements}
+}
+
+func (p *Parser) parseAssignStatement() Stmt {
+	if p.current.Type != TOKEN_IDENT {
+		panic("expected variable name")
+	}
+
+	name := p.current.Literal
+	p.advance()
+
+	p.expect(TOKEN_ASSIGN)
+
+	value := p.parseExpression()
+
+	p.expect(TOKEN_SEMI)
+
+	return AssignStmt{
+		Name:  name,
+		Value: value,
+	}
+}
+
+func (p *Parser) parseStatement() Stmt {
+	switch p.current.Type {
+	case TOKEN_IDENT:
+		if p.next.Type == TOKEN_ASSIGN {
+			return p.parseAssignStatement()
+		}
+		return p.parseExpressionStatement()
+	case TOKEN_IMPORT:
+		return p.parseImportStatement()
+	case TOKEN_LET:
+		return p.parseLetStatement()
+	case TOKEN_CONST:
+		return p.parseConstStatement()
+	case TOKEN_FN:
+		return p.parseFunctionStatement()
+	case TOKEN_RETURN:
+		return p.parseReturnStatement()
+	case TOKEN_IF:
+		return p.parseIfStatement()
+	case TOKEN_WHILE:
+		return p.parseWhileStatement()
+	default:
+		return p.parseExpressionStatement()
+	}
+}
+
+func (p *Parser) parseWhileStatement() Stmt {
+	p.expect(TOKEN_WHILE)
+
+	condition := p.parseExpression()
+
+	p.expect(TOKEN_LBRACE)
+
+	body := p.parseBlock()
+
+	return WhileStmt{
+		Condition: condition,
+		Body:      body,
+	}
+}
+
+func (p *Parser) parseIfStatement() Stmt {
+	p.expect(TOKEN_IF)
+
+	condition := p.parseExpression()
+
+	p.expect(TOKEN_LBRACE)
+
+	thenBody := p.parseBlock()
+
+	var elseBody []Stmt
+
+	if p.current.Type == TOKEN_ELSE {
+		p.expect(TOKEN_ELSE)
+		p.expect(TOKEN_LBRACE)
+
+		elseBody = p.parseBlock()
+	}
+
+	return IfStmt{
+		Condition: condition,
+		ThenBody:  thenBody,
+		ElseBody:  elseBody,
+	}
+}
+
+func (p *Parser) parseBlock() []Stmt {
+	var statements []Stmt
+
+	for p.current.Type != TOKEN_RBRACE {
+		if p.current.Type == TOKEN_EOF {
+			panic("unexpected EOF inside block")
+		}
+
+		statements = append(statements, p.parseStatement())
+	}
+
+	p.expect(TOKEN_RBRACE)
+
+	return statements
+}
+
+func (p *Parser) parseImportStatement() Stmt {
+	p.expect(TOKEN_IMPORT)
+
+	if p.current.Type != TOKEN_STRING {
+		panic("expected string path after import")
+	}
+
+	path := p.current.Literal
+	p.advance()
+
+	p.expect(TOKEN_SEMI)
+
+	return ImportStmt{Path: path}
+}
+
+func (p *Parser) parseLetStatement() Stmt {
+	p.expect(TOKEN_LET)
+
+	if p.current.Type != TOKEN_IDENT {
+		panic("expected variable name after let")
+	}
+
+	name := p.current.Literal
+	p.advance()
+
+	p.expect(TOKEN_ASSIGN)
+
+	value := p.parseExpression()
+
+	p.expect(TOKEN_SEMI)
+
+	return VariableStmt{
+		Name:     name,
+		Value:    value,
+		Constant: false,
+	}
+}
+
+func (p *Parser) parseConstStatement() Stmt {
+	p.expect(TOKEN_CONST)
+
+	if p.current.Type != TOKEN_IDENT {
+		panic("expected variable name after const")
+	}
+
+	name := p.current.Literal
+	p.advance()
+
+	p.expect(TOKEN_ASSIGN)
+
+	value := p.parseExpression()
+
+	p.expect(TOKEN_SEMI)
+
+	return VariableStmt{
+		Name:     name,
+		Value:    value,
+		Constant: true,
+	}
+}
+
+func (p *Parser) parseFunctionStatement() Stmt {
+	p.expect(TOKEN_FN)
+
+	if p.current.Type != TOKEN_IDENT {
+		panic("expected function name after fn")
+	}
+
+	name := p.current.Literal
+	p.advance()
+
+	p.expect(TOKEN_LPAREN)
+
+	params := p.parseParameterList()
+
+	p.expect(TOKEN_RPAREN)
+	p.expect(TOKEN_LBRACE)
+
+	var body []Stmt
+
+	for p.current.Type != TOKEN_RBRACE {
+		if p.current.Type == TOKEN_EOF {
+			panic("unexpected EOF inside function body")
+		}
+
+		body = append(body, p.parseStatement())
+	}
+
+	p.expect(TOKEN_RBRACE)
+
+	return FunctionStmt{
+		Name:   name,
+		Params: params,
+		Body:   body,
+	}
+}
+
+func (p *Parser) parseParameterList() []string {
+	var params []string
+
+	if p.current.Type == TOKEN_RPAREN {
+		return params
+	}
+
+	for {
+		if p.current.Type != TOKEN_IDENT {
+			panic("expected parameter name")
+		}
+
+		params = append(params, p.current.Literal)
+		p.advance()
+
+		if p.current.Type != TOKEN_COMMA {
+			break
+		}
+
+		p.advance()
+	}
+
+	return params
+}
+
+func (p *Parser) parseReturnStatement() Stmt {
+	p.expect(TOKEN_RETURN)
+
+	value := p.parseExpression()
+
+	p.expect(TOKEN_SEMI)
+
+	return ReturnStmt{
+		Value: value,
+	}
+}
+
+func (p *Parser) parseExpressionStatement() Stmt {
+	value := p.parseExpression()
+
+	p.expect(TOKEN_SEMI)
+
+	return ExprStmt{
+		Value: value,
+	}
+}
+
+func (p *Parser) parseExpression() Expr {
+	return p.parseOr()
+}
+
+func (p *Parser) parseOr() Expr {
+	left := p.parseAnd()
+
+	for p.current.Type == TOKEN_OR {
+		op := p.current.Type
+		p.advance()
+
+		right := p.parseAnd()
+
+		left = BinaryExpr{
+			Left:  left,
+			Op:    op,
+			Right: right,
+		}
+	}
+
+	return left
+}
+
+func (p *Parser) parseAnd() Expr {
+	left := p.parseComparison()
+
+	for p.current.Type == TOKEN_AND {
+		op := p.current.Type
+		p.advance()
+
+		right := p.parseComparison()
+
+		left = BinaryExpr{
+			Left:  left,
+			Op:    op,
+			Right: right,
+		}
+	}
+
+	return left
+}
+
+func (p *Parser) parseComparison() Expr {
+	left := p.parseAddSub()
+
+	for p.current.Type == TOKEN_EQ ||
+		p.current.Type == TOKEN_NEQ ||
+		p.current.Type == TOKEN_LT ||
+		p.current.Type == TOKEN_GT ||
+		p.current.Type == TOKEN_LTE ||
+		p.current.Type == TOKEN_GTE {
+
+		op := p.current.Type
+		p.advance()
+
+		right := p.parseAddSub()
+
+		left = BinaryExpr{
+			Left:  left,
+			Op:    op,
+			Right: right,
+		}
+	}
+
+	return left
+}
+
+func (p *Parser) parseAddSub() Expr {
+	left := p.parseMulDiv()
+
+	for p.current.Type == TOKEN_PLUS || p.current.Type == TOKEN_MINUS {
+		op := p.current.Type
+		p.advance()
+
+		right := p.parseMulDiv()
+
+		left = BinaryExpr{
+			Left:  left,
+			Op:    op,
+			Right: right,
+		}
+	}
+
+	return left
+}
+
+func (p *Parser) parseMulDiv() Expr {
+	left := p.parsePostfix()
+
+	for p.current.Type == TOKEN_STAR || p.current.Type == TOKEN_SLASH {
+		op := p.current.Type
+		p.advance()
+
+		right := p.parsePostfix()
+
+		left = BinaryExpr{
+			Left:  left,
+			Op:    op,
+			Right: right,
+		}
+	}
+
+	return left
+}
+
+func (p *Parser) parsePostfix() Expr {
+	expr := p.parsePrimary()
+
+	for p.current.Type == TOKEN_LBRACKET {
+		p.advance()
+
+		index := p.parseExpression()
+
+		p.expect(TOKEN_RBRACKET)
+
+		expr = IndexExpr{
+			Array: expr,
+			Index: index,
+		}
+	}
+
+	return expr
+}
+
+func (p *Parser) parseArrayLiteral() Expr {
+	p.expect(TOKEN_LBRACKET)
+
+	var elements []Expr
+
+	if p.current.Type == TOKEN_RBRACKET {
+		p.expect(TOKEN_RBRACKET)
+		return ArrayExpr{Elements: elements}
+	}
+
+	for {
+		element := p.parseExpression()
+		elements = append(elements, element)
+
+		if p.current.Type != TOKEN_COMMA {
+			break
+		}
+
+		p.advance()
+	}
+
+	p.expect(TOKEN_RBRACKET)
+
+	return ArrayExpr{Elements: elements}
+}
+
+func (p *Parser) parsePrimary() Expr {
+	switch p.current.Type {
+	case TOKEN_NUMBER:
+		value, err := strconv.Atoi(p.current.Literal)
+		if err != nil {
+			panic(err)
+		}
+
+		p.advance()
+
+		return NumberExpr{Value: value}
+
+	case TOKEN_LBRACKET:
+		return p.parseArrayLiteral()
+
+	case TOKEN_IDENT:
+		name := p.current.Literal
+		p.advance()
+
+		// Normal function call: add(1, 2)
+		if p.current.Type == TOKEN_LPAREN {
+			p.advance()
+
+			args := p.parseArgumentList()
+
+			p.expect(TOKEN_RPAREN)
+
+			return CallExpr{
+				Name: name,
+				Args: args,
+			}
+		}
+
+		// Member call: core.halt()
+		if p.current.Type == TOKEN_DOT {
+			p.advance()
+
+			if p.current.Type != TOKEN_IDENT {
+				panic("expected method name after dot")
+			}
+
+			method := p.current.Literal
+			p.advance()
+
+			p.expect(TOKEN_LPAREN)
+
+			args := p.parseArgumentList()
+
+			p.expect(TOKEN_RPAREN)
+
+			return MemberCallExpr{
+				Object: name,
+				Method: method,
+				Args:   args,
+			}
+		}
+
+		return IdentExpr{Name: name}
+
+	case TOKEN_LPAREN:
+		p.advance()
+
+		expr := p.parseExpression()
+
+		p.expect(TOKEN_RPAREN)
+
+		return expr
+
+	case TOKEN_STRING:
+		value := p.current.Literal
+		p.advance()
+
+		return StringExpr{Value: value}
+
+	case TOKEN_BACKTICK_STRING:
+		value := p.current.Literal
+		p.advance()
+
+		return parseInterpolatedString(value)
+
+	case TOKEN_TRUE:
+		p.advance()
+		return BoolExpr{Value: true}
+
+	case TOKEN_FALSE:
+		p.advance()
+		return BoolExpr{Value: false}
+
+	case TOKEN_NULL:
+		p.advance()
+		return NullExpr{}
+
+	case TOKEN_UNDEFINED:
+		p.advance()
+		return UndefinedExpr{}
+
+	default:
+		panic(fmt.Sprintf("expected expression, got %s", p.current.Type))
+	}
+}
+
+func (p *Parser) parseArgumentList() []Expr {
+	var args []Expr
+
+	if p.current.Type == TOKEN_RPAREN {
+		return args
+	}
+
+	for {
+		arg := p.parseExpression()
+		args = append(args, arg)
+
+		if p.current.Type != TOKEN_COMMA {
+			break
+		}
+
+		p.advance()
+	}
+
+	return args
+}
+
+func (p *Parser) expect(tokenType TokenType) {
+	if p.current.Type != tokenType {
+		panic(fmt.Sprintf("expected %s, got %s", tokenType, p.current.Type))
+	}
+
+	p.advance()
+}
