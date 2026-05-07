@@ -1,9 +1,5 @@
 package main
 
-import (
-	"fmt"
-)
-
 type Compiler struct {
 	mainInstructions []Instruction
 	functions        map[string]Function
@@ -80,7 +76,7 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 		c.emit(OP_RETURN, nil)
 
 	case ImportStmt:
-		panic("imports should be resolved before compiling")
+		langError(ErrorInternal, "imports should be resolved before compiling")
 
 	case IfStmt:
 		c.compileIfStatement(s)
@@ -89,7 +85,7 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 		c.compileWhileStatement(s)
 
 	default:
-		panic("unknown statement")
+		langError(ErrorInternal, "unknown statement")
 	}
 }
 
@@ -135,7 +131,7 @@ func (c *Compiler) compileIfStatement(stmt IfStmt) {
 
 func (c *Compiler) compileFunction(stmt FunctionStmt) {
 	if _, exists := c.functions[stmt.Name]; exists {
-		panic(fmt.Sprintf("function already defined: %s", stmt.Name))
+		langError(ErrorName, "function already defined: %s", stmt.Name)
 	}
 
 	oldInstructions := c.currentInstructions
@@ -261,7 +257,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 			c.emit(OP_OR, nil)
 
 		default:
-			panic("unknown binary operator")
+			langError(ErrorInternal, "unknown binary operator")
 		}
 
 	case CallExpr:
@@ -286,7 +282,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 		})
 
 	default:
-		panic("unknown expression")
+		langError(ErrorInternal, "unknown expression")
 	}
 }
 

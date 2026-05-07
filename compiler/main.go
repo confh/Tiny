@@ -6,6 +6,8 @@ import (
 )
 
 func main() {
+	defer handleLangError()
+
 	debug := flag.Bool("debug", false, "show bytecode debug output")
 
 	flag.Parse()

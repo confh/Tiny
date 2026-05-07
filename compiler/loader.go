@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -16,7 +15,7 @@ func LoadProgram(path string) Program {
 func loadFile(path string, visited map[string]bool) []Stmt {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
-		panic(err)
+		langError(ErrorImport, "%v", err)
 	}
 
 	if visited[absPath] {
@@ -27,7 +26,7 @@ func loadFile(path string, visited map[string]bool) []Stmt {
 
 	bytes, err := os.ReadFile(absPath)
 	if err != nil {
-		panic(fmt.Sprintf("failed to read file %s: %v", path, err))
+		langError(ErrorImport, "failed to read file %s: %v", path, err)
 	}
 
 	lexer := NewLexer(string(bytes))

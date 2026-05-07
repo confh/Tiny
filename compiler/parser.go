@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"strconv"
 )
 
@@ -56,7 +55,7 @@ func parseInterpolatedString(input string) Expr {
 
 		end := findClosingBrace(input, start+2)
 		if end == -1 {
-			panic("unterminated interpolation")
+			langError(ErrorSyntax, "unterminated interpolation")
 		}
 
 		exprSource := input[start+2 : end]
@@ -66,7 +65,7 @@ func parseInterpolatedString(input string) Expr {
 		expr := parser.parseExpression()
 
 		if parser.current.Type != TOKEN_EOF {
-			panic("unexpected tokens inside interpolation")
+			langError(ErrorSyntax, "unexpected tokens inside interpolation")
 		}
 
 		parts = append(parts, InterpolatedStringPart{
@@ -114,7 +113,7 @@ func (p *Parser) ParseProgram() Program {
 
 func (p *Parser) parseAssignStatement() Stmt {
 	if p.current.Type != TOKEN_IDENT {
-		panic("expected variable name")
+		langError(ErrorSyntax, "expected variable name")
 	}
 
 	name := p.current.Literal
@@ -203,7 +202,7 @@ func (p *Parser) parseBlock() []Stmt {
 
 	for p.current.Type != TOKEN_RBRACE {
 		if p.current.Type == TOKEN_EOF {
-			panic("unexpected EOF inside block")
+			langError(ErrorSyntax, "unexpected EOF inside block")
 		}
 
 		statements = append(statements, p.parseStatement())
@@ -218,7 +217,7 @@ func (p *Parser) parseImportStatement() Stmt {
 	p.expect(TOKEN_IMPORT)
 
 	if p.current.Type != TOKEN_STRING {
-		panic("expected string path after import")
+		langError(ErrorSyntax, "expected string path after import")
 	}
 
 	path := p.current.Literal
@@ -233,7 +232,7 @@ func (p *Parser) parseLetStatement() Stmt {
 	p.expect(TOKEN_LET)
 
 	if p.current.Type != TOKEN_IDENT {
-		panic("expected variable name after let")
+		langError(ErrorSyntax, "expected variable name after let")
 	}
 
 	name := p.current.Literal
@@ -256,7 +255,7 @@ func (p *Parser) parseConstStatement() Stmt {
 	p.expect(TOKEN_CONST)
 
 	if p.current.Type != TOKEN_IDENT {
-		panic("expected variable name after const")
+		langError(ErrorSyntax, "expected variable name after const")
 	}
 
 	name := p.current.Literal
@@ -279,7 +278,7 @@ func (p *Parser) parseFunctionStatement() Stmt {
 	p.expect(TOKEN_FN)
 
 	if p.current.Type != TOKEN_IDENT {
-		panic("expected function name after fn")
+		langError(ErrorSyntax, "expected function name after fn")
 	}
 
 	name := p.current.Literal
@@ -296,7 +295,7 @@ func (p *Parser) parseFunctionStatement() Stmt {
 
 	for p.current.Type != TOKEN_RBRACE {
 		if p.current.Type == TOKEN_EOF {
-			panic("unexpected EOF inside function body")
+			langError(ErrorSyntax, "unexpected EOF inside function body")
 		}
 
 		body = append(body, p.parseStatement())
@@ -320,7 +319,8 @@ func (p *Parser) parseParameterList() []string {
 
 	for {
 		if p.current.Type != TOKEN_IDENT {
-			panic("expected parameter name")
+			langError(ErrorSyntax, "expected parameter name")
+
 		}
 
 		params = append(params, p.current.Literal)
@@ -513,7 +513,7 @@ func (p *Parser) parsePrimary() Expr {
 	case TOKEN_NUMBER:
 		value, err := strconv.Atoi(p.current.Literal)
 		if err != nil {
-			panic(err)
+			langError(ErrorSyntax, "%v", err)
 		}
 
 		p.advance()
@@ -546,7 +546,7 @@ func (p *Parser) parsePrimary() Expr {
 			p.advance()
 
 			if p.current.Type != TOKEN_IDENT {
-				panic("expected method name after dot")
+				langError(ErrorSyntax, "expected method name after dot")
 			}
 
 			method := p.current.Literal
@@ -605,7 +605,8 @@ func (p *Parser) parsePrimary() Expr {
 		return UndefinedExpr{}
 
 	default:
-		panic(fmt.Sprintf("expected expression, got %s", p.current.Type))
+		langError(ErrorSyntax, "expected expression, got %s", p.current.Type)
+		return UndefinedExpr{}
 	}
 }
 
@@ -632,7 +633,7 @@ func (p *Parser) parseArgumentList() []Expr {
 
 func (p *Parser) expect(tokenType TokenType) {
 	if p.current.Type != tokenType {
-		panic(fmt.Sprintf("expected %s, got %s", tokenType, p.current.Type))
+		langError(ErrorSyntax, "expected %s, got %s", tokenType, p.current.Type)
 	}
 
 	p.advance()

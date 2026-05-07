@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"unicode"
 )
 
@@ -99,7 +98,9 @@ func (l *Lexer) NextToken() Token {
 			return Token{Type: TOKEN_NEQ, Literal: "!="}
 		}
 
-		panic("unexpected character: !")
+		langError(ErrorSyntax, "unexpected character: !")
+
+		return Token{}
 
 	case '<':
 		if l.peek() == '=' {
@@ -159,7 +160,8 @@ func (l *Lexer) NextToken() Token {
 		l.pos++
 		return Token{Type: TOKEN_RBRACKET, Literal: "]"}
 	default:
-		panic(fmt.Sprintf("unknown character: %q", ch))
+		langError(ErrorSyntax, "unknown character: %q", ch)
+		return Token{}
 	}
 }
 
@@ -219,7 +221,7 @@ func (l *Lexer) readString() string {
 	}
 
 	if l.pos >= len(l.input) {
-		panic("unterminated string")
+		langError(ErrorSyntax, "unterminated string")
 	}
 
 	value := string(l.input[start:l.pos])
@@ -239,7 +241,8 @@ func (l *Lexer) readBacktickString() string {
 	}
 
 	if l.pos >= len(l.input) {
-		panic("unterminated interpolated string")
+		langError(ErrorSyntax, "unterminated interpolated string")
+
 	}
 
 	value := string(l.input[start:l.pos])

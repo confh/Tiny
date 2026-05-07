@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"time"
 )
 
@@ -43,7 +42,7 @@ func (vm *VM) Run() {
 		ip := vm.currentIP()
 
 		if ip < 0 || ip >= len(instructions) {
-			panic("instruction pointer out of range")
+			langError(ErrorInternal, "instruction pointer out of range")
 		}
 
 		instr := instructions[ip]
@@ -58,7 +57,7 @@ func (vm *VM) Run() {
 
 			value, ok := vm.globals[name]
 			if !ok {
-				panic(fmt.Sprintf("undefined global variable: %s", name))
+				langError(ErrorName, "undefined global variable: %s", name)
 			}
 
 			vm.push(value)
@@ -77,7 +76,7 @@ func (vm *VM) Run() {
 
 			value, ok := frame.locals[name]
 			if !ok {
-				panic(fmt.Sprintf("undefined local variable: %s", name))
+				langError(ErrorName, "undefined local variable: %s", name)
 			}
 
 			vm.push(value)
@@ -96,11 +95,11 @@ func (vm *VM) Run() {
 
 			_, exists := vm.globals[name]
 			if !exists {
-				panic(fmt.Sprintf("cannot assign to undefined variable: %s", name))
+				langError(ErrorName, "cannot assign to undefined variable: %s", name)
 			}
 
 			if vm.globalConstants[name] {
-				panic(fmt.Sprintf("cannot assign to constant: %s", name))
+				langError(ErrorConst, "cannot assign to constant: %s", name)
 			}
 
 			vm.globals[name] = value
@@ -113,11 +112,11 @@ func (vm *VM) Run() {
 
 			_, exists := frame.locals[name]
 			if !exists {
-				panic(fmt.Sprintf("cannot assign to undefined local variable: %s", name))
+				langError(ErrorName, "cannot assign to undefined local variable: %s", name)
 			}
 
 			if frame.constants[name] {
-				panic(fmt.Sprintf("cannot assign to constant: %s", name))
+				langError(ErrorConst, "cannot assign to constant: %s", name)
 			}
 
 			frame.locals[name] = value
@@ -219,11 +218,11 @@ func (vm *VM) Run() {
 
 			array, ok := arrayValue.(ArrayValue)
 			if !ok {
-				panic(fmt.Sprintf("expected array, got %T", arrayValue))
+				langError(ErrorSyntax, "expected array, got %T", arrayValue)
 			}
 
 			if index < 0 || index >= len(array) {
-				panic(fmt.Sprintf("array index out of range: %d", index))
+				langError(ErrorInternal, "array index out of range: %d", index)
 			}
 
 			vm.push(array[index])
@@ -232,7 +231,7 @@ func (vm *VM) Run() {
 			returnValue := vm.pop()
 
 			if len(vm.frames) == 0 {
-				panic("return used outside of function")
+				langError(ErrorInternal, "return used outside of function")
 			}
 
 			vm.frames = vm.frames[:len(vm.frames)-1]
@@ -265,7 +264,7 @@ func (vm *VM) Run() {
 			return
 
 		default:
-			panic(fmt.Sprintf("unknown opcode: %s", instr.Op))
+			langError(ErrorInternal, "unknown opcode: %s", instr.Op)
 		}
 	}
 }
@@ -282,16 +281,14 @@ func (vm *VM) setIP(value int) {
 func (vm *VM) callFunction(name string, argCount int) {
 	fn, ok := vm.functions[name]
 	if !ok {
-		panic(fmt.Sprintf("undefined function: %s", name))
+		langError(ErrorName, "undefined function: %s", name)
 	}
 
 	if len(fn.Params) != argCount {
-		panic(fmt.Sprintf(
-			"function %s expects %d arguments, got %d",
+		langError(ErrorRuntime, "function %s expects %d arguments, got %d",
 			name,
 			len(fn.Params),
-			argCount,
-		))
+			argCount)
 	}
 
 	locals := map[string]Value{}
@@ -339,7 +336,7 @@ func (vm *VM) incrementIP() {
 
 func (vm *VM) currentFrame() *Frame {
 	if len(vm.frames) == 0 {
-		panic("no current function frame")
+		langError(ErrorInternal, "no current function frame")
 	}
 
 	return &vm.frames[len(vm.frames)-1]
@@ -361,7 +358,7 @@ func (vm *VM) push(value Value) {
 
 func (vm *VM) pop() Value {
 	if len(vm.stack) == 0 {
-		panic("stack underflow")
+		langError(ErrorInternal, "stack underflow")
 	}
 
 	value := vm.stack[len(vm.stack)-1]

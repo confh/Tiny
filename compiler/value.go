@@ -37,7 +37,8 @@ func asInt(value Value) int {
 	case uint64:
 		return int(n)
 	default:
-		panic(fmt.Sprintf("expected number, got %T", value))
+		langError(ErrorSyntax, "expected number, got %T", value)
+		return -1
 	}
 }
 
@@ -75,7 +76,7 @@ func valueToString(value Value) string {
 func asString(value Value) string {
 	stringValue, ok := value.(string)
 	if !ok {
-		panic(fmt.Sprintf("expected string, got %T", value))
+		langError(ErrorSyntax, "expected string, got %T", value)
 	}
 
 	return stringValue
@@ -84,7 +85,7 @@ func asString(value Value) string {
 func asBool(value Value) bool {
 	boolean, ok := value.(bool)
 	if !ok {
-		panic(fmt.Sprintf("expected bool, got %T", value))
+		langError(ErrorSyntax, "expected bool, got %T", value)
 	}
 
 	return boolean
