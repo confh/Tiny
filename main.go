@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"time"
 	"unicode"
 )
 
@@ -16,17 +19,19 @@ import (
 type TokenType string
 
 const (
-	TOKEN_EOF    TokenType = "EOF"
-	TOKEN_IDENT  TokenType = "IDENT"
-	TOKEN_NUMBER TokenType = "NUMBER"
-	TOKEN_STRING TokenType = "STRING"
-	TOKEN_TRUE   TokenType = "TRUE"
-	TOKEN_FALSE  TokenType = "FALSE"
+	TOKEN_EOF             TokenType = "EOF"
+	TOKEN_IDENT           TokenType = "IDENT"
+	TOKEN_NUMBER          TokenType = "NUMBER"
+	TOKEN_STRING          TokenType = "STRING"
+	TOKEN_BACKTICK_STRING TokenType = "BACKTICK_STRING"
+	TOKEN_TRUE            TokenType = "TRUE"
+	TOKEN_FALSE           TokenType = "FALSE"
+	TOKEN_NULL            TokenType = "NULL"
+	TOKEN_UNDEFINED       TokenType = "UNDEFINED"
 
 	TOKEN_IMPORT TokenType = "IMPORT"
 	TOKEN_LET    TokenType = "LET"
 	TOKEN_CONST  TokenType = "CONST"
-	TOKEN_PRINT  TokenType = "PRINT"
 	TOKEN_FN     TokenType = "FN"
 	TOKEN_RETURN TokenType = "RETURN"
 
@@ -48,12 +53,15 @@ const (
 	TOKEN_LTE    TokenType = "<="
 	TOKEN_GTE    TokenType = ">="
 
-	TOKEN_LPAREN TokenType = "("
-	TOKEN_RPAREN TokenType = ")"
-	TOKEN_LBRACE TokenType = "{"
-	TOKEN_RBRACE TokenType = "}"
-	TOKEN_COMMA  TokenType = ","
-	TOKEN_SEMI   TokenType = ";"
+	TOKEN_LPAREN   TokenType = "("
+	TOKEN_RPAREN   TokenType = ")"
+	TOKEN_LBRACKET TokenType = "["
+	TOKEN_RBRACKET TokenType = "]"
+	TOKEN_LBRACE   TokenType = "{"
+	TOKEN_RBRACE   TokenType = "}"
+	TOKEN_COMMA    TokenType = ","
+	TOKEN_SEMI     TokenType = ";"
+	TOKEN_DOT      TokenType = "."
 )
 
 type Token struct {
@@ -101,8 +109,6 @@ func (l *Lexer) NextToken() Token {
 			return Token{Type: TOKEN_LET, Literal: word}
 		case "const":
 			return Token{Type: TOKEN_CONST, Literal: word}
-		case "print":
-			return Token{Type: TOKEN_PRINT, Literal: word}
 		case "fn":
 			return Token{Type: TOKEN_FN, Literal: word}
 		case "return":
@@ -119,6 +125,10 @@ func (l *Lexer) NextToken() Token {
 			return Token{Type: TOKEN_TRUE, Literal: word}
 		case "false":
 			return Token{Type: TOKEN_FALSE, Literal: word}
+		case "null":
+			return Token{Type: TOKEN_NULL, Literal: word}
+		case "undefined":
+			return Token{Type: TOKEN_UNDEFINED, Literal: word}
 		default:
 			return Token{Type: TOKEN_IDENT, Literal: word}
 		}
@@ -132,6 +142,11 @@ func (l *Lexer) NextToken() Token {
 	if ch == '"' {
 		str := l.readString()
 		return Token{Type: TOKEN_STRING, Literal: str}
+	}
+
+	if ch == '`' {
+		str := l.readBacktickString()
+		return Token{Type: TOKEN_BACKTICK_STRING, Literal: str}
 	}
 
 	switch ch {
@@ -200,6 +215,15 @@ func (l *Lexer) NextToken() Token {
 	case ';':
 		l.pos++
 		return Token{Type: TOKEN_SEMI, Literal: ";"}
+	case '.':
+		l.pos++
+		return Token{Type: TOKEN_DOT, Literal: "."}
+	case '[':
+		l.pos++
+		return Token{Type: TOKEN_LBRACKET, Literal: "["}
+	case ']':
+		l.pos++
+		return Token{Type: TOKEN_RBRACKET, Literal: "]"}
 	default:
 		panic(fmt.Sprintf("unknown character: %q", ch))
 	}
@@ -255,6 +279,26 @@ func (l *Lexer) readString() string {
 	return value
 }
 
+func (l *Lexer) readBacktickString() string {
+	l.pos++ // skip opening `
+
+	start := l.pos
+
+	for l.pos < len(l.input) && l.input[l.pos] != '`' {
+		l.pos++
+	}
+
+	if l.pos >= len(l.input) {
+		panic("unterminated interpolated string")
+	}
+
+	value := string(l.input[start:l.pos])
+
+	l.pos++ // skip closing `
+
+	return value
+}
+
 // =====================
 // AST
 // =====================
@@ -292,12 +336,6 @@ type VariableStmt struct {
 
 func (s VariableStmt) stmtNode() {}
 
-type PrintStmt struct {
-	Value Expr
-}
-
-func (s PrintStmt) stmtNode() {}
-
 type IfStmt struct {
 	Condition Expr
 	ThenBody  []Stmt
@@ -312,11 +350,44 @@ type StringExpr struct {
 
 func (e StringExpr) exprNode() {}
 
+type ArrayExpr struct {
+	Elements []Expr
+}
+
+func (e ArrayExpr) exprNode() {}
+
+type IndexExpr struct {
+	Array Expr
+	Index Expr
+}
+
+func (e IndexExpr) exprNode() {}
+
+type InterpolatedStringPart struct {
+	Text   string
+	Expr   Expr
+	IsExpr bool
+}
+
+type InterpolatedStringExpr struct {
+	Parts []InterpolatedStringPart
+}
+
+func (e InterpolatedStringExpr) exprNode() {}
+
 type BoolExpr struct {
 	Value bool
 }
 
 func (e BoolExpr) exprNode() {}
+
+type NullExpr struct{}
+
+func (e NullExpr) exprNode() {}
+
+type UndefinedExpr struct{}
+
+func (e UndefinedExpr) exprNode() {}
 
 type ExprStmt struct {
 	Value Expr
@@ -364,6 +435,14 @@ type CallExpr struct {
 }
 
 func (e CallExpr) exprNode() {}
+
+type MemberCallExpr struct {
+	Object string
+	Method string
+	Args   []Expr
+}
+
+func (e MemberCallExpr) exprNode() {}
 
 // =====================
 // PARSER
@@ -434,8 +513,6 @@ func (p *Parser) parseStatement() Stmt {
 		return p.parseLetStatement()
 	case TOKEN_CONST:
 		return p.parseConstStatement()
-	case TOKEN_PRINT:
-		return p.parsePrintStatement()
 	case TOKEN_FN:
 		return p.parseFunctionStatement()
 	case TOKEN_RETURN:
@@ -546,18 +623,6 @@ func (p *Parser) parseConstStatement() Stmt {
 		Name:     name,
 		Value:    value,
 		Constant: true,
-	}
-}
-
-func (p *Parser) parsePrintStatement() Stmt {
-	p.expect(TOKEN_PRINT)
-
-	value := p.parseExpression()
-
-	p.expect(TOKEN_SEMI)
-
-	return PrintStmt{
-		Value: value,
 	}
 }
 
@@ -731,13 +796,13 @@ func (p *Parser) parseAddSub() Expr {
 }
 
 func (p *Parser) parseMulDiv() Expr {
-	left := p.parsePrimary()
+	left := p.parsePostfix()
 
 	for p.current.Type == TOKEN_STAR || p.current.Type == TOKEN_SLASH {
 		op := p.current.Type
 		p.advance()
 
-		right := p.parsePrimary()
+		right := p.parsePostfix()
 
 		left = BinaryExpr{
 			Left:  left,
@@ -747,6 +812,51 @@ func (p *Parser) parseMulDiv() Expr {
 	}
 
 	return left
+}
+
+func (p *Parser) parsePostfix() Expr {
+	expr := p.parsePrimary()
+
+	for p.current.Type == TOKEN_LBRACKET {
+		p.advance()
+
+		index := p.parseExpression()
+
+		p.expect(TOKEN_RBRACKET)
+
+		expr = IndexExpr{
+			Array: expr,
+			Index: index,
+		}
+	}
+
+	return expr
+}
+
+func (p *Parser) parseArrayLiteral() Expr {
+	p.expect(TOKEN_LBRACKET)
+
+	var elements []Expr
+
+	if p.current.Type == TOKEN_RBRACKET {
+		p.expect(TOKEN_RBRACKET)
+		return ArrayExpr{Elements: elements}
+	}
+
+	for {
+		element := p.parseExpression()
+		elements = append(elements, element)
+
+		if p.current.Type != TOKEN_COMMA {
+			break
+		}
+
+		p.advance()
+	}
+
+	p.expect(TOKEN_RBRACKET)
+
+	return ArrayExpr{Elements: elements}
 }
 
 func (p *Parser) parsePrimary() Expr {
@@ -761,10 +871,14 @@ func (p *Parser) parsePrimary() Expr {
 
 		return NumberExpr{Value: value}
 
+	case TOKEN_LBRACKET:
+		return p.parseArrayLiteral()
+
 	case TOKEN_IDENT:
 		name := p.current.Literal
 		p.advance()
 
+		// Normal function call: add(1, 2)
 		if p.current.Type == TOKEN_LPAREN {
 			p.advance()
 
@@ -775,6 +889,30 @@ func (p *Parser) parsePrimary() Expr {
 			return CallExpr{
 				Name: name,
 				Args: args,
+			}
+		}
+
+		// Member call: core.halt()
+		if p.current.Type == TOKEN_DOT {
+			p.advance()
+
+			if p.current.Type != TOKEN_IDENT {
+				panic("expected method name after dot")
+			}
+
+			method := p.current.Literal
+			p.advance()
+
+			p.expect(TOKEN_LPAREN)
+
+			args := p.parseArgumentList()
+
+			p.expect(TOKEN_RPAREN)
+
+			return MemberCallExpr{
+				Object: name,
+				Method: method,
+				Args:   args,
 			}
 		}
 
@@ -795,6 +933,12 @@ func (p *Parser) parsePrimary() Expr {
 
 		return StringExpr{Value: value}
 
+	case TOKEN_BACKTICK_STRING:
+		value := p.current.Literal
+		p.advance()
+
+		return parseInterpolatedString(value)
+
 	case TOKEN_TRUE:
 		p.advance()
 		return BoolExpr{Value: true}
@@ -802,6 +946,14 @@ func (p *Parser) parsePrimary() Expr {
 	case TOKEN_FALSE:
 		p.advance()
 		return BoolExpr{Value: false}
+
+	case TOKEN_NULL:
+		p.advance()
+		return NullExpr{}
+
+	case TOKEN_UNDEFINED:
+		p.advance()
+		return UndefinedExpr{}
 
 	default:
 		panic(fmt.Sprintf("expected expression, got %s", p.current.Type))
@@ -894,7 +1046,10 @@ func loadFile(path string, visited map[string]bool) []Stmt {
 type OpCode string
 
 const (
-	OP_CONST OpCode = "CONST"
+	OP_CONST       OpCode = "CONST"
+	OP_INTERPOLATE OpCode = "INTERPOLATE"
+	OP_ARRAY       OpCode = "ARRAY"
+	OP_INDEX       OpCode = "INDEX"
 
 	OP_ASSIGN_LOCAL  OpCode = "ASSIGN_LOCAL"
 	OP_ASSIGN_GLOBAL OpCode = "ASSIGN_GLOBAL"
@@ -910,12 +1065,12 @@ const (
 	OP_MUL OpCode = "MUL"
 	OP_DIV OpCode = "DIV"
 
-	OP_CALL   OpCode = "CALL"
-	OP_RETURN OpCode = "RETURN"
+	OP_BUILTIN_CALL OpCode = "BUILTIN_CALL"
+	OP_CALL         OpCode = "CALL"
+	OP_RETURN       OpCode = "RETURN"
 
-	OP_PRINT OpCode = "PRINT"
-	OP_POP   OpCode = "POP"
-	OP_HALT  OpCode = "HALT"
+	OP_POP  OpCode = "POP"
+	OP_HALT OpCode = "HALT"
 
 	OP_EQ  OpCode = "EQ"
 	OP_NEQ OpCode = "NEQ"
@@ -944,6 +1099,21 @@ type Function struct {
 
 type CallInfo struct {
 	Name     string
+	ArgCount int
+}
+
+type ArrayInfo struct {
+	Count int
+}
+
+type InterpolateInfo struct {
+	Parts     []string
+	ExprCount int
+}
+
+type BuiltinCallInfo struct {
+	Object   string
+	Method   string
 	ArgCount int
 }
 
@@ -1019,10 +1189,6 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 		} else {
 			c.emit(OP_ASSIGN_GLOBAL, s.Name)
 		}
-
-	case PrintStmt:
-		c.compileExpr(s.Value)
-		c.emit(OP_PRINT, nil)
 
 	case ExprStmt:
 		c.compileExpr(s.Value)
@@ -1112,8 +1278,49 @@ func (c *Compiler) compileExpr(expr Expr) {
 	case StringExpr:
 		c.emit(OP_CONST, e.Value)
 
+	case InterpolatedStringExpr:
+		textParts := []string{}
+		exprCount := 0
+
+		textParts = append(textParts, "")
+
+		for _, part := range e.Parts {
+			if part.IsExpr {
+				c.compileExpr(part.Expr)
+				exprCount++
+				textParts = append(textParts, "")
+			} else {
+				textParts[len(textParts)-1] += part.Text
+			}
+		}
+
+		c.emit(OP_INTERPOLATE, InterpolateInfo{
+			Parts:     textParts,
+			ExprCount: exprCount,
+		})
+
 	case BoolExpr:
 		c.emit(OP_CONST, e.Value)
+
+	case NullExpr:
+		c.emit(OP_CONST, NullValue{})
+
+	case UndefinedExpr:
+		c.emit(OP_CONST, UndefinedValue{})
+
+	case ArrayExpr:
+		for _, element := range e.Elements {
+			c.compileExpr(element)
+		}
+
+		c.emit(OP_ARRAY, ArrayInfo{
+			Count: len(e.Elements),
+		})
+
+	case IndexExpr:
+		c.compileExpr(e.Array)
+		c.compileExpr(e.Index)
+		c.emit(OP_INDEX, nil)
 
 	case NumberExpr:
 		c.emit(OP_CONST, e.Value)
@@ -1170,6 +1377,17 @@ func (c *Compiler) compileExpr(expr Expr) {
 			ArgCount: len(e.Args),
 		})
 
+	case MemberCallExpr:
+		for _, arg := range e.Args {
+			c.compileExpr(arg)
+		}
+
+		c.emit(OP_BUILTIN_CALL, BuiltinCallInfo{
+			Object:   e.Object,
+			Method:   e.Method,
+			ArgCount: len(e.Args),
+		})
+
 	default:
 		panic("unknown expression")
 	}
@@ -1196,12 +1414,70 @@ func (c *Compiler) patchJump(index int) {
 }
 
 func asInt(value Value) int {
-	number, ok := value.(int)
-	if !ok {
+	switch n := value.(type) {
+	case int:
+		return n
+	case int8:
+		return int(n)
+	case int16:
+		return int(n)
+	case int32:
+		return int(n)
+	case int64:
+		return int(n)
+	case uint:
+		return int(n)
+	case uint8:
+		return int(n)
+	case uint16:
+		return int(n)
+	case uint32:
+		return int(n)
+	case uint64:
+		return int(n)
+	default:
 		panic(fmt.Sprintf("expected number, got %T", value))
 	}
+}
 
-	return number
+func valueToString(value Value) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	case int:
+		return strconv.Itoa(v)
+	case bool:
+		if v {
+			return "true"
+		}
+		return "false"
+
+	case ArrayValue:
+		parts := make([]string, len(v))
+
+		for i, item := range v {
+			parts[i] = valueToString(item)
+		}
+
+		return "[" + strings.Join(parts, ", ") + "]"
+	case NullValue:
+		return "null"
+	case UndefinedValue:
+		return "undefined"
+	case nil:
+		return "nil"
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+func asString(value Value) string {
+	stringValue, ok := value.(string)
+	if !ok {
+		panic(fmt.Sprintf("expected string, got %T", value))
+	}
+
+	return stringValue
 }
 
 func asBool(value Value) bool {
@@ -1221,6 +1497,10 @@ func isTruthy(value Value) bool {
 		return v != 0
 	case string:
 		return v != ""
+	case NullValue:
+		return false
+	case UndefinedValue:
+		return false
 	default:
 		return value != nil
 	}
@@ -1240,6 +1520,14 @@ func valuesEqual(a Value, b Value) bool {
 		right, ok := b.(bool)
 		return ok && left == right
 
+	case NullValue:
+		_, ok := b.(NullValue)
+		return ok
+
+	case UndefinedValue:
+		_, ok := b.(UndefinedValue)
+		return ok
+
 	default:
 		return a == b
 	}
@@ -1248,6 +1536,12 @@ func valuesEqual(a Value, b Value) bool {
 // =====================
 // VM
 // =====================
+
+type NullValue struct{}
+
+type UndefinedValue struct{}
+
+type ArrayValue []Value
 
 type Value any
 
@@ -1260,6 +1554,7 @@ type Frame struct {
 }
 
 type VM struct {
+	start            int64
 	mainInstructions []Instruction
 	functions        map[string]Function
 
@@ -1274,10 +1569,116 @@ type VM struct {
 
 func NewVM(mainInstructions []Instruction, functions map[string]Function) *VM {
 	return &VM{
+		start:            time.Now().UnixMilli(),
 		mainInstructions: mainInstructions,
 		functions:        functions,
 		globals:          map[string]Value{},
 		globalConstants:  map[string]bool{},
+	}
+}
+
+func (vm *VM) callBuiltin(object string, method string, argCount int) {
+	if object != "core" {
+		panic(fmt.Sprintf("unknown builtin module: %s", object))
+	}
+
+	switch method {
+	case "len":
+		if argCount != 1 {
+			panic("core.len expects 1 argument")
+		}
+
+		value := vm.pop()
+
+		switch n := value.(type) {
+		case string:
+			vm.push(len(n))
+		case ArrayValue:
+			vm.push(len(n))
+		default:
+			panic("argument does not have a length.")
+		}
+	case "clock":
+		if argCount != 0 {
+			panic("core.clock expects 0 arguments")
+		}
+
+		vm.push(time.Now().UnixMilli() - vm.start)
+	case "time":
+		if argCount != 0 {
+			panic("core.time expects 0 arguments")
+		}
+
+		vm.push(time.Now().UnixMilli())
+	case "sleep":
+		if argCount != 1 {
+			panic("core.sleep expects 1 argument")
+		}
+
+		time.Sleep(time.Duration(asInt(vm.pop())) * time.Millisecond)
+
+		vm.push(0)
+	case "print":
+		args := vm.popArgs(argCount)
+
+		for _, arg := range args {
+			fmt.Print(valueToString(arg))
+		}
+
+		vm.push(0)
+
+	case "println":
+		args := vm.popArgs(argCount)
+
+		for i, arg := range args {
+			if i > 0 {
+				fmt.Print(" ")
+			}
+
+			fmt.Print(valueToString(arg))
+		}
+
+		fmt.Println()
+
+		vm.push(0)
+	case "input":
+		if argCount != 1 {
+			panic("core.input expects 1 argument")
+		}
+
+		reader := bufio.NewReader(os.Stdin)
+		fmt.Print(vm.pop())
+
+		input, _ := reader.ReadString('\n')
+
+		vm.push(input)
+	case "close":
+		if argCount != 0 {
+			panic("core.close expects 0 arguments")
+		}
+
+		os.Exit(0)
+
+	case "exit":
+		if argCount != 1 {
+			panic("core.exit expects 1 argument")
+		}
+
+		os.Exit(asInt(vm.pop()))
+	case "halt":
+		if argCount != 0 {
+			panic("core.halt expects 0 arguments")
+		}
+
+		fmt.Println("Press Enter to exit...")
+		reader := bufio.NewReader(os.Stdin)
+		_, _ = reader.ReadString('\n')
+
+		// Builtin calls are expressions, so push a dummy return value.
+		vm.push(0)
+
+	default:
+		panic(fmt.Sprintf("unknown core function: %s", method))
 	}
 }
 
@@ -1442,6 +1843,36 @@ func (vm *VM) Run() {
 			info := instr.Value.(CallInfo)
 			vm.callFunction(info.Name, info.ArgCount)
 
+		case OP_BUILTIN_CALL:
+			info := instr.Value.(BuiltinCallInfo)
+			vm.callBuiltin(info.Object, info.Method, info.ArgCount)
+
+		case OP_ARRAY:
+			info := instr.Value.(ArrayInfo)
+
+			elements := make([]Value, info.Count)
+
+			for i := info.Count - 1; i >= 0; i-- {
+				elements[i] = vm.pop()
+			}
+
+			vm.push(ArrayValue(elements))
+
+		case OP_INDEX:
+			index := asInt(vm.pop())
+			arrayValue := vm.pop()
+
+			array, ok := arrayValue.(ArrayValue)
+			if !ok {
+				panic(fmt.Sprintf("expected array, got %T", arrayValue))
+			}
+
+			if index < 0 || index >= len(array) {
+				panic(fmt.Sprintf("array index out of range: %d", index))
+			}
+
+			vm.push(array[index])
+
 		case OP_RETURN:
 			returnValue := vm.pop()
 
@@ -1452,12 +1883,28 @@ func (vm *VM) Run() {
 			vm.frames = vm.frames[:len(vm.frames)-1]
 			vm.push(returnValue)
 
-		case OP_PRINT:
-			value := vm.pop()
-			fmt.Println(value)
-
 		case OP_POP:
 			vm.pop()
+
+		case OP_INTERPOLATE:
+			info := instr.Value.(InterpolateInfo)
+
+			values := make([]Value, info.ExprCount)
+
+			for i := info.ExprCount - 1; i >= 0; i-- {
+				values[i] = vm.pop()
+			}
+
+			result := ""
+
+			for i := 0; i < info.ExprCount; i++ {
+				result += info.Parts[i]
+				result += valueToString(values[i])
+			}
+
+			result += info.Parts[len(info.Parts)-1]
+
+			vm.push(result)
 
 		case OP_HALT:
 			return
@@ -1543,6 +1990,16 @@ func (vm *VM) currentFrame() *Frame {
 	return &vm.frames[len(vm.frames)-1]
 }
 
+func (vm *VM) popArgs(argCount int) []Value {
+	args := make([]Value, argCount)
+
+	for i := argCount - 1; i >= 0; i-- {
+		args[i] = vm.pop()
+	}
+
+	return args
+}
+
 func (vm *VM) push(value Value) {
 	vm.stack = append(vm.stack, value)
 }
@@ -1561,6 +2018,81 @@ func (vm *VM) pop() Value {
 // =====================
 // MAIN
 // =====================
+
+func parseInterpolatedString(input string) Expr {
+	var parts []InterpolatedStringPart
+
+	for len(input) > 0 {
+		start := findInterpolationStart(input)
+
+		if start == -1 {
+			if input != "" {
+				parts = append(parts, InterpolatedStringPart{
+					Text: input,
+				})
+			}
+			break
+		}
+
+		if start > 0 {
+			parts = append(parts, InterpolatedStringPart{
+				Text: input[:start],
+			})
+		}
+
+		end := findClosingBrace(input, start+2)
+		if end == -1 {
+			panic("unterminated interpolation")
+		}
+
+		exprSource := input[start+2 : end]
+
+		lexer := NewLexer(exprSource)
+		parser := NewParser(lexer)
+		expr := parser.parseExpression()
+
+		if parser.current.Type != TOKEN_EOF {
+			panic("unexpected tokens inside interpolation")
+		}
+
+		parts = append(parts, InterpolatedStringPart{
+			Expr:   expr,
+			IsExpr: true,
+		})
+
+		input = input[end+1:]
+	}
+
+	return InterpolatedStringExpr{Parts: parts}
+}
+
+func findInterpolationStart(input string) int {
+	for i := 0; i < len(input)-1; i++ {
+		if input[i] == '$' && input[i+1] == '{' {
+			return i
+		}
+	}
+
+	return -1
+}
+
+func findClosingBrace(input string, start int) int {
+	depth := 0
+
+	for i := start; i < len(input); i++ {
+		switch input[i] {
+		case '{':
+			depth++
+		case '}':
+			if depth == 0 {
+				return i
+			}
+			depth--
+		}
+	}
+
+	return -1
+}
 
 func main() {
 	debug := flag.Bool("debug", false, "show bytecode debug output")
