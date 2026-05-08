@@ -122,9 +122,10 @@ func (p *Parser) ParseProgram() Program {
 }
 
 func (p *Parser) parsePossibleAssignmentStatement() Stmt {
-	left := p.parseExpression()
+	left := p.parsePostfix()
 
-	if p.current.Type == TOKEN_ASSIGN {
+	switch p.current.Type {
+	case TOKEN_ASSIGN:
 		p.advance()
 
 		value := p.parseExpression()
@@ -143,6 +144,35 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 				Object: target.Object,
 				Name:   target.Name,
 				Value:  value,
+			}
+
+		default:
+			langError(ErrorSyntax, "invalid assignment target")
+		}
+	case TOKEN_INCREMENT:
+		p.advance()
+
+		p.expect(TOKEN_SEMI)
+		switch target := left.(type) {
+		case IdentExpr:
+			return AssignStmt{
+				Name: target.Name,
+				Value: BinaryExpr{
+					Left:  IdentExpr{Name: target.Name},
+					Op:    TOKEN_PLUS,
+					Right: NumberExpr{Value: 1},
+				},
+			}
+
+		case PropertyExpr:
+			return PropertyAssignStmt{
+				Object: target.Object,
+				Name:   target.Name,
+				Value: BinaryExpr{
+					Left:  target,
+					Op:    TOKEN_PLUS,
+					Right: NumberExpr{Value: 1},
+				},
 			}
 
 		default:

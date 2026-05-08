@@ -125,6 +125,11 @@ func (l *Lexer) NextToken() Token {
 		return Token{Type: TOKEN_GT, Literal: ">"}
 
 	case '+':
+		if l.peek() == '+' {
+			l.pos += 2
+			return Token{Type: TOKEN_INCREMENT, Literal: "++"}
+		}
+
 		l.pos++
 		return Token{Type: TOKEN_PLUS, Literal: "+"}
 	case '-':

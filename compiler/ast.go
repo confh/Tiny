@@ -157,6 +157,12 @@ type NumberExpr struct {
 
 func (e NumberExpr) exprNode() {}
 
+type IncrementStmt struct {
+	Name string
+}
+
+func (e IncrementStmt) stmtNode() {}
+
 type FloatExpr struct {
 	Value float64
 }
