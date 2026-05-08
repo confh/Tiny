@@ -72,7 +72,12 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 		c.compileFunction(s)
 
 	case ReturnStmt:
-		c.compileExpr(s.Value)
+		if s.HasValue {
+			c.compileExpr(s.Value)
+		} else {
+			c.emit(OP_CONST, UndefinedValue{})
+		}
+
 		c.emit(OP_RETURN, nil)
 
 	case ImportStmt:
@@ -83,6 +88,11 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 
 	case WhileStmt:
 		c.compileWhileStatement(s)
+
+	case PropertyAssignStmt:
+		c.compileExpr(s.Object)
+		c.compileExpr(s.Value)
+		c.emit(OP_SET_PROPERTY, s.Name)
 
 	default:
 		langError(ErrorInternal, "unknown statement")
@@ -237,6 +247,8 @@ func (c *Compiler) compileExpr(expr Expr) {
 	case IdentExpr:
 		if c.locals[e.Name] {
 			c.emit(OP_LOAD_LOCAL, e.Name)
+		} else if _, exists := c.functions[e.Name]; exists {
+			c.emit(OP_CONST, FunctionValue{Name: e.Name})
 		} else {
 			c.emit(OP_LOAD_GLOBAL, e.Name)
 		}
@@ -287,12 +299,29 @@ func (c *Compiler) compileExpr(expr Expr) {
 		})
 
 	case MemberCallExpr:
+		// Keep core.println(), core.input(), etc. as builtins.
+		if e.Object == "core" {
+			for _, arg := range e.Args {
+				c.compileExpr(arg)
+			}
+
+			c.emit(OP_BUILTIN_CALL, BuiltinCallInfo{
+				Object:   e.Object,
+				Method:   e.Method,
+				ArgCount: len(e.Args),
+			})
+
+			return
+		}
+
+		// Object method call: user.greet()
+		c.compileExpr(IdentExpr{Name: e.Object})
+
 		for _, arg := range e.Args {
 			c.compileExpr(arg)
 		}
 
-		c.emit(OP_BUILTIN_CALL, BuiltinCallInfo{
-			Object:   e.Object,
+		c.emit(OP_METHOD_CALL, MethodCallInfo{
 			Method:   e.Method,
 			ArgCount: len(e.Args),
 		})

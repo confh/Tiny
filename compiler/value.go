@@ -14,6 +14,10 @@ type ArrayValue []Value
 
 type ObjectValue map[string]Value
 
+type FunctionValue struct {
+	Name string
+}
+
 type Value any
 
 func asInt(value Value) int {
@@ -60,6 +64,8 @@ func typeName(value Value) string {
 		return "undefined"
 	case nil:
 		return "nil"
+	case FunctionValue:
+		return "function"
 	default:
 		return fmt.Sprintf("%T", value)
 	}
@@ -143,6 +149,8 @@ func valueToString(value Value) string {
 		}
 
 		return "{" + strings.Join(parts, ", ") + "}"
+	case FunctionValue:
+		return "<function " + v.Name + ">"
 	default:
 		return fmt.Sprintf("%v", v)
 	}

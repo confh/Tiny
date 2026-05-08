@@ -9,6 +9,7 @@ const (
 	OP_INDEX        OpCode = "INDEX"
 	OP_OBJECT       OpCode = "OBJECT"
 	OP_GET_PROPERTY OpCode = "GET_PROPERTY"
+	OP_SET_PROPERTY OpCode = "SET_PROPERTY"
 
 	OP_ASSIGN_LOCAL  OpCode = "ASSIGN_LOCAL"
 	OP_ASSIGN_GLOBAL OpCode = "ASSIGN_GLOBAL"
@@ -25,6 +26,7 @@ const (
 	OP_DIV OpCode = "DIV"
 
 	OP_BUILTIN_CALL OpCode = "BUILTIN_CALL"
+	OP_METHOD_CALL  OpCode = "METHOD_CALL"
 	OP_CALL         OpCode = "CALL"
 	OP_RETURN       OpCode = "RETURN"
 
@@ -83,4 +85,9 @@ type VariableInfo struct {
 
 type ObjectInfo struct {
 	Names []string
+}
+
+type MethodCallInfo struct {
+	Method   string
+	ArgCount int
 }

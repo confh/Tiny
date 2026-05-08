@@ -19,6 +19,14 @@ type AssignStmt struct {
 
 func (s AssignStmt) stmtNode() {}
 
+type PropertyAssignStmt struct {
+	Object Expr
+	Name   string
+	Value  Expr
+}
+
+func (s PropertyAssignStmt) stmtNode() {}
+
 type ImportStmt struct {
 	Path string
 }
@@ -126,7 +134,8 @@ type FunctionStmt struct {
 func (s FunctionStmt) stmtNode() {}
 
 type ReturnStmt struct {
-	Value Expr
+	Value    Expr
+	HasValue bool
 }
 
 func (s ReturnStmt) stmtNode() {}

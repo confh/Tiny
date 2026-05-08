@@ -111,33 +111,46 @@ func (p *Parser) ParseProgram() Program {
 	return Program{Statements: statements}
 }
 
-func (p *Parser) parseAssignStatement() Stmt {
-	if p.current.Type != TOKEN_IDENT {
-		langError(ErrorSyntax, "expected variable name")
+func (p *Parser) parsePossibleAssignmentStatement() Stmt {
+	left := p.parseExpression()
+
+	if p.current.Type == TOKEN_ASSIGN {
+		p.advance()
+
+		value := p.parseExpression()
+
+		p.expect(TOKEN_SEMI)
+
+		switch target := left.(type) {
+		case IdentExpr:
+			return AssignStmt{
+				Name:  target.Name,
+				Value: value,
+			}
+
+		case PropertyExpr:
+			return PropertyAssignStmt{
+				Object: target.Object,
+				Name:   target.Name,
+				Value:  value,
+			}
+
+		default:
+			langError(ErrorSyntax, "invalid assignment target")
+		}
 	}
-
-	name := p.current.Literal
-	p.advance()
-
-	p.expect(TOKEN_ASSIGN)
-
-	value := p.parseExpression()
 
 	p.expect(TOKEN_SEMI)
 
-	return AssignStmt{
-		Name:  name,
-		Value: value,
+	return ExprStmt{
+		Value: left,
 	}
 }
 
 func (p *Parser) parseStatement() Stmt {
 	switch p.current.Type {
 	case TOKEN_IDENT:
-		if p.next.Type == TOKEN_ASSIGN {
-			return p.parseAssignStatement()
-		}
-		return p.parseExpressionStatement()
+		return p.parsePossibleAssignmentStatement()
 	case TOKEN_IMPORT:
 		return p.parseImportStatement()
 	case TOKEN_LET:
@@ -339,12 +352,21 @@ func (p *Parser) parseParameterList() []string {
 func (p *Parser) parseReturnStatement() Stmt {
 	p.expect(TOKEN_RETURN)
 
+	if p.current.Type == TOKEN_SEMI {
+		p.expect(TOKEN_SEMI)
+
+		return ReturnStmt{
+			HasValue: false,
+		}
+	}
+
 	value := p.parseExpression()
 
 	p.expect(TOKEN_SEMI)
 
 	return ReturnStmt{
-		Value: value,
+		Value:    value,
+		HasValue: true,
 	}
 }
 

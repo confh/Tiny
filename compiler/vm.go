@@ -52,6 +52,19 @@ func (vm *VM) Run() {
 		case OP_CONST:
 			vm.push(instr.Value)
 
+		case OP_SET_PROPERTY:
+			name := instr.Value.(string)
+
+			value := vm.pop()
+			objectValue := vm.pop()
+
+			object, ok := objectValue.(ObjectValue)
+			if !ok {
+				langError(ErrorType, "expected object, got %s", typeName(objectValue))
+			}
+
+			object[name] = value
+
 		case OP_LOAD_GLOBAL:
 			name := instr.Value.(string)
 
@@ -193,6 +206,10 @@ func (vm *VM) Run() {
 				vm.setIP(target)
 			}
 
+		case OP_METHOD_CALL:
+			info := instr.Value.(MethodCallInfo)
+			vm.callMethod(info.Method, info.ArgCount)
+
 		case OP_CALL:
 			info := instr.Value.(CallInfo)
 			vm.callFunction(info.Name, info.ArgCount)
@@ -300,6 +317,65 @@ func (vm *VM) Run() {
 			langError(ErrorInternal, "unknown opcode: %s", instr.Op)
 		}
 	}
+}
+
+func (vm *VM) callMethod(method string, argCount int) {
+	args := vm.popArgs(argCount)
+
+	objectValue := vm.pop()
+
+	object, ok := objectValue.(ObjectValue)
+	if !ok {
+		langError(ErrorType, "expected object, got %s", typeName(objectValue))
+	}
+
+	methodValue, exists := object[method]
+	if !exists {
+		langError(ErrorName, "object has no method: %s", method)
+	}
+
+	fnValue, ok := methodValue.(FunctionValue)
+	if !ok {
+		langError(ErrorType, "property %s is not callable", method)
+	}
+
+	fn, ok := vm.functions[fnValue.Name]
+	if !ok {
+		langError(ErrorName, "undefined function: %s", fnValue.Name)
+	}
+
+	expectedArgs := len(fn.Params)
+
+	// We automatically pass the object as the first argument: self.
+	if expectedArgs != argCount+1 {
+		langError(
+			ErrorRuntime,
+			"method %s expects %d arguments, got %d",
+			method,
+			expectedArgs-1,
+			argCount,
+		)
+	}
+
+	locals := map[string]Value{}
+
+	// First param receives the object.
+	locals[fn.Params[0]] = object
+
+	// Remaining params receive normal arguments.
+	for i, arg := range args {
+		locals[fn.Params[i+1]] = arg
+	}
+
+	frame := Frame{
+		function:     fn,
+		ip:           0,
+		locals:       locals,
+		constants:    map[string]bool{},
+		instructions: fn.Instructions,
+	}
+
+	vm.frames = append(vm.frames, frame)
 }
 
 func (vm *VM) setIP(value int) {
