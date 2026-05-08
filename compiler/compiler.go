@@ -1,9 +1,16 @@
 package main
 
+type LoopContext struct {
+	Start         int
+	BreakJumps    []int
+	ContinueJumps []int
+}
+
 type Compiler struct {
 	mainInstructions []Instruction
 	functions        map[string]Function
 	classes          map[string]Class
+	loopStack        []LoopContext
 
 	currentInstructions *[]Instruction
 
@@ -12,11 +19,144 @@ type Compiler struct {
 	globalConstants map[string]bool
 }
 
+func optimizeExpr(expr Expr) Expr {
+	switch e := expr.(type) {
+	case BinaryExpr:
+		left := optimizeExpr(e.Left)
+		right := optimizeExpr(e.Right)
+
+		// int + int
+		leftInt, leftIsInt := left.(NumberExpr)
+		rightInt, rightIsInt := right.(NumberExpr)
+
+		if leftIsInt && rightIsInt {
+			switch e.Op {
+			case TOKEN_PLUS:
+				return NumberExpr{Value: leftInt.Value + rightInt.Value}
+			case TOKEN_MINUS:
+				return NumberExpr{Value: leftInt.Value - rightInt.Value}
+			case TOKEN_STAR:
+				return NumberExpr{Value: leftInt.Value * rightInt.Value}
+			case TOKEN_SLASH:
+				if rightInt.Value == 0 {
+					return BinaryExpr{Left: left, Op: e.Op, Right: right}
+				}
+
+				return NumberExpr{Value: leftInt.Value / rightInt.Value}
+			case TOKEN_EQ:
+				return BoolExpr{Value: leftInt.Value == rightInt.Value}
+			case TOKEN_NEQ:
+				return BoolExpr{Value: leftInt.Value != rightInt.Value}
+			case TOKEN_LT:
+				return BoolExpr{Value: leftInt.Value < rightInt.Value}
+			case TOKEN_GT:
+				return BoolExpr{Value: leftInt.Value > rightInt.Value}
+			case TOKEN_LTE:
+				return BoolExpr{Value: leftInt.Value <= rightInt.Value}
+			case TOKEN_GTE:
+				return BoolExpr{Value: leftInt.Value >= rightInt.Value}
+			}
+		}
+
+		// string == string / string != string
+		leftString, leftIsString := left.(StringExpr)
+		rightString, rightIsString := right.(StringExpr)
+
+		if leftIsString && rightIsString {
+			switch e.Op {
+			case TOKEN_EQ:
+				return BoolExpr{Value: leftString.Value == rightString.Value}
+			case TOKEN_NEQ:
+				return BoolExpr{Value: leftString.Value != rightString.Value}
+			}
+		}
+
+		// bool == bool / bool != bool
+		leftBool, leftIsBool := left.(BoolExpr)
+		rightBool, rightIsBool := right.(BoolExpr)
+
+		if leftIsBool && rightIsBool {
+			switch e.Op {
+			case TOKEN_EQ:
+				return BoolExpr{Value: leftBool.Value == rightBool.Value}
+			case TOKEN_NEQ:
+				return BoolExpr{Value: leftBool.Value != rightBool.Value}
+			case TOKEN_AND:
+				return BoolExpr{Value: leftBool.Value && rightBool.Value}
+			case TOKEN_OR:
+				return BoolExpr{Value: leftBool.Value || rightBool.Value}
+			}
+		}
+
+		return BinaryExpr{
+			Left:  left,
+			Op:    e.Op,
+			Right: right,
+		}
+
+	case ArrayExpr:
+		elements := make([]Expr, len(e.Elements))
+
+		for i, element := range e.Elements {
+			elements[i] = optimizeExpr(element)
+		}
+
+		return ArrayExpr{Elements: elements}
+
+	case ObjectExpr:
+		fields := make([]ObjectField, len(e.Fields))
+
+		for i, field := range e.Fields {
+			fields[i] = ObjectField{
+				Name:  field.Name,
+				Value: optimizeExpr(field.Value),
+			}
+		}
+
+		return ObjectExpr{Fields: fields}
+
+	case CallExpr:
+		args := make([]Expr, len(e.Args))
+
+		for i, arg := range e.Args {
+			args[i] = optimizeExpr(arg)
+		}
+
+		return CallExpr{
+			Name: e.Name,
+			Args: args,
+		}
+
+	case MemberCallExpr:
+		args := make([]Expr, len(e.Args))
+
+		for i, arg := range e.Args {
+			args[i] = optimizeExpr(arg)
+		}
+
+		return MemberCallExpr{
+			Object: e.Object,
+			Method: e.Method,
+			Args:   args,
+		}
+
+	case PropertyExpr:
+		return PropertyExpr{
+			Object: optimizeExpr(e.Object),
+			Name:   e.Name,
+		}
+
+	default:
+		return expr
+	}
+}
+
 func NewCompiler() *Compiler {
 	c := &Compiler{
 		mainInstructions: []Instruction{},
 		functions:        map[string]Function{},
 		classes:          map[string]Class{},
+		loopStack:        []LoopContext{},
 		locals:           map[string]bool{},
 		localConstants:   map[string]bool{},
 		globalConstants:  map[string]bool{},
@@ -66,6 +206,12 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 			c.emit(OP_ASSIGN_GLOBAL, s.Name)
 		}
 
+	case BreakStmt:
+		c.compileBreakStatement()
+
+	case ContinueStmt:
+		c.compileContinueStatement()
+
 	case ExprStmt:
 		c.compileExpr(s.Value)
 		c.emit(OP_POP, nil)
@@ -91,6 +237,9 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 	case WhileStmt:
 		c.compileWhileStatement(s)
 
+	case ForStmt:
+		c.compileForStatement(s)
+
 	case PropertyAssignStmt:
 		c.compileExpr(s.Object)
 		c.compileExpr(s.Value)
@@ -102,6 +251,71 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 	default:
 		langError(ErrorInternal, "unknown statement")
 	}
+}
+
+func (c *Compiler) compileForStatement(stmt ForStmt) {
+	if stmt.Init != nil {
+		c.compileStatement(stmt.Init)
+	}
+
+	loopStart := len(*c.currentInstructions)
+
+	c.loopStack = append(c.loopStack, LoopContext{
+		Start: loopStart,
+	})
+
+	c.compileExpr(stmt.Condition)
+
+	jumpIfFalseIndex := c.emitJump(OP_JUMP_IF_FALSE)
+
+	for _, bodyStmt := range stmt.Body {
+		c.compileStatement(bodyStmt)
+	}
+
+	updateStart := len(*c.currentInstructions)
+
+	currentLoop := c.loopStack[len(c.loopStack)-1]
+
+	for _, continueJump := range currentLoop.ContinueJumps {
+		(*c.currentInstructions)[continueJump].Value = updateStart
+	}
+
+	if stmt.Update != nil {
+		c.compileStatement(stmt.Update)
+	}
+
+	c.emit(OP_JUMP, loopStart)
+
+	c.patchJump(jumpIfFalseIndex)
+
+	currentLoop = c.loopStack[len(c.loopStack)-1]
+	c.loopStack = c.loopStack[:len(c.loopStack)-1]
+
+	for _, breakJump := range currentLoop.BreakJumps {
+		c.patchJump(breakJump)
+	}
+}
+
+func (c *Compiler) compileBreakStatement() {
+	if len(c.loopStack) == 0 {
+		langError(ErrorSyntax, "break used outside of loop")
+	}
+
+	jumpIndex := c.emitJump(OP_JUMP)
+
+	currentLoop := &c.loopStack[len(c.loopStack)-1]
+	currentLoop.BreakJumps = append(currentLoop.BreakJumps, jumpIndex)
+}
+
+func (c *Compiler) compileContinueStatement() {
+	if len(c.loopStack) == 0 {
+		langError(ErrorSyntax, "continue used outside of loop")
+	}
+
+	jumpIndex := c.emitJump(OP_JUMP)
+
+	currentLoop := &c.loopStack[len(c.loopStack)-1]
+	currentLoop.ContinueJumps = append(currentLoop.ContinueJumps, jumpIndex)
 }
 
 func (c *Compiler) compileClass(stmt ClassStmt) {
@@ -134,6 +348,10 @@ func (c *Compiler) compileClass(stmt ClassStmt) {
 func (c *Compiler) compileWhileStatement(stmt WhileStmt) {
 	loopStart := len(*c.currentInstructions)
 
+	c.loopStack = append(c.loopStack, LoopContext{
+		Start: loopStart,
+	})
+
 	c.compileExpr(stmt.Condition)
 
 	jumpIfFalseIndex := c.emitJump(OP_JUMP_IF_FALSE)
@@ -142,9 +360,22 @@ func (c *Compiler) compileWhileStatement(stmt WhileStmt) {
 		c.compileStatement(bodyStmt)
 	}
 
+	currentLoop := c.loopStack[len(c.loopStack)-1]
+
+	for _, continueJump := range currentLoop.ContinueJumps {
+		(*c.currentInstructions)[continueJump].Value = loopStart
+	}
+
 	c.emit(OP_JUMP, loopStart)
 
 	c.patchJump(jumpIfFalseIndex)
+
+	currentLoop = c.loopStack[len(c.loopStack)-1]
+	c.loopStack = c.loopStack[:len(c.loopStack)-1]
+
+	for _, breakJump := range currentLoop.BreakJumps {
+		c.patchJump(breakJump)
+	}
 }
 
 func (c *Compiler) compileIfStatement(stmt IfStmt) {
@@ -209,6 +440,8 @@ func (c *Compiler) compileFunction(stmt FunctionStmt) {
 }
 
 func (c *Compiler) compileExpr(expr Expr) {
+	expr = optimizeExpr(expr)
+
 	switch e := expr.(type) {
 	case StringExpr:
 		c.emit(OP_CONST, e.Value)

@@ -19,6 +19,23 @@ type AssignStmt struct {
 
 func (s AssignStmt) stmtNode() {}
 
+type BreakStmt struct{}
+
+func (s BreakStmt) stmtNode() {}
+
+type ContinueStmt struct{}
+
+func (s ContinueStmt) stmtNode() {}
+
+type ForStmt struct {
+	Init      Stmt
+	Condition Expr
+	Update    Stmt
+	Body      []Stmt
+}
+
+func (s ForStmt) stmtNode() {}
+
 type PropertyAssignStmt struct {
 	Object Expr
 	Name   string

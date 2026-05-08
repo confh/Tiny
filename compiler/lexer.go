@@ -50,6 +50,12 @@ func (l *Lexer) NextToken() Token {
 			return Token{Type: TOKEN_ELSE, Literal: word}
 		case "while":
 			return Token{Type: TOKEN_WHILE, Literal: word}
+		case "for":
+			return Token{Type: TOKEN_FOR, Literal: word}
+		case "break":
+			return Token{Type: TOKEN_BREAK, Literal: word}
+		case "continue":
+			return Token{Type: TOKEN_CONTINUE, Literal: word}
 		case "and":
 			return Token{Type: TOKEN_AND, Literal: word}
 		case "or":
@@ -128,17 +134,38 @@ func (l *Lexer) NextToken() Token {
 		if l.peek() == '+' {
 			l.pos += 2
 			return Token{Type: TOKEN_INCREMENT, Literal: "++"}
+		} else if l.peek() == '=' {
+			l.pos += 2
+			return Token{Type: TOKEN_PLUS_ASSIGN, Literal: "+="}
 		}
 
 		l.pos++
 		return Token{Type: TOKEN_PLUS, Literal: "+"}
 	case '-':
+		if l.peek() == '-' {
+			l.pos += 2
+			return Token{Type: TOKEN_DECREMENT, Literal: "--"}
+		} else if l.peek() == '=' {
+			l.pos += 2
+			return Token{Type: TOKEN_MINUS_ASSIGN, Literal: "-="}
+		}
+
 		l.pos++
 		return Token{Type: TOKEN_MINUS, Literal: "-"}
 	case '*':
+		if l.peek() == '=' {
+			l.pos += 2
+			return Token{Type: TOKEN_STAR_ASSIGN, Literal: "*="}
+		}
+
 		l.pos++
 		return Token{Type: TOKEN_STAR, Literal: "*"}
 	case '/':
+		if l.peek() == '=' {
+			l.pos += 2
+			return Token{Type: TOKEN_SLASH_ASSIGN, Literal: "/="}
+		}
+
 		l.pos++
 		return Token{Type: TOKEN_SLASH, Literal: "/"}
 	case '(':

@@ -178,6 +178,168 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 		default:
 			langError(ErrorSyntax, "invalid assignment target")
 		}
+
+	case TOKEN_DECREMENT:
+		p.advance()
+
+		p.expect(TOKEN_SEMI)
+		switch target := left.(type) {
+		case IdentExpr:
+			return AssignStmt{
+				Name: target.Name,
+				Value: BinaryExpr{
+					Left:  IdentExpr{Name: target.Name},
+					Op:    TOKEN_MINUS,
+					Right: NumberExpr{Value: 1},
+				},
+			}
+
+		case PropertyExpr:
+			return PropertyAssignStmt{
+				Object: target.Object,
+				Name:   target.Name,
+				Value: BinaryExpr{
+					Left:  target,
+					Op:    TOKEN_MINUS,
+					Right: NumberExpr{Value: 1},
+				},
+			}
+
+		default:
+			langError(ErrorSyntax, "invalid assignment target")
+		}
+
+	case TOKEN_PLUS_ASSIGN:
+		p.advance()
+
+		value := p.parseExpression()
+
+		p.expect(TOKEN_SEMI)
+
+		switch target := left.(type) {
+		case IdentExpr:
+			return AssignStmt{
+				Name: target.Name,
+				Value: BinaryExpr{
+					Left:  IdentExpr{Name: target.Name},
+					Op:    TOKEN_PLUS,
+					Right: value,
+				},
+			}
+
+		case PropertyExpr:
+			return PropertyAssignStmt{
+				Object: target.Object,
+				Name:   target.Name,
+				Value: BinaryExpr{
+					Left:  target,
+					Op:    TOKEN_PLUS,
+					Right: value,
+				},
+			}
+
+		default:
+			langError(ErrorSyntax, "invalid += target")
+		}
+
+	case TOKEN_MINUS_ASSIGN:
+		p.advance()
+
+		value := p.parseExpression()
+
+		p.expect(TOKEN_SEMI)
+
+		switch target := left.(type) {
+		case IdentExpr:
+			return AssignStmt{
+				Name: target.Name,
+				Value: BinaryExpr{
+					Left:  IdentExpr{Name: target.Name},
+					Op:    TOKEN_MINUS,
+					Right: value,
+				},
+			}
+
+		case PropertyExpr:
+			return PropertyAssignStmt{
+				Object: target.Object,
+				Name:   target.Name,
+				Value: BinaryExpr{
+					Left:  target,
+					Op:    TOKEN_MINUS,
+					Right: value,
+				},
+			}
+
+		default:
+			langError(ErrorSyntax, "invalid -= target")
+		}
+
+	case TOKEN_STAR_ASSIGN:
+		p.advance()
+
+		value := p.parseExpression()
+
+		p.expect(TOKEN_SEMI)
+
+		switch target := left.(type) {
+		case IdentExpr:
+			return AssignStmt{
+				Name: target.Name,
+				Value: BinaryExpr{
+					Left:  IdentExpr{Name: target.Name},
+					Op:    TOKEN_STAR,
+					Right: value,
+				},
+			}
+
+		case PropertyExpr:
+			return PropertyAssignStmt{
+				Object: target.Object,
+				Name:   target.Name,
+				Value: BinaryExpr{
+					Left:  target,
+					Op:    TOKEN_STAR,
+					Right: value,
+				},
+			}
+
+		default:
+			langError(ErrorSyntax, "invalid *= target")
+		}
+
+	case TOKEN_SLASH_ASSIGN:
+		p.advance()
+
+		value := p.parseExpression()
+
+		p.expect(TOKEN_SEMI)
+
+		switch target := left.(type) {
+		case IdentExpr:
+			return AssignStmt{
+				Name: target.Name,
+				Value: BinaryExpr{
+					Left:  IdentExpr{Name: target.Name},
+					Op:    TOKEN_SLASH,
+					Right: value,
+				},
+			}
+
+		case PropertyExpr:
+			return PropertyAssignStmt{
+				Object: target.Object,
+				Name:   target.Name,
+				Value: BinaryExpr{
+					Left:  target,
+					Op:    TOKEN_SLASH,
+					Right: value,
+				},
+			}
+
+		default:
+			langError(ErrorSyntax, "invalid /= target")
+		}
 	}
 
 	p.expect(TOKEN_SEMI)
@@ -205,11 +367,168 @@ func (p *Parser) parseStatement() Stmt {
 		return p.parseIfStatement()
 	case TOKEN_WHILE:
 		return p.parseWhileStatement()
+	case TOKEN_FOR:
+		return p.parseForStatement()
 	case TOKEN_CLASS:
 		return p.parseClassStatement()
+	case TOKEN_BREAK:
+		return p.parseBreakStatement()
+	case TOKEN_CONTINUE:
+		return p.parseContinueStatement()
 	default:
 		return p.parseExpressionStatement()
 	}
+}
+
+func (p *Parser) parseForStatement() Stmt {
+	p.expect(TOKEN_FOR)
+
+	var init Stmt
+
+	if p.current.Type == TOKEN_LET {
+		init = p.parseLetStatement()
+	} else if p.current.Type == TOKEN_CONST {
+		init = p.parseConstStatement()
+	} else if p.current.Type == TOKEN_SEMI {
+		p.expect(TOKEN_SEMI)
+	} else {
+		init = p.parsePossibleAssignmentStatement()
+	}
+
+	var condition Expr
+
+	if p.current.Type != TOKEN_SEMI {
+		condition = p.parseExpression()
+	} else {
+		condition = BoolExpr{Value: true}
+	}
+
+	p.expect(TOKEN_SEMI)
+
+	var update Stmt
+
+	if p.current.Type != TOKEN_LBRACE {
+		update = p.parseForUpdateStatement()
+	}
+
+	p.expect(TOKEN_LBRACE)
+
+	body := p.parseBlock()
+
+	return ForStmt{
+		Init:      init,
+		Condition: condition,
+		Update:    update,
+		Body:      body,
+	}
+}
+
+func (p *Parser) parseForUpdateStatement() Stmt {
+	left := p.parsePostfix()
+
+	if p.current.Type == TOKEN_ASSIGN {
+		p.advance()
+
+		value := p.parseExpression()
+
+		switch target := left.(type) {
+		case IdentExpr:
+			return AssignStmt{
+				Name:  target.Name,
+				Value: value,
+			}
+
+		case PropertyExpr:
+			return PropertyAssignStmt{
+				Object: target.Object,
+				Name:   target.Name,
+				Value:  value,
+			}
+
+		default:
+			langError(ErrorSyntax, "invalid assignment target")
+		}
+	}
+
+	if p.current.Type == TOKEN_PLUS_ASSIGN {
+		p.advance()
+
+		value := p.parseExpression()
+
+		switch target := left.(type) {
+		case IdentExpr:
+			return AssignStmt{
+				Name: target.Name,
+				Value: BinaryExpr{
+					Left:  IdentExpr{Name: target.Name},
+					Op:    TOKEN_PLUS,
+					Right: value,
+				},
+			}
+
+		case PropertyExpr:
+			return PropertyAssignStmt{
+				Object: target.Object,
+				Name:   target.Name,
+				Value: BinaryExpr{
+					Left:  target,
+					Op:    TOKEN_PLUS,
+					Right: value,
+				},
+			}
+
+		default:
+			langError(ErrorSyntax, "invalid += target")
+		}
+	}
+
+	if p.current.Type == TOKEN_INCREMENT {
+		p.advance()
+
+		switch target := left.(type) {
+		case IdentExpr:
+			return AssignStmt{
+				Name: target.Name,
+				Value: BinaryExpr{
+					Left:  IdentExpr{Name: target.Name},
+					Op:    TOKEN_PLUS,
+					Right: NumberExpr{Value: 1},
+				},
+			}
+
+		case PropertyExpr:
+			return PropertyAssignStmt{
+				Object: target.Object,
+				Name:   target.Name,
+				Value: BinaryExpr{
+					Left:  target,
+					Op:    TOKEN_PLUS,
+					Right: NumberExpr{Value: 1},
+				},
+			}
+
+		default:
+			langError(ErrorSyntax, "invalid increment target")
+		}
+	}
+
+	return ExprStmt{
+		Value: left,
+	}
+}
+
+func (p *Parser) parseBreakStatement() Stmt {
+	p.expect(TOKEN_BREAK)
+	p.expect(TOKEN_SEMI)
+
+	return BreakStmt{}
+}
+
+func (p *Parser) parseContinueStatement() Stmt {
+	p.expect(TOKEN_CONTINUE)
+	p.expect(TOKEN_SEMI)
+
+	return ContinueStmt{}
 }
 
 func (p *Parser) parseWhileStatement() Stmt {
