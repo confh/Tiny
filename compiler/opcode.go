@@ -56,6 +56,7 @@ type Function struct {
 	Name         string
 	Params       []string
 	Instructions []Instruction
+	LocalCount   int
 }
 
 type CallInfo struct {
@@ -80,6 +81,7 @@ type BuiltinCallInfo struct {
 
 type VariableInfo struct {
 	Name     string
+	Slot     int
 	Constant bool
 }
 

@@ -6,6 +6,11 @@ type LoopContext struct {
 	ContinueJumps []int
 }
 
+type LocalInfo struct {
+	Slot     int
+	Constant bool
+}
+
 type Compiler struct {
 	mainInstructions []Instruction
 	functions        map[string]Function
@@ -14,8 +19,8 @@ type Compiler struct {
 
 	currentInstructions *[]Instruction
 
-	locals          map[string]bool
-	localConstants  map[string]bool
+	locals          map[string]LocalInfo
+	localCount      int
 	globalConstants map[string]bool
 }
 
@@ -157,8 +162,8 @@ func NewCompiler() *Compiler {
 		functions:        map[string]Function{},
 		classes:          map[string]Class{},
 		loopStack:        []LoopContext{},
-		locals:           map[string]bool{},
-		localConstants:   map[string]bool{},
+		locals:           map[string]LocalInfo{},
+		localCount:       0,
 		globalConstants:  map[string]bool{},
 	}
 
@@ -183,10 +188,17 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 		c.compileExpr(s.Value)
 
 		if c.isInsideFunction() {
-			c.locals[s.Name] = true
-			c.localConstants[s.Name] = s.Constant
+			slot := c.localCount
+			c.localCount++
+
+			c.locals[s.Name] = LocalInfo{
+				Slot:     slot,
+				Constant: s.Constant,
+			}
+
 			c.emit(OP_STORE_LOCAL, VariableInfo{
 				Name:     s.Name,
+				Slot:     slot,
 				Constant: s.Constant,
 			})
 		} else {
@@ -200,11 +212,14 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 	case AssignStmt:
 		c.compileExpr(s.Value)
 
-		if c.isInsideFunction() && c.locals[s.Name] {
-			c.emit(OP_ASSIGN_LOCAL, s.Name)
-		} else {
-			c.emit(OP_ASSIGN_GLOBAL, s.Name)
+		if c.isInsideFunction() {
+			if info, exists := c.locals[s.Name]; exists {
+				c.emit(OP_ASSIGN_LOCAL, info.Slot)
+				return
+			}
 		}
+
+		c.emit(OP_ASSIGN_GLOBAL, s.Name)
 
 	case BreakStmt:
 		c.compileBreakStatement()
@@ -330,9 +345,11 @@ func (c *Compiler) compileClass(stmt ClassStmt) {
 
 		methods[method.Name] = compiledName
 
+		params := append([]string{"this"}, method.Params...)
+
 		classMethod := FunctionStmt{
 			Name:   compiledName,
-			Params: method.Params,
+			Params: params,
 			Body:   method.Body,
 		}
 
@@ -409,34 +426,43 @@ func (c *Compiler) compileFunction(stmt FunctionStmt) {
 
 	oldInstructions := c.currentInstructions
 	oldLocals := c.locals
-	oldLocalConstants := c.localConstants
+	oldLocalCount := c.localCount
 
 	functionInstructions := []Instruction{}
+
 	c.currentInstructions = &functionInstructions
-	c.locals = map[string]bool{}
-	c.localConstants = map[string]bool{}
+	c.locals = map[string]LocalInfo{}
+	c.localCount = 0
 
 	for _, param := range stmt.Params {
-		c.locals[param] = true
-		c.localConstants[param] = false
+		slot := c.localCount
+		c.localCount++
+
+		c.locals[param] = LocalInfo{
+			Slot:     slot,
+			Constant: false,
+		}
 	}
 
 	for _, bodyStmt := range stmt.Body {
 		c.compileStatement(bodyStmt)
 	}
 
-	c.emit(OP_CONST, 0)
+	c.emit(OP_CONST, UndefinedValue{})
 	c.emit(OP_RETURN, nil)
+
+	localCount := c.localCount
 
 	c.functions[stmt.Name] = Function{
 		Name:         stmt.Name,
 		Params:       stmt.Params,
 		Instructions: functionInstructions,
+		LocalCount:   localCount,
 	}
 
 	c.currentInstructions = oldInstructions
 	c.locals = oldLocals
-	c.localConstants = oldLocalConstants
+	c.localCount = oldLocalCount
 }
 
 func (c *Compiler) compileExpr(expr Expr) {
@@ -513,8 +539,8 @@ func (c *Compiler) compileExpr(expr Expr) {
 		c.emit(OP_CONST, e.Value)
 
 	case IdentExpr:
-		if c.locals[e.Name] {
-			c.emit(OP_LOAD_LOCAL, e.Name)
+		if info, exists := c.locals[e.Name]; exists {
+			c.emit(OP_LOAD_LOCAL, info.Slot)
 		} else if _, exists := c.functions[e.Name]; exists {
 			c.emit(OP_CONST, FunctionValue{Name: e.Name})
 		} else {
@@ -593,11 +619,12 @@ func (c *Compiler) compileExpr(expr Expr) {
 		})
 
 	case ThisExpr:
-		if !c.isInsideFunction() {
-			langError(ErrorSyntax, "cannot use this outside of a function")
+		info, exists := c.locals["this"]
+		if !exists {
+			langError(ErrorName, "cannot use this outside of a method")
 		}
 
-		c.emit(OP_LOAD_LOCAL, "this")
+		c.emit(OP_LOAD_LOCAL, info.Slot)
 
 	default:
 		langError(ErrorInternal, "unknown expression")

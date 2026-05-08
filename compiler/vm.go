@@ -12,8 +12,8 @@ import (
 type Frame struct {
 	function     Function
 	ip           int
-	locals       map[string]Value
-	constants    map[string]bool
+	locals       []Value
+	constants    []bool
 	instructions []Instruction
 
 	returnOverride    Value
@@ -92,24 +92,27 @@ func (vm *VM) step() bool {
 		vm.globalConstants[info.Name] = info.Constant
 
 	case OP_LOAD_LOCAL:
-		name := instr.Value.(string)
-
+		slot := instr.Value.(int)
 		frame := vm.currentFrame()
 
-		value, ok := frame.locals[name]
-		if !ok {
-			langError(ErrorName, "undefined local variable: %s", name)
+		if slot < 0 || slot >= len(frame.locals) {
+			langError(ErrorInternal, "local slot out of range: %d", slot)
 		}
 
-		vm.push(value)
+		vm.push(frame.locals[slot])
 
 	case OP_STORE_LOCAL:
 		info := instr.Value.(VariableInfo)
 		value := vm.pop()
 
 		frame := vm.currentFrame()
-		frame.locals[info.Name] = value
-		frame.constants[info.Name] = info.Constant
+
+		if info.Slot < 0 || info.Slot >= len(frame.locals) {
+			langError(ErrorInternal, "local slot out of range: %d", info.Slot)
+		}
+
+		frame.locals[info.Slot] = value
+		frame.constants[info.Slot] = info.Constant
 
 	case OP_ASSIGN_GLOBAL:
 		name := instr.Value.(string)
@@ -127,21 +130,20 @@ func (vm *VM) step() bool {
 		vm.globals[name] = value
 
 	case OP_ASSIGN_LOCAL:
-		name := instr.Value.(string)
+		slot := instr.Value.(int)
 		value := vm.pop()
 
 		frame := vm.currentFrame()
 
-		_, exists := frame.locals[name]
-		if !exists {
-			langError(ErrorName, "cannot assign to undefined local variable: %s", name)
+		if slot < 0 || slot >= len(frame.locals) {
+			langError(ErrorInternal, "local slot out of range: %d", slot)
 		}
 
-		if frame.constants[name] {
-			langError(ErrorConst, "cannot assign to constant: %s", name)
+		if frame.constants[slot] {
+			langError(ErrorConst, "cannot assign to constant local")
 		}
 
-		frame.locals[name] = value
+		frame.locals[slot] = value
 
 	case OP_ADD:
 		right := vm.pop()
@@ -411,12 +413,12 @@ func (vm *VM) callFunctionValue(fnValue FunctionValue, args []Value) Value {
 		)
 	}
 
-	locals := map[string]Value{}
-	constants := map[string]bool{}
+	locals := make([]Value, fn.LocalCount)
+	constants := make([]bool, fn.LocalCount)
 
 	for i, arg := range args {
-		locals[fn.Params[i]] = arg
-		constants[fn.Params[i]] = false
+		locals[i] = arg
+		constants[i] = false
 	}
 
 	frameDepthBefore := len(vm.frames)
@@ -432,8 +434,7 @@ func (vm *VM) callFunctionValue(fnValue FunctionValue, args []Value) Value {
 	vm.frames = append(vm.frames, frame)
 
 	for len(vm.frames) > frameDepthBefore {
-		halted := vm.step()
-		if halted {
+		if vm.step() {
 			langError(ErrorRuntime, "program halted while running callback")
 		}
 	}
@@ -592,7 +593,7 @@ func (vm *VM) callMethod(method string, argCount int) {
 		langError(ErrorName, "undefined function: %s", fnValue.Name)
 	}
 
-	expectedArgs := len(fn.Params)
+	expectedArgs := len(fn.Params) - 1
 
 	if expectedArgs != argCount {
 		langError(
@@ -604,22 +605,22 @@ func (vm *VM) callMethod(method string, argCount int) {
 		)
 	}
 
-	locals := map[string]Value{}
-	constants := map[string]bool{}
+	locals := make([]Value, fn.LocalCount)
+	constants := make([]bool, fn.LocalCount)
 
-	locals["this"] = object
-	constants["this"] = true
+	locals[0] = object
+	constants[0] = true
 
 	for i, arg := range args {
-		locals[fn.Params[i]] = arg
-		constants[fn.Params[i]] = false
+		locals[i+1] = arg
+		constants[i+1] = false
 	}
 
 	frame := Frame{
 		function:     fn,
 		ip:           0,
 		locals:       locals,
-		constants:    map[string]bool{},
+		constants:    constants,
 		instructions: fn.Instructions,
 	}
 
@@ -653,18 +654,21 @@ func (vm *VM) callFunction(name string, argCount int) {
 			argCount)
 	}
 
-	locals := map[string]Value{}
+	locals := make([]Value, fn.LocalCount)
+	constants := make([]bool, fn.LocalCount)
 
-	for i := argCount - 1; i >= 0; i-- {
-		paramName := fn.Params[i]
-		locals[paramName] = vm.pop()
+	args := vm.popArgs(argCount)
+
+	for i, arg := range args {
+		locals[i] = arg
+		constants[i] = false
 	}
 
 	frame := Frame{
 		function:     fn,
 		ip:           0,
 		locals:       locals,
-		constants:    map[string]bool{},
+		constants:    constants,
 		instructions: fn.Instructions,
 	}
 
@@ -695,25 +699,27 @@ func (vm *VM) callClass(class Class, argCount int) {
 		langError(ErrorName, "missing init function for class: %s", class.Name)
 	}
 
-	if len(fn.Params) != argCount {
+	expectedArgs := len(fn.Params) - 1 // ignore hidden "this"
+
+	if expectedArgs != argCount {
 		langError(
 			ErrorRuntime,
 			"class %s constructor expects %d arguments, got %d",
 			class.Name,
-			len(fn.Params),
+			expectedArgs,
 			argCount,
 		)
 	}
 
-	locals := map[string]Value{}
-	constants := map[string]bool{}
+	locals := make([]Value, fn.LocalCount)
+	constants := make([]bool, fn.LocalCount)
 
-	locals["this"] = instance
-	constants["this"] = true
+	locals[0] = instance
+	constants[0] = true
 
 	for i, arg := range args {
-		locals[fn.Params[i]] = arg
-		constants[fn.Params[i]] = false
+		locals[i+1] = arg
+		constants[i+1] = false
 	}
 
 	frame := Frame{
