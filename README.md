@@ -4,8 +4,6 @@ A small interpreted programming language written in Go.
 
 Tiny is a simple scripting language with variables, functions, objects, classes, imports, built-in modules, and a stack-based bytecode VM. It is mainly built for learning how programming languages work, while still being usable enough to write small scripts and experiments.
 
-> The language name is temporary. Rename this README if your language has a final name.
-
 ---
 
 ## Features
