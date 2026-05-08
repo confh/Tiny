@@ -208,7 +208,7 @@ type CallExpr struct {
 func (e CallExpr) exprNode() {}
 
 type MemberCallExpr struct {
-	Object string
+	Object Expr
 	Method string
 	Args   []Expr
 }

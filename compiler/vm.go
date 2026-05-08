@@ -168,6 +168,8 @@ func (vm *VM) step() bool {
 				vm.push(asFloat(left) - asFloat(right))
 			} else if _, ok := right.(float64); ok {
 				vm.push(asFloat(left) - asFloat(right))
+			} else if _, ok := right.(int64); ok {
+				vm.push(int(left.(int64)) - int(right.(int64)))
 			} else {
 				vm.push(left.(int) - right.(int))
 			}

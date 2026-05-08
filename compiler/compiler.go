@@ -567,14 +567,13 @@ func (c *Compiler) compileExpr(expr Expr) {
 		})
 
 	case MemberCallExpr:
-		// Keep core.println(), core.input(), etc. as builtins.
-		if e.Object == "Core" || e.Object == "Math" {
+		if ident, ok := e.Object.(IdentExpr); ok && (ident.Name == "Core" || ident.Name == "Math") {
 			for _, arg := range e.Args {
 				c.compileExpr(arg)
 			}
 
 			c.emit(OP_BUILTIN_CALL, BuiltinCallInfo{
-				Object:   e.Object,
+				Object:   ident.Name,
 				Method:   e.Method,
 				ArgCount: len(e.Args),
 			})
@@ -582,8 +581,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 			return
 		}
 
-		// Object method call: user.greet()
-		c.compileExpr(IdentExpr{Name: e.Object})
+		c.compileExpr(e.Object)
 
 		for _, arg := range e.Args {
 			c.compileExpr(arg)

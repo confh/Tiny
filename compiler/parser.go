@@ -869,14 +869,10 @@ func (p *Parser) parsePostfix() Expr {
 
 				p.expect(TOKEN_RPAREN)
 
-				if ident, ok := expr.(IdentExpr); ok {
-					expr = MemberCallExpr{
-						Object: ident.Name,
-						Method: name,
-						Args:   args,
-					}
-				} else {
-					langError(ErrorSyntax, "method calls currently only support module.method(...)")
+				expr = MemberCallExpr{
+					Object: expr,
+					Method: name,
+					Args:   args,
 				}
 
 				continue

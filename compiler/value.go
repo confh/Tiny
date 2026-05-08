@@ -55,7 +55,7 @@ func asInt(value Value) int {
 
 func isNumber(value Value) bool {
 	switch value.(type) {
-	case int, float64:
+	case int, int64, float64:
 		return true
 	default:
 		return false
