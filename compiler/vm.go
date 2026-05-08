@@ -46,349 +46,403 @@ func NewVM(mainInstructions []Instruction, functions map[string]Function, classe
 	}
 }
 
-func (vm *VM) Run() {
-	for {
-		instructions := vm.currentInstructions()
-		ip := vm.currentIP()
+func (vm *VM) step() bool {
+	instructions := vm.currentInstructions()
+	ip := vm.currentIP()
 
-		if ip < 0 || ip >= len(instructions) {
-			langError(ErrorInternal, "instruction pointer out of range")
+	if ip < 0 || ip >= len(instructions) {
+		langError(ErrorInternal, "instruction pointer out of range")
+	}
+
+	instr := instructions[ip]
+	vm.incrementIP()
+
+	switch instr.Op {
+	case OP_CONST:
+		vm.push(instr.Value)
+
+	case OP_SET_PROPERTY:
+		name := instr.Value.(string)
+
+		value := vm.pop()
+		objectValue := vm.pop()
+
+		object, ok := objectValue.(ObjectValue)
+		if !ok {
+			langError(ErrorType, "expected object, got %s", typeName(objectValue))
 		}
 
-		instr := instructions[ip]
-		vm.incrementIP()
+		object[name] = value
 
-		switch instr.Op {
-		case OP_CONST:
-			vm.push(instr.Value)
+	case OP_LOAD_GLOBAL:
+		name := instr.Value.(string)
 
-		case OP_SET_PROPERTY:
-			name := instr.Value.(string)
+		value, ok := vm.globals[name]
+		if !ok {
+			langError(ErrorName, "undefined global variable: %s", name)
+		}
 
-			value := vm.pop()
-			objectValue := vm.pop()
+		vm.push(value)
 
-			object, ok := objectValue.(ObjectValue)
-			if !ok {
-				langError(ErrorType, "expected object, got %s", typeName(objectValue))
-			}
+	case OP_STORE_GLOBAL:
+		info := instr.Value.(VariableInfo)
+		value := vm.pop()
 
-			object[name] = value
+		vm.globals[info.Name] = value
+		vm.globalConstants[info.Name] = info.Constant
 
-		case OP_LOAD_GLOBAL:
-			name := instr.Value.(string)
+	case OP_LOAD_LOCAL:
+		name := instr.Value.(string)
 
-			value, ok := vm.globals[name]
-			if !ok {
-				langError(ErrorName, "undefined global variable: %s", name)
-			}
+		frame := vm.currentFrame()
 
-			vm.push(value)
+		value, ok := frame.locals[name]
+		if !ok {
+			langError(ErrorName, "undefined local variable: %s", name)
+		}
 
-		case OP_STORE_GLOBAL:
-			info := instr.Value.(VariableInfo)
-			value := vm.pop()
+		vm.push(value)
 
-			vm.globals[info.Name] = value
-			vm.globalConstants[info.Name] = info.Constant
+	case OP_STORE_LOCAL:
+		info := instr.Value.(VariableInfo)
+		value := vm.pop()
 
-		case OP_LOAD_LOCAL:
-			name := instr.Value.(string)
+		frame := vm.currentFrame()
+		frame.locals[info.Name] = value
+		frame.constants[info.Name] = info.Constant
 
-			frame := vm.currentFrame()
+	case OP_ASSIGN_GLOBAL:
+		name := instr.Value.(string)
+		value := vm.pop()
 
-			value, ok := frame.locals[name]
-			if !ok {
-				langError(ErrorName, "undefined local variable: %s", name)
-			}
+		_, exists := vm.globals[name]
+		if !exists {
+			langError(ErrorName, "cannot assign to undefined variable: %s", name)
+		}
 
-			vm.push(value)
+		if vm.globalConstants[name] {
+			langError(ErrorConst, "cannot assign to constant: %s", name)
+		}
 
-		case OP_STORE_LOCAL:
-			info := instr.Value.(VariableInfo)
-			value := vm.pop()
+		vm.globals[name] = value
 
-			frame := vm.currentFrame()
-			frame.locals[info.Name] = value
-			frame.constants[info.Name] = info.Constant
+	case OP_ASSIGN_LOCAL:
+		name := instr.Value.(string)
+		value := vm.pop()
 
-		case OP_ASSIGN_GLOBAL:
-			name := instr.Value.(string)
-			value := vm.pop()
+		frame := vm.currentFrame()
 
-			_, exists := vm.globals[name]
-			if !exists {
-				langError(ErrorName, "cannot assign to undefined variable: %s", name)
-			}
+		_, exists := frame.locals[name]
+		if !exists {
+			langError(ErrorName, "cannot assign to undefined local variable: %s", name)
+		}
 
-			if vm.globalConstants[name] {
-				langError(ErrorConst, "cannot assign to constant: %s", name)
-			}
+		if frame.constants[name] {
+			langError(ErrorConst, "cannot assign to constant: %s", name)
+		}
 
-			vm.globals[name] = value
+		frame.locals[name] = value
 
-		case OP_ASSIGN_LOCAL:
-			name := instr.Value.(string)
-			value := vm.pop()
+	case OP_ADD:
+		right := vm.pop()
+		left := vm.pop()
 
-			frame := vm.currentFrame()
-
-			_, exists := frame.locals[name]
-			if !exists {
-				langError(ErrorName, "cannot assign to undefined local variable: %s", name)
-			}
-
-			if frame.constants[name] {
-				langError(ErrorConst, "cannot assign to constant: %s", name)
-			}
-
-			frame.locals[name] = value
-
-		case OP_ADD:
-			right := vm.pop()
-			left := vm.pop()
-
-			if isNumber(left) && isNumber(right) {
-				if _, ok := left.(float64); ok {
-					vm.push(asFloat(left) + asFloat(right))
-				} else if _, ok := right.(float64); ok {
-					vm.push(asFloat(left) + asFloat(right))
-				} else {
-					vm.push(left.(int) + right.(int))
-				}
+		if isNumber(left) && isNumber(right) {
+			if _, ok := left.(float64); ok {
+				vm.push(asFloat(left) + asFloat(right))
+			} else if _, ok := right.(float64); ok {
+				vm.push(asFloat(left) + asFloat(right))
 			} else {
-				langError(ErrorType, "cannot add %s and %s", typeName(left), typeName(right))
+				vm.push(left.(int) + right.(int))
 			}
+		} else {
+			langError(ErrorType, "cannot add %s and %s", typeName(left), typeName(right))
+		}
 
-		case OP_SUB:
-			right := vm.pop()
-			left := vm.pop()
+	case OP_SUB:
+		right := vm.pop()
+		left := vm.pop()
 
-			if isNumber(left) && isNumber(right) {
-				if _, ok := left.(float64); ok {
-					vm.push(asFloat(left) - asFloat(right))
-				} else if _, ok := right.(float64); ok {
-					vm.push(asFloat(left) - asFloat(right))
-				} else {
-					vm.push(left.(int) - right.(int))
-				}
+		if isNumber(left) && isNumber(right) {
+			if _, ok := left.(float64); ok {
+				vm.push(asFloat(left) - asFloat(right))
+			} else if _, ok := right.(float64); ok {
+				vm.push(asFloat(left) - asFloat(right))
 			} else {
-				langError(ErrorType, "cannot subtract %s and %s", typeName(left), typeName(right))
+				vm.push(left.(int) - right.(int))
 			}
+		} else {
+			langError(ErrorType, "cannot subtract %s and %s", typeName(left), typeName(right))
+		}
 
-		case OP_MUL:
-			right := vm.pop()
-			left := vm.pop()
+	case OP_MUL:
+		right := vm.pop()
+		left := vm.pop()
 
-			if isNumber(left) && isNumber(right) {
-				if _, ok := left.(float64); ok {
-					vm.push(asFloat(left) * asFloat(right))
-				} else if _, ok := right.(float64); ok {
-					vm.push(asFloat(left) * asFloat(right))
-				} else {
-					vm.push(left.(int) * right.(int))
-				}
+		if isNumber(left) && isNumber(right) {
+			if _, ok := left.(float64); ok {
+				vm.push(asFloat(left) * asFloat(right))
+			} else if _, ok := right.(float64); ok {
+				vm.push(asFloat(left) * asFloat(right))
 			} else {
-				langError(ErrorType, "cannot multiply %s and %s", typeName(left), typeName(right))
+				vm.push(left.(int) * right.(int))
 			}
+		} else {
+			langError(ErrorType, "cannot multiply %s and %s", typeName(left), typeName(right))
+		}
 
-		case OP_DIV:
-			right := vm.pop()
-			left := vm.pop()
+	case OP_DIV:
+		right := vm.pop()
+		left := vm.pop()
 
-			if !isNumber(left) || !isNumber(right) {
-				langError(ErrorType, "cannot divide %s and %s", typeName(left), typeName(right))
-			}
+		if !isNumber(left) || !isNumber(right) {
+			langError(ErrorType, "cannot divide %s and %s", typeName(left), typeName(right))
+		}
 
-			vm.push(asFloat(left) / asFloat(right))
+		vm.push(asFloat(left) / asFloat(right))
 
-		case OP_EQ:
-			right := vm.pop()
-			left := vm.pop()
-			vm.push(valuesEqual(left, right))
+	case OP_EQ:
+		right := vm.pop()
+		left := vm.pop()
+		vm.push(valuesEqual(left, right))
 
-		case OP_NEQ:
-			right := vm.pop()
-			left := vm.pop()
-			vm.push(!valuesEqual(left, right))
+	case OP_NEQ:
+		right := vm.pop()
+		left := vm.pop()
+		vm.push(!valuesEqual(left, right))
 
-		case OP_LT:
-			right := vm.pop()
-			left := vm.pop()
+	case OP_LT:
+		right := vm.pop()
+		left := vm.pop()
 
-			if !isNumber(left) || !isNumber(right) {
-				langError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
-			}
+		if !isNumber(left) || !isNumber(right) {
+			langError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
+		}
 
-			vm.push(asFloat(left) < asFloat(right))
+		vm.push(asFloat(left) < asFloat(right))
 
-		case OP_GT:
-			right := vm.pop()
-			left := vm.pop()
+	case OP_GT:
+		right := vm.pop()
+		left := vm.pop()
 
-			if !isNumber(left) || !isNumber(right) {
-				langError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
-			}
+		if !isNumber(left) || !isNumber(right) {
+			langError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
+		}
 
-			vm.push(asFloat(left) > asFloat(right))
+		vm.push(asFloat(left) > asFloat(right))
 
-		case OP_LTE:
-			right := vm.pop()
-			left := vm.pop()
+	case OP_LTE:
+		right := vm.pop()
+		left := vm.pop()
 
-			if !isNumber(left) || !isNumber(right) {
-				langError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
-			}
+		if !isNumber(left) || !isNumber(right) {
+			langError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
+		}
 
-			vm.push(asFloat(left) <= asFloat(right))
+		vm.push(asFloat(left) <= asFloat(right))
 
-		case OP_GTE:
-			right := vm.pop()
-			left := vm.pop()
+	case OP_GTE:
+		right := vm.pop()
+		left := vm.pop()
 
-			if !isNumber(left) || !isNumber(right) {
-				langError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
-			}
+		if !isNumber(left) || !isNumber(right) {
+			langError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
+		}
 
-			vm.push(asFloat(left) >= asFloat(right))
+		vm.push(asFloat(left) >= asFloat(right))
 
-		case OP_AND:
-			right := vm.pop()
-			left := vm.pop()
-			vm.push(isTruthy(left) && isTruthy(right))
+	case OP_AND:
+		right := vm.pop()
+		left := vm.pop()
+		vm.push(isTruthy(left) && isTruthy(right))
 
-		case OP_OR:
-			right := vm.pop()
-			left := vm.pop()
-			vm.push(isTruthy(left) || isTruthy(right))
+	case OP_OR:
+		right := vm.pop()
+		left := vm.pop()
+		vm.push(isTruthy(left) || isTruthy(right))
 
-		case OP_JUMP:
-			target := instr.Value.(int)
+	case OP_JUMP:
+		target := instr.Value.(int)
+		vm.setIP(target)
+
+	case OP_JUMP_IF_FALSE:
+		target := instr.Value.(int)
+		condition := vm.pop()
+
+		if !isTruthy(condition) {
 			vm.setIP(target)
+		}
 
-		case OP_JUMP_IF_FALSE:
-			target := instr.Value.(int)
-			condition := vm.pop()
+	case OP_METHOD_CALL:
+		info := instr.Value.(MethodCallInfo)
+		vm.callMethod(info.Method, info.ArgCount)
 
-			if !isTruthy(condition) {
-				vm.setIP(target)
-			}
+	case OP_CALL:
+		info := instr.Value.(CallInfo)
+		vm.callFunction(info.Name, info.ArgCount)
 
-		case OP_METHOD_CALL:
-			info := instr.Value.(MethodCallInfo)
-			vm.callMethod(info.Method, info.ArgCount)
+	case OP_BUILTIN_CALL:
+		info := instr.Value.(BuiltinCallInfo)
+		vm.callBuiltin(info.Object, info.Method, info.ArgCount)
 
-		case OP_CALL:
-			info := instr.Value.(CallInfo)
-			vm.callFunction(info.Name, info.ArgCount)
+	case OP_ARRAY:
+		info := instr.Value.(ArrayInfo)
 
-		case OP_BUILTIN_CALL:
-			info := instr.Value.(BuiltinCallInfo)
-			vm.callBuiltin(info.Object, info.Method, info.ArgCount)
+		elements := make([]Value, info.Count)
 
-		case OP_ARRAY:
-			info := instr.Value.(ArrayInfo)
+		for i := info.Count - 1; i >= 0; i-- {
+			elements[i] = vm.pop()
+		}
 
-			elements := make([]Value, info.Count)
+		vm.push(ArrayValue(elements))
 
-			for i := info.Count - 1; i >= 0; i-- {
-				elements[i] = vm.pop()
-			}
+	case OP_INDEX:
+		index := asInt(vm.pop())
+		arrayValue := vm.pop()
 
-			vm.push(ArrayValue(elements))
+		array, ok := arrayValue.(ArrayValue)
+		if !ok {
+			langError(ErrorSyntax, "expected array, got %T", arrayValue)
+		}
 
-		case OP_INDEX:
-			index := asInt(vm.pop())
-			arrayValue := vm.pop()
+		if index < 0 || index >= len(array) {
+			langError(ErrorInternal, "array index out of range: %d", index)
+		}
 
-			array, ok := arrayValue.(ArrayValue)
-			if !ok {
-				langError(ErrorSyntax, "expected array, got %T", arrayValue)
-			}
+		vm.push(array[index])
 
-			if index < 0 || index >= len(array) {
-				langError(ErrorInternal, "array index out of range: %d", index)
-			}
+	case OP_RETURN:
+		returnValue := vm.pop()
 
-			vm.push(array[index])
+		if len(vm.frames) == 0 {
+			langError(ErrorRuntime, "return used outside of function")
+		}
 
-		case OP_RETURN:
-			returnValue := vm.pop()
+		frame := vm.frames[len(vm.frames)-1]
+		vm.frames = vm.frames[:len(vm.frames)-1]
 
-			if len(vm.frames) == 0 {
-				langError(ErrorRuntime, "return used outside of function")
-			}
+		if frame.hasReturnOverride {
+			vm.push(frame.returnOverride)
+		} else {
+			vm.push(returnValue)
+		}
 
-			frame := vm.frames[len(vm.frames)-1]
-			vm.frames = vm.frames[:len(vm.frames)-1]
+	case OP_POP:
+		vm.pop()
 
-			if frame.hasReturnOverride {
-				vm.push(frame.returnOverride)
-			} else {
-				vm.push(returnValue)
-			}
+	case OP_INTERPOLATE:
+		info := instr.Value.(InterpolateInfo)
 
-		case OP_POP:
-			vm.pop()
+		values := make([]Value, info.ExprCount)
 
-		case OP_INTERPOLATE:
-			info := instr.Value.(InterpolateInfo)
+		for i := info.ExprCount - 1; i >= 0; i-- {
+			values[i] = vm.pop()
+		}
 
-			values := make([]Value, info.ExprCount)
+		result := ""
 
-			for i := info.ExprCount - 1; i >= 0; i-- {
-				values[i] = vm.pop()
-			}
+		for i := 0; i < info.ExprCount; i++ {
+			result += info.Parts[i]
+			result += valueToString(values[i])
+		}
 
-			result := ""
+		result += info.Parts[len(info.Parts)-1]
 
-			for i := 0; i < info.ExprCount; i++ {
-				result += info.Parts[i]
-				result += valueToString(values[i])
-			}
+		vm.push(result)
 
-			result += info.Parts[len(info.Parts)-1]
+	case OP_OBJECT:
+		info := instr.Value.(ObjectInfo)
 
-			vm.push(result)
+		values := make([]Value, len(info.Names))
 
-		case OP_OBJECT:
-			info := instr.Value.(ObjectInfo)
+		for i := len(info.Names) - 1; i >= 0; i-- {
+			values[i] = vm.pop()
+		}
 
-			values := make([]Value, len(info.Names))
+		object := ObjectValue{}
 
-			for i := len(info.Names) - 1; i >= 0; i-- {
-				values[i] = vm.pop()
-			}
+		for i, name := range info.Names {
+			object[name] = values[i]
+		}
 
-			object := ObjectValue{}
+		vm.push(object)
 
-			for i, name := range info.Names {
-				object[name] = values[i]
-			}
+	case OP_GET_PROPERTY:
+		name := instr.Value.(string)
+		objectValue := vm.pop()
 
-			vm.push(object)
+		object, ok := objectValue.(ObjectValue)
+		if !ok {
+			langError(ErrorType, "expected object, got %s", typeName(objectValue))
+		}
 
-		case OP_GET_PROPERTY:
-			name := instr.Value.(string)
-			objectValue := vm.pop()
+		value, exists := object[name]
+		if !exists {
+			langError(ErrorName, "object has no property: %s", name)
+		}
 
-			object, ok := objectValue.(ObjectValue)
-			if !ok {
-				langError(ErrorType, "expected object, got %s", typeName(objectValue))
-			}
+		vm.push(value)
 
-			value, exists := object[name]
-			if !exists {
-				langError(ErrorName, "object has no property: %s", name)
-			}
+	case OP_HALT:
+		return true
 
-			vm.push(value)
+	default:
+		langError(ErrorInternal, "unknown opcode: %s", instr.Op)
+	}
 
-		case OP_HALT:
+	return false
+}
+
+func (vm *VM) callFunctionValue(fnValue FunctionValue, args []Value) Value {
+	fn, ok := vm.functions[fnValue.Name]
+	if !ok {
+		langError(ErrorName, "undefined function: %s", fnValue.Name)
+	}
+
+	if len(fn.Params) != len(args) {
+		langError(
+			ErrorRuntime,
+			"function %s expects %d arguments, got %d",
+			fnValue.Name,
+			len(fn.Params),
+			len(args),
+		)
+	}
+
+	locals := map[string]Value{}
+	constants := map[string]bool{}
+
+	for i, arg := range args {
+		locals[fn.Params[i]] = arg
+		constants[fn.Params[i]] = false
+	}
+
+	frameDepthBefore := len(vm.frames)
+
+	frame := Frame{
+		function:     fn,
+		ip:           0,
+		locals:       locals,
+		constants:    constants,
+		instructions: fn.Instructions,
+	}
+
+	vm.frames = append(vm.frames, frame)
+
+	for len(vm.frames) > frameDepthBefore {
+		halted := vm.step()
+		if halted {
+			langError(ErrorRuntime, "program halted while running callback")
+		}
+	}
+
+	return vm.pop()
+}
+
+func (vm *VM) Run() {
+	for {
+		if vm.step() {
 			return
-
-		default:
-			langError(ErrorInternal, "unknown opcode: %s", instr.Op)
 		}
 	}
 }
@@ -433,9 +487,16 @@ func (vm *VM) callServerMethod(server *NativeServerValue, method string, args []
 		}
 
 		path := asString(args[0])
-		response := valueToString(args[1])
+		handler := args[1]
 
-		server.Routes[path] = response
+		switch handler.(type) {
+		case string:
+			server.Routes[path] = handler
+		case FunctionValue:
+			server.Routes[path] = handler
+		default:
+			langError(ErrorType, "server.get expects string or function as second argument")
+		}
 
 		vm.push(0)
 
@@ -446,18 +507,25 @@ func (vm *VM) callServerMethod(server *NativeServerValue, method string, args []
 
 		mux := http.NewServeMux()
 
-		for path, response := range server.Routes {
-			text := response
+		for path, handler := range server.Routes {
+			routeHandler := handler
 
 			mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
-				trimmed := strings.TrimSpace(text)
-				isJSON := (len(trimmed) > 0 && ((trimmed[0] == '{' && trimmed[len(trimmed)-1] == '}') || (trimmed[0] == '[' && trimmed[len(trimmed)-1] == ']')))
+				switch h := routeHandler.(type) {
+				case string:
+					writeServerResponse(w, h)
 
-				if isJSON {
-					w.Header().Set("Content-Type", "application/json")
-					fmt.Fprint(w, trimmed)
-				} else {
-					fmt.Fprint(w, text)
+				case FunctionValue:
+					reqObj := ObjectValue{
+						"path":   r.URL.Path,
+						"method": r.Method,
+					}
+
+					result := vm.callFunctionValue(h, []Value{reqObj})
+					writeServerResponse(w, valueToString(result))
+
+				default:
+					langError(ErrorType, "invalid route handler: %s", typeName(routeHandler))
 				}
 			})
 		}
@@ -474,6 +542,22 @@ func (vm *VM) callServerMethod(server *NativeServerValue, method string, args []
 	default:
 		langError(ErrorName, "unknown server method: %s", method)
 	}
+}
+
+func writeServerResponse(w http.ResponseWriter, text string) {
+	trimmed := strings.TrimSpace(text)
+
+	isJSON := len(trimmed) > 0 &&
+		((trimmed[0] == '{' && trimmed[len(trimmed)-1] == '}') ||
+			(trimmed[0] == '[' && trimmed[len(trimmed)-1] == ']'))
+
+	if isJSON {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, trimmed)
+		return
+	}
+
+	fmt.Fprint(w, text)
 }
 
 func (vm *VM) callMethod(method string, argCount int) {

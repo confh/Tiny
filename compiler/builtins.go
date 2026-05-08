@@ -9,12 +9,16 @@ import (
 	"time"
 )
 
-func (vm *VM) callBuiltin(object string, method string, argCount int) {
-	if object != "core" {
-		langError(ErrorName, "unknown builtin module: %s", object)
-	}
-
+func (vm *VM) callCore(method string, argCount int) {
 	switch method {
+	case "typeOf":
+		if argCount != 1 {
+			langError(ErrorRuntime, "core.typeOf expects 1 argument")
+		}
+
+		value := vm.pop()
+
+		vm.push(typeName(value))
 	case "server":
 		if argCount != 1 {
 			langError(ErrorRuntime, "core.server expects 1 argument")
@@ -24,7 +28,7 @@ func (vm *VM) callBuiltin(object string, method string, argCount int) {
 
 		server := &NativeServerValue{
 			Port:   port,
-			Routes: map[string]string{},
+			Routes: map[string]Value{},
 		}
 
 		vm.push(server)
@@ -93,7 +97,7 @@ func (vm *VM) callBuiltin(object string, method string, argCount int) {
 			langError(ErrorRuntime, "core.clock expects 0 arguments")
 		}
 
-		vm.push(time.Now().UnixMilli() - vm.start)
+		vm.push(int(time.Now().UnixMilli() - vm.start))
 	case "time":
 		if argCount != 0 {
 			langError(ErrorRuntime, "core.time expects 0 arguments")
@@ -170,5 +174,39 @@ func (vm *VM) callBuiltin(object string, method string, argCount int) {
 
 	default:
 		langError(ErrorName, "unknown core function: %s", method)
+	}
+}
+
+func (vm *VM) callMath(method string, argCount int) {
+	switch method {
+	case "toFloat":
+		if argCount != 1 {
+			langError(ErrorRuntime, "math.toFloat expects 1 argument")
+		}
+
+		vm.push(asFloat(vm.pop()))
+
+	case "toInt":
+		if argCount != 1 {
+			langError(ErrorRuntime, "math.toInt expects 1 argument")
+		}
+
+		vm.push(int(asFloat(vm.pop())))
+
+	default:
+		langError(ErrorName, "unknown math function: %s", method)
+	}
+}
+
+func (vm *VM) callBuiltin(object string, method string, argCount int) {
+	switch object {
+	case "Core":
+		vm.callCore(method, argCount)
+
+	case "Math":
+		vm.callMath(method, argCount)
+
+	default:
+		langError(ErrorName, "unknown builtin module: %s", object)
 	}
 }

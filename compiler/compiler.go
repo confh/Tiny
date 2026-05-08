@@ -335,7 +335,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 
 	case MemberCallExpr:
 		// Keep core.println(), core.input(), etc. as builtins.
-		if e.Object == "core" {
+		if e.Object == "Core" || e.Object == "Math" {
 			for _, arg := range e.Args {
 				c.compileExpr(arg)
 			}

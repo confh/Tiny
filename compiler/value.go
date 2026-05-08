@@ -20,7 +20,7 @@ type FunctionValue struct {
 
 type NativeServerValue struct {
 	Port   int
-	Routes map[string]string
+	Routes map[string]Value
 }
 
 type Value any
@@ -90,6 +90,8 @@ func typeName(value Value) string {
 		return "null"
 	case UndefinedValue:
 		return "undefined"
+	case ObjectValue:
+		return "object"
 	case nil:
 		return "nil"
 	case FunctionValue:
