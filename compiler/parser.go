@@ -32,6 +32,16 @@ func findClosingBrace(input string, start int) int {
 	return -1
 }
 
+func containsDot(s string) bool {
+	for _, ch := range s {
+		if ch == '.' {
+			return true
+		}
+	}
+
+	return false
+}
+
 func parseInterpolatedString(input string) Expr {
 	var parts []InterpolatedStringPart
 
@@ -149,7 +159,7 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 
 func (p *Parser) parseStatement() Stmt {
 	switch p.current.Type {
-	case TOKEN_IDENT:
+	case TOKEN_IDENT, TOKEN_THIS:
 		return p.parsePossibleAssignmentStatement()
 	case TOKEN_IMPORT:
 		return p.parseImportStatement()
@@ -165,6 +175,8 @@ func (p *Parser) parseStatement() Stmt {
 		return p.parseIfStatement()
 	case TOKEN_WHILE:
 		return p.parseWhileStatement()
+	case TOKEN_CLASS:
+		return p.parseClassStatement()
 	default:
 		return p.parseExpressionStatement()
 	}
@@ -601,9 +613,22 @@ func (p *Parser) parseObjectLiteral() Expr {
 func (p *Parser) parsePrimary() Expr {
 	switch p.current.Type {
 	case TOKEN_NUMBER:
-		value, err := strconv.Atoi(p.current.Literal)
+		literal := p.current.Literal
+
+		if containsDot(literal) {
+			value, err := strconv.ParseFloat(literal, 64)
+			if err != nil {
+				langError(ErrorSyntax, "invalid float: %s", literal)
+			}
+
+			p.advance()
+
+			return FloatExpr{Value: value}
+		}
+
+		value, err := strconv.Atoi(literal)
 		if err != nil {
-			langError(ErrorSyntax, "%v", err)
+			langError(ErrorSyntax, "invalid number: %s", literal)
 		}
 
 		p.advance()
@@ -664,6 +689,10 @@ func (p *Parser) parsePrimary() Expr {
 		p.advance()
 		return BoolExpr{Value: false}
 
+	case TOKEN_THIS:
+		p.advance()
+		return ThisExpr{}
+
 	case TOKEN_NULL:
 		p.advance()
 		return NullExpr{}
@@ -675,6 +704,47 @@ func (p *Parser) parsePrimary() Expr {
 	default:
 		langError(ErrorSyntax, "expected expression, got %s", p.current.Type)
 		return UndefinedExpr{}
+	}
+}
+
+func (p *Parser) parseClassStatement() Stmt {
+	p.expect(TOKEN_CLASS)
+
+	if p.current.Type != TOKEN_IDENT {
+		langError(ErrorSyntax, "expected class name after class")
+	}
+
+	name := p.current.Literal
+	p.advance()
+
+	p.expect(TOKEN_LBRACE)
+
+	var methods []FunctionStmt
+
+	for p.current.Type != TOKEN_RBRACE {
+		if p.current.Type == TOKEN_EOF {
+			langError(ErrorSyntax, "unexpected EOF inside class body")
+		}
+
+		if p.current.Type != TOKEN_FN {
+			langError(ErrorSyntax, "expected method declaration inside class")
+		}
+
+		method := p.parseFunctionStatement()
+
+		fn, ok := method.(FunctionStmt)
+		if !ok {
+			langError(ErrorInternal, "expected function method")
+		}
+
+		methods = append(methods, fn)
+	}
+
+	p.expect(TOKEN_RBRACE)
+
+	return ClassStmt{
+		Name:    name,
+		Methods: methods,
 	}
 }
 

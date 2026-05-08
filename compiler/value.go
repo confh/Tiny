@@ -18,6 +18,11 @@ type FunctionValue struct {
 	Name string
 }
 
+type NativeServerValue struct {
+	Port   int
+	Routes map[string]string
+}
+
 type Value any
 
 func asInt(value Value) int {
@@ -48,10 +53,33 @@ func asInt(value Value) int {
 	}
 }
 
+func isNumber(value Value) bool {
+	switch value.(type) {
+	case int, float64:
+		return true
+	default:
+		return false
+	}
+}
+
+func asFloat(value Value) float64 {
+	switch v := value.(type) {
+	case int:
+		return float64(v)
+	case float64:
+		return v
+	default:
+		langError(ErrorType, "expected number, got %s", typeName(value))
+		return 0
+	}
+}
+
 func typeName(value Value) string {
 	switch value.(type) {
 	case int:
 		return "number"
+	case float64:
+		return "float"
 	case string:
 		return "string"
 	case bool:
@@ -66,6 +94,10 @@ func typeName(value Value) string {
 		return "nil"
 	case FunctionValue:
 		return "function"
+	case NativeServerValue:
+		return "server"
+	case *NativeServerValue:
+		return "server"
 	default:
 		return fmt.Sprintf("%T", value)
 	}
@@ -74,6 +106,8 @@ func typeName(value Value) string {
 func valueToJSONCompatible(value Value) any {
 	switch v := value.(type) {
 	case int:
+		return v
+	case float64:
 		return v
 
 	case string:
@@ -121,6 +155,8 @@ func valueToString(value Value) string {
 		return v
 	case int:
 		return strconv.Itoa(v)
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
 	case bool:
 		if v {
 			return "true"
@@ -151,6 +187,10 @@ func valueToString(value Value) string {
 		return "{" + strings.Join(parts, ", ") + "}"
 	case FunctionValue:
 		return "<function " + v.Name + ">"
+	case NativeServerValue:
+		return "<server :" + strconv.Itoa(v.Port) + ">"
+	case *NativeServerValue:
+		return "<server :" + strconv.Itoa(v.Port) + ">"
 	default:
 		return fmt.Sprintf("%v", v)
 	}
@@ -194,8 +234,24 @@ func isTruthy(value Value) bool {
 func valuesEqual(a Value, b Value) bool {
 	switch left := a.(type) {
 	case int:
-		right, ok := b.(int)
-		return ok && left == right
+		switch right := b.(type) {
+		case int:
+			return left == right
+		case float64:
+			return float64(left) == right
+		default:
+			return false
+		}
+
+	case float64:
+		switch right := b.(type) {
+		case int:
+			return left == float64(right)
+		case float64:
+			return left == right
+		default:
+			return false
+		}
 
 	case string:
 		right, ok := b.(string)

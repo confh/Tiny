@@ -15,6 +15,19 @@ func (vm *VM) callBuiltin(object string, method string, argCount int) {
 	}
 
 	switch method {
+	case "server":
+		if argCount != 1 {
+			langError(ErrorRuntime, "core.server expects 1 argument")
+		}
+
+		port := asInt(vm.pop())
+
+		server := &NativeServerValue{
+			Port:   port,
+			Routes: map[string]string{},
+		}
+
+		vm.push(server)
 	case "toPrettyJSON":
 		if argCount != 1 {
 			langError(ErrorRuntime, "core.toPrettyJSON expects 1 argument")

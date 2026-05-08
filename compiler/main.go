@@ -21,7 +21,7 @@ func main() {
 	program := LoadProgram(entryFile)
 
 	compiler := NewCompiler()
-	mainBytecode, functions := compiler.CompileProgram(program)
+	mainBytecode, functions, classes := compiler.CompileProgram(program)
 
 	if *debug {
 		fmt.Println("Main bytecode:")
@@ -40,6 +40,6 @@ func main() {
 		fmt.Println("\nOutput:")
 	}
 
-	vm := NewVM(mainBytecode, functions)
+	vm := NewVM(mainBytecode, functions, classes)
 	vm.Run()
 }

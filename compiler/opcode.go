@@ -91,3 +91,8 @@ type MethodCallInfo struct {
 	Method   string
 	ArgCount int
 }
+
+type Class struct {
+	Name    string
+	Methods map[string]string
+}

@@ -3,6 +3,7 @@ package main
 type Compiler struct {
 	mainInstructions []Instruction
 	functions        map[string]Function
+	classes          map[string]Class
 
 	currentInstructions *[]Instruction
 
@@ -15,6 +16,7 @@ func NewCompiler() *Compiler {
 	c := &Compiler{
 		mainInstructions: []Instruction{},
 		functions:        map[string]Function{},
+		classes:          map[string]Class{},
 		locals:           map[string]bool{},
 		localConstants:   map[string]bool{},
 		globalConstants:  map[string]bool{},
@@ -25,14 +27,14 @@ func NewCompiler() *Compiler {
 	return c
 }
 
-func (c *Compiler) CompileProgram(program Program) ([]Instruction, map[string]Function) {
+func (c *Compiler) CompileProgram(program Program) ([]Instruction, map[string]Function, map[string]Class) {
 	for _, stmt := range program.Statements {
 		c.compileStatement(stmt)
 	}
 
 	c.emit(OP_HALT, nil)
 
-	return c.mainInstructions, c.functions
+	return c.mainInstructions, c.functions, c.classes
 }
 
 func (c *Compiler) compileStatement(stmt Stmt) {
@@ -94,8 +96,38 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 		c.compileExpr(s.Value)
 		c.emit(OP_SET_PROPERTY, s.Name)
 
+	case ClassStmt:
+		c.compileClass(s)
+
 	default:
 		langError(ErrorInternal, "unknown statement")
+	}
+}
+
+func (c *Compiler) compileClass(stmt ClassStmt) {
+	if _, exists := c.classes[stmt.Name]; exists {
+		langError(ErrorName, "class already defined: %s", stmt.Name)
+	}
+
+	methods := map[string]string{}
+
+	for _, method := range stmt.Methods {
+		compiledName := stmt.Name + "." + method.Name
+
+		methods[method.Name] = compiledName
+
+		classMethod := FunctionStmt{
+			Name:   compiledName,
+			Params: method.Params,
+			Body:   method.Body,
+		}
+
+		c.compileFunction(classMethod)
+	}
+
+	c.classes[stmt.Name] = Class{
+		Name:    stmt.Name,
+		Methods: methods,
 	}
 }
 
@@ -244,6 +276,9 @@ func (c *Compiler) compileExpr(expr Expr) {
 	case NumberExpr:
 		c.emit(OP_CONST, e.Value)
 
+	case FloatExpr:
+		c.emit(OP_CONST, e.Value)
+
 	case IdentExpr:
 		if c.locals[e.Name] {
 			c.emit(OP_LOAD_LOCAL, e.Name)
@@ -325,6 +360,13 @@ func (c *Compiler) compileExpr(expr Expr) {
 			Method:   e.Method,
 			ArgCount: len(e.Args),
 		})
+
+	case ThisExpr:
+		if !c.isInsideFunction() {
+			langError(ErrorSyntax, "cannot use this outside of a function")
+		}
+
+		c.emit(OP_LOAD_LOCAL, "this")
 
 	default:
 		langError(ErrorInternal, "unknown expression")

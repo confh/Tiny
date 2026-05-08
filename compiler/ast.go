@@ -41,6 +41,13 @@ type VariableStmt struct {
 
 func (s VariableStmt) stmtNode() {}
 
+type ClassStmt struct {
+	Name    string
+	Methods []FunctionStmt
+}
+
+func (s ClassStmt) stmtNode() {}
+
 type WhileStmt struct {
 	Condition Expr
 	Body      []Stmt
@@ -67,6 +74,10 @@ type ArrayExpr struct {
 }
 
 func (e ArrayExpr) exprNode() {}
+
+type ThisExpr struct{}
+
+func (e ThisExpr) exprNode() {}
 
 type IndexExpr struct {
 	Array Expr
@@ -145,6 +156,12 @@ type NumberExpr struct {
 }
 
 func (e NumberExpr) exprNode() {}
+
+type FloatExpr struct {
+	Value float64
+}
+
+func (e FloatExpr) exprNode() {}
 
 type IdentExpr struct {
 	Name string

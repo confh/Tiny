@@ -10,6 +10,7 @@ const (
 	TOKEN_BACKTICK_STRING TokenType = "BACKTICK_STRING"
 	TOKEN_TRUE            TokenType = "TRUE"
 	TOKEN_FALSE           TokenType = "FALSE"
+	TOKEN_THIS            TokenType = "THIS"
 	TOKEN_NULL            TokenType = "NULL"
 	TOKEN_UNDEFINED       TokenType = "UNDEFINED"
 
@@ -18,6 +19,7 @@ const (
 	TOKEN_CONST  TokenType = "CONST"
 	TOKEN_FN     TokenType = "FN"
 	TOKEN_RETURN TokenType = "RETURN"
+	TOKEN_CLASS  TokenType = "CLASS"
 
 	TOKEN_IF    TokenType = "IF"
 	TOKEN_ELSE  TokenType = "ELSE"

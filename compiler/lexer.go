@@ -58,10 +58,14 @@ func (l *Lexer) NextToken() Token {
 			return Token{Type: TOKEN_TRUE, Literal: word}
 		case "false":
 			return Token{Type: TOKEN_FALSE, Literal: word}
+		case "this":
+			return Token{Type: TOKEN_THIS, Literal: word}
 		case "null":
 			return Token{Type: TOKEN_NULL, Literal: word}
 		case "undefined":
 			return Token{Type: TOKEN_UNDEFINED, Literal: word}
+		case "class":
+			return Token{Type: TOKEN_CLASS, Literal: word}
 		default:
 			return Token{Type: TOKEN_IDENT, Literal: word}
 		}
@@ -206,9 +210,26 @@ func (l *Lexer) readIdentifier() string {
 
 func (l *Lexer) readNumber() string {
 	start := l.pos
+	hasDot := false
 
-	for l.pos < len(l.input) && unicode.IsDigit(l.input[l.pos]) {
-		l.pos++
+	for l.pos < len(l.input) {
+		ch := l.input[l.pos]
+
+		if unicode.IsDigit(ch) {
+			l.pos++
+			continue
+		}
+
+		if ch == '.' && !hasDot {
+			// Only treat "." as part of a number if the next char is a digit.
+			if l.pos+1 < len(l.input) && unicode.IsDigit(l.input[l.pos+1]) {
+				hasDot = true
+				l.pos++
+				continue
+			}
+		}
+
+		break
 	}
 
 	return string(l.input[start:l.pos])

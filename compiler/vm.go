@@ -1,6 +1,11 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -10,12 +15,16 @@ type Frame struct {
 	locals       map[string]Value
 	constants    map[string]bool
 	instructions []Instruction
+
+	returnOverride    Value
+	hasReturnOverride bool
 }
 
 type VM struct {
 	start            int64
 	mainInstructions []Instruction
 	functions        map[string]Function
+	classes          map[string]Class
 
 	ip int
 
@@ -26,11 +35,12 @@ type VM struct {
 	frames []Frame
 }
 
-func NewVM(mainInstructions []Instruction, functions map[string]Function) *VM {
+func NewVM(mainInstructions []Instruction, functions map[string]Function, classes map[string]Class) *VM {
 	return &VM{
 		start:            time.Now().UnixMilli(),
 		mainInstructions: mainInstructions,
 		functions:        functions,
+		classes:          classes,
 		globals:          map[string]Value{},
 		globalConstants:  map[string]bool{},
 	}
@@ -135,24 +145,62 @@ func (vm *VM) Run() {
 			frame.locals[name] = value
 
 		case OP_ADD:
-			right := asInt(vm.pop())
-			left := asInt(vm.pop())
-			vm.push(left + right)
+			right := vm.pop()
+			left := vm.pop()
+
+			if isNumber(left) && isNumber(right) {
+				if _, ok := left.(float64); ok {
+					vm.push(asFloat(left) + asFloat(right))
+				} else if _, ok := right.(float64); ok {
+					vm.push(asFloat(left) + asFloat(right))
+				} else {
+					vm.push(left.(int) + right.(int))
+				}
+			} else {
+				langError(ErrorType, "cannot add %s and %s", typeName(left), typeName(right))
+			}
 
 		case OP_SUB:
-			right := asInt(vm.pop())
-			left := asInt(vm.pop())
-			vm.push(left - right)
+			right := vm.pop()
+			left := vm.pop()
+
+			if isNumber(left) && isNumber(right) {
+				if _, ok := left.(float64); ok {
+					vm.push(asFloat(left) - asFloat(right))
+				} else if _, ok := right.(float64); ok {
+					vm.push(asFloat(left) - asFloat(right))
+				} else {
+					vm.push(left.(int) - right.(int))
+				}
+			} else {
+				langError(ErrorType, "cannot subtract %s and %s", typeName(left), typeName(right))
+			}
 
 		case OP_MUL:
-			right := asInt(vm.pop())
-			left := asInt(vm.pop())
-			vm.push(left * right)
+			right := vm.pop()
+			left := vm.pop()
+
+			if isNumber(left) && isNumber(right) {
+				if _, ok := left.(float64); ok {
+					vm.push(asFloat(left) * asFloat(right))
+				} else if _, ok := right.(float64); ok {
+					vm.push(asFloat(left) * asFloat(right))
+				} else {
+					vm.push(left.(int) * right.(int))
+				}
+			} else {
+				langError(ErrorType, "cannot multiply %s and %s", typeName(left), typeName(right))
+			}
 
 		case OP_DIV:
-			right := asInt(vm.pop())
-			left := asInt(vm.pop())
-			vm.push(left / right)
+			right := vm.pop()
+			left := vm.pop()
+
+			if !isNumber(left) || !isNumber(right) {
+				langError(ErrorType, "cannot divide %s and %s", typeName(left), typeName(right))
+			}
+
+			vm.push(asFloat(left) / asFloat(right))
 
 		case OP_EQ:
 			right := vm.pop()
@@ -165,24 +213,44 @@ func (vm *VM) Run() {
 			vm.push(!valuesEqual(left, right))
 
 		case OP_LT:
-			right := asInt(vm.pop())
-			left := asInt(vm.pop())
-			vm.push(left < right)
+			right := vm.pop()
+			left := vm.pop()
+
+			if !isNumber(left) || !isNumber(right) {
+				langError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
+			}
+
+			vm.push(asFloat(left) < asFloat(right))
 
 		case OP_GT:
-			right := asInt(vm.pop())
-			left := asInt(vm.pop())
-			vm.push(left > right)
+			right := vm.pop()
+			left := vm.pop()
+
+			if !isNumber(left) || !isNumber(right) {
+				langError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
+			}
+
+			vm.push(asFloat(left) > asFloat(right))
 
 		case OP_LTE:
-			right := asInt(vm.pop())
-			left := asInt(vm.pop())
-			vm.push(left <= right)
+			right := vm.pop()
+			left := vm.pop()
+
+			if !isNumber(left) || !isNumber(right) {
+				langError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
+			}
+
+			vm.push(asFloat(left) <= asFloat(right))
 
 		case OP_GTE:
-			right := asInt(vm.pop())
-			left := asInt(vm.pop())
-			vm.push(left >= right)
+			right := vm.pop()
+			left := vm.pop()
+
+			if !isNumber(left) || !isNumber(right) {
+				langError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
+			}
+
+			vm.push(asFloat(left) >= asFloat(right))
 
 		case OP_AND:
 			right := vm.pop()
@@ -248,11 +316,17 @@ func (vm *VM) Run() {
 			returnValue := vm.pop()
 
 			if len(vm.frames) == 0 {
-				langError(ErrorInternal, "return used outside of function")
+				langError(ErrorRuntime, "return used outside of function")
 			}
 
+			frame := vm.frames[len(vm.frames)-1]
 			vm.frames = vm.frames[:len(vm.frames)-1]
-			vm.push(returnValue)
+
+			if frame.hasReturnOverride {
+				vm.push(frame.returnOverride)
+			} else {
+				vm.push(returnValue)
+			}
 
 		case OP_POP:
 			vm.pop()
@@ -319,10 +393,98 @@ func (vm *VM) Run() {
 	}
 }
 
+func (vm *VM) callServerMethod(server *NativeServerValue, method string, args []Value) {
+	switch method {
+	case "getPrettyJSON":
+		if len(args) != 2 {
+			langError(ErrorRuntime, "server.getJSON expects 2 arguments")
+		}
+
+		path := asString(args[0])
+		jsonValue := valueToJSONCompatible(args[1])
+
+		bytes, err := json.MarshalIndent(jsonValue, "", "  ")
+		if err != nil {
+			langError(ErrorRuntime, "failed to convert value to JSON: %v", err)
+		}
+
+		server.Routes[path] = string(bytes)
+
+		vm.push(0)
+	case "getJSON":
+		if len(args) != 2 {
+			langError(ErrorRuntime, "server.getJSON expects 2 arguments")
+		}
+
+		path := asString(args[0])
+		jsonValue := valueToJSONCompatible(args[1])
+
+		bytes, err := json.Marshal(jsonValue)
+		if err != nil {
+			langError(ErrorRuntime, "failed to convert value to JSON: %v", err)
+		}
+
+		server.Routes[path] = string(bytes)
+
+		vm.push(0)
+	case "get":
+		if len(args) != 2 {
+			langError(ErrorRuntime, "server.get expects 2 arguments")
+		}
+
+		path := asString(args[0])
+		response := valueToString(args[1])
+
+		server.Routes[path] = response
+
+		vm.push(0)
+
+	case "start":
+		if len(args) != 0 {
+			langError(ErrorRuntime, "server.start expects 0 arguments")
+		}
+
+		mux := http.NewServeMux()
+
+		for path, response := range server.Routes {
+			text := response
+
+			mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
+				trimmed := strings.TrimSpace(text)
+				isJSON := (len(trimmed) > 0 && ((trimmed[0] == '{' && trimmed[len(trimmed)-1] == '}') || (trimmed[0] == '[' && trimmed[len(trimmed)-1] == ']')))
+
+				if isJSON {
+					w.Header().Set("Content-Type", "application/json")
+					fmt.Fprint(w, trimmed)
+				} else {
+					fmt.Fprint(w, text)
+				}
+			})
+		}
+
+		addr := ":" + strconv.Itoa(server.Port)
+
+		err := http.ListenAndServe(addr, mux)
+		if err != nil {
+			langError(ErrorRuntime, "server failed: %v", err)
+		}
+
+		vm.push(0)
+
+	default:
+		langError(ErrorName, "unknown server method: %s", method)
+	}
+}
+
 func (vm *VM) callMethod(method string, argCount int) {
 	args := vm.popArgs(argCount)
 
 	objectValue := vm.pop()
+
+	if server, ok := objectValue.(*NativeServerValue); ok {
+		vm.callServerMethod(server, method, args)
+		return
+	}
 
 	object, ok := objectValue.(ObjectValue)
 	if !ok {
@@ -346,25 +508,25 @@ func (vm *VM) callMethod(method string, argCount int) {
 
 	expectedArgs := len(fn.Params)
 
-	// We automatically pass the object as the first argument: self.
-	if expectedArgs != argCount+1 {
+	if expectedArgs != argCount {
 		langError(
 			ErrorRuntime,
 			"method %s expects %d arguments, got %d",
 			method,
-			expectedArgs-1,
+			expectedArgs,
 			argCount,
 		)
 	}
 
 	locals := map[string]Value{}
+	constants := map[string]bool{}
 
-	// First param receives the object.
-	locals[fn.Params[0]] = object
+	locals["this"] = object
+	constants["this"] = true
 
-	// Remaining params receive normal arguments.
 	for i, arg := range args {
-		locals[fn.Params[i+1]] = arg
+		locals[fn.Params[i]] = arg
+		constants[fn.Params[i]] = false
 	}
 
 	frame := Frame{
@@ -390,7 +552,12 @@ func (vm *VM) setIP(value int) {
 func (vm *VM) callFunction(name string, argCount int) {
 	fn, ok := vm.functions[name]
 	if !ok {
-		langError(ErrorName, "undefined function: %s", name)
+		if class, exists := vm.classes[name]; exists {
+			vm.callClass(class, argCount)
+			return
+		}
+
+		langError(ErrorName, "undefined function or class: %s", name)
 	}
 
 	if len(fn.Params) != argCount {
@@ -413,6 +580,64 @@ func (vm *VM) callFunction(name string, argCount int) {
 		locals:       locals,
 		constants:    map[string]bool{},
 		instructions: fn.Instructions,
+	}
+
+	vm.frames = append(vm.frames, frame)
+}
+
+func (vm *VM) callClass(class Class, argCount int) {
+	args := vm.popArgs(argCount)
+
+	instance := ObjectValue{}
+
+	for methodName, functionName := range class.Methods {
+		instance[methodName] = FunctionValue{Name: functionName}
+	}
+
+	initName, hasInit := class.Methods["init"]
+	if !hasInit {
+		if argCount != 0 {
+			langError(ErrorRuntime, "class %s expects 0 arguments", class.Name)
+		}
+
+		vm.push(instance)
+		return
+	}
+
+	fn, ok := vm.functions[initName]
+	if !ok {
+		langError(ErrorName, "missing init function for class: %s", class.Name)
+	}
+
+	if len(fn.Params) != argCount {
+		langError(
+			ErrorRuntime,
+			"class %s constructor expects %d arguments, got %d",
+			class.Name,
+			len(fn.Params),
+			argCount,
+		)
+	}
+
+	locals := map[string]Value{}
+	constants := map[string]bool{}
+
+	locals["this"] = instance
+	constants["this"] = true
+
+	for i, arg := range args {
+		locals[fn.Params[i]] = arg
+		constants[fn.Params[i]] = false
+	}
+
+	frame := Frame{
+		function:          fn,
+		ip:                0,
+		locals:            locals,
+		constants:         constants,
+		instructions:      fn.Instructions,
+		returnOverride:    instance,
+		hasReturnOverride: true,
 	}
 
 	vm.frames = append(vm.frames, frame)
