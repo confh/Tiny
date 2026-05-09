@@ -1,21 +1,33 @@
 package main
 
 import (
-	"flag"
 	"fmt"
+	"os"
 )
 
 func main() {
 	defer handleLangError()
 
-	debug := flag.Bool("debug", false, "show bytecode debug output")
+	if len(os.Args) >= 2 {
+		switch os.Args[1] {
+		case "build":
+			buildCommand(os.Args[2:])
+			return
 
-	flag.Parse()
+		case "run":
+			runBytecodeCommand(os.Args[2:])
+			return
+		}
+	}
 
+	runSourceCommand(os.Args[1:])
+}
+
+func runSourceCommand(args []string) {
 	entryFile := "main.tiny"
 
-	if flag.NArg() >= 1 {
-		entryFile = flag.Arg(0)
+	if len(args) >= 1 {
+		entryFile = args[0]
 	}
 
 	program := LoadProgram(entryFile)
@@ -23,22 +35,41 @@ func main() {
 	compiler := NewCompiler()
 	mainBytecode, functions, classes := compiler.CompileProgram(program)
 
-	if *debug {
-		fmt.Println("Main bytecode:")
-		for i, instr := range mainBytecode {
-			fmt.Printf("%03d: %-13s %v\n", i, instr.Op, instr.Value)
-		}
+	vm := NewVM(mainBytecode, functions, classes)
+	vm.Run()
+}
 
-		fmt.Println("\nFunctions:")
-		for name, fn := range functions {
-			fmt.Println("fn", name, fn.Params)
-			for i, instr := range fn.Instructions {
-				fmt.Printf("  %03d: %-13s %v\n", i, instr.Op, instr.Value)
-			}
-		}
-
-		fmt.Println("\nOutput:")
+func buildCommand(args []string) {
+	if len(args) < 1 {
+		langError(ErrorRuntime, "usage: tiny build <file.tiny> -o <file.tbc>")
 	}
+
+	entryFile := args[0]
+	outFile := "out.tbc"
+
+	for i := 1; i < len(args); i++ {
+		if args[i] == "-o" && i+1 < len(args) {
+			outFile = args[i+1]
+			i++
+		}
+	}
+
+	program := LoadProgram(entryFile)
+
+	compiler := NewCompiler()
+	mainBytecode, functions, classes := compiler.CompileProgram(program)
+
+	SaveBytecode(outFile, mainBytecode, functions, classes)
+
+	fmt.Println("Built", outFile)
+}
+
+func runBytecodeCommand(args []string) {
+	if len(args) < 1 {
+		langError(ErrorRuntime, "usage: tiny run <file.tbc>")
+	}
+
+	mainBytecode, functions, classes := LoadBytecode(args[0])
 
 	vm := NewVM(mainBytecode, functions, classes)
 	vm.Run()
