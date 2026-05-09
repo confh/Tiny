@@ -10,9 +10,16 @@ type NullValue struct{}
 
 type UndefinedValue struct{}
 
-type ArrayValue []Value
+type ArrayValue struct {
+	Elements []Value
+}
 
 type ObjectValue map[string]Value
+
+type ErrorValue struct {
+	Kind    string
+	Message string
+}
 
 type FunctionValue struct {
 	Name string
@@ -100,6 +107,10 @@ func typeName(value Value) string {
 		return "server"
 	case *NativeServerValue:
 		return "server"
+	case ErrorValue:
+		return "error"
+	case *ErrorValue:
+		return "error"
 	default:
 		return fmt.Sprintf("%T", value)
 	}
@@ -128,9 +139,9 @@ func valueToJSONCompatible(value Value) any {
 		return result
 
 	case ArrayValue:
-		result := make([]any, len(v))
+		result := make([]any, len(v.Elements))
 
-		for i, item := range v {
+		for i, item := range v.Elements {
 			result[i] = valueToJSONCompatible(item)
 		}
 
@@ -165,14 +176,20 @@ func valueToString(value Value) string {
 		}
 		return "false"
 
-	case ArrayValue:
-		parts := make([]string, len(v))
+	case *ArrayValue:
+		parts := make([]string, len(v.Elements))
 
-		for i, item := range v {
+		for i, item := range v.Elements {
 			parts[i] = valueToString(item)
 		}
 
 		return "[" + strings.Join(parts, ", ") + "]"
+
+	case ErrorValue:
+		return v.Kind + ": " + v.Message
+
+	case *ErrorValue:
+		return v.Kind + ": " + v.Message
 	case NullValue:
 		return "null"
 	case UndefinedValue:
@@ -205,6 +222,15 @@ func asString(value Value) string {
 	}
 
 	return stringValue
+}
+
+func asArray(value Value) *ArrayValue {
+	arrayValue, ok := value.(*ArrayValue)
+	if !ok {
+		langError(ErrorSyntax, "expected string, got %T", value)
+	}
+
+	return arrayValue
 }
 
 func asBool(value Value) bool {

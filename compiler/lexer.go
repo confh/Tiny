@@ -44,6 +44,12 @@ func (l *Lexer) NextToken() Token {
 			return Token{Type: TOKEN_FN, Literal: word}
 		case "return":
 			return Token{Type: TOKEN_RETURN, Literal: word}
+		case "throw":
+			return Token{Type: TOKEN_THROW, Literal: word}
+		case "try":
+			return Token{Type: TOKEN_TRY, Literal: word}
+		case "catch":
+			return Token{Type: TOKEN_CATCH, Literal: word}
 		case "if":
 			return Token{Type: TOKEN_IF, Literal: word}
 		case "else":

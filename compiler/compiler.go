@@ -221,6 +221,13 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 
 		c.emit(OP_ASSIGN_GLOBAL, s.Name)
 
+	case ThrowStmt:
+		c.compileExpr(s.Value)
+		c.emit(OP_THROW, nil)
+
+	case TryCatchStmt:
+		c.compileTryCatchStatement(s)
+
 	case BreakStmt:
 		c.compileBreakStatement()
 
@@ -266,6 +273,54 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 	default:
 		langError(ErrorInternal, "unknown statement")
 	}
+}
+
+func (c *Compiler) compileTryCatchStatement(stmt TryCatchStmt) {
+	info := TryInfo{
+		CatchIP: -1,
+		Name:    stmt.ErrorName,
+		Slot:    -1,
+		IsLocal: c.isInsideFunction(),
+	}
+
+	if c.isInsideFunction() {
+		slot := c.localCount
+		c.localCount++
+
+		c.locals[stmt.ErrorName] = LocalInfo{
+			Slot:     slot,
+			Constant: false,
+		}
+
+		info.Slot = slot
+	} else {
+		c.globalConstants[stmt.ErrorName] = false
+	}
+
+	setupIndex := c.emitJump(OP_SETUP_TRY)
+
+	// Replace the temporary -1 value with our TryInfo.
+	(*c.currentInstructions)[setupIndex].Value = info
+
+	for _, bodyStmt := range stmt.TryBody {
+		c.compileStatement(bodyStmt)
+	}
+
+	c.emit(OP_POP_TRY, nil)
+
+	jumpOverCatch := c.emitJump(OP_JUMP)
+
+	catchStart := len(*c.currentInstructions)
+
+	// Patch OP_SETUP_TRY with catch IP.
+	info.CatchIP = catchStart
+	(*c.currentInstructions)[setupIndex].Value = info
+
+	for _, bodyStmt := range stmt.CatchBody {
+		c.compileStatement(bodyStmt)
+	}
+
+	c.patchJump(jumpOverCatch)
 }
 
 func (c *Compiler) compileForStatement(stmt ForStmt) {
@@ -593,7 +648,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 		})
 
 	case MemberCallExpr:
-		if ident, ok := e.Object.(IdentExpr); ok && (ident.Name == "Core" || ident.Name == "Math") {
+		if ident, ok := e.Object.(IdentExpr); ok && (ident.Name == "Core" || ident.Name == "Math" || ident.Name == "Array" || ident.Name == "String") {
 			for _, arg := range e.Args {
 				c.compileExpr(arg)
 			}

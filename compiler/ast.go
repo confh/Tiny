@@ -151,6 +151,12 @@ type ExprStmt struct {
 	Value Expr
 }
 
+type ThrowStmt struct {
+	Value Expr
+}
+
+func (s ThrowStmt) stmtNode() {}
+
 func (s ExprStmt) stmtNode() {}
 
 type FunctionStmt struct {
@@ -160,6 +166,14 @@ type FunctionStmt struct {
 }
 
 func (s FunctionStmt) stmtNode() {}
+
+type TryCatchStmt struct {
+	TryBody   []Stmt
+	ErrorName string
+	CatchBody []Stmt
+}
+
+func (s TryCatchStmt) stmtNode() {}
 
 type ReturnStmt struct {
 	Value    Expr

@@ -17,6 +17,10 @@ func main() {
 		case "run":
 			runBytecodeCommand(os.Args[2:])
 			return
+
+		case "pack":
+			packCommand(os.Args[2:])
+			return
 		}
 	}
 

@@ -9,6 +9,15 @@ import (
 	"time"
 )
 
+type TryHandler struct {
+	CatchIP int
+	Name    string
+	Slot    int
+	IsLocal bool
+
+	FrameDepth int
+}
+
 type Frame struct {
 	function     Function
 	ip           int
@@ -25,6 +34,8 @@ type VM struct {
 	mainInstructions []Instruction
 	functions        map[string]Function
 	classes          map[string]Class
+
+	tryHandlers []TryHandler
 
 	ip int
 
@@ -83,6 +94,24 @@ func (vm *VM) step() bool {
 		}
 
 		vm.push(value)
+
+	case OP_SETUP_TRY:
+		info := instr.Value.(TryInfo)
+
+		vm.tryHandlers = append(vm.tryHandlers, TryHandler{
+			CatchIP:    info.CatchIP,
+			Name:       info.Name,
+			Slot:       info.Slot,
+			IsLocal:    info.IsLocal,
+			FrameDepth: len(vm.frames),
+		})
+
+	case OP_POP_TRY:
+		if len(vm.tryHandlers) == 0 {
+			langError(ErrorInternal, "try handler stack underflow")
+		}
+
+		vm.tryHandlers = vm.tryHandlers[:len(vm.tryHandlers)-1]
 
 	case OP_STORE_GLOBAL:
 		info := instr.Value.(VariableInfo)
@@ -298,22 +327,22 @@ func (vm *VM) step() bool {
 			elements[i] = vm.pop()
 		}
 
-		vm.push(ArrayValue(elements))
+		vm.push(&ArrayValue{Elements: elements})
 
 	case OP_INDEX:
 		index := asInt(vm.pop())
 		arrayValue := vm.pop()
 
-		array, ok := arrayValue.(ArrayValue)
+		array, ok := arrayValue.(*ArrayValue)
 		if !ok {
 			langError(ErrorSyntax, "expected array, got %T", arrayValue)
 		}
 
-		if index < 0 || index >= len(array) {
+		if index < 0 || index >= len(array.Elements) {
 			langError(ErrorInternal, "array index out of range: %d", index)
 		}
 
-		vm.push(array[index])
+		vm.push(array.Elements[index])
 
 	case OP_RETURN:
 		returnValue := vm.pop()
@@ -321,6 +350,9 @@ func (vm *VM) step() bool {
 		if len(vm.frames) == 0 {
 			langError(ErrorRuntime, "return used outside of function")
 		}
+
+		returningDepth := len(vm.frames)
+		vm.removeTryHandlersAtOrAbove(returningDepth)
 
 		frame := vm.frames[len(vm.frames)-1]
 		vm.frames = vm.frames[:len(vm.frames)-1]
@@ -330,6 +362,10 @@ func (vm *VM) step() bool {
 		} else {
 			vm.push(returnValue)
 		}
+
+	case OP_THROW:
+		value := vm.pop()
+		vm.throwValue(value)
 
 	case OP_POP:
 		vm.pop()
@@ -391,10 +427,98 @@ func (vm *VM) step() bool {
 		return true
 
 	default:
-		langError(ErrorInternal, "unknown opcode: %s", instr.Op)
+		langError(ErrorInternal, "unknown opcode: %d", instr.Op)
 	}
 
 	return false
+}
+
+func (vm *VM) removeTryHandlersAtOrAbove(depth int) {
+	filtered := vm.tryHandlers[:0]
+
+	for _, handler := range vm.tryHandlers {
+		if handler.FrameDepth < depth {
+			filtered = append(filtered, handler)
+		}
+	}
+
+	vm.tryHandlers = filtered
+}
+
+func (vm *VM) throwValue(value Value) {
+	errorObject := makeErrorObject(value)
+
+	if len(vm.tryHandlers) == 0 {
+		message := valueToString(errorObject["message"])
+		kind := valueToString(errorObject["kind"])
+
+		panic(LangError{
+			Kind:    ErrorKind(kind),
+			Message: message,
+		})
+	}
+
+	handler := vm.tryHandlers[len(vm.tryHandlers)-1]
+	vm.tryHandlers = vm.tryHandlers[:len(vm.tryHandlers)-1]
+
+	for len(vm.frames) > handler.FrameDepth {
+		vm.frames = vm.frames[:len(vm.frames)-1]
+	}
+
+	if handler.IsLocal {
+		if handler.FrameDepth == 0 {
+			langError(ErrorInternal, "local catch handler has no frame")
+		}
+
+		frame := &vm.frames[handler.FrameDepth-1]
+
+		if handler.Slot < 0 || handler.Slot >= len(frame.locals) {
+			langError(ErrorInternal, "catch local slot out of range")
+		}
+
+		frame.locals[handler.Slot] = errorObject
+		frame.constants[handler.Slot] = false
+	} else {
+		vm.globals[handler.Name] = errorObject
+		vm.globalConstants[handler.Name] = false
+	}
+
+	if handler.FrameDepth == 0 {
+		vm.ip = handler.CatchIP
+	} else {
+		vm.frames[handler.FrameDepth-1].ip = handler.CatchIP
+	}
+}
+
+func makeErrorObject(value Value) ObjectValue {
+	switch err := value.(type) {
+	case ErrorValue:
+		return ObjectValue{
+			"kind":    err.Kind,
+			"message": err.Message,
+		}
+
+	case *ErrorValue:
+		return ObjectValue{
+			"kind":    err.Kind,
+			"message": err.Message,
+		}
+
+	case ObjectValue:
+		return err
+
+	case string:
+		return ObjectValue{
+			"kind":    "Error",
+			"message": err,
+		}
+
+	default:
+		return ObjectValue{
+			"kind":    "Error",
+			"message": valueToString(value),
+		}
+	}
 }
 
 func (vm *VM) callFunctionValue(fnValue FunctionValue, args []Value) Value {

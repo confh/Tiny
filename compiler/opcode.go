@@ -32,6 +32,10 @@ const (
 
 	OP_POP
 	OP_HALT
+	OP_THROW
+
+	OP_SETUP_TRY
+	OP_POP_TRY
 
 	OP_EQ
 	OP_NEQ
@@ -62,6 +66,13 @@ type Function struct {
 type CallInfo struct {
 	Name     string
 	ArgCount int
+}
+
+type TryInfo struct {
+	CatchIP int
+	Name    string
+	Slot    int
+	IsLocal bool
 }
 
 type ArrayInfo struct {

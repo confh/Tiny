@@ -375,8 +375,50 @@ func (p *Parser) parseStatement() Stmt {
 		return p.parseBreakStatement()
 	case TOKEN_CONTINUE:
 		return p.parseContinueStatement()
+	case TOKEN_THROW:
+		return p.parseThrowStatement()
+	case TOKEN_TRY:
+		return p.parseTryCatchStatement()
 	default:
 		return p.parseExpressionStatement()
+	}
+}
+
+func (p *Parser) parseTryCatchStatement() Stmt {
+	p.expect(TOKEN_TRY)
+	p.expect(TOKEN_LBRACE)
+
+	tryBody := p.parseBlock()
+
+	p.expect(TOKEN_CATCH)
+
+	if p.current.Type != TOKEN_IDENT {
+		langError(ErrorSyntax, "expected error variable name after catch")
+	}
+
+	errorName := p.current.Literal
+	p.advance()
+
+	p.expect(TOKEN_LBRACE)
+
+	catchBody := p.parseBlock()
+
+	return TryCatchStmt{
+		TryBody:   tryBody,
+		ErrorName: errorName,
+		CatchBody: catchBody,
+	}
+}
+
+func (p *Parser) parseThrowStatement() Stmt {
+	p.expect(TOKEN_THROW)
+
+	value := p.parseExpression()
+
+	p.expect(TOKEN_SEMI)
+
+	return ThrowStmt{
+		Value: value,
 	}
 }
 

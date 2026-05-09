@@ -19,7 +19,11 @@ const (
 	TOKEN_CONST  TokenType = "CONST"
 	TOKEN_FN     TokenType = "FN"
 	TOKEN_RETURN TokenType = "RETURN"
+	TOKEN_THROW  TokenType = "THROW"
 	TOKEN_CLASS  TokenType = "CLASS"
+
+	TOKEN_TRY   TokenType = "TRY"
+	TOKEN_CATCH TokenType = "CATCH"
 
 	TOKEN_IF   TokenType = "IF"
 	TOKEN_ELSE TokenType = "ELSE"

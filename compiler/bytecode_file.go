@@ -65,9 +65,13 @@ func LoadBytecode(path string) ([]Instruction, map[string]Function, map[string]C
 		langError(ErrorRuntime, "failed to read bytecode file: %v", err)
 	}
 
+	return LoadBytecodeFromBytes(data)
+}
+
+func LoadBytecodeFromBytes(data []byte) ([]Instruction, map[string]Function, map[string]Class) {
 	var file BytecodeFile
 
-	err = json.Unmarshal(data, &file)
+	err := json.Unmarshal(data, &file)
 	if err != nil {
 		langError(ErrorRuntime, "failed to decode bytecode file: %v", err)
 	}

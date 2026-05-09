@@ -12,6 +12,7 @@ const (
 	ErrorConst    ErrorKind = "ConstError"
 	ErrorImport   ErrorKind = "ImportError"
 	ErrorInternal ErrorKind = "InternalError"
+	ErrorUser     ErrorKind = "Error"
 )
 
 type LangError struct {
