@@ -735,6 +735,11 @@ func (vm *VM) callMethod(method string, argCount int) {
 
 	objectValue := vm.pop()
 
+	if plugin, ok := objectValue.(*NativePluginValue); ok {
+		vm.callNativePlugin(plugin, method, args)
+		return
+	}
+
 	if server, ok := objectValue.(*NativeServerValue); ok {
 		vm.callServerMethod(server, method, args)
 		return

@@ -380,6 +380,10 @@ func (vm *VM) callBuiltin(object string, method string, argCount int) {
 
 	case "String":
 		vm.callString(method, argCount)
+
+	case "Plugin":
+		vm.callPluginModule(method, argCount)
+
 	default:
 		langError(ErrorName, "unknown builtin module: %s", object)
 	}

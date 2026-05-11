@@ -30,6 +30,13 @@ type NativeServerValue struct {
 	Routes map[string]Value
 }
 
+type NativePluginValue struct {
+	Path string
+	Call uintptr
+	Free uintptr
+	DLL  any
+}
+
 type Value any
 
 func asInt(value Value) int {
@@ -111,6 +118,8 @@ func typeName(value Value) string {
 		return "error"
 	case *ErrorValue:
 		return "error"
+	case *NativePluginValue:
+		return "plugin"
 	default:
 		return fmt.Sprintf("%T", value)
 	}
@@ -147,6 +156,15 @@ func valueToJSONCompatible(value Value) any {
 
 		return result
 
+	case *ArrayValue:
+		result := make([]any, len(v.Elements))
+
+		for i, item := range v.Elements {
+			result[i] = valueToJSONCompatible(item)
+		}
+
+		return result
+
 	case NullValue:
 		return nil
 
@@ -159,6 +177,49 @@ func valueToJSONCompatible(value Value) any {
 	default:
 		langError(ErrorType, "cannot convert %s to JSON", typeName(value))
 		return nil
+	}
+}
+
+func jsonToTinyValue(value any) Value {
+	switch v := value.(type) {
+	case nil:
+		return NullValue{}
+
+	case string:
+		return v
+
+	case bool:
+		return v
+
+	case float64:
+		if v == float64(int(v)) {
+			return int(v)
+		}
+
+		return v
+
+	case []any:
+		elements := make([]Value, len(v))
+
+		for i, item := range v {
+			elements[i] = jsonToTinyValue(item)
+		}
+
+		return &ArrayValue{
+			Elements: elements,
+		}
+
+	case map[string]any:
+		object := ObjectValue{}
+
+		for key, item := range v {
+			object[key] = jsonToTinyValue(item)
+		}
+
+		return object
+
+	default:
+		return valueToString(v)
 	}
 }
 
@@ -210,6 +271,8 @@ func valueToString(value Value) string {
 		return "<server :" + strconv.Itoa(v.Port) + ">"
 	case *NativeServerValue:
 		return "<server :" + strconv.Itoa(v.Port) + ">"
+	case *NativePluginValue:
+		return "<plugin " + v.Path + ">"
 	default:
 		return fmt.Sprintf("%v", v)
 	}
