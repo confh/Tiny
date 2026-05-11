@@ -97,11 +97,18 @@ type ThisExpr struct{}
 func (e ThisExpr) exprNode() {}
 
 type IndexExpr struct {
-	Array Expr
-	Index Expr
+	Object Expr
+	Index  Expr
 }
 
 func (e IndexExpr) exprNode() {}
+
+type FunctionExpr struct {
+	Params []string
+	Body   []Stmt
+}
+
+func (e FunctionExpr) exprNode() {}
 
 type InterpolatedStringPart struct {
 	Text   string
@@ -158,6 +165,14 @@ type ThrowStmt struct {
 func (s ThrowStmt) stmtNode() {}
 
 func (s ExprStmt) stmtNode() {}
+
+type IndexAssignStmt struct {
+	Object Expr
+	Index  Expr
+	Value  Expr
+}
+
+func (s IndexAssignStmt) stmtNode() {}
 
 type FunctionStmt struct {
 	Name   string

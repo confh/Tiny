@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -37,6 +38,8 @@ type VM struct {
 
 	tryHandlers []TryHandler
 
+	mu sync.Mutex
+
 	ip int
 
 	stack           []Value
@@ -54,6 +57,7 @@ func NewVM(mainInstructions []Instruction, functions map[string]Function, classe
 		classes:          classes,
 		globals:          map[string]Value{},
 		globalConstants:  map[string]bool{},
+		mu:               sync.Mutex{},
 	}
 }
 
@@ -330,19 +334,55 @@ func (vm *VM) step() bool {
 		vm.push(&ArrayValue{Elements: elements})
 
 	case OP_INDEX:
-		index := asInt(vm.pop())
-		arrayValue := vm.pop()
+		indexValue := vm.pop()
+		objectValue := vm.pop()
 
-		array, ok := arrayValue.(*ArrayValue)
-		if !ok {
-			langError(ErrorSyntax, "expected array, got %T", arrayValue)
+		switch obj := objectValue.(type) {
+		case *ArrayValue:
+			index := asInt(indexValue)
+
+			if index < 0 || index >= len(obj.Elements) {
+				langError(ErrorRuntime, "array index out of range: %d", index)
+			}
+
+			vm.push(obj.Elements[index])
+
+		case ObjectValue:
+			key := asString(indexValue)
+
+			value, exists := obj[key]
+			if !exists {
+				langError(ErrorName, "object has no key: %s", key)
+			}
+
+			vm.push(value)
+
+		default:
+			langError(ErrorType, "cannot index %s", typeName(objectValue))
 		}
 
-		if index < 0 || index >= len(array.Elements) {
-			langError(ErrorInternal, "array index out of range: %d", index)
-		}
+	case OP_SET_INDEX:
+		value := vm.pop()
+		indexValue := vm.pop()
+		objectValue := vm.pop()
 
-		vm.push(array.Elements[index])
+		switch obj := objectValue.(type) {
+		case *ArrayValue:
+			index := asInt(indexValue)
+
+			if index < 0 || index >= len(obj.Elements) {
+				langError(ErrorRuntime, "array index out of range: %d", index)
+			}
+
+			obj.Elements[index] = value
+
+		case ObjectValue:
+			key := asString(indexValue)
+			obj[key] = value
+
+		default:
+			langError(ErrorType, "cannot index assign %s", typeName(objectValue))
+		}
 
 	case OP_RETURN:
 		returnValue := vm.pop()
@@ -647,6 +687,9 @@ func (vm *VM) callServerMethod(server *NativeServerValue, method string, args []
 						"path":   r.URL.Path,
 						"method": r.Method,
 					}
+
+					vm.mu.Lock()
+					defer vm.mu.Unlock()
 
 					result := vm.callFunctionValue(h, []Value{reqObj})
 					writeServerResponse(w, valueToString(result))

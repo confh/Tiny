@@ -1,5 +1,7 @@
 package main
 
+import "strconv"
+
 type LoopContext struct {
 	Start         int
 	BreakJumps    []int
@@ -12,10 +14,11 @@ type LocalInfo struct {
 }
 
 type Compiler struct {
-	mainInstructions []Instruction
-	functions        map[string]Function
-	classes          map[string]Class
-	loopStack        []LoopContext
+	mainInstructions       []Instruction
+	functions              map[string]Function
+	classes                map[string]Class
+	loopStack              []LoopContext
+	anonymousFunctionCount int
 
 	currentInstructions *[]Instruction
 
@@ -30,7 +33,6 @@ func optimizeExpr(expr Expr) Expr {
 		left := optimizeExpr(e.Left)
 		right := optimizeExpr(e.Right)
 
-		// int + int
 		leftInt, leftIsInt := left.(NumberExpr)
 		rightInt, rightIsInt := right.(NumberExpr)
 
@@ -158,13 +160,14 @@ func optimizeExpr(expr Expr) Expr {
 
 func NewCompiler() *Compiler {
 	c := &Compiler{
-		mainInstructions: []Instruction{},
-		functions:        map[string]Function{},
-		classes:          map[string]Class{},
-		loopStack:        []LoopContext{},
-		locals:           map[string]LocalInfo{},
-		localCount:       0,
-		globalConstants:  map[string]bool{},
+		mainInstructions:       []Instruction{},
+		functions:              map[string]Function{},
+		classes:                map[string]Class{},
+		loopStack:              []LoopContext{},
+		locals:                 map[string]LocalInfo{},
+		localCount:             0,
+		globalConstants:        map[string]bool{},
+		anonymousFunctionCount: 0,
 	}
 
 	c.currentInstructions = &c.mainInstructions
@@ -220,6 +223,12 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 		}
 
 		c.emit(OP_ASSIGN_GLOBAL, s.Name)
+
+	case IndexAssignStmt:
+		c.compileExpr(s.Object)
+		c.compileExpr(s.Index)
+		c.compileExpr(s.Value)
+		c.emit(OP_SET_INDEX, nil)
 
 	case ThrowStmt:
 		c.compileExpr(s.Value)
@@ -520,6 +529,12 @@ func (c *Compiler) compileFunction(stmt FunctionStmt) {
 	c.localCount = oldLocalCount
 }
 
+func (c *Compiler) makeAnonymousFunctionName() string {
+	name := "__anon_" + strconv.Itoa(c.anonymousFunctionCount)
+	c.anonymousFunctionCount++
+	return name
+}
+
 func (c *Compiler) compileExpr(expr Expr) {
 	expr = optimizeExpr(expr)
 
@@ -547,6 +562,19 @@ func (c *Compiler) compileExpr(expr Expr) {
 			Parts:     textParts,
 			ExprCount: exprCount,
 		})
+
+	case FunctionExpr:
+		name := c.makeAnonymousFunctionName()
+
+		fnStmt := FunctionStmt{
+			Name:   name,
+			Params: e.Params,
+			Body:   e.Body,
+		}
+
+		c.compileFunction(fnStmt)
+
+		c.emit(OP_CONST, FunctionValue{Name: name})
 
 	case BoolExpr:
 		c.emit(OP_CONST, e.Value)
@@ -583,7 +611,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 		})
 
 	case IndexExpr:
-		c.compileExpr(e.Array)
+		c.compileExpr(e.Object)
 		c.compileExpr(e.Index)
 		c.emit(OP_INDEX, nil)
 

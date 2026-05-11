@@ -146,6 +146,13 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 				Value:  value,
 			}
 
+		case IndexExpr:
+			return IndexAssignStmt{
+				Object: target.Object,
+				Index:  target.Index,
+				Value:  value,
+			}
+
 		default:
 			langError(ErrorSyntax, "invalid assignment target")
 		}
@@ -427,13 +434,14 @@ func (p *Parser) parseForStatement() Stmt {
 
 	var init Stmt
 
-	if p.current.Type == TOKEN_LET {
+	switch p.current.Type {
+	case TOKEN_LET:
 		init = p.parseLetStatement()
-	} else if p.current.Type == TOKEN_CONST {
+	case TOKEN_CONST:
 		init = p.parseConstStatement()
-	} else if p.current.Type == TOKEN_SEMI {
+	case TOKEN_SEMI:
 		p.expect(TOKEN_SEMI)
-	} else {
+	default:
 		init = p.parsePossibleAssignmentStatement()
 	}
 
@@ -903,7 +911,6 @@ func (p *Parser) parsePostfix() Expr {
 			name := p.current.Literal
 			p.advance()
 
-			// Method/builtin call: core.println(...)
 			if p.current.Type == TOKEN_LPAREN {
 				p.advance()
 
@@ -920,10 +927,21 @@ func (p *Parser) parsePostfix() Expr {
 				continue
 			}
 
-			// Property access: user.name
 			expr = PropertyExpr{
 				Object: expr,
 				Name:   name,
+			}
+
+		case TOKEN_LBRACKET:
+			p.advance()
+
+			index := p.parseExpression()
+
+			p.expect(TOKEN_RBRACKET)
+
+			expr = IndexExpr{
+				Object: expr,
+				Index:  index,
 			}
 
 		default:
@@ -1022,6 +1040,9 @@ func (p *Parser) parsePrimary() Expr {
 
 		return NumberExpr{Value: value}
 
+	case TOKEN_FN:
+		return p.parseFunctionExpression()
+
 	case TOKEN_LBRACKET:
 		return p.parseArrayLiteral()
 
@@ -1091,6 +1112,42 @@ func (p *Parser) parsePrimary() Expr {
 	default:
 		langError(ErrorSyntax, "expected expression, got %s", p.current.Type)
 		return UndefinedExpr{}
+	}
+}
+
+func (p *Parser) parseFunctionExpression() Expr {
+	p.expect(TOKEN_FN)
+
+	p.expect(TOKEN_LPAREN)
+
+	var params []string
+
+	if p.current.Type != TOKEN_RPAREN {
+		for {
+			if p.current.Type != TOKEN_IDENT {
+				langError(ErrorSyntax, "expected parameter name")
+			}
+
+			params = append(params, p.current.Literal)
+			p.advance()
+
+			if p.current.Type != TOKEN_COMMA {
+				break
+			}
+
+			p.advance()
+		}
+	}
+
+	p.expect(TOKEN_RPAREN)
+
+	p.expect(TOKEN_LBRACE)
+
+	body := p.parseBlock()
+
+	return FunctionExpr{
+		Params: params,
+		Body:   body,
 	}
 }
 
