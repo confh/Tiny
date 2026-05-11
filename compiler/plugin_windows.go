@@ -1,10 +1,22 @@
+//go:build windows
+// +build windows
+
 package main
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"syscall"
 	"unsafe"
 )
+
+func defaultPluginPath(path string, ext string) string {
+	if filepath.Ext(path) == "" {
+		return path + ext
+	}
+
+	return path
+}
 
 func (vm *VM) callPluginModule(method string, argCount int) {
 	switch method {
@@ -14,24 +26,22 @@ func (vm *VM) callPluginModule(method string, argCount int) {
 		}
 
 		path := asString(vm.pop())
+		path = defaultPluginPath(path, ".dll")
 
 		dll := syscall.NewLazyDLL(path)
 
 		callProc := dll.NewProc("TinyPluginCall")
 		freeProc := dll.NewProc("TinyPluginFree")
 
-		err := dll.Load()
-		if err != nil {
+		if err := dll.Load(); err != nil {
 			langError(ErrorRuntime, "failed to load plugin %s: %v", path, err)
 		}
 
-		err = callProc.Find()
-		if err != nil {
+		if err := callProc.Find(); err != nil {
 			langError(ErrorRuntime, "plugin missing TinyPluginCall: %v", err)
 		}
 
-		err = freeProc.Find()
-		if err != nil {
+		if err := freeProc.Find(); err != nil {
 			langError(ErrorRuntime, "plugin missing TinyPluginFree: %v", err)
 		}
 
@@ -39,7 +49,6 @@ func (vm *VM) callPluginModule(method string, argCount int) {
 			Path: path,
 			Call: callProc.Addr(),
 			Free: freeProc.Addr(),
-			DLL:  dll,
 		})
 
 	default:

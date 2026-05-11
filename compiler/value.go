@@ -30,13 +30,6 @@ type NativeServerValue struct {
 	Routes map[string]Value
 }
 
-type NativePluginValue struct {
-	Path string
-	Call uintptr
-	Free uintptr
-	DLL  any
-}
-
 type Value any
 
 func asInt(value Value) int {
