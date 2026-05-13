@@ -15,7 +15,7 @@ func packCommand(args []string) {
 	}
 
 	entryFile := args[0]
-	outFile := "app.exe"
+	outFile := defaultPackedOutputName()
 
 	for i := 1; i < len(args); i++ {
 		if args[i] == "-o" && i+1 < len(args) {
@@ -65,6 +65,14 @@ func packCommand(args []string) {
 	}
 
 	fmt.Println("Packed", absOutFile)
+}
+
+func defaultPackedOutputName() string {
+	if runtime.GOOS == "windows" {
+		return "app.exe"
+	}
+
+	return "app"
 }
 
 func copyRuntimeFiles(tempDir string, sourceDir string) {
