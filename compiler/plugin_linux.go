@@ -41,6 +41,7 @@ import "C"
 import (
 	"encoding/json"
 	"path/filepath"
+	"slices"
 	"unsafe"
 )
 
@@ -60,11 +61,11 @@ func (vm *VM) callPluginModule(method string, argCount int) {
 
 		name := asString(vm.pop())
 
-		switch name {
-		case "array":
-			vm.push(&StandardModuleValue{Name: name})
+		availablePlugins := []string{"array", "math", "string"}
 
-		default:
+		if slices.Contains(availablePlugins, name) {
+			vm.push(&StandardModuleValue{Name: name})
+		} else {
 			langError(ErrorName, "unknown standard module: %s", name)
 		}
 	case "load":
