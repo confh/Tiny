@@ -60,6 +60,15 @@ type NativeFileValue struct {
 	Closed bool
 }
 
+type NamespaceValue struct {
+	Name    string
+	Members map[string]Value
+}
+
+type NamespaceMemberRef struct {
+	GlobalName string
+}
+
 type Value any
 
 func asInt(value Value) int {
@@ -153,6 +162,14 @@ func typeName(value Value) string {
 		return "app"
 	case *NativeTaskValue:
 		return "task"
+	case NamespaceValue:
+		return "namespace"
+	case *NamespaceValue:
+		return "namespace"
+	case NamespaceMemberRef:
+		return "namespace member ref"
+	case *NamespaceMemberRef:
+		return "namespace member ref"
 	default:
 		return fmt.Sprintf("%T", value)
 	}
@@ -319,6 +336,14 @@ func valueToString(value Value) string {
 		return "<app " + v.Name + ">"
 	case *NativeTaskValue:
 		return "<task>"
+	case NamespaceValue:
+		return "<namespace " + v.Name + ">"
+	case *NamespaceValue:
+		return "<namespace " + v.Name + ">"
+	case NamespaceMemberRef:
+		return "<namespace ref " + v.GlobalName + ">"
+	case *NamespaceMemberRef:
+		return "<namespace ref " + v.GlobalName + ">"
 	default:
 		return fmt.Sprintf("%v", v)
 	}

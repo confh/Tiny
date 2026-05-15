@@ -46,6 +46,15 @@ func loadFile(path string, visited map[string]bool) []Stmt {
 
 			importPath := filepath.Join(dir, s.Path)
 			importedStatements := loadFile(importPath, visited)
+
+			if s.Alias != "" {
+				result = append(result, NamespaceStmt{
+					Name:       s.Alias,
+					Statements: importedStatements,
+				})
+				continue
+			}
+
 			result = append(result, importedStatements...)
 
 		default:

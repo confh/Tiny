@@ -125,7 +125,22 @@ func (vm *VM) step() bool {
 
 			for _, capture := range info.Captures {
 				if capture.OuterSlot < 0 || capture.OuterSlot >= len(frame.locals) {
-					langError(ErrorInternal, "capture slot out of range")
+					langError(
+						ErrorInternal,
+						"capture slot out of range: function=%s outerSlot=%d locals=%d",
+						frame.function.Name,
+						capture.OuterSlot,
+						len(frame.locals),
+					)
+				}
+
+				if frame.locals[capture.OuterSlot] == nil {
+					langError(
+						ErrorInternal,
+						"captured local is nil: function=%s outerSlot=%d",
+						frame.function.Name,
+						capture.OuterSlot,
+					)
 				}
 
 				captures[capture.InnerSlot] = frame.locals[capture.OuterSlot]
@@ -193,11 +208,23 @@ func (vm *VM) step() bool {
 		frame := vm.currentFrame()
 
 		if slot < 0 || slot >= len(frame.locals) {
-			langError(ErrorInternal, "local slot out of range: %d", slot)
+			langError(
+				ErrorInternal,
+				"local slot out of range: function=%s slot=%d locals=%d",
+				frame.function.Name,
+				slot,
+				len(frame.locals),
+			)
 		}
 
 		if frame.locals[slot] == nil {
-			langError(ErrorInternal, "local slot %d is nil", slot)
+			langError(
+				ErrorInternal,
+				"local slot is nil: function=%s slot=%d locals=%d",
+				frame.function.Name,
+				slot,
+				len(frame.locals),
+			)
 		}
 
 		vm.push(frame.locals[slot].Value)
@@ -237,11 +264,23 @@ func (vm *VM) step() bool {
 		frame := vm.currentFrame()
 
 		if slot < 0 || slot >= len(frame.locals) {
-			langError(ErrorInternal, "local slot out of range: %d", slot)
+			langError(
+				ErrorInternal,
+				"local slot out of range: function=%s slot=%d locals=%d",
+				frame.function.Name,
+				slot,
+				len(frame.locals),
+			)
 		}
 
 		if frame.locals[slot] == nil {
-			frame.locals[slot] = &Cell{Value: UndefinedValue{}}
+			langError(
+				ErrorInternal,
+				"local slot is nil during assignment: function=%s slot=%d locals=%d",
+				frame.function.Name,
+				slot,
+				len(frame.locals),
+			)
 		}
 
 		if frame.constants[slot] {
@@ -421,6 +460,33 @@ func (vm *VM) step() bool {
 		info := instr.Value.(BuiltinCallInfo)
 		vm.callBuiltin(info.Object, info.Method, info.ArgCount)
 
+	case OP_MOD:
+		right := vm.pop()
+		left := vm.pop()
+
+		switch l := left.(type) {
+		case int:
+			r := asInt(right)
+
+			if r == 0 {
+				langError(ErrorRuntime, "cannot modulo by zero")
+			}
+
+			vm.push(l % r)
+
+		case int64:
+			r := int64(asInt(right))
+
+			if r == 0 {
+				langError(ErrorRuntime, "cannot modulo by zero")
+			}
+
+			vm.push(l % r)
+
+		default:
+			langError(ErrorType, "cannot modulo %s and %s", typeName(left), typeName(right))
+		}
+
 	case OP_ARRAY:
 		info := instr.Value.(ArrayInfo)
 
@@ -559,6 +625,66 @@ func (vm *VM) step() bool {
 	case OP_GET_PROPERTY:
 		name := instr.Value.(string)
 		objectValue := vm.pop()
+
+		if ns, ok := objectValue.(NamespaceValue); ok {
+			value, exists := ns.Members[name]
+			if !exists {
+				langError(ErrorName, "namespace %s has no member: %s", ns.Name, name)
+			}
+
+			if ref, ok := value.(NamespaceMemberRef); ok {
+				actual, exists := vm.globals[ref.GlobalName]
+				if !exists {
+					langError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
+				}
+
+				vm.push(actual)
+				break
+			}
+
+			if ref, ok := value.(*NamespaceMemberRef); ok {
+				actual, exists := vm.globals[ref.GlobalName]
+				if !exists {
+					langError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
+				}
+
+				vm.push(actual)
+				break
+			}
+
+			vm.push(value)
+			break
+		}
+
+		if ns, ok := objectValue.(*NamespaceValue); ok {
+			value, exists := ns.Members[name]
+			if !exists {
+				langError(ErrorName, "namespace %s has no member: %s", ns.Name, name)
+			}
+
+			if ref, ok := value.(NamespaceMemberRef); ok {
+				actual, exists := vm.globals[ref.GlobalName]
+				if !exists {
+					langError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
+				}
+
+				vm.push(actual)
+				break
+			}
+
+			if ref, ok := value.(*NamespaceMemberRef); ok {
+				actual, exists := vm.globals[ref.GlobalName]
+				if !exists {
+					langError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
+				}
+
+				vm.push(actual)
+				break
+			}
+
+			vm.push(value)
+			break
+		}
 
 		object, ok := objectValue.(ObjectValue)
 		if !ok {
@@ -860,10 +986,35 @@ func writeServerResponse(w http.ResponseWriter, text string) {
 	fmt.Fprint(w, text)
 }
 
+func (vm *VM) callNamespaceMethod(ns NamespaceValue, method string, args []Value) {
+	value, exists := ns.Members[method]
+	if !exists {
+		langError(ErrorName, "namespace %s has no function: %s", ns.Name, method)
+	}
+
+	fn, ok := value.(FunctionValue)
+	if !ok {
+		langError(ErrorType, "namespace member %s is not callable", method)
+	}
+
+	result := vm.callFunctionValue(fn, args)
+	vm.push(result)
+}
+
 func (vm *VM) callMethod(method string, argCount int) {
 	args := vm.popArgs(argCount)
 
 	objectValue := vm.pop()
+
+	if ns, ok := objectValue.(NamespaceValue); ok {
+		vm.callNamespaceMethod(ns, method, args)
+		return
+	}
+
+	if ns, ok := objectValue.(*NamespaceValue); ok {
+		vm.callNamespaceMethod(*ns, method, args)
+		return
+	}
 
 	if plugin, ok := objectValue.(*NativePluginValue); ok {
 		vm.callNativePlugin(plugin, method, args)
@@ -1060,61 +1211,78 @@ func (vm *VM) callFunction(name string, argCount int) {
 func (vm *VM) callClass(class Class, argCount int) {
 	args := vm.popArgs(argCount)
 
-	instance := ObjectValue{}
+	object := ObjectValue{}
 
+	// Add methods to object
 	for methodName, functionName := range class.Methods {
-		instance[methodName] = FunctionValue{Name: functionName}
+		object[methodName] = FunctionValue{
+			Name: functionName,
+		}
 	}
 
-	initName, hasInit := class.Methods["init"]
-	if !hasInit {
-		if argCount != 0 {
-			langError(ErrorRuntime, "class %s expects 0 arguments", class.Name)
+	// If class has init, call it
+	if initName, exists := class.Methods["init"]; exists {
+		fn, ok := vm.functions[initName]
+		if !ok {
+			langError(ErrorName, "undefined init function: %s", initName)
 		}
 
-		vm.push(instance)
-		return
+		expectedArgs := len(fn.Params) - 1 // subtract this
+
+		if expectedArgs != len(args) {
+			langError(
+				ErrorRuntime,
+				"class %s constructor expects %d arguments, got %d",
+				class.Name,
+				expectedArgs,
+				len(args),
+			)
+		}
+
+		locals := make([]*Cell, fn.LocalCount)
+		constants := make([]bool, fn.LocalCount)
+
+		// slot 0 = this
+		locals[0] = &Cell{Value: object}
+		constants[0] = true
+
+		// slot 1+ = constructor args
+		for i, arg := range args {
+			locals[i+1] = &Cell{Value: arg}
+			constants[i+1] = false
+		}
+
+		for i := range locals {
+			if locals[i] == nil {
+				locals[i] = &Cell{Value: UndefinedValue{}}
+			}
+		}
+
+		frameDepthBefore := len(vm.frames)
+
+		frame := Frame{
+			function:     fn,
+			ip:           0,
+			locals:       locals,
+			constants:    constants,
+			instructions: fn.Instructions,
+		}
+
+		vm.frames = append(vm.frames, frame)
+
+		for len(vm.frames) > frameDepthBefore {
+			if vm.step() {
+				langError(ErrorRuntime, "program halted while running constructor")
+			}
+		}
+
+		// Constructor return value is ignored.
+		if len(vm.stack) > 0 {
+			vm.pop()
+		}
 	}
 
-	fn, ok := vm.functions[initName]
-	if !ok {
-		langError(ErrorName, "missing init function for class: %s", class.Name)
-	}
-
-	expectedArgs := len(fn.Params) - 1 // ignore hidden "this"
-
-	if expectedArgs != argCount {
-		langError(
-			ErrorRuntime,
-			"class %s constructor expects %d arguments, got %d",
-			class.Name,
-			expectedArgs,
-			argCount,
-		)
-	}
-
-	locals := make([]*Cell, fn.LocalCount)
-	constants := make([]bool, fn.LocalCount)
-
-	locals[0].Value = instance
-	constants[0] = true
-
-	for i, arg := range args {
-		locals[i+1].Value = arg
-		constants[i+1] = false
-	}
-
-	frame := Frame{
-		function:          fn,
-		ip:                0,
-		locals:            locals,
-		constants:         constants,
-		instructions:      fn.Instructions,
-		returnOverride:    instance,
-		hasReturnOverride: true,
-	}
-
-	vm.frames = append(vm.frames, frame)
+	vm.push(object)
 }
 
 func (vm *VM) currentInstructions() []Instruction {

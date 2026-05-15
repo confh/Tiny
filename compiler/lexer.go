@@ -112,7 +112,14 @@ func (l *Lexer) NextToken() Token {
 	}
 
 	switch ch {
+	case '%':
+		if l.peek() == '=' {
+			l.pos += 2
+			return l.tokenAt(start, TOKEN_PERCENT_ASSIGN, "%=")
+		}
 
+		l.pos++
+		return l.tokenAt(start, TOKEN_PERCENT, "%")
 	case '=':
 		if l.peek() == '=' {
 			l.pos += 2

@@ -1,6 +1,8 @@
 package main
 
-import "strconv"
+import (
+	"strconv"
+)
 
 type BindingKind int
 
@@ -33,6 +35,12 @@ type Compiler struct {
 	classes                map[string]Class
 	loopStack              []LoopContext
 	anonymousFunctionCount int
+
+	currentNamespaceVariables map[string]string
+
+	currentNamespaceFunctions map[string]string
+
+	inMethod bool
 
 	outerBindings   map[string]Binding
 	currentCaptures map[string]CapturedVar
@@ -266,6 +274,86 @@ func (c *Compiler) currentScope() map[string]Binding {
 	return c.scopes[len(c.scopes)-1]
 }
 
+func (c *Compiler) compileNestedFunction(stmt FunctionStmt) {
+	compiledName := c.makeAnonymousFunctionName()
+
+	outerBindings := c.collectCapturableBindings()
+
+	oldInstructions := c.currentInstructions
+	oldScopes := c.scopes
+	oldLocalCount := c.localCount
+	oldInMethod := c.inMethod
+	oldOuterBindings := c.outerBindings
+	oldCurrentCaptures := c.currentCaptures
+
+	functionInstructions := []Instruction{}
+
+	c.currentInstructions = &functionInstructions
+	c.scopes = []map[string]Binding{}
+	c.localCount = 0
+	c.inMethod = false
+	c.outerBindings = outerBindings
+	c.currentCaptures = map[string]CapturedVar{}
+
+	c.beginScope()
+
+	for _, param := range stmt.Params {
+		c.declareVariable(param, false)
+	}
+
+	for _, bodyStmt := range stmt.Body {
+		c.compileStatement(bodyStmt)
+	}
+
+	c.emit(OP_CONST, UndefinedValue{})
+	c.emit(OP_RETURN, nil)
+
+	captures := []CapturedVar{}
+
+	for _, capture := range c.currentCaptures {
+		captures = append(captures, capture)
+	}
+
+	localCount := c.localCount
+
+	c.functions[compiledName] = Function{
+		Name:         compiledName,
+		Params:       stmt.Params,
+		Instructions: functionInstructions,
+		LocalCount:   localCount,
+		Captures:     captures,
+	}
+
+	c.currentInstructions = oldInstructions
+	c.scopes = oldScopes
+	c.localCount = oldLocalCount
+	c.inMethod = oldInMethod
+	c.outerBindings = oldOuterBindings
+	c.currentCaptures = oldCurrentCaptures
+
+	// Create closure value.
+	c.emit(OP_CLOSURE, ClosureInfo{
+		Name:     compiledName,
+		Captures: captures,
+	})
+
+	// Store it as local const function name.
+	binding := c.declareVariable(stmt.Name, true)
+
+	if binding.Kind == BindingLocal {
+		c.emit(OP_STORE_LOCAL, VariableInfo{
+			Name:     stmt.Name,
+			Slot:     binding.Slot,
+			Constant: true,
+		})
+	} else {
+		c.emit(OP_STORE_GLOBAL, VariableInfo{
+			Name:     binding.Name,
+			Constant: true,
+		})
+	}
+}
+
 func (c *Compiler) declareVariable(name string, constant bool) Binding {
 	scope := c.currentScope()
 
@@ -340,8 +428,115 @@ func (c *Compiler) CompileProgram(program Program) ([]Instruction, map[string]Fu
 	return c.mainInstructions, c.functions, c.classes
 }
 
+func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
+	oldNamespaceFunctions := c.currentNamespaceFunctions
+	oldNamespaceVariables := c.currentNamespaceVariables
+
+	namespaceVariables := map[string]string{}
+	namespaceFunctions := map[string]string{}
+	members := map[string]Value{}
+
+	// First pass: collect functions.
+	for _, raw := range stmt.Statements {
+		fn, ok := raw.(FunctionStmt)
+		if !ok {
+			continue
+		}
+
+		fullName := stmt.Name + "." + fn.Name
+		namespaceFunctions[fn.Name] = fullName
+		members[fn.Name] = FunctionValue{Name: fullName}
+
+		c.functions[fullName] = Function{
+			Name:   fullName,
+			Params: fn.Params,
+		}
+	}
+
+	// First pass: collect variables.
+	for _, raw := range stmt.Statements {
+		v, ok := raw.(VariableStmt)
+		if !ok {
+			continue
+		}
+
+		fullName := stmt.Name + "." + v.Name
+
+		members[v.Name] = NamespaceMemberRef{
+			GlobalName: fullName,
+		}
+	}
+
+	c.currentNamespaceFunctions = namespaceFunctions
+	c.currentNamespaceVariables = namespaceVariables
+
+	// Compile variables as hidden globals.
+	for _, raw := range stmt.Statements {
+		v, ok := raw.(VariableStmt)
+		if !ok {
+			continue
+		}
+
+		fullName := stmt.Name + "." + v.Name
+		namespaceVariables[v.Name] = fullName
+
+		c.compileExpr(v.Value)
+
+		c.emit(OP_STORE_GLOBAL, VariableInfo{
+			Name:     fullName,
+			Constant: v.Constant,
+		})
+
+		c.globalConstants[fullName] = v.Constant
+	}
+
+	// Compile functions with namespaced names.
+	for _, raw := range stmt.Statements {
+		fn, ok := raw.(FunctionStmt)
+		if !ok {
+			continue
+		}
+
+		fullName := stmt.Name + "." + fn.Name
+
+		namespacedFn := FunctionStmt{
+			Name:   fullName,
+			Params: fn.Params,
+			Body:   fn.Body,
+		}
+
+		c.compileFunction(namespacedFn)
+	}
+
+	c.currentNamespaceFunctions = oldNamespaceFunctions
+	c.currentNamespaceVariables = oldNamespaceVariables
+
+	// Create namespace object.
+	c.emit(OP_CONST, NamespaceValue{
+		Name:    stmt.Name,
+		Members: members,
+	})
+
+	binding := c.declareVariable(stmt.Name, true)
+
+	if binding.Kind == BindingLocal {
+		c.emit(OP_STORE_LOCAL, VariableInfo{
+			Name:     stmt.Name,
+			Slot:     binding.Slot,
+			Constant: true,
+		})
+	} else {
+		c.emit(OP_STORE_GLOBAL, VariableInfo{
+			Name:     binding.Name,
+			Constant: true,
+		})
+	}
+}
+
 func (c *Compiler) compileStatement(stmt Stmt) {
 	switch s := stmt.(type) {
+	case NamespaceStmt:
+		c.compileNamespace(s)
 	case VariableStmt:
 		c.compileExpr(s.Value)
 
@@ -400,6 +595,13 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 			}
 		}
 
+		if c.currentNamespaceVariables != nil {
+			if fullName, exists := c.currentNamespaceVariables[s.Name]; exists {
+				c.emit(OP_ASSIGN_GLOBAL, fullName)
+				return
+			}
+		}
+
 		c.emit(OP_ASSIGN_GLOBAL, s.Name)
 
 	case IndexAssignStmt:
@@ -426,7 +628,11 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 		c.emit(OP_POP, nil)
 
 	case FunctionStmt:
-		c.compileFunction(s)
+		if c.isCompilingMain() {
+			c.compileFunction(s)
+		} else {
+			c.compileNestedFunction(s)
+		}
 
 	case ReturnStmt:
 		if s.HasValue {
@@ -609,7 +815,51 @@ func (c *Compiler) compileContinueStatement() {
 	currentLoop.ContinueJumps = append(currentLoop.ContinueJumps, jumpIndex)
 }
 
+func (c *Compiler) ensureCaptured(name string) (Binding, bool) {
+	if binding, exists := c.resolveVariable(name); exists {
+		return binding, true
+	}
+
+	if c.outerBindings == nil {
+		return Binding{}, false
+	}
+
+	outer, exists := c.outerBindings[name]
+	if !exists {
+		return Binding{}, false
+	}
+
+	capture, already := c.currentCaptures[name]
+	if !already {
+		slot := c.localCount
+		c.localCount++
+
+		capture = CapturedVar{
+			Name:      name,
+			OuterSlot: outer.Slot,
+			InnerSlot: slot,
+		}
+
+		c.currentCaptures[name] = capture
+
+		c.currentScope()[name] = Binding{
+			Kind:     BindingLocal,
+			Name:     name,
+			Slot:     slot,
+			Constant: outer.Constant,
+		}
+	}
+
+	return Binding{
+		Kind:     BindingLocal,
+		Name:     name,
+		Slot:     capture.InnerSlot,
+		Constant: outer.Constant,
+	}, true
+}
+
 func (c *Compiler) compileClass(stmt ClassStmt) {
+
 	if _, exists := c.classes[stmt.Name]; exists {
 		langError(ErrorName, "class already defined: %s", stmt.Name)
 	}
@@ -618,18 +868,15 @@ func (c *Compiler) compileClass(stmt ClassStmt) {
 
 	for _, method := range stmt.Methods {
 		compiledName := stmt.Name + "." + method.Name
-
 		methods[method.Name] = compiledName
 
-		params := append([]string{"this"}, method.Params...)
-
 		classMethod := FunctionStmt{
-			Name:   compiledName,
-			Params: params,
+			Name:   method.Name,
+			Params: method.Params,
 			Body:   method.Body,
 		}
 
-		c.compileFunction(classMethod)
+		c.compileMethod(stmt.Name, classMethod)
 	}
 
 	c.classes[stmt.Name] = Class{
@@ -690,19 +937,32 @@ func (c *Compiler) compileIfStatement(stmt IfStmt) {
 }
 
 func (c *Compiler) compileFunction(stmt FunctionStmt) {
-	if _, exists := c.functions[stmt.Name]; exists {
+	if existing, exists := c.functions[stmt.Name]; exists && len(existing.Instructions) > 0 {
 		langError(ErrorName, "function already defined: %s", stmt.Name)
+	}
+
+	// Predeclare function so recursion works.
+	c.functions[stmt.Name] = Function{
+		Name:   stmt.Name,
+		Params: stmt.Params,
 	}
 
 	oldInstructions := c.currentInstructions
 	oldScopes := c.scopes
 	oldLocalCount := c.localCount
+	oldInMethod := c.inMethod
+	oldOuterBindings := c.outerBindings
+	oldCurrentCaptures := c.currentCaptures
 
 	functionInstructions := []Instruction{}
 
 	c.currentInstructions = &functionInstructions
 	c.scopes = []map[string]Binding{}
 	c.localCount = 0
+	c.inMethod = false
+	c.outerBindings = nil
+	c.currentCaptures = nil
+
 	c.beginScope()
 
 	for _, param := range stmt.Params {
@@ -728,12 +988,38 @@ func (c *Compiler) compileFunction(stmt FunctionStmt) {
 	c.currentInstructions = oldInstructions
 	c.scopes = oldScopes
 	c.localCount = oldLocalCount
+	c.inMethod = oldInMethod
+	c.outerBindings = oldOuterBindings
+	c.currentCaptures = oldCurrentCaptures
 }
 
 func (c *Compiler) makeAnonymousFunctionName() string {
 	name := "__anon_" + strconv.Itoa(c.anonymousFunctionCount)
 	c.anonymousFunctionCount++
 	return name
+}
+
+func (c *Compiler) collectCapturableBindings() map[string]Binding {
+	result := map[string]Binding{}
+
+	for _, scope := range c.scopes {
+		for name, binding := range scope {
+			if binding.Kind == BindingLocal {
+				result[name] = binding
+			}
+		}
+	}
+
+	if c.outerBindings != nil {
+		for name := range c.outerBindings {
+			binding, ok := c.ensureCaptured(name)
+			if ok {
+				result[name] = binding
+			}
+		}
+	}
+
+	return result
 }
 
 func (c *Compiler) compileExpr(expr Expr) {
@@ -778,11 +1064,12 @@ func (c *Compiler) compileExpr(expr Expr) {
 	case FunctionExpr:
 		name := c.makeAnonymousFunctionName()
 
-		outerBindings := c.collectCurrentLocalBindings()
+		outerBindings := c.collectCapturableBindings()
 
 		oldInstructions := c.currentInstructions
 		oldScopes := c.scopes
 		oldLocalCount := c.localCount
+		oldInMethod := c.inMethod
 		oldOuterBindings := c.outerBindings
 		oldCurrentCaptures := c.currentCaptures
 
@@ -791,6 +1078,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 		c.currentInstructions = &functionInstructions
 		c.scopes = []map[string]Binding{}
 		c.localCount = 0
+		c.inMethod = false
 		c.outerBindings = outerBindings
 		c.currentCaptures = map[string]CapturedVar{}
 
@@ -825,6 +1113,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 		c.currentInstructions = oldInstructions
 		c.scopes = oldScopes
 		c.localCount = oldLocalCount
+		c.inMethod = oldInMethod
 		c.outerBindings = oldOuterBindings
 		c.currentCaptures = oldCurrentCaptures
 
@@ -889,13 +1178,30 @@ func (c *Compiler) compileExpr(expr Expr) {
 			return
 		}
 
+		if binding, exists := c.ensureCaptured(e.Name); exists {
+			c.emit(OP_LOAD_LOCAL, binding.Slot)
+			return
+		}
+
+		if c.currentNamespaceFunctions != nil {
+			if fullName, exists := c.currentNamespaceFunctions[e.Name]; exists {
+				c.emit(OP_CONST, FunctionValue{Name: fullName})
+				return
+			}
+		}
+
+		if c.currentNamespaceVariables != nil {
+			if fullName, exists := c.currentNamespaceVariables[e.Name]; exists {
+				c.emit(OP_LOAD_GLOBAL, fullName)
+				return
+			}
+		}
+
 		if _, exists := c.functions[e.Name]; exists {
 			c.emit(OP_CONST, FunctionValue{Name: e.Name})
 			return
 		}
 
-		// Important fallback:
-		// If it is not a local and not a function, assume it is a global.
 		c.emit(OP_LOAD_GLOBAL, e.Name)
 
 	case BinaryExpr:
@@ -928,6 +1234,8 @@ func (c *Compiler) compileExpr(expr Expr) {
 			c.emit(OP_AND, nil)
 		case TOKEN_OR:
 			c.emit(OP_OR, nil)
+		case TOKEN_PERCENT:
+			c.emit(OP_MOD, nil)
 
 		default:
 			langError(ErrorInternal, "unknown binary operator")
@@ -973,6 +1281,21 @@ func (c *Compiler) compileExpr(expr Expr) {
 
 	case CallValueExpr:
 		if ident, ok := e.Callee.(IdentExpr); ok {
+			if c.currentNamespaceFunctions != nil {
+				if fullName, exists := c.currentNamespaceFunctions[ident.Name]; exists {
+					for _, arg := range e.Args {
+						c.compileExpr(arg)
+					}
+
+					c.emit(OP_CALL, CallInfo{
+						Name:     fullName,
+						ArgCount: len(e.Args),
+					})
+
+					return
+				}
+			}
+
 			if _, exists := c.functions[ident.Name]; exists {
 				for _, arg := range e.Args {
 					c.compileExpr(arg)
@@ -1037,16 +1360,90 @@ func (c *Compiler) compileExpr(expr Expr) {
 		})
 
 	case ThisExpr:
-		info, exists := c.locals["this"]
-		if !exists {
-			langError(ErrorName, "cannot use this outside of a method")
+		if binding, exists := c.resolveVariable("this"); exists {
+			c.emit(OP_LOAD_LOCAL, binding.Slot)
+			return
 		}
 
-		c.emit(OP_LOAD_LOCAL, info.Slot)
+		if binding, exists := c.ensureCaptured("this"); exists {
+			c.emit(OP_LOAD_LOCAL, binding.Slot)
+			return
+		}
+
+		langError(ErrorName, "cannot use this outside of a method")
 
 	default:
 		langError(ErrorInternal, "unknown expression")
 	}
+}
+
+func (c *Compiler) isCompilingMain() bool {
+	return c.currentInstructions == &c.mainInstructions
+}
+
+func (c *Compiler) compileMethod(className string, stmt FunctionStmt) {
+	name := className + "." + stmt.Name
+
+	oldInstructions := c.currentInstructions
+	oldScopes := c.scopes
+	oldLocalCount := c.localCount
+	oldInMethod := c.inMethod
+	oldOuterBindings := c.outerBindings
+	oldCurrentCaptures := c.currentCaptures
+
+	functionInstructions := []Instruction{}
+
+	c.currentInstructions = &functionInstructions
+	c.scopes = []map[string]Binding{}
+	c.localCount = 0
+	c.inMethod = true
+	c.outerBindings = nil
+	c.currentCaptures = nil
+
+	c.beginScope()
+
+	// slot 0 = this
+	c.declareVariable("this", false)
+
+	// slot 1+ = real user parameters
+	for _, param := range stmt.Params {
+		if param == "this" {
+			continue
+		}
+
+		c.declareVariable(param, false)
+	}
+
+	for _, bodyStmt := range stmt.Body {
+		c.compileStatement(bodyStmt)
+	}
+
+	c.emit(OP_CONST, UndefinedValue{})
+	c.emit(OP_RETURN, nil)
+
+	params := []string{"this"}
+
+	for _, param := range stmt.Params {
+		if param == "this" {
+			continue
+		}
+
+		params = append(params, param)
+	}
+
+	c.functions[name] = Function{
+		Name:         name,
+		Params:       params,
+		Instructions: functionInstructions,
+		LocalCount:   c.localCount,
+	}
+
+	c.currentInstructions = oldInstructions
+	c.scopes = oldScopes
+	c.localCount = oldLocalCount
+	c.inMethod = oldInMethod
+	c.outerBindings = oldOuterBindings
+	c.currentCaptures = oldCurrentCaptures
 }
 
 func (c *Compiler) emit(op OpCode, value any) {

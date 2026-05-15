@@ -42,6 +42,8 @@ const (
 	OP_SETUP_TRY
 	OP_POP_TRY
 
+	OP_MOD
+
 	OP_EQ
 	OP_NEQ
 	OP_LT

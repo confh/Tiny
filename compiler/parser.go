@@ -640,13 +640,17 @@ func (p *Parser) parseBlock() []Stmt {
 func (p *Parser) parseImportStatement() Stmt {
 	p.expect(TOKEN_IMPORT)
 
-	// import std "array";
-	// import std "math" as m;
 	if p.current.Type == TOKEN_IDENT && p.current.Literal == "std" {
 		p.advance()
 
 		if p.current.Type != TOKEN_STRING {
-			langError(ErrorSyntax, "expected standard module name after import std")
+			langErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"expected standard module name after import std",
+			)
 		}
 
 		moduleName := p.current.Literal
@@ -658,7 +662,13 @@ func (p *Parser) parseImportStatement() Stmt {
 			p.advance()
 
 			if p.current.Type != TOKEN_IDENT {
-				langError(ErrorSyntax, "expected alias name after as")
+				langErrorAt(
+					ErrorSyntax,
+					p.current.File,
+					p.current.Line,
+					p.current.Column,
+					"expected alias name after as",
+				)
 			}
 
 			alias = p.current.Literal
@@ -674,20 +684,44 @@ func (p *Parser) parseImportStatement() Stmt {
 		}
 	}
 
-	// import "lib.tiny";
 	if p.current.Type != TOKEN_STRING {
-		langError(ErrorSyntax, "expected import path")
+		langErrorAt(
+			ErrorSyntax,
+			p.current.File,
+			p.current.Line,
+			p.current.Column,
+			"expected import path",
+		)
 	}
 
 	path := p.current.Literal
 	p.advance()
+
+	alias := ""
+
+	if p.current.Type == TOKEN_IDENT && p.current.Literal == "as" {
+		p.advance()
+
+		if p.current.Type != TOKEN_IDENT {
+			langErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"expected alias name after as",
+			)
+		}
+
+		alias = p.current.Literal
+		p.advance()
+	}
 
 	p.expect(TOKEN_SEMI)
 
 	return ImportStmt{
 		Path:  path,
 		Std:   false,
-		Alias: "",
+		Alias: alias,
 	}
 }
 
@@ -917,13 +951,13 @@ func (p *Parser) parseAddSub() Expr {
 }
 
 func (p *Parser) parseMulDiv() Expr {
-	left := p.parsePostfix()
+	left := p.parseUnary()
 
-	for p.current.Type == TOKEN_STAR || p.current.Type == TOKEN_SLASH {
+	for p.current.Type == TOKEN_STAR || p.current.Type == TOKEN_SLASH || p.current.Type == TOKEN_PERCENT {
 		op := p.current.Type
 		p.advance()
 
-		right := p.parsePostfix()
+		right := p.parseUnary()
 
 		left = BinaryExpr{
 			Left:  left,
