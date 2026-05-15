@@ -2,3 +2,5 @@
 *.exe
 *.syso
 *.tbc
+dist/
+plugins/

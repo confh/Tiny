@@ -231,6 +231,18 @@ func encodeValue(value any) EncodedValue {
 			},
 		}
 
+	case Class:
+		return EncodedValue{
+			Type: "class",
+			Data: v,
+		}
+
+	case *Class:
+		return EncodedValue{
+			Type: "class",
+			Data: *v,
+		}
+
 	default:
 		langError(ErrorRuntime, "cannot encode bytecode value: %T", value)
 		return EncodedValue{Type: "nil"}
@@ -269,6 +281,11 @@ func decodeValue(value EncodedValue) any {
 
 	case "builtinCall":
 		var result BuiltinCallInfo
+		decodeInto(value.Data, &result)
+		return result
+
+	case "class":
+		var result Class
 		decodeInto(value.Data, &result)
 		return result
 

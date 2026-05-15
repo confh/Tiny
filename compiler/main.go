@@ -40,6 +40,10 @@ func main() {
 		case "pack":
 			packCommand(os.Args[2:])
 			return
+
+		case "dist":
+			distCommand(os.Args[2:])
+			return
 		}
 	}
 

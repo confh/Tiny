@@ -37,7 +37,7 @@ type Compiler struct {
 	anonymousFunctionCount int
 
 	currentNamespaceVariables map[string]string
-
+	currentNamespaceClasses   map[string]string
 	currentNamespaceFunctions map[string]string
 
 	inMethod bool
@@ -431,8 +431,10 @@ func (c *Compiler) CompileProgram(program Program) ([]Instruction, map[string]Fu
 func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 	oldNamespaceFunctions := c.currentNamespaceFunctions
 	oldNamespaceVariables := c.currentNamespaceVariables
+	oldNamespaceClasses := c.currentNamespaceClasses
 
 	namespaceFunctions := map[string]string{}
+	namespaceClasses := map[string]string{}
 	namespaceVariables := map[string]string{}
 	members := map[string]Value{}
 
@@ -485,6 +487,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 
 	c.currentNamespaceFunctions = namespaceFunctions
 	c.currentNamespaceVariables = namespaceVariables
+	c.currentNamespaceClasses = namespaceClasses
 
 	// 4. Compile variables as hidden globals.
 	for _, raw := range stmt.Statements {
@@ -505,6 +508,18 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		c.globalConstants[fullName] = v.Constant
 	}
 
+	// Collect classes.
+	for _, raw := range stmt.Statements {
+		classStmt, ok := raw.(ClassStmt)
+		if !ok {
+			continue
+		}
+
+		fullName := stmt.Name + "." + classStmt.Name
+		namespaceClasses[classStmt.Name] = fullName
+		members[classStmt.Name] = Class{Name: fullName}
+	}
+
 	// 5. Compile functions.
 	for _, raw := range stmt.Statements {
 		fn, ok := raw.(FunctionStmt)
@@ -523,8 +538,24 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		c.compileFunction(namespacedFn)
 	}
 
+	// Compile classes with namespaced names.
+	for _, raw := range stmt.Statements {
+		classStmt, ok := raw.(ClassStmt)
+		if !ok {
+			continue
+		}
+
+		namespacedClass := ClassStmt{
+			Name:    stmt.Name + "." + classStmt.Name,
+			Methods: classStmt.Methods,
+		}
+
+		c.compileClass(namespacedClass)
+	}
+
 	c.currentNamespaceFunctions = oldNamespaceFunctions
 	c.currentNamespaceVariables = oldNamespaceVariables
+	c.currentNamespaceClasses = oldNamespaceClasses
 
 	// 6. Create namespace object.
 	c.emit(OP_CONST, NamespaceValue{
@@ -1183,6 +1214,13 @@ func (c *Compiler) compileExpr(expr Expr) {
 		c.emit(OP_CONST, e.Value)
 
 	case IdentExpr:
+		if c.currentNamespaceClasses != nil {
+			if fullName, exists := c.currentNamespaceClasses[e.Name]; exists {
+				c.emit(OP_CONST, Class{Name: fullName})
+				return
+			}
+		}
+
 		if binding, exists := c.resolveVariable(e.Name); exists {
 			if binding.Kind == BindingLocal {
 				c.emit(OP_LOAD_LOCAL, binding.Slot)
@@ -1296,6 +1334,21 @@ func (c *Compiler) compileExpr(expr Expr) {
 
 	case CallValueExpr:
 		if ident, ok := e.Callee.(IdentExpr); ok {
+			if c.currentNamespaceClasses != nil {
+				if fullName, exists := c.currentNamespaceClasses[ident.Name]; exists {
+					for _, arg := range e.Args {
+						c.compileExpr(arg)
+					}
+
+					c.emit(OP_CALL, CallInfo{
+						Name:     fullName,
+						ArgCount: len(e.Args),
+					})
+
+					return
+				}
+			}
+
 			if c.currentNamespaceFunctions != nil {
 				if fullName, exists := c.currentNamespaceFunctions[ident.Name]; exists {
 					for _, arg := range e.Args {
