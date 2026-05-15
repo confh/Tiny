@@ -20,6 +20,20 @@ func defaultPluginPath(path string, ext string) string {
 
 func (vm *VM) callPluginModule(method string, argCount int) {
 	switch method {
+	case "std":
+		if argCount != 1 {
+			langError(ErrorRuntime, "Plugin.std expects 1 argument")
+		}
+
+		name := asString(vm.pop())
+
+		switch name {
+		case "array":
+			vm.push(&StandardModuleValue{Name: name})
+
+		default:
+			langError(ErrorName, "unknown standard module: %s", name)
+		}
 	case "load":
 		if argCount != 1 {
 			langError(ErrorRuntime, "Plugin.load expects 1 argument")

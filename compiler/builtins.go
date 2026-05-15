@@ -375,8 +375,8 @@ func (vm *VM) callBuiltin(object string, method string, argCount int) {
 	case "Math":
 		vm.callMath(method, argCount)
 
-	case "Array":
-		vm.callArray(method, argCount)
+	// case "Array":
+	// 	vm.callArray(method, argCount)
 
 	case "String":
 		vm.callString(method, argCount)

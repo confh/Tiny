@@ -676,7 +676,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 		})
 
 	case MemberCallExpr:
-		if ident, ok := e.Object.(IdentExpr); ok && (ident.Name == "Core" || ident.Name == "Math" || ident.Name == "Array" || ident.Name == "String" || ident.Name == "Plugin") {
+		if ident, ok := e.Object.(IdentExpr); ok && (ident.Name == "Core" || ident.Name == "Math" || ident.Name == "String" || ident.Name == "Plugin") {
 			for _, arg := range e.Args {
 				c.compileExpr(arg)
 			}

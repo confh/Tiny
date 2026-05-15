@@ -30,6 +30,10 @@ type NativeServerValue struct {
 	Routes map[string]Value
 }
 
+type StandardModuleValue struct {
+	Name string
+}
+
 type Value any
 
 func asInt(value Value) int {
@@ -113,6 +117,8 @@ func typeName(value Value) string {
 		return "error"
 	case *NativePluginValue:
 		return "plugin"
+	case *StandardModuleValue:
+		return "standard module"
 	default:
 		return fmt.Sprintf("%T", value)
 	}
@@ -266,6 +272,8 @@ func valueToString(value Value) string {
 		return "<server :" + strconv.Itoa(v.Port) + ">"
 	case *NativePluginValue:
 		return "<plugin " + v.Path + ">"
+	case *StandardModuleValue:
+		return "<std " + v.Name + ">"
 	default:
 		return fmt.Sprintf("%v", v)
 	}

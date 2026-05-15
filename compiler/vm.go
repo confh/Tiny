@@ -740,6 +740,11 @@ func (vm *VM) callMethod(method string, argCount int) {
 		return
 	}
 
+	if std, ok := objectValue.(*StandardModuleValue); ok {
+		vm.callStandardModule(std.Name, method, args)
+		return
+	}
+
 	if server, ok := objectValue.(*NativeServerValue); ok {
 		vm.callServerMethod(server, method, args)
 		return
