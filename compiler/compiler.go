@@ -432,11 +432,26 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 	oldNamespaceFunctions := c.currentNamespaceFunctions
 	oldNamespaceVariables := c.currentNamespaceVariables
 
-	namespaceVariables := map[string]string{}
 	namespaceFunctions := map[string]string{}
+	namespaceVariables := map[string]string{}
 	members := map[string]Value{}
 
-	// First pass: collect functions.
+	// 1. Compile nested namespaces first.
+	for _, raw := range stmt.Statements {
+		ns, ok := raw.(NamespaceStmt)
+		if !ok {
+			continue
+		}
+
+		c.compileNamespace(ns)
+
+		// expose nested namespace as a member too
+		members[ns.Name] = NamespaceMemberRef{
+			GlobalName: ns.Name,
+		}
+	}
+
+	// 2. Collect functions.
 	for _, raw := range stmt.Statements {
 		fn, ok := raw.(FunctionStmt)
 		if !ok {
@@ -453,7 +468,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		}
 	}
 
-	// First pass: collect variables.
+	// 3. Collect variables.
 	for _, raw := range stmt.Statements {
 		v, ok := raw.(VariableStmt)
 		if !ok {
@@ -461,6 +476,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		}
 
 		fullName := stmt.Name + "." + v.Name
+		namespaceVariables[v.Name] = fullName
 
 		members[v.Name] = NamespaceMemberRef{
 			GlobalName: fullName,
@@ -470,7 +486,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 	c.currentNamespaceFunctions = namespaceFunctions
 	c.currentNamespaceVariables = namespaceVariables
 
-	// Compile variables as hidden globals.
+	// 4. Compile variables as hidden globals.
 	for _, raw := range stmt.Statements {
 		v, ok := raw.(VariableStmt)
 		if !ok {
@@ -478,7 +494,6 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		}
 
 		fullName := stmt.Name + "." + v.Name
-		namespaceVariables[v.Name] = fullName
 
 		c.compileExpr(v.Value)
 
@@ -490,7 +505,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		c.globalConstants[fullName] = v.Constant
 	}
 
-	// Compile functions with namespaced names.
+	// 5. Compile functions.
 	for _, raw := range stmt.Statements {
 		fn, ok := raw.(FunctionStmt)
 		if !ok {
@@ -511,7 +526,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 	c.currentNamespaceFunctions = oldNamespaceFunctions
 	c.currentNamespaceVariables = oldNamespaceVariables
 
-	// Create namespace object.
+	// 6. Create namespace object.
 	c.emit(OP_CONST, NamespaceValue{
 		Name:    stmt.Name,
 		Members: members,
