@@ -128,6 +128,13 @@ type BoolExpr struct {
 
 func (e BoolExpr) exprNode() {}
 
+type UnaryExpr struct {
+	Op    TokenType
+	Right Expr
+}
+
+func (e UnaryExpr) exprNode() {}
+
 type ObjectField struct {
 	Name  string
 	Value Expr

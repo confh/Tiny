@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -32,6 +33,12 @@ type NativeServerValue struct {
 
 type StandardModuleValue struct {
 	Name string
+}
+
+type NativeFileValue struct {
+	File   *os.File
+	Path   string
+	Closed bool
 }
 
 type Value any
@@ -119,6 +126,8 @@ func typeName(value Value) string {
 		return "plugin"
 	case *StandardModuleValue:
 		return "standard module"
+	case *NativeFileValue:
+		return "file"
 	default:
 		return fmt.Sprintf("%T", value)
 	}
@@ -240,7 +249,12 @@ func valueToString(value Value) string {
 		parts := make([]string, len(v.Elements))
 
 		for i, item := range v.Elements {
-			parts[i] = valueToString(item)
+			value, ok := item.(string)
+			if ok {
+				parts[i] = "\"" + value + "\""
+			} else {
+				parts[i] = valueToString(item)
+			}
 		}
 
 		return "[" + strings.Join(parts, ", ") + "]"
@@ -274,6 +288,8 @@ func valueToString(value Value) string {
 		return "<plugin " + v.Path + ">"
 	case *StandardModuleValue:
 		return "<std " + v.Name + ">"
+	case *NativeFileValue:
+		return "<file " + v.Path + ">"
 	default:
 		return fmt.Sprintf("%v", v)
 	}
@@ -291,7 +307,7 @@ func asString(value Value) string {
 func asArray(value Value) *ArrayValue {
 	arrayValue, ok := value.(*ArrayValue)
 	if !ok {
-		langError(ErrorSyntax, "expected string, got %T", value)
+		langError(ErrorSyntax, "expected array, got %T", value)
 	}
 
 	return arrayValue

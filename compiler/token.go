@@ -37,6 +37,7 @@ const (
 	TOKEN_AND TokenType = "AND"
 	TOKEN_OR  TokenType = "OR"
 
+	TOKEN_BANG         TokenType = "!"
 	TOKEN_ASSIGN       TokenType = "="
 	TOKEN_PLUS         TokenType = "+"
 	TOKEN_INCREMENT    TokenType = "++"

@@ -447,6 +447,10 @@ func (vm *VM) step() bool {
 
 		vm.push(object)
 
+	case OP_NOT:
+		value := vm.pop()
+		vm.push(!isTruthy(value))
+
 	case OP_GET_PROPERTY:
 		name := instr.Value.(string)
 		objectValue := vm.pop()

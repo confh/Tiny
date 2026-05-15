@@ -1,6 +1,13 @@
 package main
 
-import "strings"
+import (
+	"encoding/json"
+	"errors"
+	"io"
+	"os"
+	"slices"
+	"strings"
+)
 
 func (vm *VM) callStandardModule(module string, method string, args []Value) {
 	switch module {
@@ -13,8 +20,208 @@ func (vm *VM) callStandardModule(module string, method string, args []Value) {
 	case "string":
 		vm.callStdString(method, args)
 
+	case "json":
+		vm.callStdJson(method, args)
+
+	case "fs":
+		vm.callStdFs(method, args)
+
 	default:
 		langError(ErrorName, "unknown standard module: %s", module)
+	}
+}
+
+func (vm *VM) callStdFs(method string, args []Value) {
+	switch method {
+	case "open":
+		if len(args) != 1 {
+			langError(ErrorRuntime, "fs.open expects 1 argument")
+		}
+
+		path := asString(args[0])
+
+		file, err := os.Open(path)
+		if err != nil {
+			langError(ErrorRuntime, "failed to open file: %v", err)
+		}
+
+		vm.push(&NativeFileValue{
+			File: file,
+			Path: path,
+		})
+
+	case "read":
+		if len(args) != 2 {
+			langError(ErrorRuntime, "fs.read expects 2 arguments")
+		}
+
+		file, ok := args[0].(*NativeFileValue)
+		if !ok {
+			langError(ErrorType, "fs.read expects file, got %s", typeName(args[0]))
+		}
+
+		if file.Closed {
+			langError(ErrorRuntime, "cannot read closed file")
+		}
+
+		size := asInt(args[1])
+
+		if size <= 0 {
+			langError(ErrorRuntime, "read size must be greater than 0")
+		}
+
+		buffer := make([]byte, size)
+
+		n, err := file.File.Read(buffer)
+		if err != nil && !errors.Is(err, io.EOF) {
+			langError(ErrorRuntime, "failed to read file: %v", err)
+		}
+
+		vm.push(string(buffer[:n]))
+
+	case "close":
+		if len(args) != 1 {
+			langError(ErrorRuntime, "fs.close expects 1 argument")
+		}
+
+		file, ok := args[0].(*NativeFileValue)
+		if !ok {
+			langError(ErrorType, "fs.close expects file, got %s", typeName(args[0]))
+		}
+
+		if !file.Closed {
+			err := file.File.Close()
+			if err != nil {
+				langError(ErrorRuntime, "failed to close file: %v", err)
+			}
+
+			file.Closed = true
+		}
+
+		vm.push(true)
+
+	case "readFile":
+		if len(args) != 1 {
+			langError(ErrorRuntime, "fs.readFile expects 1 argument")
+		}
+
+		fileName := asString(args[0])
+
+		data, err := os.ReadFile(fileName)
+		if err != nil {
+			langError(ErrorRuntime, "error reading file: %s", err)
+		}
+
+		vm.push(string(data))
+
+	case "writeFile":
+		if len(args) != 2 {
+			langError(ErrorRuntime, "fs.writeFile expects 2 arguments")
+		}
+
+		fileName := asString(args[0])
+		data := valueToString(args[1])
+
+		err := os.WriteFile(fileName, []byte(data), 0644)
+		if err != nil {
+			langError(ErrorRuntime, "error writing file: %s", err)
+		}
+
+		vm.push(0)
+
+	case "exists":
+		if len(args) != 1 {
+			langError(ErrorRuntime, "fs.exists expects 1 argument")
+		}
+
+		fileName := asString(args[0])
+
+		_, err := os.Stat(fileName)
+
+		if err == nil {
+			vm.push(true)
+		} else if errors.Is(err, os.ErrNotExist) {
+			vm.push(false)
+		} else {
+			langError(ErrorRuntime, "something went wrong: %s", err)
+		}
+
+	case "readDir":
+		if len(args) != 1 {
+			langError(ErrorRuntime, "fs.readDir expects 1 argument")
+		}
+
+		dirName := asString(args[0])
+
+		files, err := os.ReadDir(dirName)
+		if err != nil {
+			langError(ErrorRuntime, "error reading directory: %s", err)
+		}
+
+		fileNames := &ArrayValue{
+			Elements: []Value{},
+		}
+
+		for _, file := range files {
+			fileNames.Elements = append(fileNames.Elements, file.Name())
+		}
+
+		vm.push(fileNames)
+	default:
+		langError(ErrorName, "unknown fs function: %s", method)
+	}
+}
+
+func (vm *VM) callStdJson(method string, args []Value) {
+	switch method {
+	case "stringify":
+		if len(args) != 1 {
+			langError(ErrorRuntime, "json.stringify expects 1 argument")
+		}
+
+		value := args[0]
+
+		jsonValue := valueToJSONCompatible(value)
+
+		bytes, err := json.Marshal(jsonValue)
+		if err != nil {
+			langError(ErrorRuntime, "failed to convert value to JSON: %v", err)
+		}
+
+		vm.push(string(bytes))
+
+	case "pretty":
+		if len(args) != 1 {
+			langError(ErrorRuntime, "json.pretty expects 1 argument")
+		}
+
+		value := args[0]
+
+		jsonValue := valueToJSONCompatible(value)
+
+		bytes, err := json.MarshalIndent(jsonValue, "", "  ")
+		if err != nil {
+			langError(ErrorRuntime, "failed to convert value to JSON: %v", err)
+		}
+
+		vm.push(string(bytes))
+	case "parse":
+		if len(args) != 1 {
+			langError(ErrorRuntime, "json.parse expects 1 argument")
+		}
+
+		stringified := asString(args[0])
+
+		var result any
+
+		err := json.Unmarshal([]byte(stringified), &result)
+		if err != nil {
+			langError(ErrorRuntime, "invalid JSON: %v", err)
+		}
+
+		vm.push(jsonToTinyValue(result))
+	default:
+		langError(ErrorName, "unknown json function: %s", method)
 	}
 }
 
@@ -195,6 +402,20 @@ func (vm *VM) callStdArray(method string, args []Value) {
 		arr.Elements[index] = args[2]
 
 		vm.push(arr)
+
+	case "contains":
+		if len(args) != 2 {
+			langError(ErrorRuntime, "array.contains expects 2 arguments")
+		}
+
+		arr, ok := args[0].(*ArrayValue)
+		if !ok {
+			langError(ErrorType, "array.contains expects array, got %s", typeName(args[0]))
+		}
+
+		element := args[1]
+
+		vm.push(slices.Contains(arr.Elements, element))
 
 	default:
 		langError(ErrorName, "unknown array function: %s", method)

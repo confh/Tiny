@@ -99,6 +99,7 @@ func (l *Lexer) NextToken() Token {
 	}
 
 	switch ch {
+
 	case '=':
 		if l.peek() == '=' {
 			l.pos += 2
@@ -114,9 +115,8 @@ func (l *Lexer) NextToken() Token {
 			return Token{Type: TOKEN_NEQ, Literal: "!="}
 		}
 
-		langError(ErrorSyntax, "unexpected character: !")
-
-		return Token{}
+		l.pos++
+		return Token{Type: TOKEN_BANG, Literal: "!"}
 
 	case '<':
 		if l.peek() == '=' {

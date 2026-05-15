@@ -153,6 +153,20 @@ func optimizeExpr(expr Expr) Expr {
 			Name:   e.Name,
 		}
 
+	case UnaryExpr:
+		right := optimizeExpr(e.Right)
+
+		if e.Op == TOKEN_BANG {
+			if boolExpr, ok := right.(BoolExpr); ok {
+				return BoolExpr{Value: !boolExpr.Value}
+			}
+		}
+
+		return UnaryExpr{
+			Op:    e.Op,
+			Right: right,
+		}
+
 	default:
 		return expr
 	}
@@ -541,6 +555,17 @@ func (c *Compiler) compileExpr(expr Expr) {
 	switch e := expr.(type) {
 	case StringExpr:
 		c.emit(OP_CONST, e.Value)
+
+	case UnaryExpr:
+		c.compileExpr(e.Right)
+
+		switch e.Op {
+		case TOKEN_BANG:
+			c.emit(OP_NOT, nil)
+
+		default:
+			langError(ErrorInternal, "unknown unary operator: %s", e.Op)
+		}
 
 	case InterpolatedStringExpr:
 		textParts := []string{}

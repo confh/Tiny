@@ -122,7 +122,7 @@ func (p *Parser) ParseProgram() Program {
 }
 
 func (p *Parser) parsePossibleAssignmentStatement() Stmt {
-	left := p.parsePostfix()
+	left := p.parseUnary()
 
 	switch p.current.Type {
 	case TOKEN_ASSIGN:
@@ -1109,6 +1109,9 @@ func (p *Parser) parsePrimary() Expr {
 		p.advance()
 		return UndefinedExpr{}
 
+	case TOKEN_BANG:
+		return p.parseUnary()
+
 	default:
 		langError(ErrorSyntax, "expected expression, got %s", p.current.Type)
 		return UndefinedExpr{}
@@ -1190,6 +1193,22 @@ func (p *Parser) parseClassStatement() Stmt {
 		Name:    name,
 		Methods: methods,
 	}
+}
+
+func (p *Parser) parseUnary() Expr {
+	if p.current.Type == TOKEN_BANG {
+		op := p.current.Type
+		p.advance()
+
+		right := p.parseUnary()
+
+		return UnaryExpr{
+			Op:    op,
+			Right: right,
+		}
+	}
+
+	return p.parsePostfix()
 }
 
 func (p *Parser) parseArgumentList() []Expr {

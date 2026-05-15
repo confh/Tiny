@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -47,36 +46,6 @@ func (vm *VM) callCore(method string, argCount int) {
 		}
 
 		vm.push(server)
-	case "toPrettyJSON":
-		if argCount != 1 {
-			langError(ErrorRuntime, "Core.toPrettyJSON expects 1 argument")
-		}
-
-		value := vm.pop()
-
-		jsonValue := valueToJSONCompatible(value)
-
-		bytes, err := json.MarshalIndent(jsonValue, "", "  ")
-		if err != nil {
-			langError(ErrorRuntime, "failed to convert value to JSON: %v", err)
-		}
-
-		vm.push(string(bytes))
-	case "toJSON":
-		if argCount != 1 {
-			langError(ErrorRuntime, "Core.toJSON expects 1 argument")
-		}
-
-		value := vm.pop()
-
-		jsonValue := valueToJSONCompatible(value)
-
-		bytes, err := json.Marshal(jsonValue)
-		if err != nil {
-			langError(ErrorRuntime, "failed to convert value to JSON: %v", err)
-		}
-
-		vm.push(string(bytes))
 	case "has":
 		if argCount != 2 {
 			langError(ErrorRuntime, "Core.has expects 2 arguments")
