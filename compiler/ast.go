@@ -45,9 +45,10 @@ type PropertyAssignStmt struct {
 func (s PropertyAssignStmt) stmtNode() {}
 
 type ImportStmt struct {
-	Path  string
-	Std   bool
-	Alias string
+	Path   string
+	Std    bool
+	Plugin bool
+	Alias  string
 }
 
 func (s ImportStmt) stmtNode() {}

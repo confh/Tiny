@@ -885,39 +885,18 @@ func (c *Compiler) compileExpr(expr Expr) {
 			} else {
 				c.emit(OP_LOAD_GLOBAL, binding.Name)
 			}
+
 			return
 		}
 
-		if c.outerBindings != nil {
-			if outer, exists := c.outerBindings[e.Name]; exists {
-				capture, already := c.currentCaptures[e.Name]
-				if !already {
-					slot := c.localCount
-					c.localCount++
-
-					capture = CapturedVar{
-						Name:      e.Name,
-						OuterSlot: outer.Slot,
-						InnerSlot: slot,
-					}
-
-					c.currentCaptures[e.Name] = capture
-
-					// declare it in current scope too
-					c.currentScope()[e.Name] = Binding{
-						Kind:     BindingLocal,
-						Name:     e.Name,
-						Slot:     slot,
-						Constant: outer.Constant,
-					}
-				}
-
-				c.emit(OP_LOAD_LOCAL, capture.InnerSlot)
-				return
-			}
+		if _, exists := c.functions[e.Name]; exists {
+			c.emit(OP_CONST, FunctionValue{Name: e.Name})
+			return
 		}
 
-		// functions/classes/global fallback...
+		// Important fallback:
+		// If it is not a local and not a function, assume it is a global.
+		c.emit(OP_LOAD_GLOBAL, e.Name)
 
 	case BinaryExpr:
 		c.compileExpr(e.Left)

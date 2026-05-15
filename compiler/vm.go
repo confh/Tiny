@@ -36,6 +36,10 @@ type VM struct {
 	functions        map[string]Function
 	classes          map[string]Class
 
+	lastInstruction      Instruction
+	lastInstructionIndex int
+	lastFunctionName     string
+
 	cliArgs []string
 
 	tryHandlers []TryHandler
@@ -94,6 +98,16 @@ func (vm *VM) step() bool {
 	}
 
 	instr := instructions[ip]
+
+	vm.lastInstruction = instr
+	vm.lastInstructionIndex = ip // use whatever variable stores current instruction index
+
+	if len(vm.frames) > 0 {
+		vm.lastFunctionName = vm.frames[len(vm.frames)-1].function.Name
+	} else {
+		vm.lastFunctionName = "<main>"
+	}
+
 	vm.incrementIP()
 
 	switch instr.Op {
@@ -182,6 +196,10 @@ func (vm *VM) step() bool {
 			langError(ErrorInternal, "local slot out of range: %d", slot)
 		}
 
+		if frame.locals[slot] == nil {
+			langError(ErrorInternal, "local slot %d is nil", slot)
+		}
+
 		vm.push(frame.locals[slot].Value)
 
 	case OP_STORE_LOCAL:
@@ -220,6 +238,10 @@ func (vm *VM) step() bool {
 
 		if slot < 0 || slot >= len(frame.locals) {
 			langError(ErrorInternal, "local slot out of range: %d", slot)
+		}
+
+		if frame.locals[slot] == nil {
+			frame.locals[slot] = &Cell{Value: UndefinedValue{}}
 		}
 
 		if frame.constants[slot] {
@@ -362,6 +384,7 @@ func (vm *VM) step() bool {
 
 	case OP_METHOD_CALL:
 		info := instr.Value.(MethodCallInfo)
+
 		vm.callMethod(info.Method, info.ArgCount)
 
 	case OP_CALL:
@@ -461,7 +484,13 @@ func (vm *VM) step() bool {
 		}
 
 	case OP_RETURN:
-		returnValue := vm.pop()
+		var returnValue Value
+
+		if len(vm.stack) == 0 {
+			returnValue = UndefinedValue{}
+		} else {
+			returnValue = vm.pop()
+		}
 
 		if len(vm.frames) == 0 {
 			langError(ErrorRuntime, "return used outside of function")
@@ -641,13 +670,13 @@ func makeErrorObject(value Value) ObjectValue {
 	}
 }
 
-func (vm *VM) callFunctionValue(fnValue FunctionValue, args []Value) Value {
+func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []Value) {
 	fn, ok := vm.functions[fnValue.Name]
 	if !ok {
 		langError(ErrorName, "undefined function: %s", fnValue.Name)
 	}
 
-	if len(fn.Params) != len(args) {
+	if len(args) != len(fn.Params) {
 		langError(
 			ErrorRuntime,
 			"function %s expects %d arguments, got %d",
@@ -661,8 +690,7 @@ func (vm *VM) callFunctionValue(fnValue FunctionValue, args []Value) Value {
 	constants := make([]bool, fn.LocalCount)
 
 	for i, arg := range args {
-		locals[i].Value = arg
-		constants[i] = false
+		locals[i] = &Cell{Value: arg}
 	}
 
 	for slot, cell := range fnValue.Captures {
@@ -673,7 +701,11 @@ func (vm *VM) callFunctionValue(fnValue FunctionValue, args []Value) Value {
 		locals[slot] = cell
 	}
 
-	frameDepthBefore := len(vm.frames)
+	for i := range locals {
+		if locals[i] == nil {
+			locals[i] = &Cell{Value: UndefinedValue{}}
+		}
+	}
 
 	frame := Frame{
 		function:     fn,
@@ -684,11 +716,21 @@ func (vm *VM) callFunctionValue(fnValue FunctionValue, args []Value) Value {
 	}
 
 	vm.frames = append(vm.frames, frame)
+}
+
+func (vm *VM) callFunctionValue(fnValue FunctionValue, args []Value) Value {
+	frameDepthBefore := len(vm.frames)
+
+	vm.callFunctionValueWithArgs(fnValue, args)
 
 	for len(vm.frames) > frameDepthBefore {
 		if vm.step() {
-			langError(ErrorRuntime, "program halted while running callback")
+			langError(ErrorRuntime, "program halted while running function value")
 		}
+	}
+
+	if len(vm.stack) == 0 {
+		langError(ErrorInternal, "function %s returned no value", fnValue.Name)
 	}
 
 	return vm.pop()
@@ -878,12 +920,18 @@ func (vm *VM) callMethod(method string, argCount int) {
 	locals := make([]*Cell, fn.LocalCount)
 	constants := make([]bool, fn.LocalCount)
 
-	locals[0].Value = object
+	locals[0] = &Cell{Value: object}
 	constants[0] = true
 
 	for i, arg := range args {
-		locals[i+1].Value = arg
+		locals[i+1] = &Cell{Value: arg}
 		constants[i+1] = false
+	}
+
+	for i := range locals {
+		if locals[i] == nil {
+			locals[i] = &Cell{Value: UndefinedValue{}}
+		}
 	}
 
 	frame := Frame{
@@ -967,31 +1015,35 @@ func (vm *VM) setIP(value int) {
 }
 
 func (vm *VM) callFunction(name string, argCount int) {
-	fn, ok := vm.functions[name]
-	if !ok {
-		if class, exists := vm.classes[name]; exists {
-			vm.callClass(class, argCount)
-			return
-		}
-
-		langError(ErrorName, "undefined function or class: %s", name)
+	fn, exists := vm.functions[name]
+	if !exists {
+		langError(ErrorName, "undefined function: %s", name)
 	}
 
-	if len(fn.Params) != argCount {
-		langError(ErrorRuntime, "function %s expects %d arguments, got %d",
+	args := vm.popArgs(argCount)
+
+	if len(args) != len(fn.Params) {
+		langError(
+			ErrorRuntime,
+			"function %s expects %d arguments, got %d",
 			name,
 			len(fn.Params),
-			argCount)
+			len(args),
+		)
 	}
 
 	locals := make([]*Cell, fn.LocalCount)
 	constants := make([]bool, fn.LocalCount)
 
-	args := vm.popArgs(argCount)
-
 	for i, arg := range args {
-		locals[i].Value = arg
-		constants[i] = false
+		locals[i] = &Cell{Value: arg}
+	}
+
+	// Very important: fill empty local slots.
+	for i := range locals {
+		if locals[i] == nil {
+			locals[i] = &Cell{Value: UndefinedValue{}}
+		}
 	}
 
 	frame := Frame{
@@ -1098,10 +1150,24 @@ func (vm *VM) currentFrame() *Frame {
 	return &vm.frames[len(vm.frames)-1]
 }
 
-func (vm *VM) popArgs(argCount int) []Value {
-	args := make([]Value, argCount)
+func (vm *VM) popArgs(count int) []Value {
+	if len(vm.stack) < count {
+		langError(
+			ErrorInternal,
+			"not enough values for args: need=%d have=%d at function=%s ip=%d op=%v value=%#v stack=%#v",
+			count,
+			len(vm.stack),
+			vm.lastFunctionName,
+			vm.lastInstructionIndex,
+			vm.lastInstruction.Op,
+			vm.lastInstruction.Value,
+			vm.stack,
+		)
+	}
 
-	for i := argCount - 1; i >= 0; i-- {
+	args := make([]Value, count)
+
+	for i := count - 1; i >= 0; i-- {
 		args[i] = vm.pop()
 	}
 
@@ -1114,11 +1180,17 @@ func (vm *VM) push(value Value) {
 
 func (vm *VM) pop() Value {
 	if len(vm.stack) == 0 {
-		langError(ErrorInternal, "stack underflow")
+		langError(
+			ErrorInternal,
+			"stack underflow at function=%s ip=%d op=%v value=%#v",
+			vm.lastFunctionName,
+			vm.lastInstructionIndex,
+			vm.lastInstruction.Op,
+			vm.lastInstruction.Value,
+		)
 	}
 
 	value := vm.stack[len(vm.stack)-1]
 	vm.stack = vm.stack[:len(vm.stack)-1]
-
 	return value
 }
