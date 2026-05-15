@@ -22,6 +22,15 @@ type SerializableFunction struct {
 	Instructions []SerializableInstruction `json:"instructions"`
 }
 
+type SerializableNamespaceValue struct {
+	Name    string                  `json:"name"`
+	Members map[string]EncodedValue `json:"members"`
+}
+
+type SerializableNamespaceMemberRef struct {
+	GlobalName string `json:"globalName"`
+}
+
 type SerializableInstruction struct {
 	Op    OpCode       `json:"op"`
 	Value EncodedValue `json:"value"`
@@ -176,6 +185,52 @@ func encodeValue(value any) EncodedValue {
 	case UndefinedValue:
 		return EncodedValue{Type: "undefined"}
 
+	case NamespaceValue:
+		members := map[string]EncodedValue{}
+
+		for name, member := range v.Members {
+			members[name] = encodeValue(member)
+		}
+
+		return EncodedValue{
+			Type: "namespace",
+			Data: SerializableNamespaceValue{
+				Name:    v.Name,
+				Members: members,
+			},
+		}
+
+	case *NamespaceValue:
+		members := map[string]EncodedValue{}
+
+		for name, member := range v.Members {
+			members[name] = encodeValue(member)
+		}
+
+		return EncodedValue{
+			Type: "namespace",
+			Data: SerializableNamespaceValue{
+				Name:    v.Name,
+				Members: members,
+			},
+		}
+
+	case NamespaceMemberRef:
+		return EncodedValue{
+			Type: "namespaceRef",
+			Data: SerializableNamespaceMemberRef{
+				GlobalName: v.GlobalName,
+			},
+		}
+
+	case *NamespaceMemberRef:
+		return EncodedValue{
+			Type: "namespaceRef",
+			Data: SerializableNamespaceMemberRef{
+				GlobalName: v.GlobalName,
+			},
+		}
+
 	default:
 		langError(ErrorRuntime, "cannot encode bytecode value: %T", value)
 		return EncodedValue{Type: "nil"}
@@ -252,6 +307,29 @@ func decodeValue(value EncodedValue) any {
 
 	case "undefined":
 		return UndefinedValue{}
+
+	case "namespace":
+		var data SerializableNamespaceValue
+		decodeInto(value.Data, &data)
+
+		members := map[string]Value{}
+
+		for name, encodedMember := range data.Members {
+			members[name] = decodeValue(encodedMember)
+		}
+
+		return NamespaceValue{
+			Name:    data.Name,
+			Members: members,
+		}
+
+	case "namespaceRef":
+		var data SerializableNamespaceMemberRef
+		decodeInto(value.Data, &data)
+
+		return NamespaceMemberRef{
+			GlobalName: data.GlobalName,
+		}
 
 	default:
 		langError(ErrorRuntime, "unknown encoded value type: %s", value.Type)

@@ -147,6 +147,7 @@ func writePackedMain(tempDir string) {
 	code := `package main
 
 import _ "embed"
+import "os"
 
 //go:embed app.tbc
 var embeddedBytecode []byte
