@@ -18,6 +18,7 @@ type SerializableFunction struct {
 	Name         string                    `json:"name"`
 	Params       []string                  `json:"params"`
 	LocalCount   int                       `json:"localCount"`
+	Captures     []CapturedVar             `json:"captures"`
 	Instructions []SerializableInstruction `json:"instructions"`
 }
 
@@ -160,6 +161,9 @@ func encodeValue(value any) EncodedValue {
 	case ObjectInfo:
 		return EncodedValue{Type: "object", Data: v}
 
+	case ClosureInfo:
+		return EncodedValue{Type: "closure", Data: v}
+
 	case ArrayInfo:
 		return EncodedValue{Type: "array", Data: v}
 
@@ -220,6 +224,11 @@ func decodeValue(value EncodedValue) any {
 
 	case "interpolate":
 		var result InterpolateInfo
+		decodeInto(value.Data, &result)
+		return result
+
+	case "closure":
+		var result ClosureInfo
 		decodeInto(value.Data, &result)
 		return result
 

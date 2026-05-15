@@ -157,6 +157,7 @@ func main() {
 	mainBytecode, functions, classes := LoadBytecodeFromBytes(embeddedBytecode)
 
 	vm := NewVM(mainBytecode, functions, classes)
+	vm.SetCLIArgs(os.Args[1:])
 	vm.Run()
 }
 `

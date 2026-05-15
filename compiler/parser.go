@@ -70,7 +70,7 @@ func parseInterpolatedString(input string) Expr {
 
 		exprSource := input[start+2 : end]
 
-		lexer := NewLexer(exprSource)
+		lexer := NewLexer(exprSource, "")
 		parser := NewParser(lexer)
 		expr := parser.parseExpression()
 
@@ -640,8 +640,43 @@ func (p *Parser) parseBlock() []Stmt {
 func (p *Parser) parseImportStatement() Stmt {
 	p.expect(TOKEN_IMPORT)
 
+	// import std "array";
+	// import std "math" as m;
+	if p.current.Type == TOKEN_IDENT && p.current.Literal == "std" {
+		p.advance()
+
+		if p.current.Type != TOKEN_STRING {
+			langError(ErrorSyntax, "expected standard module name after import std")
+		}
+
+		moduleName := p.current.Literal
+		p.advance()
+
+		alias := moduleName
+
+		if p.current.Type == TOKEN_IDENT && p.current.Literal == "as" {
+			p.advance()
+
+			if p.current.Type != TOKEN_IDENT {
+				langError(ErrorSyntax, "expected alias name after as")
+			}
+
+			alias = p.current.Literal
+			p.advance()
+		}
+
+		p.expect(TOKEN_SEMI)
+
+		return ImportStmt{
+			Path:  moduleName,
+			Std:   true,
+			Alias: alias,
+		}
+	}
+
+	// import "lib.tiny";
 	if p.current.Type != TOKEN_STRING {
-		langError(ErrorSyntax, "expected string path after import")
+		langError(ErrorSyntax, "expected import path")
 	}
 
 	path := p.current.Literal
@@ -649,7 +684,11 @@ func (p *Parser) parseImportStatement() Stmt {
 
 	p.expect(TOKEN_SEMI)
 
-	return ImportStmt{Path: path}
+	return ImportStmt{
+		Path:  path,
+		Std:   false,
+		Alias: "",
+	}
 }
 
 func (p *Parser) parseLetStatement() Stmt {
@@ -901,6 +940,18 @@ func (p *Parser) parsePostfix() Expr {
 
 	for {
 		switch p.current.Type {
+		case TOKEN_LPAREN:
+			p.advance()
+
+			args := p.parseArgumentList()
+
+			p.expect(TOKEN_RPAREN)
+
+			expr = CallValueExpr{
+				Callee: expr,
+				Args:   args,
+			}
+
 		case TOKEN_DOT:
 			p.advance()
 
@@ -1049,19 +1100,6 @@ func (p *Parser) parsePrimary() Expr {
 	case TOKEN_IDENT:
 		name := p.current.Literal
 		p.advance()
-
-		if p.current.Type == TOKEN_LPAREN {
-			p.advance()
-
-			args := p.parseArgumentList()
-
-			p.expect(TOKEN_RPAREN)
-
-			return CallExpr{
-				Name: name,
-				Args: args,
-			}
-		}
 
 		return IdentExpr{Name: name}
 
@@ -1234,7 +1272,15 @@ func (p *Parser) parseArgumentList() []Expr {
 
 func (p *Parser) expect(tokenType TokenType) {
 	if p.current.Type != tokenType {
-		langError(ErrorSyntax, "expected %s, got %s", tokenType, p.current.Type)
+		langErrorAt(
+			ErrorSyntax,
+			p.current.File,
+			p.current.Line,
+			p.current.Column,
+			"expected %s, got %s",
+			tokenType,
+			p.current.Type,
+		)
 	}
 
 	p.advance()

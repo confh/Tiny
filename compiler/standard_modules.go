@@ -26,8 +26,33 @@ func (vm *VM) callStandardModule(module string, method string, args []Value) {
 	case "fs":
 		vm.callStdFs(method, args)
 
+	case "app":
+		vm.callStdApp(method, args)
+
+	case "task":
+		vm.callTaskModule(method, args)
+
 	default:
 		langError(ErrorName, "unknown standard module: %s", module)
+	}
+}
+
+func (vm *VM) callStdApp(method string, args []Value) {
+	switch method {
+	case "new":
+		if len(args) != 1 {
+			langError(ErrorRuntime, "app.new expects 1 argument")
+		}
+
+		name := asString(args[0])
+
+		vm.push(&NativeAppValue{
+			Name:     name,
+			Commands: map[string]FunctionValue{},
+		})
+
+	default:
+		langError(ErrorName, "unknown app function: %s", method)
 	}
 }
 

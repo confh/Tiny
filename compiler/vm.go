@@ -22,7 +22,7 @@ type TryHandler struct {
 type Frame struct {
 	function     Function
 	ip           int
-	locals       []Value
+	locals       []*Cell
 	constants    []bool
 	instructions []Instruction
 
@@ -35,6 +35,8 @@ type VM struct {
 	mainInstructions []Instruction
 	functions        map[string]Function
 	classes          map[string]Class
+
+	cliArgs []string
 
 	tryHandlers []TryHandler
 
@@ -58,6 +60,28 @@ func NewVM(mainInstructions []Instruction, functions map[string]Function, classe
 		globals:          map[string]Value{},
 		globalConstants:  map[string]bool{},
 		mu:               sync.Mutex{},
+		cliArgs:          []string{},
+	}
+}
+
+func (vm *VM) SetCLIArgs(args []string) {
+	vm.cliArgs = args
+}
+
+func (vm *VM) CloneForTask() *VM {
+	return &VM{
+		mainInstructions: vm.mainInstructions,
+		functions:        vm.functions,
+		classes:          vm.classes,
+
+		stack:       []Value{},
+		frames:      []Frame{},
+		tryHandlers: []TryHandler{},
+
+		globals:         vm.globals,
+		globalConstants: vm.globalConstants,
+
+		cliArgs: vm.cliArgs,
 	}
 }
 
@@ -73,6 +97,32 @@ func (vm *VM) step() bool {
 	vm.incrementIP()
 
 	switch instr.Op {
+	case OP_CLOSURE:
+		info := instr.Value.(ClosureInfo)
+
+		captures := map[int]*Cell{}
+
+		if len(info.Captures) > 0 {
+			if len(vm.frames) == 0 {
+				langError(ErrorInternal, "closure has captures but no current function frame")
+			}
+
+			frame := vm.currentFrame()
+
+			for _, capture := range info.Captures {
+				if capture.OuterSlot < 0 || capture.OuterSlot >= len(frame.locals) {
+					langError(ErrorInternal, "capture slot out of range")
+				}
+
+				captures[capture.InnerSlot] = frame.locals[capture.OuterSlot]
+			}
+		}
+
+		vm.push(FunctionValue{
+			Name:     info.Name,
+			Captures: captures,
+		})
+
 	case OP_CONST:
 		vm.push(instr.Value)
 
@@ -132,7 +182,7 @@ func (vm *VM) step() bool {
 			langError(ErrorInternal, "local slot out of range: %d", slot)
 		}
 
-		vm.push(frame.locals[slot])
+		vm.push(frame.locals[slot].Value)
 
 	case OP_STORE_LOCAL:
 		info := instr.Value.(VariableInfo)
@@ -144,7 +194,7 @@ func (vm *VM) step() bool {
 			langError(ErrorInternal, "local slot out of range: %d", info.Slot)
 		}
 
-		frame.locals[info.Slot] = value
+		frame.locals[info.Slot] = &Cell{Value: value}
 		frame.constants[info.Slot] = info.Constant
 
 	case OP_ASSIGN_GLOBAL:
@@ -176,7 +226,7 @@ func (vm *VM) step() bool {
 			langError(ErrorConst, "cannot assign to constant local")
 		}
 
-		frame.locals[slot] = value
+		frame.locals[slot].Value = value
 
 	case OP_ADD:
 		right := vm.pop()
@@ -316,7 +366,33 @@ func (vm *VM) step() bool {
 
 	case OP_CALL:
 		info := instr.Value.(CallInfo)
+
+		if class, exists := vm.classes[info.Name]; exists {
+			vm.callClass(class, info.ArgCount)
+			return false
+		}
+
 		vm.callFunction(info.Name, info.ArgCount)
+
+	case OP_CALL_VALUE:
+		info := instr.Value.(CallInfo)
+
+		args := vm.popArgs(info.ArgCount)
+
+		callee := vm.pop()
+
+		switch fn := callee.(type) {
+		case FunctionValue:
+			result := vm.callFunctionValue(fn, args)
+			vm.push(result)
+
+		case *FunctionValue:
+			result := vm.callFunctionValue(*fn, args)
+			vm.push(result)
+
+		default:
+			langError(ErrorType, "expected function, got %s", typeName(callee))
+		}
 
 	case OP_BUILTIN_CALL:
 		info := instr.Value.(BuiltinCallInfo)
@@ -520,7 +596,7 @@ func (vm *VM) throwValue(value Value) {
 			langError(ErrorInternal, "catch local slot out of range")
 		}
 
-		frame.locals[handler.Slot] = errorObject
+		frame.locals[handler.Slot].Value = errorObject
 		frame.constants[handler.Slot] = false
 	} else {
 		vm.globals[handler.Name] = errorObject
@@ -581,12 +657,20 @@ func (vm *VM) callFunctionValue(fnValue FunctionValue, args []Value) Value {
 		)
 	}
 
-	locals := make([]Value, fn.LocalCount)
+	locals := make([]*Cell, fn.LocalCount)
 	constants := make([]bool, fn.LocalCount)
 
 	for i, arg := range args {
-		locals[i] = arg
+		locals[i].Value = arg
 		constants[i] = false
+	}
+
+	for slot, cell := range fnValue.Captures {
+		if slot < 0 || slot >= len(locals) {
+			langError(ErrorInternal, "closure capture slot out of range")
+		}
+
+		locals[slot] = cell
 	}
 
 	frameDepthBefore := len(vm.frames)
@@ -744,6 +828,11 @@ func (vm *VM) callMethod(method string, argCount int) {
 		return
 	}
 
+	if app, ok := objectValue.(*NativeAppValue); ok {
+		vm.callNativeAppMethod(app, method, args)
+		return
+	}
+
 	if std, ok := objectValue.(*StandardModuleValue); ok {
 		vm.callStandardModule(std.Name, method, args)
 		return
@@ -786,14 +875,14 @@ func (vm *VM) callMethod(method string, argCount int) {
 		)
 	}
 
-	locals := make([]Value, fn.LocalCount)
+	locals := make([]*Cell, fn.LocalCount)
 	constants := make([]bool, fn.LocalCount)
 
-	locals[0] = object
+	locals[0].Value = object
 	constants[0] = true
 
 	for i, arg := range args {
-		locals[i+1] = arg
+		locals[i+1].Value = arg
 		constants[i+1] = false
 	}
 
@@ -806,6 +895,66 @@ func (vm *VM) callMethod(method string, argCount int) {
 	}
 
 	vm.frames = append(vm.frames, frame)
+}
+
+func (vm *VM) runNativeApp(app *NativeAppValue) {
+	if len(vm.cliArgs) == 0 {
+		fmt.Println("Available commands:")
+
+		for name := range app.Commands {
+			fmt.Println("  " + name)
+		}
+
+		return
+	}
+
+	commandName := vm.cliArgs[0]
+	commandArgs := vm.cliArgs[1:]
+
+	fn, exists := app.Commands[commandName]
+	if !exists {
+		langError(ErrorRuntime, "unknown command: %s", commandName)
+	}
+
+	tinyArgs := &ArrayValue{
+		Elements: make([]Value, len(commandArgs)),
+	}
+
+	for i, arg := range commandArgs {
+		tinyArgs.Elements[i] = arg
+	}
+
+	vm.callFunctionValue(fn, []Value{tinyArgs})
+}
+
+func (vm *VM) callNativeAppMethod(app *NativeAppValue, method string, args []Value) {
+	switch method {
+	case "command":
+		if len(args) != 2 {
+			langError(ErrorRuntime, "app.command expects 2 arguments")
+		}
+
+		name := asString(args[0])
+
+		fn, ok := args[1].(FunctionValue)
+		if !ok {
+			langError(ErrorType, "app.command expects function callback")
+		}
+
+		app.Commands[name] = fn
+		vm.push(app)
+
+	case "run":
+		if len(args) != 0 {
+			langError(ErrorRuntime, "app.run expects 0 arguments")
+		}
+
+		vm.runNativeApp(app)
+		vm.push(0)
+
+	default:
+		langError(ErrorName, "unknown app method: %s", method)
+	}
 }
 
 func (vm *VM) setIP(value int) {
@@ -835,13 +984,13 @@ func (vm *VM) callFunction(name string, argCount int) {
 			argCount)
 	}
 
-	locals := make([]Value, fn.LocalCount)
+	locals := make([]*Cell, fn.LocalCount)
 	constants := make([]bool, fn.LocalCount)
 
 	args := vm.popArgs(argCount)
 
 	for i, arg := range args {
-		locals[i] = arg
+		locals[i].Value = arg
 		constants[i] = false
 	}
 
@@ -892,14 +1041,14 @@ func (vm *VM) callClass(class Class, argCount int) {
 		)
 	}
 
-	locals := make([]Value, fn.LocalCount)
+	locals := make([]*Cell, fn.LocalCount)
 	constants := make([]bool, fn.LocalCount)
 
-	locals[0] = instance
+	locals[0].Value = instance
 	constants[0] = true
 
 	for i, arg := range args {
-		locals[i+1] = arg
+		locals[i+1].Value = arg
 		constants[i+1] = false
 	}
 

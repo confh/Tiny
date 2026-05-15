@@ -5,6 +5,25 @@ import (
 	"os"
 )
 
+func getScriptArgs() []string {
+	args := os.Args
+
+	if len(args) < 2 {
+		return []string{}
+	}
+
+	// Examples:
+	// tiny main.tiny hello confis
+	// go run ./compiler main.tiny hello confis
+	//
+	// For your simple CLI, assume first non-command source file is args[1].
+	if len(args) >= 3 {
+		return args[2:]
+	}
+
+	return []string{}
+}
+
 func main() {
 	defer handleLangError()
 
@@ -29,9 +48,11 @@ func main() {
 
 func runSourceCommand(args []string) {
 	entryFile := "main.tiny"
+	cliArgs := []string{}
 
 	if len(args) >= 1 {
 		entryFile = args[0]
+		cliArgs = args[1:]
 	}
 
 	program := LoadProgram(entryFile)
@@ -40,6 +61,7 @@ func runSourceCommand(args []string) {
 	mainBytecode, functions, classes := compiler.CompileProgram(program)
 
 	vm := NewVM(mainBytecode, functions, classes)
+	vm.SetCLIArgs(cliArgs)
 	vm.Run()
 }
 
@@ -76,5 +98,6 @@ func runBytecodeCommand(args []string) {
 	mainBytecode, functions, classes := LoadBytecode(args[0])
 
 	vm := NewVM(mainBytecode, functions, classes)
+	vm.SetCLIArgs(getScriptArgs())
 	vm.Run()
 }

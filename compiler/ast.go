@@ -45,7 +45,9 @@ type PropertyAssignStmt struct {
 func (s PropertyAssignStmt) stmtNode() {}
 
 type ImportStmt struct {
-	Path string
+	Path  string
+	Std   bool
+	Alias string
 }
 
 func (s ImportStmt) stmtNode() {}
@@ -242,6 +244,13 @@ type CallExpr struct {
 }
 
 func (e CallExpr) exprNode() {}
+
+type CallValueExpr struct {
+	Callee Expr
+	Args   []Expr
+}
+
+func (e CallValueExpr) exprNode() {}
 
 type MemberCallExpr struct {
 	Object Expr

@@ -17,18 +17,37 @@ type ArrayValue struct {
 
 type ObjectValue map[string]Value
 
+type NativeTaskValue struct {
+	Done chan TaskResult
+}
+
+type TaskResult struct {
+	Value Value
+	Error any
+}
+
+type Cell struct {
+	Value Value
+}
+
 type ErrorValue struct {
 	Kind    string
 	Message string
 }
 
 type FunctionValue struct {
-	Name string
+	Name     string
+	Captures map[int]*Cell
 }
 
 type NativeServerValue struct {
 	Port   int
 	Routes map[string]Value
+}
+
+type NativeAppValue struct {
+	Name     string
+	Commands map[string]FunctionValue
 }
 
 type StandardModuleValue struct {
@@ -93,7 +112,7 @@ func asFloat(value Value) float64 {
 }
 
 func typeName(value Value) string {
-	switch value.(type) {
+	switch v := value.(type) {
 	case int:
 		return "number"
 	case float64:
@@ -113,7 +132,9 @@ func typeName(value Value) string {
 	case nil:
 		return "nil"
 	case FunctionValue:
-		return "function"
+		return "<function " + v.Name + ">"
+	case *FunctionValue:
+		return "<function " + v.Name + ">"
 	case NativeServerValue:
 		return "server"
 	case *NativeServerValue:
@@ -128,6 +149,10 @@ func typeName(value Value) string {
 		return "standard module"
 	case *NativeFileValue:
 		return "file"
+	case *NativeAppValue:
+		return "app"
+	case *NativeTaskValue:
+		return "task"
 	default:
 		return fmt.Sprintf("%T", value)
 	}
@@ -290,6 +315,10 @@ func valueToString(value Value) string {
 		return "<std " + v.Name + ">"
 	case *NativeFileValue:
 		return "<file " + v.Path + ">"
+	case *NativeAppValue:
+		return "<app " + v.Name + ">"
+	case *NativeTaskValue:
+		return "<task>"
 	default:
 		return fmt.Sprintf("%v", v)
 	}

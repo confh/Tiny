@@ -29,7 +29,7 @@ func loadFile(path string, visited map[string]bool) []Stmt {
 		langError(ErrorImport, "failed to read file %s: %v", path, err)
 	}
 
-	lexer := NewLexer(string(bytes))
+	lexer := NewLexer(string(bytes), absPath)
 	parser := NewParser(lexer)
 	program := parser.ParseProgram()
 
@@ -39,6 +39,11 @@ func loadFile(path string, visited map[string]bool) []Stmt {
 	for _, stmt := range program.Statements {
 		switch s := stmt.(type) {
 		case ImportStmt:
+			if s.Std {
+				result = append(result, s)
+				continue
+			}
+
 			importPath := filepath.Join(dir, s.Path)
 			importedStatements := loadFile(importPath, visited)
 			result = append(result, importedStatements...)

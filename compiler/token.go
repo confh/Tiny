@@ -71,4 +71,8 @@ const (
 type Token struct {
 	Type    TokenType
 	Literal string
+
+	File   string
+	Line   int
+	Column int
 }

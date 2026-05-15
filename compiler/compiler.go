@@ -2,6 +2,20 @@ package main
 
 import "strconv"
 
+type BindingKind int
+
+const (
+	BindingGlobal BindingKind = iota
+	BindingLocal
+)
+
+type Binding struct {
+	Kind     BindingKind
+	Name     string
+	Slot     int
+	Constant bool
+}
+
 type LoopContext struct {
 	Start         int
 	BreakJumps    []int
@@ -20,7 +34,18 @@ type Compiler struct {
 	loopStack              []LoopContext
 	anonymousFunctionCount int
 
+	outerBindings   map[string]Binding
+	currentCaptures map[string]CapturedVar
+
+	parent   *Compiler
+	captured map[string]CapturedVar
+
+	outerScopes []map[string]Binding
+
 	currentInstructions *[]Instruction
+
+	scopes  []map[string]Binding
+	scopeID int
 
 	locals          map[string]LocalInfo
 	localCount      int
@@ -110,6 +135,18 @@ func optimizeExpr(expr Expr) Expr {
 
 		return ArrayExpr{Elements: elements}
 
+	case CallValueExpr:
+		args := make([]Expr, len(e.Args))
+
+		for i, arg := range e.Args {
+			args[i] = optimizeExpr(arg)
+		}
+
+		return CallValueExpr{
+			Callee: optimizeExpr(e.Callee),
+			Args:   args,
+		}
+
 	case ObjectExpr:
 		fields := make([]ObjectField, len(e.Fields))
 
@@ -182,11 +219,115 @@ func NewCompiler() *Compiler {
 		localCount:             0,
 		globalConstants:        map[string]bool{},
 		anonymousFunctionCount: 0,
+		scopes:                 []map[string]Binding{},
 	}
 
 	c.currentInstructions = &c.mainInstructions
+	c.beginScope()
 
 	return c
+}
+
+// func (c *Compiler) compileAnonymousFunction(expr FunctionExpr) FunctionValue {
+// 	// later
+// }
+
+func (c *Compiler) collectCurrentLocalBindings() map[string]Binding {
+	result := map[string]Binding{}
+
+	for _, scope := range c.scopes {
+		for name, binding := range scope {
+			if binding.Kind == BindingLocal {
+				result[name] = binding
+			}
+		}
+	}
+
+	return result
+}
+
+func (c *Compiler) beginScope() {
+	c.scopes = append(c.scopes, map[string]Binding{})
+}
+
+func (c *Compiler) endScope() {
+	if len(c.scopes) == 0 {
+		langError(ErrorInternal, "scope stack underflow")
+	}
+
+	c.scopes = c.scopes[:len(c.scopes)-1]
+}
+
+func (c *Compiler) currentScope() map[string]Binding {
+	if len(c.scopes) == 0 {
+		c.beginScope()
+	}
+
+	return c.scopes[len(c.scopes)-1]
+}
+
+func (c *Compiler) declareVariable(name string, constant bool) Binding {
+	scope := c.currentScope()
+
+	if _, exists := scope[name]; exists {
+		langError(ErrorName, "variable already declared in this scope: %s", name)
+	}
+
+	if c.isInsideFunction() {
+		slot := c.localCount
+		c.localCount++
+
+		binding := Binding{
+			Kind:     BindingLocal,
+			Name:     name,
+			Slot:     slot,
+			Constant: constant,
+		}
+
+		scope[name] = binding
+		return binding
+	}
+
+	globalName := name
+
+	// Top-level variables keep their real name.
+	// Block/global variables get a hidden internal name.
+	if len(c.scopes) > 1 {
+		globalName = "__scope_" + strconv.Itoa(c.scopeID) + "_" + name
+		c.scopeID++
+	}
+
+	binding := Binding{
+		Kind:     BindingGlobal,
+		Name:     globalName,
+		Slot:     -1,
+		Constant: constant,
+	}
+
+	scope[name] = binding
+	c.globalConstants[globalName] = constant
+
+	return binding
+}
+
+func (c *Compiler) resolveVariable(name string) (Binding, bool) {
+	for i := len(c.scopes) - 1; i >= 0; i-- {
+		if binding, exists := c.scopes[i][name]; exists {
+			return binding, true
+		}
+	}
+
+	return Binding{}, false
+}
+
+func (c *Compiler) compileScopedBlock(body []Stmt) {
+	c.beginScope()
+
+	for _, stmt := range body {
+		c.compileStatement(stmt)
+	}
+
+	c.endScope()
 }
 
 func (c *Compiler) CompileProgram(program Program) ([]Instruction, map[string]Function, map[string]Class) {
@@ -204,24 +345,17 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 	case VariableStmt:
 		c.compileExpr(s.Value)
 
-		if c.isInsideFunction() {
-			slot := c.localCount
-			c.localCount++
+		binding := c.declareVariable(s.Name, s.Constant)
 
-			c.locals[s.Name] = LocalInfo{
-				Slot:     slot,
-				Constant: s.Constant,
-			}
-
+		if binding.Kind == BindingLocal {
 			c.emit(OP_STORE_LOCAL, VariableInfo{
 				Name:     s.Name,
-				Slot:     slot,
+				Slot:     binding.Slot,
 				Constant: s.Constant,
 			})
 		} else {
-			c.globalConstants[s.Name] = s.Constant
 			c.emit(OP_STORE_GLOBAL, VariableInfo{
-				Name:     s.Name,
+				Name:     binding.Name,
 				Constant: s.Constant,
 			})
 		}
@@ -229,9 +363,39 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 	case AssignStmt:
 		c.compileExpr(s.Value)
 
-		if c.isInsideFunction() {
-			if info, exists := c.locals[s.Name]; exists {
-				c.emit(OP_ASSIGN_LOCAL, info.Slot)
+		if binding, exists := c.resolveVariable(s.Name); exists {
+			if binding.Kind == BindingLocal {
+				c.emit(OP_ASSIGN_LOCAL, binding.Slot)
+			} else {
+				c.emit(OP_ASSIGN_GLOBAL, binding.Name)
+			}
+			return
+		}
+
+		if c.outerBindings != nil {
+			if outer, exists := c.outerBindings[s.Name]; exists {
+				capture, already := c.currentCaptures[s.Name]
+				if !already {
+					slot := c.localCount
+					c.localCount++
+
+					capture = CapturedVar{
+						Name:      s.Name,
+						OuterSlot: outer.Slot,
+						InnerSlot: slot,
+					}
+
+					c.currentCaptures[s.Name] = capture
+
+					c.currentScope()[s.Name] = Binding{
+						Kind:     BindingLocal,
+						Name:     s.Name,
+						Slot:     slot,
+						Constant: outer.Constant,
+					}
+				}
+
+				c.emit(OP_ASSIGN_LOCAL, capture.InnerSlot)
 				return
 			}
 		}
@@ -274,6 +438,11 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 		c.emit(OP_RETURN, nil)
 
 	case ImportStmt:
+		if s.Std {
+			c.compileStdImport(s)
+			return
+		}
+
 		langError(ErrorInternal, "imports should be resolved before compiling")
 
 	case IfStmt:
@@ -298,6 +467,39 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 	}
 }
 
+func (c *Compiler) compileStdImport(stmt ImportStmt) {
+	name := stmt.Alias
+
+	if name == "" {
+		name = stmt.Path
+	}
+
+	// Same as:
+	// const name = Plugin.std("module");
+	c.emit(OP_CONST, stmt.Path)
+
+	c.emit(OP_BUILTIN_CALL, BuiltinCallInfo{
+		Object:   "Plugin",
+		Method:   "std",
+		ArgCount: 1,
+	})
+
+	binding := c.declareVariable(name, true)
+
+	if binding.Kind == BindingLocal {
+		c.emit(OP_STORE_LOCAL, VariableInfo{
+			Name:     name,
+			Slot:     binding.Slot,
+			Constant: true,
+		})
+	} else {
+		c.emit(OP_STORE_GLOBAL, VariableInfo{
+			Name:     binding.Name,
+			Constant: true,
+		})
+	}
+}
+
 func (c *Compiler) compileTryCatchStatement(stmt TryCatchStmt) {
 	info := TryInfo{
 		CatchIP: -1,
@@ -306,28 +508,10 @@ func (c *Compiler) compileTryCatchStatement(stmt TryCatchStmt) {
 		IsLocal: c.isInsideFunction(),
 	}
 
-	if c.isInsideFunction() {
-		slot := c.localCount
-		c.localCount++
-
-		c.locals[stmt.ErrorName] = LocalInfo{
-			Slot:     slot,
-			Constant: false,
-		}
-
-		info.Slot = slot
-	} else {
-		c.globalConstants[stmt.ErrorName] = false
-	}
-
 	setupIndex := c.emitJump(OP_SETUP_TRY)
-
-	// Replace the temporary -1 value with our TryInfo.
 	(*c.currentInstructions)[setupIndex].Value = info
 
-	for _, bodyStmt := range stmt.TryBody {
-		c.compileStatement(bodyStmt)
-	}
+	c.compileScopedBlock(stmt.TryBody)
 
 	c.emit(OP_POP_TRY, nil)
 
@@ -335,7 +519,18 @@ func (c *Compiler) compileTryCatchStatement(stmt TryCatchStmt) {
 
 	catchStart := len(*c.currentInstructions)
 
-	// Patch OP_SETUP_TRY with catch IP.
+	c.beginScope()
+
+	binding := c.declareVariable(stmt.ErrorName, false)
+
+	if binding.Kind == BindingLocal {
+		info.IsLocal = true
+		info.Slot = binding.Slot
+	} else {
+		info.IsLocal = false
+		info.Name = binding.Name
+	}
+
 	info.CatchIP = catchStart
 	(*c.currentInstructions)[setupIndex].Value = info
 
@@ -343,10 +538,15 @@ func (c *Compiler) compileTryCatchStatement(stmt TryCatchStmt) {
 		c.compileStatement(bodyStmt)
 	}
 
+	c.endScope()
+
 	c.patchJump(jumpOverCatch)
 }
 
 func (c *Compiler) compileForStatement(stmt ForStmt) {
+	c.beginScope()
+	defer c.endScope()
+
 	if stmt.Init != nil {
 		c.compileStatement(stmt.Init)
 	}
@@ -361,9 +561,7 @@ func (c *Compiler) compileForStatement(stmt ForStmt) {
 
 	jumpIfFalseIndex := c.emitJump(OP_JUMP_IF_FALSE)
 
-	for _, bodyStmt := range stmt.Body {
-		c.compileStatement(bodyStmt)
-	}
+	c.compileScopedBlock(stmt.Body)
 
 	updateStart := len(*c.currentInstructions)
 
@@ -451,9 +649,7 @@ func (c *Compiler) compileWhileStatement(stmt WhileStmt) {
 
 	jumpIfFalseIndex := c.emitJump(OP_JUMP_IF_FALSE)
 
-	for _, bodyStmt := range stmt.Body {
-		c.compileStatement(bodyStmt)
-	}
+	c.compileScopedBlock(stmt.Body)
 
 	currentLoop := c.loopStack[len(c.loopStack)-1]
 
@@ -478,18 +674,14 @@ func (c *Compiler) compileIfStatement(stmt IfStmt) {
 
 	jumpIfFalseIndex := c.emitJump(OP_JUMP_IF_FALSE)
 
-	for _, bodyStmt := range stmt.ThenBody {
-		c.compileStatement(bodyStmt)
-	}
+	c.compileScopedBlock(stmt.ThenBody)
 
 	if len(stmt.ElseBody) > 0 {
 		jumpOverElseIndex := c.emitJump(OP_JUMP)
 
 		c.patchJump(jumpIfFalseIndex)
 
-		for _, bodyStmt := range stmt.ElseBody {
-			c.compileStatement(bodyStmt)
-		}
+		c.compileScopedBlock(stmt.ElseBody)
 
 		c.patchJump(jumpOverElseIndex)
 	} else {
@@ -503,23 +695,18 @@ func (c *Compiler) compileFunction(stmt FunctionStmt) {
 	}
 
 	oldInstructions := c.currentInstructions
-	oldLocals := c.locals
+	oldScopes := c.scopes
 	oldLocalCount := c.localCount
 
 	functionInstructions := []Instruction{}
 
 	c.currentInstructions = &functionInstructions
-	c.locals = map[string]LocalInfo{}
+	c.scopes = []map[string]Binding{}
 	c.localCount = 0
+	c.beginScope()
 
 	for _, param := range stmt.Params {
-		slot := c.localCount
-		c.localCount++
-
-		c.locals[param] = LocalInfo{
-			Slot:     slot,
-			Constant: false,
-		}
+		c.declareVariable(param, false)
 	}
 
 	for _, bodyStmt := range stmt.Body {
@@ -539,7 +726,7 @@ func (c *Compiler) compileFunction(stmt FunctionStmt) {
 	}
 
 	c.currentInstructions = oldInstructions
-	c.locals = oldLocals
+	c.scopes = oldScopes
 	c.localCount = oldLocalCount
 }
 
@@ -591,15 +778,60 @@ func (c *Compiler) compileExpr(expr Expr) {
 	case FunctionExpr:
 		name := c.makeAnonymousFunctionName()
 
-		fnStmt := FunctionStmt{
-			Name:   name,
-			Params: e.Params,
-			Body:   e.Body,
+		outerBindings := c.collectCurrentLocalBindings()
+
+		oldInstructions := c.currentInstructions
+		oldScopes := c.scopes
+		oldLocalCount := c.localCount
+		oldOuterBindings := c.outerBindings
+		oldCurrentCaptures := c.currentCaptures
+
+		functionInstructions := []Instruction{}
+
+		c.currentInstructions = &functionInstructions
+		c.scopes = []map[string]Binding{}
+		c.localCount = 0
+		c.outerBindings = outerBindings
+		c.currentCaptures = map[string]CapturedVar{}
+
+		c.beginScope()
+
+		for _, param := range e.Params {
+			c.declareVariable(param, false)
 		}
 
-		c.compileFunction(fnStmt)
+		for _, bodyStmt := range e.Body {
+			c.compileStatement(bodyStmt)
+		}
 
-		c.emit(OP_CONST, FunctionValue{Name: name})
+		c.emit(OP_CONST, UndefinedValue{})
+		c.emit(OP_RETURN, nil)
+
+		captures := []CapturedVar{}
+		for _, capture := range c.currentCaptures {
+			captures = append(captures, capture)
+		}
+
+		localCount := c.localCount
+
+		c.functions[name] = Function{
+			Name:         name,
+			Params:       e.Params,
+			Instructions: functionInstructions,
+			LocalCount:   localCount,
+			Captures:     captures,
+		}
+
+		c.currentInstructions = oldInstructions
+		c.scopes = oldScopes
+		c.localCount = oldLocalCount
+		c.outerBindings = oldOuterBindings
+		c.currentCaptures = oldCurrentCaptures
+
+		c.emit(OP_CLOSURE, ClosureInfo{
+			Name:     name,
+			Captures: captures,
+		})
 
 	case BoolExpr:
 		c.emit(OP_CONST, e.Value)
@@ -647,13 +879,45 @@ func (c *Compiler) compileExpr(expr Expr) {
 		c.emit(OP_CONST, e.Value)
 
 	case IdentExpr:
-		if info, exists := c.locals[e.Name]; exists {
-			c.emit(OP_LOAD_LOCAL, info.Slot)
-		} else if _, exists := c.functions[e.Name]; exists {
-			c.emit(OP_CONST, FunctionValue{Name: e.Name})
-		} else {
-			c.emit(OP_LOAD_GLOBAL, e.Name)
+		if binding, exists := c.resolveVariable(e.Name); exists {
+			if binding.Kind == BindingLocal {
+				c.emit(OP_LOAD_LOCAL, binding.Slot)
+			} else {
+				c.emit(OP_LOAD_GLOBAL, binding.Name)
+			}
+			return
 		}
+
+		if c.outerBindings != nil {
+			if outer, exists := c.outerBindings[e.Name]; exists {
+				capture, already := c.currentCaptures[e.Name]
+				if !already {
+					slot := c.localCount
+					c.localCount++
+
+					capture = CapturedVar{
+						Name:      e.Name,
+						OuterSlot: outer.Slot,
+						InnerSlot: slot,
+					}
+
+					c.currentCaptures[e.Name] = capture
+
+					// declare it in current scope too
+					c.currentScope()[e.Name] = Binding{
+						Kind:     BindingLocal,
+						Name:     e.Name,
+						Slot:     slot,
+						Constant: outer.Constant,
+					}
+				}
+
+				c.emit(OP_LOAD_LOCAL, capture.InnerSlot)
+				return
+			}
+		}
+
+		// functions/classes/global fallback...
 
 	case BinaryExpr:
 		c.compileExpr(e.Left)
@@ -691,12 +955,79 @@ func (c *Compiler) compileExpr(expr Expr) {
 		}
 
 	case CallExpr:
+		if _, exists := c.functions[e.Name]; exists {
+			for _, arg := range e.Args {
+				c.compileExpr(arg)
+			}
+
+			c.emit(OP_CALL, CallInfo{
+				Name:     e.Name,
+				ArgCount: len(e.Args),
+			})
+
+			return
+		}
+
+		if _, exists := c.classes[e.Name]; exists {
+			for _, arg := range e.Args {
+				c.compileExpr(arg)
+			}
+
+			c.emit(OP_CALL, CallInfo{
+				Name:     e.Name,
+				ArgCount: len(e.Args),
+			})
+
+			return
+		}
+
+		// Otherwise treat it as a function value variable.
+		c.compileExpr(IdentExpr{Name: e.Name})
+
 		for _, arg := range e.Args {
 			c.compileExpr(arg)
 		}
 
 		c.emit(OP_CALL, CallInfo{
-			Name:     e.Name,
+			ArgCount: len(e.Args),
+		})
+
+	case CallValueExpr:
+		if ident, ok := e.Callee.(IdentExpr); ok {
+			if _, exists := c.functions[ident.Name]; exists {
+				for _, arg := range e.Args {
+					c.compileExpr(arg)
+				}
+
+				c.emit(OP_CALL, CallInfo{
+					Name:     ident.Name,
+					ArgCount: len(e.Args),
+				})
+
+				return
+			}
+
+			if _, exists := c.classes[ident.Name]; exists {
+				for _, arg := range e.Args {
+					c.compileExpr(arg)
+				}
+
+				c.emit(OP_CALL, CallInfo{
+					Name:     ident.Name,
+					ArgCount: len(e.Args),
+				})
+
+				return
+			}
+		}
+
+		c.compileExpr(e.Callee)
+
+		for _, arg := range e.Args {
+			c.compileExpr(arg)
+		}
+
+		c.emit(OP_CALL_VALUE, CallInfo{
 			ArgCount: len(e.Args),
 		})
 

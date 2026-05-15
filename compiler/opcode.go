@@ -30,7 +30,10 @@ const (
 	OP_BUILTIN_CALL
 	OP_METHOD_CALL
 	OP_CALL
+	OP_CALL_VALUE
 	OP_RETURN
+
+	OP_CLOSURE
 
 	OP_POP
 	OP_HALT
@@ -63,6 +66,13 @@ type Function struct {
 	Params       []string
 	Instructions []Instruction
 	LocalCount   int
+	Captures     []CapturedVar
+}
+
+type CapturedVar struct {
+	Name      string
+	OuterSlot int
+	InnerSlot int
 }
 
 type CallInfo struct {
@@ -84,6 +94,11 @@ type ArrayInfo struct {
 type InterpolateInfo struct {
 	Parts     []string
 	ExprCount int
+}
+
+type ClosureInfo struct {
+	Name     string
+	Captures []CapturedVar
 }
 
 type BuiltinCallInfo struct {

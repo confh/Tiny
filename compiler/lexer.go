@@ -7,10 +7,21 @@ import (
 type Lexer struct {
 	input []rune
 	pos   int
+
+	file   string
+	line   int
+	column int
 }
 
-func NewLexer(input string) *Lexer {
-	return &Lexer{input: []rune(input)}
+func NewLexer(input string, file string) *Lexer {
+	l := &Lexer{
+		input:  []rune(input),
+		file:   file,
+		line:   1,
+		column: 1,
+	}
+
+	return l
 }
 
 func (l *Lexer) peek() rune {
@@ -24,8 +35,10 @@ func (l *Lexer) peek() rune {
 func (l *Lexer) NextToken() Token {
 	l.skipIgnored()
 
+	start := l.pos
+
 	if l.pos >= len(l.input) {
-		return Token{Type: TOKEN_EOF}
+		return l.tokenAt(start, TOKEN_EOF, "")
 	}
 
 	ch := l.input[l.pos]
@@ -35,67 +48,67 @@ func (l *Lexer) NextToken() Token {
 
 		switch word {
 		case "import":
-			return Token{Type: TOKEN_IMPORT, Literal: word}
+			return l.tokenAt(start, TOKEN_IMPORT, word)
 		case "let":
-			return Token{Type: TOKEN_LET, Literal: word}
+			return l.tokenAt(start, TOKEN_LET, word)
 		case "const":
-			return Token{Type: TOKEN_CONST, Literal: word}
+			return l.tokenAt(start, TOKEN_CONST, word)
 		case "fn":
-			return Token{Type: TOKEN_FN, Literal: word}
+			return l.tokenAt(start, TOKEN_FN, word)
 		case "return":
-			return Token{Type: TOKEN_RETURN, Literal: word}
+			return l.tokenAt(start, TOKEN_RETURN, word)
 		case "throw":
-			return Token{Type: TOKEN_THROW, Literal: word}
+			return l.tokenAt(start, TOKEN_THROW, word)
 		case "try":
-			return Token{Type: TOKEN_TRY, Literal: word}
+			return l.tokenAt(start, TOKEN_TRY, word)
 		case "catch":
-			return Token{Type: TOKEN_CATCH, Literal: word}
+			return l.tokenAt(start, TOKEN_CATCH, word)
 		case "if":
-			return Token{Type: TOKEN_IF, Literal: word}
+			return l.tokenAt(start, TOKEN_IF, word)
 		case "else":
-			return Token{Type: TOKEN_ELSE, Literal: word}
+			return l.tokenAt(start, TOKEN_ELSE, word)
 		case "while":
-			return Token{Type: TOKEN_WHILE, Literal: word}
+			return l.tokenAt(start, TOKEN_WHILE, word)
 		case "for":
-			return Token{Type: TOKEN_FOR, Literal: word}
+			return l.tokenAt(start, TOKEN_FOR, word)
 		case "break":
-			return Token{Type: TOKEN_BREAK, Literal: word}
+			return l.tokenAt(start, TOKEN_BREAK, word)
 		case "continue":
-			return Token{Type: TOKEN_CONTINUE, Literal: word}
+			return l.tokenAt(start, TOKEN_CONTINUE, word)
 		case "and":
-			return Token{Type: TOKEN_AND, Literal: word}
+			return l.tokenAt(start, TOKEN_AND, word)
 		case "or":
-			return Token{Type: TOKEN_OR, Literal: word}
+			return l.tokenAt(start, TOKEN_OR, word)
 		case "true":
-			return Token{Type: TOKEN_TRUE, Literal: word}
+			return l.tokenAt(start, TOKEN_TRUE, word)
 		case "false":
-			return Token{Type: TOKEN_FALSE, Literal: word}
+			return l.tokenAt(start, TOKEN_FALSE, word)
 		case "this":
-			return Token{Type: TOKEN_THIS, Literal: word}
+			return l.tokenAt(start, TOKEN_THIS, word)
 		case "null":
-			return Token{Type: TOKEN_NULL, Literal: word}
+			return l.tokenAt(start, TOKEN_NULL, word)
 		case "undefined":
-			return Token{Type: TOKEN_UNDEFINED, Literal: word}
+			return l.tokenAt(start, TOKEN_UNDEFINED, word)
 		case "class":
-			return Token{Type: TOKEN_CLASS, Literal: word}
+			return l.tokenAt(start, TOKEN_CLASS, word)
 		default:
-			return Token{Type: TOKEN_IDENT, Literal: word}
+			return l.tokenAt(start, TOKEN_IDENT, word)
 		}
 	}
 
 	if unicode.IsDigit(ch) {
 		num := l.readNumber()
-		return Token{Type: TOKEN_NUMBER, Literal: num}
+		return l.tokenAt(start, TOKEN_NUMBER, num)
 	}
 
 	if ch == '"' {
 		str := l.readString()
-		return Token{Type: TOKEN_STRING, Literal: str}
+		return l.tokenAt(start, TOKEN_STRING, str)
 	}
 
 	if ch == '`' {
 		str := l.readBacktickString()
-		return Token{Type: TOKEN_BACKTICK_STRING, Literal: str}
+		return l.tokenAt(start, TOKEN_BACKTICK_STRING, str)
 	}
 
 	switch ch {
@@ -103,111 +116,140 @@ func (l *Lexer) NextToken() Token {
 	case '=':
 		if l.peek() == '=' {
 			l.pos += 2
-			return Token{Type: TOKEN_EQ, Literal: "=="}
+			return l.tokenAt(start, TOKEN_EQ, "==")
 		}
 
 		l.pos++
-		return Token{Type: TOKEN_ASSIGN, Literal: "="}
+		return l.tokenAt(start, TOKEN_ASSIGN, "=")
 
 	case '!':
 		if l.peek() == '=' {
 			l.pos += 2
-			return Token{Type: TOKEN_NEQ, Literal: "!="}
+			return l.tokenAt(start, TOKEN_NEQ, "!=")
 		}
 
 		l.pos++
-		return Token{Type: TOKEN_BANG, Literal: "!"}
+		return l.tokenAt(start, TOKEN_LET, "!")
 
 	case '<':
 		if l.peek() == '=' {
 			l.pos += 2
-			return Token{Type: TOKEN_LTE, Literal: "<="}
+			return l.tokenAt(start, TOKEN_LTE, "<=")
 		}
 
 		l.pos++
-		return Token{Type: TOKEN_LT, Literal: "<"}
+		return l.tokenAt(start, TOKEN_LT, "<")
 
 	case '>':
 		if l.peek() == '=' {
 			l.pos += 2
-			return Token{Type: TOKEN_GTE, Literal: ">="}
+			return l.tokenAt(start, TOKEN_GTE, ">=")
 		}
 
 		l.pos++
-		return Token{Type: TOKEN_GT, Literal: ">"}
+		return l.tokenAt(start, TOKEN_GT, ">")
 
 	case '+':
 		if l.peek() == '+' {
 			l.pos += 2
-			return Token{Type: TOKEN_INCREMENT, Literal: "++"}
+			return l.tokenAt(start, TOKEN_INCREMENT, "++")
 		} else if l.peek() == '=' {
 			l.pos += 2
-			return Token{Type: TOKEN_PLUS_ASSIGN, Literal: "+="}
+			return l.tokenAt(start, TOKEN_PLUS_ASSIGN, "+=")
 		}
 
 		l.pos++
-		return Token{Type: TOKEN_PLUS, Literal: "+"}
+		return l.tokenAt(start, TOKEN_PLUS, "+")
 	case '-':
 		if l.peek() == '-' {
 			l.pos += 2
-			return Token{Type: TOKEN_DECREMENT, Literal: "--"}
+			return l.tokenAt(start, TOKEN_DECREMENT, "--")
 		} else if l.peek() == '=' {
 			l.pos += 2
-			return Token{Type: TOKEN_MINUS_ASSIGN, Literal: "-="}
+			return l.tokenAt(start, TOKEN_MINUS_ASSIGN, "-=")
 		}
 
 		l.pos++
-		return Token{Type: TOKEN_MINUS, Literal: "-"}
+		return l.tokenAt(start, TOKEN_MINUS, "-")
 	case '*':
 		if l.peek() == '=' {
 			l.pos += 2
-			return Token{Type: TOKEN_STAR_ASSIGN, Literal: "*="}
+			return l.tokenAt(start, TOKEN_STAR_ASSIGN, "*=")
 		}
 
 		l.pos++
-		return Token{Type: TOKEN_STAR, Literal: "*"}
+		return l.tokenAt(start, TOKEN_STAR, "*")
 	case '/':
 		if l.peek() == '=' {
 			l.pos += 2
-			return Token{Type: TOKEN_SLASH_ASSIGN, Literal: "/="}
+			return l.tokenAt(start, TOKEN_SLASH_ASSIGN, "/=")
 		}
 
 		l.pos++
-		return Token{Type: TOKEN_SLASH, Literal: "/"}
+		return l.tokenAt(start, TOKEN_SLASH, "/")
 	case '(':
 		l.pos++
-		return Token{Type: TOKEN_LPAREN, Literal: "("}
+		return l.tokenAt(start, TOKEN_LPAREN, "(")
 	case ')':
 		l.pos++
-		return Token{Type: TOKEN_RPAREN, Literal: ")"}
+		return l.tokenAt(start, TOKEN_RPAREN, ")")
 	case '{':
 		l.pos++
-		return Token{Type: TOKEN_LBRACE, Literal: "{"}
+		return l.tokenAt(start, TOKEN_LBRACE, "{")
 	case '}':
 		l.pos++
-		return Token{Type: TOKEN_RBRACE, Literal: "}"}
+		return l.tokenAt(start, TOKEN_RBRACE, "}")
 	case ',':
 		l.pos++
-		return Token{Type: TOKEN_COMMA, Literal: ","}
+		return l.tokenAt(start, TOKEN_COMMA, ",")
 	case ';':
 		l.pos++
-		return Token{Type: TOKEN_SEMI, Literal: ";"}
+		return l.tokenAt(start, TOKEN_SEMI, ";")
 	case '.':
 		l.pos++
-		return Token{Type: TOKEN_DOT, Literal: "."}
+		return l.tokenAt(start, TOKEN_DOT, ".")
 	case ':':
 		l.pos++
-		return Token{Type: TOKEN_COLON, Literal: ":"}
+		return l.tokenAt(start, TOKEN_COLON, ":")
 	case '[':
 		l.pos++
-		return Token{Type: TOKEN_LBRACKET, Literal: "["}
+		return l.tokenAt(start, TOKEN_LBRACKET, "[")
 	case ']':
 		l.pos++
-		return Token{Type: TOKEN_RBRACKET, Literal: "]"}
+		return l.tokenAt(start, TOKEN_RBRACKET, "]")
 	default:
-		langError(ErrorSyntax, "unknown character: %q", ch)
+		line, column := l.lineColumnAt(start)
+		langErrorAt(ErrorSyntax, l.file, line, column, "unknown character: %q", ch)
 		return Token{}
 	}
+}
+
+func (l *Lexer) tokenAt(pos int, tokenType TokenType, literal string) Token {
+	line, column := l.lineColumnAt(pos)
+
+	return Token{
+		Type:    tokenType,
+		Literal: literal,
+		File:    l.file,
+		Line:    line,
+		Column:  column,
+	}
+}
+
+func (l *Lexer) lineColumnAt(pos int) (int, int) {
+	line := 1
+	column := 1
+
+	for i := 0; i < pos && i < len(l.input); i++ {
+		if l.input[i] == '\n' {
+			line++
+			column = 1
+		} else {
+			column++
+		}
+	}
+
+	return line, column
 }
 
 func (l *Lexer) skipIgnored() {
