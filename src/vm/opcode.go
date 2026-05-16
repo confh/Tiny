@@ -44,12 +44,16 @@ const (
 
 	OP_MOD
 
+	OP_LEN
+
 	OP_EQ
 	OP_NEQ
 	OP_LT
 	OP_GT
 	OP_LTE
 	OP_GTE
+
+	OP_NEGATE
 
 	OP_AND
 	OP_OR

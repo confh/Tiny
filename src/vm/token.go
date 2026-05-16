@@ -32,6 +32,7 @@ const (
 
 	TOKEN_WHILE TokenType = "WHILE"
 	TOKEN_FOR   TokenType = "FOR"
+	TOKEN_IN    TokenType = "in"
 
 	TOKEN_BREAK    TokenType = "BREAK"
 	TOKEN_CONTINUE TokenType = "CONTINUE"
@@ -40,6 +41,8 @@ const (
 
 	TOKEN_AND TokenType = "AND"
 	TOKEN_OR  TokenType = "OR"
+
+	TOKEN_MATCH TokenType = "MATCH"
 
 	TOKEN_BANG           TokenType = "!"
 	TOKEN_ASSIGN         TokenType = "="
@@ -62,6 +65,7 @@ const (
 	TOKEN_PERCENT        TokenType = "%"
 	TOKEN_PERCENT_ASSIGN TokenType = "%="
 
+	TOKEN_QUESTION TokenType = "?"
 	TOKEN_LPAREN   TokenType = "("
 	TOKEN_RPAREN   TokenType = ")"
 	TOKEN_LBRACKET TokenType = "["

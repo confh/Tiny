@@ -81,6 +81,28 @@ type VariableStmt struct {
 
 func (s VariableStmt) stmtNode() {}
 
+type ForInStmt struct {
+	ItemName  string
+	IndexName string
+	Iterable  Expr
+	Body      []Stmt
+}
+
+func (s ForInStmt) stmtNode() {}
+
+type MatchCase struct {
+	Value Expr
+	Body  []Stmt
+}
+
+type MatchStmt struct {
+	Value   Expr
+	Cases   []MatchCase
+	Default []Stmt
+}
+
+func (s MatchStmt) stmtNode() {}
+
 type ClassStmt struct {
 	Name    string
 	Methods []FunctionStmt
@@ -133,6 +155,14 @@ type FunctionExpr struct {
 }
 
 func (e FunctionExpr) exprNode() {}
+
+type TernaryExpr struct {
+	Condition Expr
+	ThenExpr  Expr
+	ElseExpr  Expr
+}
+
+func (e TernaryExpr) exprNode() {}
 
 type InterpolatedStringPart struct {
 	Text   string

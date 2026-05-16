@@ -1,111 +1,57 @@
 package vm
 
 import (
-	"slices"
+	"strings"
 
 	. "language.com/src/tinyerrors"
 )
 
 func (vm *VM) callStdArray(method string, args []Value) {
 	switch method {
-	case "push":
+	case "range":
 		if len(args) != 2 {
-			LangError(ErrorRuntime, "array.push expects 2 arguments")
+			LangError(ErrorRuntime, "array.range expects 2 arguments")
 		}
 
-		arr, ok := args[0].(*ArrayValue)
-		if !ok {
-			LangError(ErrorType, "array.push expects array, got %s", typeName(args[0]))
+		min := asInt(args[0])
+		max := asInt(args[1])
+
+		array := &ArrayValue{
+			Elements: make([]Value, 0, max-min),
 		}
 
-		arr.Elements = append(arr.Elements, args[1])
+		for i := min; i < max+1; i++ {
+			array.Elements = append(array.Elements, i)
+		}
 
-		vm.push(arr)
+		vm.push(array)
 
-	case "pop":
+	case "isArray":
 		if len(args) != 1 {
-			LangError(ErrorRuntime, "array.pop expects 1 argument")
+			LangError(ErrorRuntime, "array.isArray expects 1 argument")
 		}
 
-		arr, ok := args[0].(*ArrayValue)
-		if !ok {
-			LangError(ErrorType, "array.pop expects array, got %s", typeName(args[0]))
-		}
+		_, ok := args[0].(*ArrayValue)
 
-		if len(arr.Elements) == 0 {
-			vm.push(UndefinedValue{})
-			return
-		}
+		vm.push(ok)
 
-		last := arr.Elements[len(arr.Elements)-1]
-		arr.Elements = arr.Elements[:len(arr.Elements)-1]
-
-		vm.push(last)
-
-	case "len":
+	case "from":
 		if len(args) != 1 {
-			LangError(ErrorRuntime, "array.len expects 1 argument")
+			LangError(ErrorRuntime, "array.isArray expects 1 argument")
 		}
 
-		arr, ok := args[0].(*ArrayValue)
-		if !ok {
-			LangError(ErrorType, "array.len expects array, got %s", typeName(args[0]))
+		switch v := args[0].(type) {
+		case string:
+			vm.push(strings.Split(v, ""))
+		case *ArrayValue:
+			dst := make([]Value, len(v.Elements))
+
+			copy(dst, v.Elements)
+
+			vm.push(dst)
+		default:
+			LangError(ErrorType, "type %s cannot be turned into an array", typeName(v))
 		}
-
-		vm.push(len(arr.Elements))
-
-	case "get":
-		if len(args) != 2 {
-			LangError(ErrorRuntime, "array.get expects 2 arguments")
-		}
-
-		arr, ok := args[0].(*ArrayValue)
-		if !ok {
-			LangError(ErrorType, "array.get expects array, got %s", typeName(args[0]))
-		}
-
-		index := asInt(args[1])
-
-		if index < 0 || index >= len(arr.Elements) {
-			LangError(ErrorRuntime, "array index out of range: %d", index)
-		}
-
-		vm.push(arr.Elements[index])
-
-	case "set":
-		if len(args) != 3 {
-			LangError(ErrorRuntime, "array.set expects 3 arguments")
-		}
-
-		arr, ok := args[0].(*ArrayValue)
-		if !ok {
-			LangError(ErrorType, "array.set expects array, got %s", typeName(args[0]))
-		}
-
-		index := asInt(args[1])
-
-		if index < 0 || index >= len(arr.Elements) {
-			LangError(ErrorRuntime, "array index out of range: %d", index)
-		}
-
-		arr.Elements[index] = args[2]
-
-		vm.push(arr)
-
-	case "contains":
-		if len(args) != 2 {
-			LangError(ErrorRuntime, "array.contains expects 2 arguments")
-		}
-
-		arr, ok := args[0].(*ArrayValue)
-		if !ok {
-			LangError(ErrorType, "array.contains expects array, got %s", typeName(args[0]))
-		}
-
-		element := args[1]
-
-		vm.push(slices.Contains(arr.Elements, element))
-
 	default:
 		LangError(ErrorName, "unknown array function: %s", method)
 	}

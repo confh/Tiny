@@ -198,6 +198,25 @@ func (vm *VM) step() bool {
 	vm.incrementIP()
 
 	switch instr.Op {
+	case OP_NEGATE:
+		value := vm.pop()
+
+		switch v := value.(type) {
+		case int:
+			vm.push(-v)
+
+		case int64:
+			vm.push(-v)
+
+		case float64:
+			vm.push(-v)
+
+		case float32:
+			vm.push(-v)
+
+		default:
+			LangError(ErrorType, "cannot negate %s", typeName(value))
+		}
 	case OP_CLOSURE:
 		info := instr.Value.(ClosureInfo)
 
@@ -539,6 +558,32 @@ func (vm *VM) step() bool {
 		info := instr.Value.(MethodCallInfo)
 
 		vm.callMethod(info.Method, info.ArgCount)
+
+	case OP_LEN:
+		value := vm.pop()
+
+		switch v := value.(type) {
+		case *ArrayValue:
+			vm.push(len(v.Elements))
+
+		case ArrayValue:
+			vm.push(len(v.Elements))
+
+		case string:
+			vm.push(len([]rune(v)))
+
+		case ObjectValue:
+			vm.push(len(v))
+
+		case BufferValue:
+			vm.push(len(v.Bytes))
+
+		case *BufferValue:
+			vm.push(len(v.Bytes))
+
+		default:
+			LangError(ErrorType, "cannot get length of %s", typeName(value))
+		}
 
 	case OP_CALL:
 		info := instr.Value.(CallInfo)
@@ -1178,6 +1223,10 @@ func (vm *VM) callMethod(method string, argCount int) {
 
 	case *BufferValue:
 		vm.callBufferMethod(val, method, args)
+		return
+
+	case *ArrayValue:
+		vm.callArrayMethod(val, method, args)
 		return
 
 	case string:

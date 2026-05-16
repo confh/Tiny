@@ -97,6 +97,10 @@ func (l *Lexer) NextToken() Token {
 			return l.tokenAt(start, TOKEN_ENUM, word)
 		case "export":
 			return l.tokenAt(start, TOKEN_EXPORT, word)
+		case "match":
+			return l.tokenAt(start, TOKEN_MATCH, word)
+		case "in":
+			return l.tokenAt(start, TOKEN_IN, word)
 		default:
 			return l.tokenAt(start, TOKEN_IDENT, word)
 		}
@@ -118,6 +122,10 @@ func (l *Lexer) NextToken() Token {
 	}
 
 	switch ch {
+	case '?':
+		l.pos++
+		return l.tokenAt(start, TOKEN_QUESTION, "?")
+
 	case '%':
 		if l.peek() == '=' {
 			l.pos += 2
@@ -126,6 +134,7 @@ func (l *Lexer) NextToken() Token {
 
 		l.pos++
 		return l.tokenAt(start, TOKEN_PERCENT, "%")
+
 	case '=':
 		if l.peek() == '=' {
 			l.pos += 2

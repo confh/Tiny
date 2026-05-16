@@ -1,24 +1,22 @@
 package main
 
 import (
-	"fmt"
-	"os"
 	"path/filepath"
 	"runtime"
 
 	. "language.com/src/vm"
 )
 
-func collectPluginPathsFromProgram(program Program) []string {
+func collectPluginPathsFromProgram(program Program, target string) []string {
 	seen := map[string]bool{}
 	var result []string
 
-	var add = func(path string) {
+	add := func(path string) {
 		if path == "" {
 			return
 		}
 
-		path = normalizePluginPath(path)
+		path = normalizePluginPathForTarget(path, target)
 
 		if !seen[path] {
 			seen[path] = true
@@ -193,21 +191,4 @@ func normalizePluginPath(path string) string {
 	default:
 		return path
 	}
-}
-
-func copyPluginToDist(pluginPath string, distDir string) error {
-	source := filepath.Clean(pluginPath)
-
-	if !fileExists(source) {
-		return fmt.Errorf("plugin file does not exist")
-	}
-
-	target := filepath.Join(distDir, source)
-
-	return cpFile(source, target)
-}
-
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
 }

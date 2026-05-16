@@ -463,8 +463,72 @@ func (p *Parser) parseStatement() Stmt {
 		return p.parseEnumStatement()
 	case TOKEN_EXPORT:
 		return p.parseExportStatement()
+	case TOKEN_MATCH:
+		return p.parseMatchStatement()
 	default:
 		return p.parseExpressionStatement()
+	}
+}
+
+func (p *Parser) parseMatchStatement() Stmt {
+	p.expect(TOKEN_MATCH)
+
+	value := p.parseExpression()
+
+	p.expect(TOKEN_LBRACE)
+
+	cases := []MatchCase{}
+	var defaultBody []Stmt
+	hasDefault := false
+
+	for p.current.Type != TOKEN_RBRACE && p.current.Type != TOKEN_EOF {
+		// default case: _ { ... }
+		if p.current.Type == TOKEN_IDENT && p.current.Literal == "_" {
+			if hasDefault {
+				LangErrorAt(
+					ErrorSyntax,
+					p.current.File,
+					p.current.Line,
+					p.current.Column,
+					"duplicate default case in match",
+				)
+			}
+
+			p.advance()
+
+			defaultBody = p.parseBlock()
+			hasDefault = true
+			continue
+		}
+
+		caseValue := p.parseExpression()
+
+		for _, c := range cases {
+			if c.Value == caseValue {
+				LangErrorAt(
+					ErrorSyntax,
+					p.current.File,
+					p.current.Line,
+					p.current.Column,
+					"duplicate case value in match",
+				)
+			}
+		}
+
+		body := p.parseBlock()
+
+		cases = append(cases, MatchCase{
+			Value: caseValue,
+			Body:  body,
+		})
+	}
+
+	p.expect(TOKEN_RBRACE)
+
+	return MatchStmt{
+		Value:   value,
+		Cases:   cases,
+		Default: defaultBody,
 	}
 }
 
@@ -543,6 +607,55 @@ func (p *Parser) parseThrowStatement() Stmt {
 
 func (p *Parser) parseForStatement() Stmt {
 	p.expect(TOKEN_FOR)
+
+	// New for-in syntax:
+	// for item in items { ... }
+	// for item, index in items { ... }
+	if p.current.Type == TOKEN_IDENT {
+		itemName := p.current.Literal
+		p.advance()
+
+		indexName := ""
+
+		if p.current.Type == TOKEN_COMMA {
+			p.advance()
+
+			if p.current.Type != TOKEN_IDENT {
+				LangErrorAt(
+					ErrorSyntax,
+					p.current.File,
+					p.current.Line,
+					p.current.Column,
+					"expected index variable name after ,",
+				)
+			}
+
+			indexName = p.current.Literal
+			p.advance()
+		}
+
+		if p.current.Type == TOKEN_IN {
+			p.advance()
+
+			iterable := p.parseExpression()
+			body := p.parseBlock()
+
+			return ForInStmt{
+				ItemName:  itemName,
+				IndexName: indexName,
+				Iterable:  iterable,
+				Body:      body,
+			}
+		}
+
+		LangErrorAt(
+			ErrorSyntax,
+			p.current.File,
+			p.current.Line,
+			p.current.Column,
+			"expected in after for variable",
+		)
+	}
 
 	var init Stmt
 
@@ -1017,7 +1130,29 @@ func (p *Parser) parseExpressionStatement() Stmt {
 }
 
 func (p *Parser) parseExpression() Expr {
-	return p.parseOr()
+	return p.parseTernary()
+}
+
+func (p *Parser) parseTernary() Expr {
+	condition := p.parseOr()
+
+	if p.current.Type != TOKEN_QUESTION {
+		return condition
+	}
+
+	p.advance()
+
+	thenExpr := p.parseExpression()
+
+	p.expect(TOKEN_COLON)
+
+	elseExpr := p.parseExpression()
+
+	return TernaryExpr{
+		Condition: condition,
+		ThenExpr:  thenExpr,
+		ElseExpr:  elseExpr,
+	}
 }
 
 func (p *Parser) parseOr() Expr {
@@ -1538,7 +1673,7 @@ func (p *Parser) parseClassStatement() Stmt {
 }
 
 func (p *Parser) parseUnary() Expr {
-	if p.current.Type == TOKEN_BANG {
+	if p.current.Type == TOKEN_MINUS || p.current.Type == TOKEN_BANG {
 		op := p.current.Type
 		p.advance()
 

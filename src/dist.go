@@ -7,35 +7,57 @@ import (
 	"path/filepath"
 	"runtime"
 
+	. "language.com/src/bytecode"
 	. "language.com/src/tinyerrors"
 )
 
-func distCommand(args []string) {
+func DistCommand(args []string) {
 	if len(args) < 1 {
-		LangError(ErrorRuntime, "usage: tiny dist <file.tiny> -o <output>")
+		LangError(ErrorRuntime, "usage: tiny dist <file.tiny> -o <output> [--target windows-amd64|linux-amd64] [--plugin <path>]")
 	}
 
 	entryFile := args[0]
-	outFile := defaultPackedOutputName()
+	target := normalizeTarget("")
+	outFile := defaultDistOutputName(entryFile, target)
 	extraPlugins := []string{}
 
 	for i := 1; i < len(args); i++ {
-		if args[i] == "-o" && i+1 < len(args) {
+		switch args[i] {
+		case "-o":
+			if i+1 >= len(args) {
+				LangError(ErrorRuntime, "expected output path after -o")
+			}
+
 			outFile = args[i+1]
 			i++
-			continue
-		}
 
-		if args[i] == "--plugin" && i+1 < len(args) {
+		case "--target":
+			if i+1 >= len(args) {
+				LangError(ErrorRuntime, "expected target after --target")
+			}
+
+			target = normalizeTarget(args[i+1])
+			i++
+
+		case "--plugin":
+			if i+1 >= len(args) {
+				LangError(ErrorRuntime, "expected plugin path after --plugin")
+			}
+
 			extraPlugins = append(extraPlugins, args[i+1])
 			i++
-			continue
+
+		default:
+			LangError(ErrorRuntime, "unknown dist argument: %s", args[i])
 		}
 	}
 
-	outFile = addExeExtensionIfNeeded(outFile)
+	outFile = addExtensionForTarget(outFile, target)
 
 	distDir := filepath.Dir(outFile)
+	if distDir == "" {
+		distDir = "."
+	}
 
 	err := os.MkdirAll(distDir, 0755)
 	if err != nil {
@@ -44,13 +66,13 @@ func distCommand(args []string) {
 
 	program := LoadProgram(entryFile)
 
-	pluginPaths := collectPluginPathsFromProgram(program)
+	pluginPaths := collectPluginPathsFromProgram(program, target)
 
 	for _, plugin := range extraPlugins {
-		pluginPaths = append(pluginPaths, normalizePluginPath(plugin))
+		pluginPaths = append(pluginPaths, normalizePluginPathForTarget(plugin, target))
 	}
 
-	packCommand([]string{entryFile, "-o", outFile})
+	packToOutput(entryFile, outFile, target)
 
 	for _, pluginPath := range pluginPaths {
 		err := copyPluginToDist(pluginPath, distDir)
@@ -62,12 +84,78 @@ func distCommand(args []string) {
 	fmt.Println("Dist created:", distDir)
 }
 
+func defaultPackOutputName(entryFile string, target string) string {
+	base := filepath.Base(entryFile)
+	ext := filepath.Ext(base)
+	name := base[:len(base)-len(ext)]
+
+	if target == "windows-amd64" {
+		return name + ".exe"
+	}
+
+	return name
+}
+
+func defaultDistOutputName(entryFile string, target string) string {
+	base := filepath.Base(entryFile)
+	ext := filepath.Ext(base)
+	name := base[:len(base)-len(ext)]
+
+	if target == "windows-amd64" {
+		return filepath.Join("dist", name+".exe")
+	}
+
+	return filepath.Join("dist", name)
+}
+
 func addExeExtensionIfNeeded(path string) string {
 	if runtime.GOOS == "windows" && filepath.Ext(path) == "" {
 		return path + ".exe"
 	}
 
 	return path
+}
+
+func packToOutput(entryFile string, outFile string, target string) {
+	target = normalizeTarget(target)
+
+	program := LoadProgram(entryFile)
+
+	compiler := NewCompiler()
+	mainInstructions, functions, classes := compiler.CompileProgram(program)
+
+	bytecodeBytes := SaveBytecodeToBytes(mainInstructions, functions, classes)
+
+	runtimeBytes := getEmbeddedRuntimeForTarget(target)
+
+	err := writePackedExecutable(outFile, runtimeBytes, bytecodeBytes)
+	if err != nil {
+		LangError(ErrorRuntime, "failed to write packed executable: %v", err)
+	}
+
+	if target == "linux-amd64" {
+		err = os.Chmod(outFile, 0755)
+		if err != nil {
+			LangError(ErrorRuntime, "failed to chmod linux executable: %v", err)
+		}
+	}
+}
+
+func copyPluginToDist(pluginPath string, distDir string) error {
+	source := filepath.Clean(pluginPath)
+
+	if !fileExists(source) {
+		return fmt.Errorf("plugin file does not exist")
+	}
+
+	target := filepath.Join(distDir, source)
+
+	return cpFile(source, target)
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 func dirExists(path string) bool {

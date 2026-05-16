@@ -39,6 +39,8 @@ type Compiler struct {
 	loopStack              []LoopContext
 	anonymousFunctionCount int
 
+	matchTempID int
+
 	currentNamespaceVariables map[string]string
 	currentNamespaceClasses   map[string]string
 	currentNamespaceFunctions map[string]string
@@ -174,6 +176,25 @@ func optimizeExpr(expr Expr) Expr {
 
 		return ArrayExpr{Elements: elements}
 
+	case TernaryExpr:
+		condition := optimizeExpr(e.Condition)
+		thenExpr := optimizeExpr(e.ThenExpr)
+		elseExpr := optimizeExpr(e.ElseExpr)
+
+		if b, ok := condition.(BoolExpr); ok {
+			if b.Value {
+				return thenExpr
+			}
+
+			return elseExpr
+		}
+
+		return TernaryExpr{
+			Condition: condition,
+			ThenExpr:  thenExpr,
+			ElseExpr:  elseExpr,
+		}
+
 	case CallValueExpr:
 		args := make([]Expr, len(e.Args))
 
@@ -232,9 +253,17 @@ func optimizeExpr(expr Expr) Expr {
 	case UnaryExpr:
 		right := optimizeExpr(e.Right)
 
-		if e.Op == TOKEN_BANG {
+		switch e.Op {
+		case TOKEN_BANG:
 			if boolExpr, ok := right.(BoolExpr); ok {
 				return BoolExpr{Value: !boolExpr.Value}
+			}
+
+		case TOKEN_MINUS:
+			if num, ok := right.(NumberExpr); ok {
+				return NumberExpr{
+					Value: -num.Value,
+				}
 			}
 		}
 
@@ -267,9 +296,11 @@ func NewCompiler() *Compiler {
 	return c
 }
 
-// func (c *Compiler) compileAnonymousFunction(expr FunctionExpr) FunctionValue {
-// 	// later
-// }
+func (c *Compiler) newMatchTempName() string {
+	name := "__match_" + strconv.Itoa(c.matchTempID)
+	c.matchTempID++
+	return name
+}
 
 func (c *Compiler) collectCurrentLocalBindings() map[string]Binding {
 	result := map[string]Binding{}
@@ -697,10 +728,184 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 	}
 }
 
+func (c *Compiler) compileMatchStatement(stmt MatchStmt) {
+	// Create block scope so hidden temp does not leak.
+	c.beginScope()
+	defer c.endScope()
+
+	tempName := c.newMatchTempName()
+
+	// const __match_0 = <value>;
+	c.compileExpr(stmt.Value)
+
+	tempBinding := c.declareVariable(tempName, true)
+
+	if tempBinding.Kind == BindingLocal {
+		c.emit(OP_STORE_LOCAL, VariableInfo{
+			Name:     tempName,
+			Slot:     tempBinding.Slot,
+			Constant: true,
+		})
+	} else {
+		c.emit(OP_STORE_GLOBAL, VariableInfo{
+			Name:     tempBinding.Name,
+			Constant: true,
+		})
+	}
+
+	endJumps := []int{}
+
+	for _, matchCase := range stmt.Cases {
+		// load temp
+		if tempBinding.Kind == BindingLocal {
+			c.emit(OP_LOAD_LOCAL, tempBinding.Slot)
+		} else {
+			c.emit(OP_LOAD_GLOBAL, tempBinding.Name)
+		}
+
+		// load case value
+		c.compileExpr(matchCase.Value)
+
+		// compare
+		c.emit(OP_EQ, nil)
+
+		// if false, jump to next case
+		jumpToNext := c.emitJump(OP_JUMP_IF_FALSE)
+
+		// body
+		c.compileScopedBlock(matchCase.Body)
+
+		// after matching body, jump to end
+		endJumps = append(endJumps, c.emitJump(OP_JUMP))
+
+		// next case starts here
+		c.patchJump(jumpToNext)
+	}
+
+	if stmt.Default != nil {
+		c.compileScopedBlock(stmt.Default)
+	}
+
+	for _, jump := range endJumps {
+		c.patchJump(jump)
+	}
+}
+
+func (c *Compiler) emitStoreBinding(binding Binding, name string, constant bool, typeHint TypeHint) {
+	if binding.Kind == BindingLocal {
+		c.emit(OP_STORE_LOCAL, VariableInfo{
+			Name:     name,
+			Slot:     binding.Slot,
+			Constant: constant,
+			TypeHint: typeHint,
+		})
+		return
+	}
+
+	c.emit(OP_STORE_GLOBAL, VariableInfo{
+		Name:     binding.Name,
+		Constant: constant,
+		TypeHint: typeHint,
+	})
+}
+
+func (c *Compiler) emitLoadBinding(binding Binding) {
+	if binding.Kind == BindingLocal {
+		c.emit(OP_LOAD_LOCAL, binding.Slot)
+		return
+	}
+
+	c.emit(OP_LOAD_GLOBAL, binding.Name)
+}
+
+func (c *Compiler) emitAssignBinding(binding Binding) {
+	if binding.Kind == BindingLocal {
+		c.emit(OP_ASSIGN_LOCAL, binding.Slot)
+		return
+	}
+
+	c.emit(OP_ASSIGN_GLOBAL, binding.Name)
+}
+
+func (c *Compiler) compileForInStatement(stmt ForInStmt) {
+	c.beginScope()
+	defer c.endScope()
+
+	iterName := "__iter_" + strconv.Itoa(c.matchTempID)
+	c.matchTempID++
+
+	indexInternalName := "__i_" + strconv.Itoa(c.matchTempID)
+	c.matchTempID++
+
+	// const __iter = iterable
+	c.compileExpr(stmt.Iterable)
+
+	iterBinding := c.declareVariable(iterName, true)
+	c.emitStoreBinding(iterBinding, iterName, true, TypeHint{})
+
+	// let __i = 0
+	c.emit(OP_CONST, 0)
+
+	indexBinding := c.declareVariable(indexInternalName, false)
+	c.emitStoreBinding(indexBinding, indexInternalName, false, TypeHint{})
+
+	loopStart := len(*c.currentInstructions)
+
+	// condition: __i < len(__iter)
+	c.emitLoadBinding(indexBinding)
+	c.emitLoadBinding(iterBinding)
+	c.emit(OP_LEN, nil)
+	c.emit(OP_LT, nil)
+
+	exitJump := c.emitJump(OP_JUMP_IF_FALSE)
+
+	// item/index block scope
+	c.beginScope()
+
+	// const item = __iter[__i]
+	c.emitLoadBinding(iterBinding)
+	c.emitLoadBinding(indexBinding)
+	c.emit(OP_INDEX, nil) // use your actual index opcode if different
+
+	itemBinding := c.declareVariable(stmt.ItemName, true)
+	c.emitStoreBinding(itemBinding, stmt.ItemName, true, TypeHint{})
+
+	// const index = __i
+	if stmt.IndexName != "" {
+		c.emitLoadBinding(indexBinding)
+
+		userIndexBinding := c.declareVariable(stmt.IndexName, true)
+		c.emitStoreBinding(userIndexBinding, stmt.IndexName, true, TypeHint{})
+	}
+
+	for _, bodyStmt := range stmt.Body {
+		c.compileStatement(bodyStmt)
+	}
+
+	c.endScope()
+
+	// __i = __i + 1
+	c.emitLoadBinding(indexBinding)
+	c.emit(OP_CONST, 1)
+	c.emit(OP_ADD, nil)
+	c.emitAssignBinding(indexBinding)
+
+	c.emit(OP_JUMP, loopStart)
+
+	c.patchJump(exitJump)
+}
+
 func (c *Compiler) compileStatement(stmt Stmt) {
 	switch s := stmt.(type) {
+	case ForInStmt:
+		c.compileForInStatement(s)
+
+	case MatchStmt:
+		c.compileMatchStatement(s)
+
 	case NamespaceStmt:
 		c.compileNamespace(s)
+
 	case VariableStmt:
 		c.compileExpr(s.Value)
 
@@ -1228,6 +1433,21 @@ func (c *Compiler) compileExpr(expr Expr) {
 	expr = optimizeExpr(expr)
 
 	switch e := expr.(type) {
+	case TernaryExpr:
+		c.compileExpr(e.Condition)
+
+		jumpToElse := c.emitJump(OP_JUMP_IF_FALSE)
+
+		c.compileExpr(e.ThenExpr)
+
+		jumpToEnd := c.emitJump(OP_JUMP)
+
+		c.patchJump(jumpToElse)
+
+		c.compileExpr(e.ElseExpr)
+
+		c.patchJump(jumpToEnd)
+
 	case StringExpr:
 		c.emit(OP_CONST, e.Value)
 
@@ -1237,6 +1457,9 @@ func (c *Compiler) compileExpr(expr Expr) {
 		switch e.Op {
 		case TOKEN_BANG:
 			c.emit(OP_NOT, nil)
+
+		case TOKEN_MINUS:
+			c.emit(OP_NEGATE, nil)
 
 		default:
 			LangError(ErrorInternal, "unknown unary operator: %s", e.Op)

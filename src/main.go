@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	. "language.com/src/bytecode"
 	. "language.com/src/tinyerrors"
 	. "language.com/src/vm"
 )
@@ -40,7 +41,7 @@ func main() {
 			return
 
 		case "dist":
-			distCommand(os.Args[2:])
+			DistCommand(os.Args[2:])
 			return
 		}
 	}

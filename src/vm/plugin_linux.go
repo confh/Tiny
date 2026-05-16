@@ -43,6 +43,8 @@ import (
 	"path/filepath"
 	"slices"
 	"unsafe"
+
+	. "language.com/src/tinyerrors"
 )
 
 func defaultPluginPath(path string, ext string) string {
