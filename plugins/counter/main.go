@@ -8,7 +8,7 @@ import "C"
 import (
 	"unsafe"
 
-	"language.com/compiler/tinyplugin"
+	"language.com/src/tinyplugin"
 )
 
 //export TinyPluginCall

@@ -1,7 +1,9 @@
-package main
+package vm
 
 import (
 	"strconv"
+
+	. "language.com/src/tinyerrors"
 )
 
 func findInterpolationStart(input string) int {
@@ -65,7 +67,7 @@ func parseInterpolatedString(input string) Expr {
 
 		end := findClosingBrace(input, start+2)
 		if end == -1 {
-			langError(ErrorSyntax, "unterminated interpolation")
+			LangError(ErrorSyntax, "unterminated interpolation")
 		}
 
 		exprSource := input[start+2 : end]
@@ -75,7 +77,7 @@ func parseInterpolatedString(input string) Expr {
 		expr := parser.parseExpression()
 
 		if parser.current.Type != TOKEN_EOF {
-			langErrorAt(
+			LangErrorAt(
 				ErrorSyntax,
 				parser.current.File,
 				parser.current.Line,
@@ -135,7 +137,7 @@ func (p *Parser) parseOptionalTypeHint() TypeHint {
 	p.advance()
 
 	if p.current.Type != TOKEN_IDENT {
-		langErrorAt(
+		LangErrorAt(
 			ErrorSyntax,
 			p.current.File,
 			p.current.Line,
@@ -183,7 +185,7 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 			}
 
 		default:
-			langErrorAt(
+			LangErrorAt(
 				ErrorSyntax,
 				p.current.File,
 				p.current.Line,
@@ -218,7 +220,7 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 			}
 
 		default:
-			langErrorAt(
+			LangErrorAt(
 				ErrorSyntax,
 				p.current.File,
 				p.current.Line,
@@ -254,7 +256,7 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 			}
 
 		default:
-			langErrorAt(
+			LangErrorAt(
 				ErrorSyntax,
 				p.current.File,
 				p.current.Line,
@@ -293,7 +295,7 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 			}
 
 		default:
-			langErrorAt(
+			LangErrorAt(
 				ErrorSyntax,
 				p.current.File,
 				p.current.Line,
@@ -332,7 +334,7 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 			}
 
 		default:
-			langErrorAt(
+			LangErrorAt(
 				ErrorSyntax,
 				p.current.File,
 				p.current.Line,
@@ -371,7 +373,7 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 			}
 
 		default:
-			langErrorAt(
+			LangErrorAt(
 				ErrorSyntax,
 				p.current.File,
 				p.current.Line,
@@ -410,7 +412,7 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 			}
 
 		default:
-			langErrorAt(
+			LangErrorAt(
 				ErrorSyntax,
 				p.current.File,
 				p.current.Line,
@@ -486,7 +488,7 @@ func (p *Parser) parseExportStatement() Stmt {
 		return ExportStmt{Inner: p.parseEnumStatement()}
 
 	default:
-		langErrorAt(
+		LangErrorAt(
 			ErrorSyntax,
 			p.current.File,
 			p.current.Line,
@@ -506,7 +508,7 @@ func (p *Parser) parseTryCatchStatement() Stmt {
 	p.expect(TOKEN_CATCH)
 
 	if p.current.Type != TOKEN_IDENT {
-		langErrorAt(
+		LangErrorAt(
 			ErrorSyntax,
 			p.current.File,
 			p.current.Line,
@@ -604,7 +606,7 @@ func (p *Parser) parseForUpdateStatement() Stmt {
 			}
 
 		default:
-			langErrorAt(
+			LangErrorAt(
 				ErrorSyntax,
 				p.current.File,
 				p.current.Line,
@@ -642,7 +644,7 @@ func (p *Parser) parseForUpdateStatement() Stmt {
 			}
 
 		default:
-			langErrorAt(
+			LangErrorAt(
 				ErrorSyntax,
 				p.current.File,
 				p.current.Line,
@@ -678,7 +680,7 @@ func (p *Parser) parseForUpdateStatement() Stmt {
 			}
 
 		default:
-			langErrorAt(
+			LangErrorAt(
 				ErrorSyntax,
 				p.current.File,
 				p.current.Line,
@@ -763,7 +765,7 @@ func (p *Parser) parseImportStatement() Stmt {
 		p.advance()
 
 		if p.current.Type != TOKEN_STRING {
-			langErrorAt(
+			LangErrorAt(
 				ErrorSyntax,
 				p.current.File,
 				p.current.Line,
@@ -781,7 +783,7 @@ func (p *Parser) parseImportStatement() Stmt {
 			p.advance()
 
 			if p.current.Type != TOKEN_IDENT {
-				langErrorAt(
+				LangErrorAt(
 					ErrorSyntax,
 					p.current.File,
 					p.current.Line,
@@ -804,7 +806,7 @@ func (p *Parser) parseImportStatement() Stmt {
 	}
 
 	if p.current.Type != TOKEN_STRING {
-		langErrorAt(
+		LangErrorAt(
 			ErrorSyntax,
 			p.current.File,
 			p.current.Line,
@@ -822,7 +824,7 @@ func (p *Parser) parseImportStatement() Stmt {
 		p.advance()
 
 		if p.current.Type != TOKEN_IDENT {
-			langErrorAt(
+			LangErrorAt(
 				ErrorSyntax,
 				p.current.File,
 				p.current.Line,
@@ -848,7 +850,7 @@ func (p *Parser) parseLetStatement() Stmt {
 	p.expect(TOKEN_LET)
 
 	if p.current.Type != TOKEN_IDENT {
-		langErrorAt(
+		LangErrorAt(
 			ErrorSyntax,
 			p.current.File,
 			p.current.Line,
@@ -880,7 +882,7 @@ func (p *Parser) parseConstStatement() Stmt {
 	p.expect(TOKEN_CONST)
 
 	if p.current.Type != TOKEN_IDENT {
-		langErrorAt(
+		LangErrorAt(
 			ErrorSyntax,
 			p.current.File,
 			p.current.Line,
@@ -912,7 +914,7 @@ func (p *Parser) parseFunctionStatement() Stmt {
 	p.expect(TOKEN_FN)
 
 	if p.current.Type != TOKEN_IDENT {
-		langErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "expected function name")
+		LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "expected function name")
 	}
 
 	name := p.current.Literal
@@ -937,7 +939,7 @@ func (p *Parser) parseParameterList() []Param {
 
 	for {
 		if p.current.Type != TOKEN_IDENT {
-			langErrorAt(
+			LangErrorAt(
 				ErrorSyntax,
 				p.current.File,
 				p.current.Line,
@@ -955,7 +957,7 @@ func (p *Parser) parseParameterList() []Param {
 			p.advance()
 
 			if p.current.Type != TOKEN_IDENT {
-				langErrorAt(
+				LangErrorAt(
 					ErrorSyntax,
 					p.current.File,
 					p.current.Line,
@@ -1140,7 +1142,7 @@ func (p *Parser) parsePostfix() Expr {
 			p.advance()
 
 			if p.current.Type != TOKEN_IDENT {
-				langErrorAt(
+				LangErrorAt(
 					ErrorSyntax,
 					p.current.File,
 					p.current.Line,
@@ -1229,7 +1231,7 @@ func (p *Parser) parseObjectLiteral() Expr {
 
 	for {
 		if p.current.Type != TOKEN_IDENT && p.current.Type != TOKEN_STRING {
-			langErrorAt(
+			LangErrorAt(
 				ErrorSyntax,
 				p.current.File,
 				p.current.Line,
@@ -1275,7 +1277,7 @@ func (p *Parser) parseFunctionSignatureAndBody() ([]Param, TypeHint, []Stmt) {
 		p.advance()
 
 		if p.current.Type != TOKEN_IDENT {
-			langErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "expected return type after :")
+			LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "expected return type after :")
 		}
 
 		returnType = TypeHint{Name: p.current.Literal}
@@ -1295,7 +1297,7 @@ func (p *Parser) parsePrimary() Expr {
 		if containsDot(literal) {
 			value, err := strconv.ParseFloat(literal, 64)
 			if err != nil {
-				langErrorAt(
+				LangErrorAt(
 					ErrorSyntax,
 					p.current.File,
 					p.current.Line,
@@ -1311,7 +1313,7 @@ func (p *Parser) parsePrimary() Expr {
 
 		value, err := strconv.Atoi(literal)
 		if err != nil {
-			langErrorAt(
+			LangErrorAt(
 				ErrorSyntax,
 				p.current.File,
 				p.current.Line,
@@ -1384,7 +1386,7 @@ func (p *Parser) parsePrimary() Expr {
 		return p.parseUnary()
 
 	default:
-		langErrorAt(
+		LangErrorAt(
 			ErrorSyntax,
 			p.current.File,
 			p.current.Line,
@@ -1399,7 +1401,7 @@ func (p *Parser) parseEnumStatement() Stmt {
 	p.expect(TOKEN_ENUM)
 
 	if p.current.Type != TOKEN_IDENT {
-		langErrorAt(
+		LangErrorAt(
 			ErrorSyntax,
 			p.current.File,
 			p.current.Line,
@@ -1417,7 +1419,7 @@ func (p *Parser) parseEnumStatement() Stmt {
 
 	for p.current.Type != TOKEN_RBRACE && p.current.Type != TOKEN_EOF {
 		if p.current.Type != TOKEN_IDENT {
-			langErrorAt(
+			LangErrorAt(
 				ErrorSyntax,
 				p.current.File,
 				p.current.Line,
@@ -1435,7 +1437,7 @@ func (p *Parser) parseEnumStatement() Stmt {
 		}
 
 		if p.current.Type != TOKEN_RBRACE {
-			langErrorAt(
+			LangErrorAt(
 				ErrorSyntax,
 				p.current.File,
 				p.current.Line,
@@ -1474,7 +1476,7 @@ func (p *Parser) parseClassStatement() Stmt {
 	p.expect(TOKEN_CLASS)
 
 	if p.current.Type != TOKEN_IDENT {
-		langErrorAt(
+		LangErrorAt(
 			ErrorSyntax,
 			p.current.File,
 			p.current.Line,
@@ -1492,7 +1494,7 @@ func (p *Parser) parseClassStatement() Stmt {
 
 	for p.current.Type != TOKEN_RBRACE {
 		if p.current.Type == TOKEN_EOF {
-			langErrorAt(
+			LangErrorAt(
 				ErrorSyntax,
 				p.current.File,
 				p.current.Line,
@@ -1502,7 +1504,7 @@ func (p *Parser) parseClassStatement() Stmt {
 		}
 
 		if p.current.Type != TOKEN_FN {
-			langErrorAt(
+			LangErrorAt(
 				ErrorSyntax,
 				p.current.File,
 				p.current.Line,
@@ -1515,7 +1517,7 @@ func (p *Parser) parseClassStatement() Stmt {
 
 		fn, ok := method.(FunctionStmt)
 		if !ok {
-			langErrorAt(
+			LangErrorAt(
 				ErrorSyntax,
 				p.current.File,
 				p.current.Line,
@@ -1574,7 +1576,7 @@ func (p *Parser) parseArgumentList() []Expr {
 
 func (p *Parser) expect(tokenType TokenType) {
 	if p.current.Type != tokenType {
-		langErrorAt(
+		LangErrorAt(
 			ErrorSyntax,
 			p.current.File,
 			p.current.Line,

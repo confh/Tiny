@@ -2,6 +2,9 @@ package main
 
 import (
 	"strconv"
+
+	. "language.com/src/tinyerrors"
+	. "language.com/src/vm"
 )
 
 type BindingKind int
@@ -288,7 +291,7 @@ func (c *Compiler) beginScope() {
 
 func (c *Compiler) endScope() {
 	if len(c.scopes) == 0 {
-		langError(ErrorInternal, "scope stack underflow")
+		LangError(ErrorInternal, "scope stack underflow")
 	}
 
 	c.scopes = c.scopes[:len(c.scopes)-1]
@@ -386,7 +389,7 @@ func (c *Compiler) declareVariable(name string, constant bool) Binding {
 	scope := c.currentScope()
 
 	if _, exists := scope[name]; exists {
-		langError(ErrorName, "variable already declared in this scope: %s", name)
+		LangError(ErrorName, "variable already declared in this scope: %s", name)
 	}
 
 	if c.isInsideFunction() {
@@ -591,7 +594,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 
 		for _, member := range enumStmt.Members {
 			if _, exists := obj[member]; exists {
-				langError(ErrorName, "duplicate enum member %s.%s", enumStmt.Name, member)
+				LangError(ErrorName, "duplicate enum member %s.%s", enumStmt.Name, member)
 			}
 
 			obj[member] = member
@@ -812,7 +815,7 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 			return
 		}
 
-		langError(ErrorInternal, "imports should be resolved before compiling")
+		LangError(ErrorInternal, "imports should be resolved before compiling")
 
 	case IfStmt:
 		c.compileIfStatement(s)
@@ -835,20 +838,20 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 		c.compileEnum(s)
 
 	default:
-		langError(ErrorInternal, "unknown statement")
+		LangError(ErrorInternal, "unknown statement")
 	}
 }
 
 func (c *Compiler) compileEnum(stmt EnumStmt) {
 	if len(stmt.Members) == 0 {
-		langError(ErrorSyntax, "enum %s must have at least one member", stmt.Name)
+		LangError(ErrorSyntax, "enum %s must have at least one member", stmt.Name)
 	}
 
 	obj := ObjectValue{}
 
 	for _, member := range stmt.Members {
 		if _, exists := obj[member]; exists {
-			langError(ErrorName, "duplicate enum member %s.%s", stmt.Name, member)
+			LangError(ErrorName, "duplicate enum member %s.%s", stmt.Name, member)
 		}
 
 		obj[member] = member
@@ -994,7 +997,7 @@ func (c *Compiler) compileForStatement(stmt ForStmt) {
 
 func (c *Compiler) compileBreakStatement() {
 	if len(c.loopStack) == 0 {
-		langError(ErrorSyntax, "break used outside of loop")
+		LangError(ErrorSyntax, "break used outside of loop")
 	}
 
 	jumpIndex := c.emitJump(OP_JUMP)
@@ -1005,7 +1008,7 @@ func (c *Compiler) compileBreakStatement() {
 
 func (c *Compiler) compileContinueStatement() {
 	if len(c.loopStack) == 0 {
-		langError(ErrorSyntax, "continue used outside of loop")
+		LangError(ErrorSyntax, "continue used outside of loop")
 	}
 
 	jumpIndex := c.emitJump(OP_JUMP)
@@ -1060,7 +1063,7 @@ func (c *Compiler) ensureCaptured(name string) (Binding, bool) {
 func (c *Compiler) compileClass(stmt ClassStmt) {
 
 	if _, exists := c.classes[stmt.Name]; exists {
-		langError(ErrorName, "class already defined: %s", stmt.Name)
+		LangError(ErrorName, "class already defined: %s", stmt.Name)
 	}
 
 	methods := map[string]string{}
@@ -1137,7 +1140,7 @@ func (c *Compiler) compileIfStatement(stmt IfStmt) {
 
 func (c *Compiler) compileFunction(stmt FunctionStmt) {
 	if existing, exists := c.functions[stmt.Name]; exists && len(existing.Instructions) > 0 {
-		langError(ErrorName, "function already defined: %s", stmt.Name)
+		LangError(ErrorName, "function already defined: %s", stmt.Name)
 	}
 
 	// Predeclare function so recursion works.
@@ -1236,7 +1239,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 			c.emit(OP_NOT, nil)
 
 		default:
-			langError(ErrorInternal, "unknown unary operator: %s", e.Op)
+			LangError(ErrorInternal, "unknown unary operator: %s", e.Op)
 		}
 
 	case InterpolatedStringExpr:
@@ -1451,7 +1454,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 			c.emit(OP_MOD, nil)
 
 		default:
-			langError(ErrorInternal, "unknown binary operator")
+			LangError(ErrorInternal, "unknown binary operator")
 		}
 
 	case CallExpr:
@@ -1598,10 +1601,10 @@ func (c *Compiler) compileExpr(expr Expr) {
 			return
 		}
 
-		langError(ErrorName, "cannot use this outside of a method")
+		LangError(ErrorName, "cannot use this outside of a method")
 
 	default:
-		langError(ErrorInternal, "unknown expression")
+		LangError(ErrorInternal, "unknown expression")
 	}
 }
 

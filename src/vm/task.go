@@ -1,17 +1,19 @@
-package main
+package vm
+
+import . "language.com/src/tinyerrors"
 
 func (vm *VM) callTaskModule(method string, args []Value) {
 	switch method {
 	case "run":
 		if len(args) != 1 {
-			langError(ErrorRuntime, "task.run expects 1 argument")
+			LangError(ErrorRuntime, "task.run expects 1 argument")
 		}
 
 		value := args[0]
 
 		fn, ok := value.(FunctionValue)
 		if !ok {
-			langError(ErrorType, "task.run expects function, got %s", typeName(value))
+			LangError(ErrorType, "task.run expects function, got %s", typeName(value))
 		}
 
 		task := &NativeTaskValue{
@@ -40,14 +42,14 @@ func (vm *VM) callTaskModule(method string, args []Value) {
 
 	case "await":
 		if len(args) != 1 {
-			langError(ErrorRuntime, "task.await expects 1 argument")
+			LangError(ErrorRuntime, "task.await expects 1 argument")
 		}
 
 		value := args[0]
 
 		task, ok := value.(*NativeTaskValue)
 		if !ok {
-			langError(ErrorType, "task.await expects task, got %s", typeName(value))
+			LangError(ErrorType, "task.await expects task, got %s", typeName(value))
 		}
 
 		result := <-task.Done
@@ -59,6 +61,6 @@ func (vm *VM) callTaskModule(method string, args []Value) {
 		vm.push(result.Value)
 
 	default:
-		langError(ErrorName, "unknown task function: %s", method)
+		LangError(ErrorName, "unknown task function: %s", method)
 	}
 }

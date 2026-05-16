@@ -1,4 +1,4 @@
-package main
+package vm
 
 type Stmt interface {
 	stmtNode()

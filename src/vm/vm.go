@@ -1,4 +1,4 @@
-package main
+package vm
 
 import (
 	"encoding/json"
@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	. "language.com/src/tinyerrors"
 )
 
 type TryHandler struct {
@@ -105,13 +107,13 @@ func (vm *VM) callClassWithArgs(class Class, args []Value) {
 	if initName, exists := class.Methods["init"]; exists {
 		fn, ok := vm.functions[initName]
 		if !ok {
-			langError(ErrorName, "undefined init function: %s", initName)
+			LangError(ErrorName, "undefined init function: %s", initName)
 		}
 
 		expectedArgs := len(fn.Params) - 1
 
 		if expectedArgs != len(args) {
-			langError(
+			LangError(
 				ErrorRuntime,
 				"class %s constructor expects %d arguments, got %d",
 				class.Name,
@@ -153,7 +155,7 @@ func (vm *VM) callClassWithArgs(class Class, args []Value) {
 
 		for len(vm.frames) > frameDepthBefore {
 			if vm.step() {
-				langError(ErrorRuntime, "program halted while running constructor")
+				LangError(ErrorRuntime, "program halted while running constructor")
 			}
 		}
 
@@ -168,7 +170,7 @@ func (vm *VM) callClassWithArgs(class Class, args []Value) {
 func (vm *VM) callClassByName(name string, args []Value) {
 	class, exists := vm.classes[name]
 	if !exists {
-		langError(ErrorName, "undefined class: %s", name)
+		LangError(ErrorName, "undefined class: %s", name)
 	}
 
 	vm.callClassWithArgs(class, args)
@@ -179,7 +181,7 @@ func (vm *VM) step() bool {
 	ip := vm.currentIP()
 
 	if ip < 0 || ip >= len(instructions) {
-		langError(ErrorInternal, "instruction pointer out of range")
+		LangError(ErrorInternal, "instruction pointer out of range")
 	}
 
 	instr := instructions[ip]
@@ -203,14 +205,14 @@ func (vm *VM) step() bool {
 
 		if len(info.Captures) > 0 {
 			if len(vm.frames) == 0 {
-				langError(ErrorInternal, "closure has captures but no current function frame")
+				LangError(ErrorInternal, "closure has captures but no current function frame")
 			}
 
 			frame := vm.currentFrame()
 
 			for _, capture := range info.Captures {
 				if capture.OuterSlot < 0 || capture.OuterSlot >= len(frame.locals) {
-					langError(
+					LangError(
 						ErrorInternal,
 						"capture slot out of range: function=%s outerSlot=%d locals=%d",
 						frame.function.Name,
@@ -220,7 +222,7 @@ func (vm *VM) step() bool {
 				}
 
 				if frame.locals[capture.OuterSlot] == nil {
-					langError(
+					LangError(
 						ErrorInternal,
 						"captured local is nil: function=%s outerSlot=%d",
 						frame.function.Name,
@@ -248,7 +250,7 @@ func (vm *VM) step() bool {
 
 		object, ok := objectValue.(ObjectValue)
 		if !ok {
-			langError(ErrorType, "expected object, got %s", typeName(objectValue))
+			LangError(ErrorType, "expected object, got %s", typeName(objectValue))
 		}
 
 		object[name] = value
@@ -258,7 +260,7 @@ func (vm *VM) step() bool {
 
 		value, ok := vm.globals[name]
 		if !ok {
-			langError(ErrorName, "undefined global variable: %s", name)
+			LangError(ErrorName, "undefined global variable: %s", name)
 		}
 
 		vm.push(value)
@@ -276,7 +278,7 @@ func (vm *VM) step() bool {
 
 	case OP_POP_TRY:
 		if len(vm.tryHandlers) == 0 {
-			langError(ErrorInternal, "try handler stack underflow")
+			LangError(ErrorInternal, "try handler stack underflow")
 		}
 
 		vm.tryHandlers = vm.tryHandlers[:len(vm.tryHandlers)-1]
@@ -286,7 +288,7 @@ func (vm *VM) step() bool {
 		value := vm.pop()
 
 		if !checkTypeHint(value, info.TypeHint) {
-			langError(
+			LangError(
 				ErrorType,
 				"variable %s expected %s, got %s",
 				info.Name,
@@ -304,7 +306,7 @@ func (vm *VM) step() bool {
 		frame := vm.currentFrame()
 
 		if slot < 0 || slot >= len(frame.locals) {
-			langError(
+			LangError(
 				ErrorInternal,
 				"local slot out of range: function=%s slot=%d locals=%d",
 				frame.function.Name,
@@ -314,7 +316,7 @@ func (vm *VM) step() bool {
 		}
 
 		if frame.locals[slot] == nil {
-			langError(
+			LangError(
 				ErrorInternal,
 				"local slot is nil: function=%s slot=%d locals=%d",
 				frame.function.Name,
@@ -330,7 +332,7 @@ func (vm *VM) step() bool {
 		value := vm.pop()
 
 		if !checkTypeHint(value, info.TypeHint) {
-			langError(
+			LangError(
 				ErrorType,
 				"variable %s expected %s, got %s",
 				info.Name,
@@ -350,13 +352,13 @@ func (vm *VM) step() bool {
 		value := vm.pop()
 
 		if vm.globalConstants[name] {
-			langError(ErrorConst, "cannot assign to constant global")
+			LangError(ErrorConst, "cannot assign to constant global")
 		}
 
 		hint := vm.globalTypes[name]
 
 		if !checkTypeHint(value, hint) {
-			langError(
+			LangError(
 				ErrorType,
 				"global %s expected %s, got %s",
 				name,
@@ -374,7 +376,7 @@ func (vm *VM) step() bool {
 		frame := vm.currentFrame()
 
 		if slot < 0 || slot >= len(frame.locals) {
-			langError(
+			LangError(
 				ErrorInternal,
 				"local slot out of range: function=%s slot=%d locals=%d",
 				frame.function.Name,
@@ -384,7 +386,7 @@ func (vm *VM) step() bool {
 		}
 
 		if frame.locals[slot] == nil {
-			langError(
+			LangError(
 				ErrorInternal,
 				"local slot is nil during assignment: function=%s slot=%d locals=%d",
 				frame.function.Name,
@@ -394,7 +396,7 @@ func (vm *VM) step() bool {
 		}
 
 		if frame.constants[slot] {
-			langError(ErrorConst, "cannot assign to constant local")
+			LangError(ErrorConst, "cannot assign to constant local")
 		}
 
 		frame.locals[slot].Value = value
@@ -414,7 +416,7 @@ func (vm *VM) step() bool {
 		} else if isString(left) && isString(right) {
 			vm.push(left.(string) + right.(string))
 		} else {
-			langError(ErrorType, "cannot add %s and %s", typeName(left), typeName(right))
+			LangError(ErrorType, "cannot add %s and %s", typeName(left), typeName(right))
 		}
 
 	case OP_SUB:
@@ -432,7 +434,7 @@ func (vm *VM) step() bool {
 				vm.push(left.(int) - right.(int))
 			}
 		} else {
-			langError(ErrorType, "cannot subtract %s and %s", typeName(left), typeName(right))
+			LangError(ErrorType, "cannot subtract %s and %s", typeName(left), typeName(right))
 		}
 
 	case OP_MUL:
@@ -448,7 +450,7 @@ func (vm *VM) step() bool {
 				vm.push(left.(int) * right.(int))
 			}
 		} else {
-			langError(ErrorType, "cannot multiply %s and %s", typeName(left), typeName(right))
+			LangError(ErrorType, "cannot multiply %s and %s", typeName(left), typeName(right))
 		}
 
 	case OP_DIV:
@@ -456,7 +458,7 @@ func (vm *VM) step() bool {
 		left := vm.pop()
 
 		if !isNumber(left) || !isNumber(right) {
-			langError(ErrorType, "cannot divide %s and %s", typeName(left), typeName(right))
+			LangError(ErrorType, "cannot divide %s and %s", typeName(left), typeName(right))
 		}
 
 		vm.push(asFloat(left) / asFloat(right))
@@ -476,7 +478,7 @@ func (vm *VM) step() bool {
 		left := vm.pop()
 
 		if !isNumber(left) || !isNumber(right) {
-			langError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
+			LangError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
 		}
 
 		vm.push(asFloat(left) < asFloat(right))
@@ -486,7 +488,7 @@ func (vm *VM) step() bool {
 		left := vm.pop()
 
 		if !isNumber(left) || !isNumber(right) {
-			langError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
+			LangError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
 		}
 
 		vm.push(asFloat(left) > asFloat(right))
@@ -496,7 +498,7 @@ func (vm *VM) step() bool {
 		left := vm.pop()
 
 		if !isNumber(left) || !isNumber(right) {
-			langError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
+			LangError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
 		}
 
 		vm.push(asFloat(left) <= asFloat(right))
@@ -506,7 +508,7 @@ func (vm *VM) step() bool {
 		left := vm.pop()
 
 		if !isNumber(left) || !isNumber(right) {
-			langError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
+			LangError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
 		}
 
 		vm.push(asFloat(left) >= asFloat(right))
@@ -571,7 +573,7 @@ func (vm *VM) step() bool {
 			vm.callClassByName(v.Name, args)
 
 		default:
-			langError(ErrorType, "expected function or class, got %s", typeName(callee))
+			LangError(ErrorType, "expected function or class, got %s", typeName(callee))
 		}
 
 	case OP_BUILTIN_CALL:
@@ -587,7 +589,7 @@ func (vm *VM) step() bool {
 			r := asInt(right)
 
 			if r == 0 {
-				langError(ErrorRuntime, "cannot modulo by zero")
+				LangError(ErrorRuntime, "cannot modulo by zero")
 			}
 
 			vm.push(l % r)
@@ -596,13 +598,13 @@ func (vm *VM) step() bool {
 			r := int64(asInt(right))
 
 			if r == 0 {
-				langError(ErrorRuntime, "cannot modulo by zero")
+				LangError(ErrorRuntime, "cannot modulo by zero")
 			}
 
 			vm.push(l % r)
 
 		default:
-			langError(ErrorType, "cannot modulo %s and %s", typeName(left), typeName(right))
+			LangError(ErrorType, "cannot modulo %s and %s", typeName(left), typeName(right))
 		}
 
 	case OP_ARRAY:
@@ -625,7 +627,7 @@ func (vm *VM) step() bool {
 			index := asInt(indexValue)
 
 			if index < 0 || index >= len(obj.Elements) {
-				langError(ErrorRuntime, "array index out of range: %d", index)
+				LangError(ErrorRuntime, "array index out of range: %d", index)
 			}
 
 			vm.push(obj.Elements[index])
@@ -635,13 +637,13 @@ func (vm *VM) step() bool {
 
 			value, exists := obj[key]
 			if !exists {
-				langError(ErrorName, "object has no key: %s", key)
+				LangError(ErrorName, "object has no key: %s", key)
 			}
 
 			vm.push(value)
 
 		default:
-			langError(ErrorType, "cannot index %s", typeName(objectValue))
+			LangError(ErrorType, "cannot index %s", typeName(objectValue))
 		}
 
 	case OP_SET_INDEX:
@@ -654,7 +656,7 @@ func (vm *VM) step() bool {
 			index := asInt(indexValue)
 
 			if index < 0 || index >= len(obj.Elements) {
-				langError(ErrorRuntime, "array index out of range: %d", index)
+				LangError(ErrorRuntime, "array index out of range: %d", index)
 			}
 
 			obj.Elements[index] = value
@@ -664,7 +666,7 @@ func (vm *VM) step() bool {
 			obj[key] = value
 
 		default:
-			langError(ErrorType, "cannot index assign %s", typeName(objectValue))
+			LangError(ErrorType, "cannot index assign %s", typeName(objectValue))
 		}
 
 	case OP_RETURN:
@@ -682,7 +684,7 @@ func (vm *VM) step() bool {
 		frame := vm.frames[len(vm.frames)-1]
 
 		if !checkTypeHint(returnValue, frame.function.ReturnType) {
-			langError(
+			LangError(
 				ErrorType,
 				"function %s should return %s, got %s",
 				frame.function.Name,
@@ -692,7 +694,7 @@ func (vm *VM) step() bool {
 		}
 
 		if len(vm.frames) == 0 {
-			langError(ErrorRuntime, "return used outside of function")
+			LangError(ErrorRuntime, "return used outside of function")
 		}
 
 		vm.frames = vm.frames[:len(vm.frames)-1]
@@ -758,13 +760,13 @@ func (vm *VM) step() bool {
 		if ns, ok := objectValue.(NamespaceValue); ok {
 			value, exists := ns.Members[name]
 			if !exists {
-				langError(ErrorName, "namespace %s has no member: %s", ns.Name, name)
+				LangError(ErrorName, "namespace %s has no member: %s", ns.Name, name)
 			}
 
 			if ref, ok := value.(NamespaceMemberRef); ok {
 				actual, exists := vm.globals[ref.GlobalName]
 				if !exists {
-					langError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
+					LangError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
 				}
 
 				vm.push(actual)
@@ -774,7 +776,7 @@ func (vm *VM) step() bool {
 			if ref, ok := value.(*NamespaceMemberRef); ok {
 				actual, exists := vm.globals[ref.GlobalName]
 				if !exists {
-					langError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
+					LangError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
 				}
 
 				vm.push(actual)
@@ -788,13 +790,13 @@ func (vm *VM) step() bool {
 		if ns, ok := objectValue.(*NamespaceValue); ok {
 			value, exists := ns.Members[name]
 			if !exists {
-				langError(ErrorName, "namespace %s has no member: %s", ns.Name, name)
+				LangError(ErrorName, "namespace %s has no member: %s", ns.Name, name)
 			}
 
 			if ref, ok := value.(NamespaceMemberRef); ok {
 				actual, exists := vm.globals[ref.GlobalName]
 				if !exists {
-					langError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
+					LangError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
 				}
 
 				vm.push(actual)
@@ -804,7 +806,7 @@ func (vm *VM) step() bool {
 			if ref, ok := value.(*NamespaceMemberRef); ok {
 				actual, exists := vm.globals[ref.GlobalName]
 				if !exists {
-					langError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
+					LangError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
 				}
 
 				vm.push(actual)
@@ -817,12 +819,12 @@ func (vm *VM) step() bool {
 
 		object, ok := objectValue.(ObjectValue)
 		if !ok {
-			langError(ErrorType, "expected object, got %s", typeName(objectValue))
+			LangError(ErrorType, "expected object, got %s", typeName(objectValue))
 		}
 
 		value, exists := object[name]
 		if !exists {
-			langError(ErrorName, "object has no property: %s", name)
+			LangError(ErrorName, "object has no property: %s", name)
 		}
 
 		vm.push(value)
@@ -831,7 +833,7 @@ func (vm *VM) step() bool {
 		return true
 
 	default:
-		langError(ErrorInternal, "unknown opcode: %d", instr.Op)
+		LangError(ErrorInternal, "unknown opcode: %d", instr.Op)
 	}
 
 	return false
@@ -856,7 +858,7 @@ func (vm *VM) throwValue(value Value) {
 		message := valueToString(errorObject["message"])
 		kind := valueToString(errorObject["kind"])
 
-		panic(LangError{
+		panic(LangErrorType{
 			Kind:    ErrorKind(kind),
 			Message: message,
 		})
@@ -871,13 +873,13 @@ func (vm *VM) throwValue(value Value) {
 
 	if handler.IsLocal {
 		if handler.FrameDepth == 0 {
-			langError(ErrorInternal, "local catch handler has no frame")
+			LangError(ErrorInternal, "local catch handler has no frame")
 		}
 
 		frame := &vm.frames[handler.FrameDepth-1]
 
 		if handler.Slot < 0 || handler.Slot >= len(frame.locals) {
-			langError(ErrorInternal, "catch local slot out of range")
+			LangError(ErrorInternal, "catch local slot out of range")
 		}
 
 		frame.locals[handler.Slot].Value = errorObject
@@ -928,11 +930,11 @@ func makeErrorObject(value Value) ObjectValue {
 func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []Value) {
 	fn, ok := vm.functions[fnValue.Name]
 	if !ok {
-		langError(ErrorName, "undefined function: %s", fnValue.Name)
+		LangError(ErrorName, "undefined function: %s", fnValue.Name)
 	}
 
 	if len(args) != len(fn.Params) {
-		langError(
+		LangError(
 			ErrorRuntime,
 			"function %s expects %d arguments, got %d",
 			fnValue.Name,
@@ -950,7 +952,7 @@ func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []Value) {
 
 	for slot, cell := range fnValue.Captures {
 		if slot < 0 || slot >= len(locals) {
-			langError(ErrorInternal, "closure capture slot out of range")
+			LangError(ErrorInternal, "closure capture slot out of range")
 		}
 
 		locals[slot] = cell
@@ -983,12 +985,12 @@ func (vm *VM) callFunctionValue(fnValue FunctionValue, args []Value) Value {
 
 	for len(vm.frames) > frameDepthBefore {
 		if vm.step() {
-			langError(ErrorRuntime, "program halted while running function value")
+			LangError(ErrorRuntime, "program halted while running function value")
 		}
 	}
 
 	if len(vm.stack) == 0 {
-		langError(ErrorInternal, "function %s returned no value", fnValue.Name)
+		LangError(ErrorInternal, "function %s returned no value", fnValue.Name)
 	}
 
 	return vm.pop()
@@ -1006,7 +1008,7 @@ func (vm *VM) callServerMethod(server *NativeServerValue, method string, args []
 	switch method {
 	case "getPrettyJSON":
 		if len(args) != 2 {
-			langError(ErrorRuntime, "server.getJSON expects 2 arguments")
+			LangError(ErrorRuntime, "server.getJSON expects 2 arguments")
 		}
 
 		path := asString(args[0])
@@ -1014,7 +1016,7 @@ func (vm *VM) callServerMethod(server *NativeServerValue, method string, args []
 
 		bytes, err := json.MarshalIndent(jsonValue, "", "  ")
 		if err != nil {
-			langError(ErrorRuntime, "failed to convert value to JSON: %v", err)
+			LangError(ErrorRuntime, "failed to convert value to JSON: %v", err)
 		}
 
 		server.Routes[path] = string(bytes)
@@ -1022,7 +1024,7 @@ func (vm *VM) callServerMethod(server *NativeServerValue, method string, args []
 		vm.push(0)
 	case "getJSON":
 		if len(args) != 2 {
-			langError(ErrorRuntime, "server.getJSON expects 2 arguments")
+			LangError(ErrorRuntime, "server.getJSON expects 2 arguments")
 		}
 
 		path := asString(args[0])
@@ -1030,7 +1032,7 @@ func (vm *VM) callServerMethod(server *NativeServerValue, method string, args []
 
 		bytes, err := json.Marshal(jsonValue)
 		if err != nil {
-			langError(ErrorRuntime, "failed to convert value to JSON: %v", err)
+			LangError(ErrorRuntime, "failed to convert value to JSON: %v", err)
 		}
 
 		server.Routes[path] = string(bytes)
@@ -1038,7 +1040,7 @@ func (vm *VM) callServerMethod(server *NativeServerValue, method string, args []
 		vm.push(0)
 	case "get":
 		if len(args) != 2 {
-			langError(ErrorRuntime, "server.get expects 2 arguments")
+			LangError(ErrorRuntime, "server.get expects 2 arguments")
 		}
 
 		path := asString(args[0])
@@ -1050,14 +1052,14 @@ func (vm *VM) callServerMethod(server *NativeServerValue, method string, args []
 		case FunctionValue:
 			server.Routes[path] = handler
 		default:
-			langError(ErrorType, "server.get expects string or function as second argument")
+			LangError(ErrorType, "server.get expects string or function as second argument")
 		}
 
 		vm.push(0)
 
 	case "start":
 		if len(args) != 0 {
-			langError(ErrorRuntime, "server.start expects 0 arguments")
+			LangError(ErrorRuntime, "server.start expects 0 arguments")
 		}
 
 		mux := http.NewServeMux()
@@ -1083,7 +1085,7 @@ func (vm *VM) callServerMethod(server *NativeServerValue, method string, args []
 					writeServerResponse(w, valueToString(result))
 
 				default:
-					langError(ErrorType, "invalid route handler: %s", typeName(routeHandler))
+					LangError(ErrorType, "invalid route handler: %s", typeName(routeHandler))
 				}
 			})
 		}
@@ -1092,13 +1094,13 @@ func (vm *VM) callServerMethod(server *NativeServerValue, method string, args []
 
 		err := http.ListenAndServe(addr, mux)
 		if err != nil {
-			langError(ErrorRuntime, "server failed: %v", err)
+			LangError(ErrorRuntime, "server failed: %v", err)
 		}
 
 		vm.push(0)
 
 	default:
-		langError(ErrorName, "unknown server method: %s", method)
+		LangError(ErrorName, "unknown server method: %s", method)
 	}
 }
 
@@ -1121,7 +1123,7 @@ func writeServerResponse(w http.ResponseWriter, text string) {
 func (vm *VM) callNamespaceMethod(ns NamespaceValue, method string, args []Value) {
 	value, exists := ns.Members[method]
 	if !exists {
-		langError(ErrorName, "namespace %s has no member: %s", ns.Name, method)
+		LangError(ErrorName, "namespace %s has no member: %s", ns.Name, method)
 	}
 
 	switch v := value.(type) {
@@ -1140,7 +1142,7 @@ func (vm *VM) callNamespaceMethod(ns NamespaceValue, method string, args []Value
 		vm.callClassByName(v.Name, args)
 
 	default:
-		langError(ErrorType, "namespace member %s is not callable", method)
+		LangError(ErrorType, "namespace member %s is not callable", method)
 	}
 }
 
@@ -1181,28 +1183,28 @@ func (vm *VM) callMethod(method string, argCount int) {
 
 	object, ok := objectValue.(ObjectValue)
 	if !ok {
-		langError(ErrorType, "expected object, got %s", typeName(objectValue))
+		LangError(ErrorType, "expected object, got %s", typeName(objectValue))
 	}
 
 	methodValue, exists := object[method]
 	if !exists {
-		langError(ErrorName, "object has no method: %s", method)
+		LangError(ErrorName, "object has no method: %s", method)
 	}
 
 	fnValue, ok := methodValue.(FunctionValue)
 	if !ok {
-		langError(ErrorType, "property %s is not callable", method)
+		LangError(ErrorType, "property %s is not callable", method)
 	}
 
 	fn, ok := vm.functions[fnValue.Name]
 	if !ok {
-		langError(ErrorName, "undefined function: %s", fnValue.Name)
+		LangError(ErrorName, "undefined function: %s", fnValue.Name)
 	}
 
 	expectedArgs := len(fn.Params) - 1
 
 	if expectedArgs != argCount {
-		langError(
+		LangError(
 			ErrorRuntime,
 			"method %s expects %d arguments, got %d",
 			method,
@@ -1258,7 +1260,7 @@ func (vm *VM) runNativeApp(app *NativeAppValue) {
 
 	fn, exists := app.Commands[commandName]
 	if !exists {
-		langError(ErrorRuntime, "unknown command: %s", commandName)
+		LangError(ErrorRuntime, "unknown command: %s", commandName)
 	}
 
 	tinyArgs := &ArrayValue{
@@ -1276,14 +1278,14 @@ func (vm *VM) callNativeAppMethod(app *NativeAppValue, method string, args []Val
 	switch method {
 	case "command":
 		if len(args) != 2 {
-			langError(ErrorRuntime, "app.command expects 2 arguments")
+			LangError(ErrorRuntime, "app.command expects 2 arguments")
 		}
 
 		name := asString(args[0])
 
 		fn, ok := args[1].(FunctionValue)
 		if !ok {
-			langError(ErrorType, "app.command expects function callback")
+			LangError(ErrorType, "app.command expects function callback")
 		}
 
 		app.Commands[name] = fn
@@ -1291,14 +1293,14 @@ func (vm *VM) callNativeAppMethod(app *NativeAppValue, method string, args []Val
 
 	case "run":
 		if len(args) != 0 {
-			langError(ErrorRuntime, "app.run expects 0 arguments")
+			LangError(ErrorRuntime, "app.run expects 0 arguments")
 		}
 
 		vm.runNativeApp(app)
 		vm.push(0)
 
 	default:
-		langError(ErrorName, "unknown app method: %s", method)
+		LangError(ErrorName, "unknown app method: %s", method)
 	}
 }
 
@@ -1314,13 +1316,13 @@ func (vm *VM) setIP(value int) {
 func (vm *VM) callFunction(name string, argCount int) {
 	fn, exists := vm.functions[name]
 	if !exists {
-		langError(ErrorName, "undefined function: %s", name)
+		LangError(ErrorName, "undefined function: %s", name)
 	}
 
 	args := vm.popArgs(argCount)
 
 	if len(args) != len(fn.Params) {
-		langError(
+		LangError(
 			ErrorRuntime,
 			"function %s expects %d arguments, got %d",
 			name,
@@ -1355,14 +1357,14 @@ func (vm *VM) callFunction(name string, argCount int) {
 	}
 
 	if len(args) != len(fn.Params) {
-		langError(ErrorRuntime, "function %s expects %d arguments, got %d", fn.Name, len(fn.Params), len(args))
+		LangError(ErrorRuntime, "function %s expects %d arguments, got %d", fn.Name, len(fn.Params), len(args))
 	}
 
 	for i, arg := range args {
 		param := fn.Params[i]
 
 		if !checkTypeHint(arg, param.TypeHint) {
-			langError(
+			LangError(
 				ErrorType,
 				"function %s parameter %s expected %s, got %s",
 				fn.Name,
@@ -1408,7 +1410,7 @@ func (vm *VM) incrementIP() {
 
 func (vm *VM) currentFrame() *Frame {
 	if len(vm.frames) == 0 {
-		langError(ErrorInternal, "no current function frame")
+		LangError(ErrorInternal, "no current function frame")
 	}
 
 	return &vm.frames[len(vm.frames)-1]
@@ -1416,7 +1418,7 @@ func (vm *VM) currentFrame() *Frame {
 
 func (vm *VM) popArgs(count int) []Value {
 	if len(vm.stack) < count {
-		langError(
+		LangError(
 			ErrorInternal,
 			"not enough values for args: need=%d have=%d at function=%s ip=%d op=%v value=%#v stack=%#v",
 			count,
@@ -1444,7 +1446,7 @@ func (vm *VM) push(value Value) {
 
 func (vm *VM) pop() Value {
 	if len(vm.stack) == 0 {
-		langError(
+		LangError(
 			ErrorInternal,
 			"stack underflow at function=%s ip=%d op=%v value=%#v",
 			vm.lastFunctionName,

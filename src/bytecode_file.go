@@ -3,6 +3,9 @@ package main
 import (
 	"encoding/json"
 	"os"
+
+	. "language.com/src/tinyerrors"
+	. "language.com/src/vm"
 )
 
 const BytecodeVersion = 1
@@ -61,19 +64,19 @@ func SaveBytecode(path string, main []Instruction, functions map[string]Function
 
 	data, err := json.MarshalIndent(file, "", "  ")
 	if err != nil {
-		langError(ErrorRuntime, "failed to encode bytecode: %v", err)
+		LangError(ErrorRuntime, "failed to encode bytecode: %v", err)
 	}
 
 	err = os.WriteFile(path, data, 0644)
 	if err != nil {
-		langError(ErrorRuntime, "failed to write bytecode file: %v", err)
+		LangError(ErrorRuntime, "failed to write bytecode file: %v", err)
 	}
 }
 
 func LoadBytecode(path string) ([]Instruction, map[string]Function, map[string]Class) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		langError(ErrorRuntime, "failed to read bytecode file: %v", err)
+		LangError(ErrorRuntime, "failed to read bytecode file: %v", err)
 	}
 
 	return LoadBytecodeFromBytes(data)
@@ -84,11 +87,11 @@ func LoadBytecodeFromBytes(data []byte) ([]Instruction, map[string]Function, map
 
 	err := json.Unmarshal(data, &file)
 	if err != nil {
-		langError(ErrorRuntime, "failed to decode bytecode file: %v", err)
+		LangError(ErrorRuntime, "failed to decode bytecode file: %v", err)
 	}
 
 	if file.Version != BytecodeVersion {
-		langError(ErrorRuntime, "unsupported bytecode version: %d", file.Version)
+		LangError(ErrorRuntime, "unsupported bytecode version: %d", file.Version)
 	}
 
 	main := deserializeInstructions(file.Main)
@@ -245,7 +248,7 @@ func encodeValue(value any) EncodedValue {
 		}
 
 	default:
-		langError(ErrorRuntime, "cannot encode bytecode value: %T", value)
+		LangError(ErrorRuntime, "cannot encode bytecode value: %T", value)
 		return EncodedValue{Type: "nil"}
 	}
 }
@@ -350,7 +353,7 @@ func decodeValue(value EncodedValue) any {
 		}
 
 	default:
-		langError(ErrorRuntime, "unknown encoded value type: %s", value.Type)
+		LangError(ErrorRuntime, "unknown encoded value type: %s", value.Type)
 		return nil
 	}
 }
@@ -358,19 +361,19 @@ func decodeValue(value EncodedValue) any {
 func decodeInto(data any, target any) {
 	bytes, err := json.Marshal(data)
 	if err != nil {
-		langError(ErrorRuntime, "failed to re-encode bytecode value: %v", err)
+		LangError(ErrorRuntime, "failed to re-encode bytecode value: %v", err)
 	}
 
 	err = json.Unmarshal(bytes, target)
 	if err != nil {
-		langError(ErrorRuntime, "failed to decode bytecode value: %v", err)
+		LangError(ErrorRuntime, "failed to decode bytecode value: %v", err)
 	}
 }
 
 func toFloat64(value any) float64 {
 	number, ok := value.(float64)
 	if !ok {
-		langError(ErrorRuntime, "expected JSON number, got %T", value)
+		LangError(ErrorRuntime, "expected JSON number, got %T", value)
 	}
 
 	return number

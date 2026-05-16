@@ -1,10 +1,12 @@
-package main
+package vm
 
 import (
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
+
+	. "language.com/src/tinyerrors"
 )
 
 type NullValue struct{}
@@ -24,6 +26,10 @@ type NativeTaskValue struct {
 type TaskResult struct {
 	Value Value
 	Error any
+}
+
+type BufferValue struct {
+	Bytes []byte
 }
 
 type Cell struct {
@@ -94,7 +100,7 @@ func asInt(value Value) int {
 	case uint64:
 		return int(n)
 	default:
-		langError(ErrorSyntax, "expected number, got %T", value)
+		LangError(ErrorSyntax, "expected number, got %T", value)
 		return -1
 	}
 }
@@ -124,7 +130,7 @@ func asFloat(value Value) float64 {
 	case float64:
 		return v
 	default:
-		langError(ErrorType, "expected number, got %s", typeName(value))
+		LangError(ErrorType, "expected number, got %s", typeName(value))
 		return 0
 	}
 }
@@ -234,7 +240,7 @@ func valueToJSONCompatible(value Value) any {
 		return nil
 
 	default:
-		langError(ErrorType, "cannot convert %s to JSON", typeName(value))
+		LangError(ErrorType, "cannot convert %s to JSON", typeName(value))
 		return nil
 	}
 }
@@ -361,7 +367,7 @@ func valueToString(value Value) string {
 func asString(value Value) string {
 	stringValue, ok := value.(string)
 	if !ok {
-		langError(ErrorSyntax, "expected string, got %T", value)
+		LangError(ErrorSyntax, "expected string, got %T", value)
 	}
 
 	return stringValue
@@ -370,7 +376,7 @@ func asString(value Value) string {
 func asArray(value Value) *ArrayValue {
 	arrayValue, ok := value.(*ArrayValue)
 	if !ok {
-		langError(ErrorSyntax, "expected array, got %T", value)
+		LangError(ErrorSyntax, "expected array, got %T", value)
 	}
 
 	return arrayValue
@@ -379,7 +385,7 @@ func asArray(value Value) *ArrayValue {
 func asBool(value Value) bool {
 	boolean, ok := value.(bool)
 	if !ok {
-		langError(ErrorSyntax, "expected bool, got %T", value)
+		LangError(ErrorSyntax, "expected bool, got %T", value)
 	}
 
 	return boolean

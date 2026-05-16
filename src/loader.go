@@ -3,6 +3,9 @@ package main
 import (
 	"os"
 	"path/filepath"
+
+	. "language.com/src/tinyerrors"
+	. "language.com/src/vm"
 )
 
 func LoadProgram(path string) Program {
@@ -15,7 +18,7 @@ func LoadProgram(path string) Program {
 func loadFile(path string, visited map[string]bool) []Stmt {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
-		langError(ErrorImport, "%v", err)
+		LangError(ErrorImport, "%v", err)
 	}
 
 	if visited[absPath] {
@@ -26,7 +29,7 @@ func loadFile(path string, visited map[string]bool) []Stmt {
 
 	bytes, err := os.ReadFile(absPath)
 	if err != nil {
-		langError(ErrorImport, "failed to read file %s: %v", path, err)
+		LangError(ErrorImport, "failed to read file %s: %v", path, err)
 	}
 
 	lexer := NewLexer(string(bytes), absPath)

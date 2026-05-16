@@ -3,6 +3,9 @@ package main
 import (
 	"fmt"
 	"os"
+
+	. "language.com/src/tinyerrors"
+	. "language.com/src/vm"
 )
 
 func getScriptArgs() []string {
@@ -12,11 +15,6 @@ func getScriptArgs() []string {
 		return []string{}
 	}
 
-	// Examples:
-	// tiny main.tiny hello confis
-	// go run ./compiler main.tiny hello confis
-	//
-	// For your simple CLI, assume first non-command source file is args[1].
 	if len(args) >= 3 {
 		return args[2:]
 	}
@@ -25,7 +23,7 @@ func getScriptArgs() []string {
 }
 
 func main() {
-	defer handleLangError()
+	defer HandleLangError()
 
 	if len(os.Args) >= 2 {
 		switch os.Args[1] {
@@ -71,7 +69,7 @@ func runSourceCommand(args []string) {
 
 func buildCommand(args []string) {
 	if len(args) < 1 {
-		langError(ErrorRuntime, "usage: tiny build <file.tiny> -o <file.tbc>")
+		LangError(ErrorRuntime, "usage: tiny build <file.tiny> -o <file.tbc>")
 	}
 
 	entryFile := args[0]
@@ -96,7 +94,7 @@ func buildCommand(args []string) {
 
 func runBytecodeCommand(args []string) {
 	if len(args) < 1 {
-		langError(ErrorRuntime, "usage: tiny run <file.tbc>")
+		LangError(ErrorRuntime, "usage: tiny run <file.tbc>")
 	}
 
 	mainBytecode, functions, classes := LoadBytecode(args[0])

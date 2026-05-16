@@ -1,4 +1,4 @@
-package main
+package vm
 
 type TypeHint struct {
 	Name string

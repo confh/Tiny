@@ -1,7 +1,7 @@
 //go:build linux && cgo
 // +build linux,cgo
 
-package main
+package vm
 
 /*
 #cgo LDFLAGS: -ldl
@@ -56,21 +56,21 @@ func (vm *VM) callPluginModule(method string, argCount int) {
 	switch method {
 	case "std":
 		if argCount != 1 {
-			langError(ErrorRuntime, "Plugin.std expects 1 argument")
+			LangError(ErrorRuntime, "Plugin.std expects 1 argument")
 		}
 
 		name := asString(vm.pop())
 
-		availablePlugins := []string{"array", "math", "string", "json", "fs", "app", "task"}
+		availablePlugins := []string{"array", "math", "string", "json", "fs", "app", "task", "buffer"}
 
 		if slices.Contains(availablePlugins, name) {
 			vm.push(&StandardModuleValue{Name: name})
 		} else {
-			langError(ErrorName, "unknown standard module: %s", name)
+			LangError(ErrorName, "unknown standard module: %s", name)
 		}
 	case "load":
 		if argCount != 1 {
-			langError(ErrorRuntime, "Plugin.load expects 1 argument")
+			LangError(ErrorRuntime, "Plugin.load expects 1 argument")
 		}
 
 		path := asString(vm.pop())
@@ -82,7 +82,7 @@ func (vm *VM) callPluginModule(method string, argCount int) {
 		handle := C.tiny_open(cpath)
 		if handle == nil {
 			errText := C.GoString(C.tiny_err())
-			langError(ErrorRuntime, "failed to load plugin %s: %s", path, errText)
+			LangError(ErrorRuntime, "failed to load plugin %s: %s", path, errText)
 		}
 
 		callName := C.CString("TinyPluginCall")
@@ -93,12 +93,12 @@ func (vm *VM) callPluginModule(method string, argCount int) {
 
 		callPtr := C.tiny_sym(handle, callName)
 		if callPtr == nil {
-			langError(ErrorRuntime, "plugin missing TinyPluginCall")
+			LangError(ErrorRuntime, "plugin missing TinyPluginCall")
 		}
 
 		freePtr := C.tiny_sym(handle, freeName)
 		if freePtr == nil {
-			langError(ErrorRuntime, "plugin missing TinyPluginFree")
+			LangError(ErrorRuntime, "plugin missing TinyPluginFree")
 		}
 
 		vm.push(&NativePluginValue{
@@ -109,7 +109,7 @@ func (vm *VM) callPluginModule(method string, argCount int) {
 		})
 
 	default:
-		langError(ErrorName, "unknown Plugin function: %s", method)
+		LangError(ErrorName, "unknown Plugin function: %s", method)
 	}
 }
 
@@ -126,7 +126,7 @@ func (vm *VM) callNativePlugin(plugin *NativePluginValue, method string, args []
 
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		langError(ErrorRuntime, "failed to encode plugin call: %v", err)
+		LangError(ErrorRuntime, "failed to encode plugin call: %v", err)
 	}
 
 	cmethod := C.CString(method)
@@ -137,7 +137,7 @@ func (vm *VM) callNativePlugin(plugin *NativePluginValue, method string, args []
 
 	resultPtr := C.tiny_call(unsafe.Pointer(plugin.Call), cmethod, cargs)
 	if resultPtr == nil {
-		langError(ErrorRuntime, "plugin returned null")
+		LangError(ErrorRuntime, "plugin returned null")
 	}
 
 	resultText := C.GoString(resultPtr)
@@ -147,7 +147,7 @@ func (vm *VM) callNativePlugin(plugin *NativePluginValue, method string, args []
 	var result any
 	err = json.Unmarshal([]byte(resultText), &result)
 	if err != nil {
-		langError(ErrorRuntime, "plugin returned invalid JSON: %v", err)
+		LangError(ErrorRuntime, "plugin returned invalid JSON: %v", err)
 	}
 
 	if obj, ok := result.(map[string]any); ok {
@@ -160,7 +160,7 @@ func (vm *VM) callNativePlugin(plugin *NativePluginValue, method string, args []
 					kind = "PluginError"
 				}
 
-				langError(ErrorKind(kind), "%s", message)
+				LangError(ErrorKind(kind), "%s", message)
 			}
 		}
 	}

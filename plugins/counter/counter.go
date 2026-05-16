@@ -1,6 +1,6 @@
 package main
 
-import "language.com/compiler/tinyplugin"
+import "language.com/src/tinyplugin"
 
 type Counter struct {
 	Name  string

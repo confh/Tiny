@@ -1,7 +1,7 @@
 //go:build windows
 // +build windows
 
-package main
+package vm
 
 import (
 	"encoding/json"
@@ -9,6 +9,8 @@ import (
 	"slices"
 	"syscall"
 	"unsafe"
+
+	. "language.com/src/tinyerrors"
 )
 
 func defaultPluginPath(path string, ext string) string {
@@ -23,21 +25,21 @@ func (vm *VM) callPluginModule(method string, argCount int) {
 	switch method {
 	case "std":
 		if argCount != 1 {
-			langError(ErrorRuntime, "Plugin.std expects 1 argument")
+			LangError(ErrorRuntime, "Plugin.std expects 1 argument")
 		}
 
 		name := asString(vm.pop())
 
-		availablePlugins := []string{"array", "math", "string", "json", "fs", "app", "task"}
+		availablePlugins := []string{"array", "math", "string", "json", "fs", "app", "task", "buffer"}
 
 		if slices.Contains(availablePlugins, name) {
 			vm.push(&StandardModuleValue{Name: name})
 		} else {
-			langError(ErrorName, "unknown standard module: %s", name)
+			LangError(ErrorName, "unknown standard module: %s", name)
 		}
 	case "load":
 		if argCount != 1 {
-			langError(ErrorRuntime, "Plugin.load expects 1 argument")
+			LangError(ErrorRuntime, "Plugin.load expects 1 argument")
 		}
 
 		path := asString(vm.pop())
@@ -49,15 +51,15 @@ func (vm *VM) callPluginModule(method string, argCount int) {
 		freeProc := dll.NewProc("TinyPluginFree")
 
 		if err := dll.Load(); err != nil {
-			langError(ErrorRuntime, "failed to load plugin %s: %v", path, err)
+			LangError(ErrorRuntime, "failed to load plugin %s: %v", path, err)
 		}
 
 		if err := callProc.Find(); err != nil {
-			langError(ErrorRuntime, "plugin missing TinyPluginCall: %v", err)
+			LangError(ErrorRuntime, "plugin missing TinyPluginCall: %v", err)
 		}
 
 		if err := freeProc.Find(); err != nil {
-			langError(ErrorRuntime, "plugin missing TinyPluginFree: %v", err)
+			LangError(ErrorRuntime, "plugin missing TinyPluginFree: %v", err)
 		}
 
 		vm.push(&NativePluginValue{
@@ -67,7 +69,7 @@ func (vm *VM) callPluginModule(method string, argCount int) {
 		})
 
 	default:
-		langError(ErrorName, "unknown Plugin function: %s", method)
+		LangError(ErrorName, "unknown Plugin function: %s", method)
 	}
 }
 
@@ -85,17 +87,17 @@ func (vm *VM) callNativePlugin(plugin *NativePluginValue, method string, args []
 
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		langError(ErrorRuntime, "failed to encode plugin call: %v", err)
+		LangError(ErrorRuntime, "failed to encode plugin call: %v", err)
 	}
 
 	methodPtr, err := syscall.BytePtrFromString(method)
 	if err != nil {
-		langError(ErrorRuntime, "invalid plugin method: %v", err)
+		LangError(ErrorRuntime, "invalid plugin method: %v", err)
 	}
 
 	argsPtr, err := syscall.BytePtrFromString(string(payloadBytes))
 	if err != nil {
-		langError(ErrorRuntime, "invalid plugin args: %v", err)
+		LangError(ErrorRuntime, "invalid plugin args: %v", err)
 	}
 
 	resultPtr, _, _ := syscall.SyscallN(
@@ -105,7 +107,7 @@ func (vm *VM) callNativePlugin(plugin *NativePluginValue, method string, args []
 	)
 
 	if resultPtr == 0 {
-		langError(ErrorRuntime, "plugin returned null")
+		LangError(ErrorRuntime, "plugin returned null")
 	}
 
 	resultText := cStringToGoString(resultPtr)
@@ -116,7 +118,7 @@ func (vm *VM) callNativePlugin(plugin *NativePluginValue, method string, args []
 
 	err = json.Unmarshal([]byte(resultText), &result)
 	if err != nil {
-		langError(ErrorRuntime, "plugin returned invalid JSON: %v", err)
+		LangError(ErrorRuntime, "plugin returned invalid JSON: %v", err)
 	}
 
 	if obj, ok := result.(map[string]any); ok {
@@ -130,7 +132,7 @@ func (vm *VM) callNativePlugin(plugin *NativePluginValue, method string, args []
 					kind = "PluginError"
 				}
 
-				langError(ErrorKind(kind), "%s", message)
+				LangError(ErrorKind(kind), "%s", message)
 			}
 		}
 	}

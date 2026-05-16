@@ -1,7 +1,9 @@
-package main
+package vm
 
 import (
 	"unicode"
+
+	. "language.com/src/tinyerrors"
 )
 
 type Lexer struct {
@@ -230,7 +232,7 @@ func (l *Lexer) NextToken() Token {
 		return l.tokenAt(start, TOKEN_RBRACKET, "]")
 	default:
 		line, column := l.lineColumnAt(start)
-		langErrorAt(ErrorSyntax, l.file, line, column, "unknown character: %q", ch)
+		LangErrorAt(ErrorSyntax, l.file, line, column, "unknown character: %q", ch)
 		return Token{}
 	}
 }
@@ -337,7 +339,7 @@ func (l *Lexer) readString() string {
 
 	if l.pos >= len(l.input) {
 		line, column := l.lineColumnAt(start)
-		langErrorAt(ErrorSyntax, l.file, line, column, "unterminated string")
+		LangErrorAt(ErrorSyntax, l.file, line, column, "unterminated string")
 	}
 
 	value := string(l.input[start:l.pos])
@@ -358,7 +360,7 @@ func (l *Lexer) readBacktickString() string {
 
 	if l.pos >= len(l.input) {
 		line, column := l.lineColumnAt(start)
-		langErrorAt(ErrorSyntax, l.file, line, column, "unterminated interpolated string")
+		LangErrorAt(ErrorSyntax, l.file, line, column, "unterminated interpolated string")
 	}
 
 	value := string(l.input[start:l.pos])

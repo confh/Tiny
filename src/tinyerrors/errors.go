@@ -1,4 +1,4 @@
-package main
+package tinyerrors
 
 import (
 	"fmt"
@@ -19,7 +19,7 @@ const (
 	ErrorUser     ErrorKind = "Error"
 )
 
-type LangError struct {
+type LangErrorType struct {
 	Kind    ErrorKind
 	Message string
 
@@ -28,19 +28,19 @@ type LangError struct {
 	Column int
 }
 
-func (e LangError) Error() string {
+func (e LangErrorType) Error() string {
 	return fmt.Sprintf("%s: %s", e.Kind, e.Message)
 }
 
-func langError(kind ErrorKind, format string, args ...any) {
-	panic(LangError{
+func LangError(kind ErrorKind, format string, args ...any) {
+	panic(LangErrorType{
 		Kind:    kind,
 		Message: fmt.Sprintf(format, args...),
 	})
 }
 
-func langErrorAt(kind ErrorKind, file string, line int, column int, format string, args ...any) {
-	panic(LangError{
+func LangErrorAt(kind ErrorKind, file string, line int, column int, format string, args ...any) {
+	panic(LangErrorType{
 		Kind:    kind,
 		Message: fmt.Sprintf(format, args...),
 		File:    file,
@@ -49,10 +49,10 @@ func langErrorAt(kind ErrorKind, file string, line int, column int, format strin
 	})
 }
 
-func handleLangError() {
+func HandleLangError() {
 	if r := recover(); r != nil {
 		switch err := r.(type) {
-		case LangError:
+		case LangErrorType:
 			if err.File != "" && err.Line > 0 {
 				root, errDir := os.Getwd()
 				if errDir != nil {

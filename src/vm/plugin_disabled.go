@@ -2,12 +2,14 @@
 // +build !windows
 // +build !linux !cgo
 
-package main
+package vm
+
+import . "language.com/src/tinyerrors"
 
 func (vm *VM) callPluginModule(method string, argCount int) {
-	langError(ErrorRuntime, "native plugins are not supported on this build")
+	LangError(ErrorRuntime, "native plugins are not supported on this build")
 }
 
 func (vm *VM) callNativePlugin(plugin *NativePluginValue, method string, args []Value) {
-	langError(ErrorRuntime, "native plugins are not supported on this build")
+	LangError(ErrorRuntime, "native plugins are not supported on this build")
 }

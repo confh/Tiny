@@ -6,11 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	. "language.com/src/tinyerrors"
 )
 
 func distCommand(args []string) {
 	if len(args) < 1 {
-		langError(ErrorRuntime, "usage: tiny dist <file.tiny> -o <output>")
+		LangError(ErrorRuntime, "usage: tiny dist <file.tiny> -o <output>")
 	}
 
 	entryFile := args[0]
@@ -37,7 +39,7 @@ func distCommand(args []string) {
 
 	err := os.MkdirAll(distDir, 0755)
 	if err != nil {
-		langError(ErrorRuntime, "failed to create dist folder: %v", err)
+		LangError(ErrorRuntime, "failed to create dist folder: %v", err)
 	}
 
 	program := LoadProgram(entryFile)
@@ -53,7 +55,7 @@ func distCommand(args []string) {
 	for _, pluginPath := range pluginPaths {
 		err := copyPluginToDist(pluginPath, distDir)
 		if err != nil {
-			langError(ErrorRuntime, "failed to copy plugin %s: %v", pluginPath, err)
+			LangError(ErrorRuntime, "failed to copy plugin %s: %v", pluginPath, err)
 		}
 	}
 

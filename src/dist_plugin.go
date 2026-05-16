@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	. "language.com/src/vm"
 )
 
 func collectPluginPathsFromProgram(program Program) []string {

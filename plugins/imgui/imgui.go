@@ -5,7 +5,7 @@ import (
 	"strconv"
 
 	g "github.com/AllenDang/giu"
-	"language.com/compiler/tinyplugin"
+	"language.com/src/tinyplugin"
 )
 
 func init() {
