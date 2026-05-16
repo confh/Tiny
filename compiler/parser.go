@@ -500,7 +500,6 @@ func (p *Parser) parseExportStatement() Stmt {
 
 func (p *Parser) parseTryCatchStatement() Stmt {
 	p.expect(TOKEN_TRY)
-	p.expect(TOKEN_LBRACE)
 
 	tryBody := p.parseBlock()
 
@@ -518,8 +517,6 @@ func (p *Parser) parseTryCatchStatement() Stmt {
 
 	errorName := p.current.Literal
 	p.advance()
-
-	p.expect(TOKEN_LBRACE)
 
 	catchBody := p.parseBlock()
 
@@ -573,8 +570,6 @@ func (p *Parser) parseForStatement() Stmt {
 	if p.current.Type != TOKEN_LBRACE {
 		update = p.parseForUpdateStatement()
 	}
-
-	p.expect(TOKEN_LBRACE)
 
 	body := p.parseBlock()
 
@@ -717,8 +712,6 @@ func (p *Parser) parseWhileStatement() Stmt {
 
 	condition := p.parseExpression()
 
-	p.expect(TOKEN_LBRACE)
-
 	body := p.parseBlock()
 
 	return WhileStmt{
@@ -732,15 +725,12 @@ func (p *Parser) parseIfStatement() Stmt {
 
 	condition := p.parseExpression()
 
-	p.expect(TOKEN_LBRACE)
-
 	thenBody := p.parseBlock()
 
 	var elseBody []Stmt
 
 	if p.current.Type == TOKEN_ELSE {
 		p.expect(TOKEN_ELSE)
-		p.expect(TOKEN_LBRACE)
 
 		elseBody = p.parseBlock()
 	}
