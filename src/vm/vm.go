@@ -350,7 +350,13 @@ func (vm *VM) step() bool {
 		info := instr.Value.(VariableInfo)
 		value := vm.pop()
 
-		if !checkTypeHint(value, info.TypeHint) {
+		frame := vm.currentFrame()
+
+		if info.Slot < 0 || info.Slot >= len(frame.locals) {
+			LangError(ErrorInternal, "local slot out of range: %d", info.Slot)
+		}
+
+		if !info.TypeHint.IsEmpty() && !checkTypeHint(value, info.TypeHint) {
 			LangError(
 				ErrorType,
 				"variable %s expected %s, got %s",
@@ -359,8 +365,6 @@ func (vm *VM) step() bool {
 				typeName(value),
 			)
 		}
-
-		frame := vm.currentFrame()
 
 		frame.locals[info.Slot] = &Cell{Value: value}
 		frame.constants[info.Slot] = info.Constant
@@ -376,7 +380,7 @@ func (vm *VM) step() bool {
 
 		hint := vm.globalTypes[name]
 
-		if !checkTypeHint(value, hint) {
+		if !hint.IsEmpty() && !checkTypeHint(value, hint) {
 			LangError(
 				ErrorType,
 				"global %s expected %s, got %s",
@@ -387,6 +391,168 @@ func (vm *VM) step() bool {
 		}
 
 		vm.globals[name] = value
+
+	case OP_DEC_LOCAL:
+		info := instr.Value.(DecrementInfo)
+		slot := info.Slot
+
+		frame := vm.currentFrame()
+
+		if slot < 0 || slot >= len(frame.locals) {
+			LangError(
+				ErrorInternal,
+				"local slot out of range: function=%s slot=%d locals=%d",
+				frame.function.Name,
+				slot,
+				len(frame.locals),
+			)
+		}
+
+		if frame.locals[slot] == nil {
+			LangError(
+				ErrorInternal,
+				"local slot is nil during increment: function=%s slot=%d locals=%d",
+				frame.function.Name,
+				slot,
+				len(frame.locals),
+			)
+		}
+
+		if frame.constants[slot] {
+			LangError(ErrorConst, "cannot increment constant local")
+		}
+
+		value := frame.locals[slot].Value
+
+		switch v := value.(type) {
+		case int:
+			if info.IsFloat {
+				frame.locals[slot].Value = float64(v) - info.FloatAmount
+			} else {
+				frame.locals[slot].Value = v - info.IntAmount
+			}
+
+		case float64:
+			if info.IsFloat {
+				frame.locals[slot].Value = v - info.FloatAmount
+			} else {
+				frame.locals[slot].Value = v - float64(info.IntAmount)
+			}
+
+		default:
+			LangError(ErrorType, "cannot increment %s", typeName(value))
+		}
+
+	case OP_DEC_GLOBAL:
+		info := instr.Value.(DecrementInfo)
+		name := info.Name
+
+		if vm.globalConstants[name] {
+			LangError(ErrorConst, "cannot increment constant global")
+		}
+
+		value, exists := vm.globals[name]
+		if !exists {
+			LangError(ErrorName, "undefined global variable: %s", name)
+		}
+
+		switch v := value.(type) {
+		case int:
+			vm.globals[name] = v - info.IntAmount
+
+		case float64:
+			if info.IsFloat {
+				vm.globals[name] = v - info.FloatAmount
+			} else {
+				vm.globals[name] = v - float64(info.IntAmount)
+			}
+
+		default:
+			LangError(ErrorType, "cannot increment %s", typeName(value))
+		}
+
+	case OP_INC_LOCAL:
+		info := instr.Value.(IncrementInfo)
+		slot := info.Slot
+
+		frame := vm.currentFrame()
+
+		if slot < 0 || slot >= len(frame.locals) {
+			LangError(
+				ErrorInternal,
+				"local slot out of range: function=%s slot=%d locals=%d",
+				frame.function.Name,
+				slot,
+				len(frame.locals),
+			)
+		}
+
+		if frame.locals[slot] == nil {
+			LangError(
+				ErrorInternal,
+				"local slot is nil during increment: function=%s slot=%d locals=%d",
+				frame.function.Name,
+				slot,
+				len(frame.locals),
+			)
+		}
+
+		if frame.constants[slot] {
+			LangError(ErrorConst, "cannot increment constant local")
+		}
+
+		value := frame.locals[slot].Value
+
+		switch v := value.(type) {
+		case int:
+			if info.IsFloat {
+				frame.locals[slot].Value = float64(v) + info.FloatAmount
+			} else {
+				frame.locals[slot].Value = v + info.IntAmount
+			}
+
+		case float64:
+			if info.IsFloat {
+				frame.locals[slot].Value = v + info.FloatAmount
+			} else {
+				frame.locals[slot].Value = v + float64(info.IntAmount)
+			}
+
+		default:
+			LangError(ErrorType, "cannot increment %s", typeName(value))
+		}
+
+	case OP_INC_GLOBAL:
+		info := instr.Value.(IncrementInfo)
+		name := info.Name
+
+		if vm.globalConstants[name] {
+			LangError(ErrorConst, "cannot increment constant global")
+		}
+
+		value, exists := vm.globals[name]
+		if !exists {
+			LangError(ErrorName, "undefined global variable: %s", name)
+		}
+
+		switch v := value.(type) {
+		case int:
+			if info.IsFloat {
+				vm.globals[name] = float64(v) + info.FloatAmount
+			} else {
+				vm.globals[name] = v + info.IntAmount
+			}
+
+		case float64:
+			if info.IsFloat {
+				vm.globals[name] = v + info.FloatAmount
+			} else {
+				vm.globals[name] = v + float64(info.IntAmount)
+			}
+
+		default:
+			LangError(ErrorType, "cannot increment %s", typeName(value))
+		}
 
 	case OP_ASSIGN_LOCAL:
 		slot := instr.Value.(int)
@@ -418,23 +584,57 @@ func (vm *VM) step() bool {
 			LangError(ErrorConst, "cannot assign to constant local")
 		}
 
+		hint := frame.localTypes[slot]
+
+		if !hint.IsEmpty() && !checkTypeHint(value, hint) {
+			LangError(
+				ErrorType,
+				"local variable expected %s, got %s",
+				hint.Name,
+				typeName(value),
+			)
+		}
+
 		frame.locals[slot].Value = value
 
 	case OP_ADD:
 		right := vm.pop()
 		left := vm.pop()
 
-		if isNumber(left) && isNumber(right) {
-			if _, ok := left.(float64); ok {
-				vm.push(asFloat(left) + asFloat(right))
-			} else if _, ok := right.(float64); ok {
-				vm.push(asFloat(left) + asFloat(right))
-			} else {
-				vm.push(left.(int) + right.(int))
+		switch l := left.(type) {
+		case int:
+			switch r := right.(type) {
+			case int:
+				vm.push(l + r)
+
+			case float64:
+				vm.push(float64(l) + r)
+
+			default:
+				LangError(ErrorType, "cannot add %s and %s", typeName(left), typeName(right))
 			}
-		} else if isString(left) && isString(right) {
-			vm.push(left.(string) + right.(string))
-		} else {
+
+		case float64:
+			switch r := right.(type) {
+			case int:
+				vm.push(l + float64(r))
+
+			case float64:
+				vm.push(l + r)
+
+			default:
+				LangError(ErrorType, "cannot add %s and %s", typeName(left), typeName(right))
+			}
+
+		case string:
+			r, ok := right.(string)
+			if !ok {
+				LangError(ErrorType, "cannot add %s and %s", typeName(left), typeName(right))
+			}
+
+			vm.push(l + r)
+
+		default:
 			LangError(ErrorType, "cannot add %s and %s", typeName(left), typeName(right))
 		}
 
@@ -496,11 +696,34 @@ func (vm *VM) step() bool {
 		right := vm.pop()
 		left := vm.pop()
 
-		if !isNumber(left) || !isNumber(right) {
+		switch l := left.(type) {
+		case int:
+			switch r := right.(type) {
+			case int:
+				vm.push(l < r)
+
+			case float64:
+				vm.push(float64(l) < r)
+
+			default:
+				LangError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
+			}
+
+		case float64:
+			switch r := right.(type) {
+			case int:
+				vm.push(l < float64(r))
+
+			case float64:
+				vm.push(l < r)
+
+			default:
+				LangError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
+			}
+
+		default:
 			LangError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
 		}
-
-		vm.push(asFloat(left) < asFloat(right))
 
 	case OP_GT:
 		right := vm.pop()
@@ -989,10 +1212,26 @@ func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []Value) {
 	}
 
 	locals := make([]*Cell, fn.LocalCount)
+	localTypes := make([]TypeHint, fn.LocalCount)
 	constants := make([]bool, fn.LocalCount)
 
 	for i, arg := range args {
+		param := fn.Params[i]
+
+		if !param.TypeHint.IsEmpty() && !checkTypeHint(arg, param.TypeHint) {
+			LangError(
+				ErrorType,
+				"function %s parameter %s expected %s, got %s",
+				fn.Name,
+				param.Name,
+				param.TypeHint.Name,
+				typeName(arg),
+			)
+		}
+
 		locals[i] = &Cell{Value: arg}
+		constants[i] = false
+		localTypes[i] = param.TypeHint
 	}
 
 	for slot, cell := range fnValue.Captures {
@@ -1008,8 +1247,6 @@ func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []Value) {
 			locals[i] = &Cell{Value: UndefinedValue{}}
 		}
 	}
-
-	localTypes := make([]TypeHint, fn.LocalCount)
 
 	frame := Frame{
 		function:     fn,
@@ -1386,9 +1623,25 @@ func (vm *VM) callFunction(name string, argCount int) {
 
 	locals := make([]*Cell, fn.LocalCount)
 	constants := make([]bool, fn.LocalCount)
+	localTypes := make([]TypeHint, fn.LocalCount)
 
 	for i, arg := range args {
+		param := fn.Params[i]
+
+		if !param.TypeHint.IsEmpty() && !checkTypeHint(arg, param.TypeHint) {
+			LangError(
+				ErrorType,
+				"function %s parameter %s expected %s, got %s",
+				fn.Name,
+				param.Name,
+				param.TypeHint.Name,
+				typeName(arg),
+			)
+		}
+
 		locals[i] = &Cell{Value: arg}
+		constants[i] = false
+		localTypes[i] = param.TypeHint
 	}
 
 	// Very important: fill empty local slots.
@@ -1397,9 +1650,6 @@ func (vm *VM) callFunction(name string, argCount int) {
 			locals[i] = &Cell{Value: UndefinedValue{}}
 		}
 	}
-
-	localTypes := make([]TypeHint, fn.LocalCount)
-
 	frame := Frame{
 		function:     fn,
 		ip:           0,

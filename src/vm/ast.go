@@ -276,6 +276,12 @@ type IncrementStmt struct {
 
 func (e IncrementStmt) stmtNode() {}
 
+type DecrementStmt struct {
+	Name string
+}
+
+func (e DecrementStmt) stmtNode() {}
+
 type FloatExpr struct {
 	Value float64
 }

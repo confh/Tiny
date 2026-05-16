@@ -27,6 +27,12 @@ const (
 	OP_DIV
 	OP_NOT
 
+	OP_INC_LOCAL
+	OP_INC_GLOBAL
+
+	OP_DEC_LOCAL
+	OP_DEC_GLOBAL
+
 	OP_BUILTIN_CALL
 	OP_METHOD_CALL
 	OP_CALL
@@ -128,6 +134,22 @@ type ObjectInfo struct {
 type MethodCallInfo struct {
 	Method   string
 	ArgCount int
+}
+
+type IncrementInfo struct {
+	Slot        int
+	Name        string
+	IntAmount   int
+	FloatAmount float64
+	IsFloat     bool
+}
+
+type DecrementInfo struct {
+	Slot        int
+	Name        string
+	IntAmount   int
+	FloatAmount float64
+	IsFloat     bool
 }
 
 type Class struct {

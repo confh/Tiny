@@ -27,11 +27,6 @@ type LoopContext struct {
 	ContinueJumps []int
 }
 
-type LocalInfo struct {
-	Slot     int
-	Constant bool
-}
-
 type Compiler struct {
 	mainInstructions       []Instruction
 	functions              map[string]Function
@@ -61,7 +56,6 @@ type Compiler struct {
 	scopes  []map[string]Binding
 	scopeID int
 
-	locals          map[string]LocalInfo
 	localCount      int
 	globalConstants map[string]bool
 }
@@ -74,23 +68,13 @@ func unwrapExport(stmt Stmt) (Stmt, bool) {
 	return stmt, false
 }
 
-func exportedName(stmt Stmt) (string, bool) {
-	switch s := stmt.(type) {
-	case VariableStmt:
-		return s.Name, true
-
-	case FunctionStmt:
-		return s.Name, true
-
-	case ClassStmt:
-		return s.Name, true
-
-	case EnumStmt:
-		return s.Name, true
-
-	default:
-		return "", false
+func getNumberLiteral(expr Expr) (int, float64, bool, bool) {
+	num, ok := expr.(NumberExpr)
+	if !ok {
+		return 0, 0, false, false
 	}
+
+	return num.Value, 0, false, true
 }
 
 func optimizeExpr(expr Expr) Expr {
@@ -283,7 +267,6 @@ func NewCompiler() *Compiler {
 		functions:              map[string]Function{},
 		classes:                map[string]Class{},
 		loopStack:              []LoopContext{},
-		locals:                 map[string]LocalInfo{},
 		localCount:             0,
 		globalConstants:        map[string]bool{},
 		anonymousFunctionCount: 0,
@@ -926,7 +909,87 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 			})
 		}
 
+	case IncrementStmt:
+		if binding, exists := c.resolveVariable(s.Name); exists {
+			if binding.Kind == BindingLocal {
+				c.emit(OP_INC_LOCAL, IncrementInfo{
+					Slot:      binding.Slot,
+					IntAmount: 1,
+					IsFloat:   false,
+				})
+			} else {
+				c.emit(OP_INC_GLOBAL, IncrementInfo{
+					Name:      binding.Name,
+					IntAmount: 1,
+					IsFloat:   false,
+				})
+			}
+			return
+		}
+
+		if binding, exists := c.ensureCaptured(s.Name); exists {
+			if binding.Kind == BindingLocal {
+				c.emit(OP_INC_LOCAL, IncrementInfo{
+					Slot:      binding.Slot,
+					IntAmount: 1,
+					IsFloat:   false,
+				})
+			} else {
+				c.emit(OP_INC_GLOBAL, IncrementInfo{
+					Name:      binding.Name,
+					IntAmount: 1,
+					IsFloat:   false,
+				})
+			}
+			return
+		}
+
+		if c.currentNamespaceVariables != nil {
+			if fullName, exists := c.currentNamespaceVariables[s.Name]; exists {
+				c.emit(OP_INC_GLOBAL, IncrementInfo{
+					Name:      fullName,
+					IntAmount: 1,
+					IsFloat:   false,
+				})
+				return
+			}
+		}
+
+		c.emit(OP_INC_GLOBAL, s.Name)
+
+	case DecrementStmt:
+		if binding, exists := c.resolveVariable(s.Name); exists {
+			if binding.Kind == BindingLocal {
+				c.emit(OP_DEC_LOCAL, binding.Slot)
+			} else {
+				c.emit(OP_DEC_GLOBAL, binding.Name)
+			}
+			return
+		}
+
+		if binding, exists := c.ensureCaptured(s.Name); exists {
+			if binding.Kind == BindingLocal {
+				c.emit(OP_DEC_LOCAL, binding.Slot)
+			} else {
+				c.emit(OP_DEC_GLOBAL, binding.Name)
+			}
+			return
+		}
+
+		if c.currentNamespaceVariables != nil {
+			if fullName, exists := c.currentNamespaceVariables[s.Name]; exists {
+				c.emit(OP_DEC_GLOBAL, fullName)
+				return
+			}
+		}
+
+		c.emit(OP_DEC_GLOBAL, s.Name)
+
 	case AssignStmt:
+		if c.tryCompileFastIncrement(s.Name, s.Value) {
+			return
+		}
+
 		c.compileExpr(s.Value)
 
 		if binding, exists := c.resolveVariable(s.Name); exists {
@@ -1427,6 +1490,82 @@ func (c *Compiler) collectCapturableBindings() map[string]Binding {
 	}
 
 	return result
+}
+
+func (c *Compiler) tryCompileFastIncrement(name string, value Expr) bool {
+	bin, ok := value.(BinaryExpr)
+	if !ok {
+		return false
+	}
+
+	leftIdent, ok := bin.Left.(IdentExpr)
+	if !ok || leftIdent.Name != name {
+		return false
+	}
+
+	intAmount, floatAmount, isFloat, ok := getNumberLiteral(bin.Right)
+	if !ok {
+		return false
+	}
+
+	switch bin.Op {
+	case TOKEN_PLUS:
+		// keep amount
+
+	case TOKEN_MINUS:
+		if isFloat {
+			floatAmount = -floatAmount
+		} else {
+			intAmount = -intAmount
+		}
+
+	default:
+		return false
+	}
+
+	c.emitIncrementForName(name, intAmount, floatAmount, isFloat)
+	return true
+}
+
+func (c *Compiler) emitIncrementForName(name string, intAmount int, floatAmount float64, isFloat bool) {
+	info := IncrementInfo{
+		IntAmount:   intAmount,
+		FloatAmount: floatAmount,
+		IsFloat:     isFloat,
+	}
+
+	if binding, exists := c.resolveVariable(name); exists {
+		if binding.Kind == BindingLocal {
+			info.Slot = binding.Slot
+			c.emit(OP_INC_LOCAL, info)
+		} else {
+			info.Name = binding.Name
+			c.emit(OP_INC_GLOBAL, info)
+		}
+		return
+	}
+
+	if binding, exists := c.ensureCaptured(name); exists {
+		if binding.Kind == BindingLocal {
+			info.Slot = binding.Slot
+			c.emit(OP_INC_LOCAL, info)
+		} else {
+			info.Name = binding.Name
+			c.emit(OP_INC_GLOBAL, info)
+		}
+		return
+	}
+
+	if c.currentNamespaceVariables != nil {
+		if fullName, exists := c.currentNamespaceVariables[name]; exists {
+			info.Name = fullName
+			c.emit(OP_INC_GLOBAL, info)
+			return
+		}
+	}
+
+	info.Name = name
+	c.emit(OP_INC_GLOBAL, info)
 }
 
 func (c *Compiler) compileExpr(expr Expr) {

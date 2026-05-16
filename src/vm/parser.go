@@ -199,13 +199,8 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 		p.expect(TOKEN_SEMI)
 		switch target := left.(type) {
 		case IdentExpr:
-			return AssignStmt{
+			return IncrementStmt{
 				Name: target.Name,
-				Value: BinaryExpr{
-					Left:  IdentExpr{Name: target.Name},
-					Op:    TOKEN_PLUS,
-					Right: NumberExpr{Value: 1},
-				},
 			}
 
 		case PropertyExpr:
@@ -235,13 +230,8 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 		p.expect(TOKEN_SEMI)
 		switch target := left.(type) {
 		case IdentExpr:
-			return AssignStmt{
+			return DecrementStmt{
 				Name: target.Name,
-				Value: BinaryExpr{
-					Left:  IdentExpr{Name: target.Name},
-					Op:    TOKEN_MINUS,
-					Right: NumberExpr{Value: 1},
-				},
 			}
 
 		case PropertyExpr:
