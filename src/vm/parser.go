@@ -767,7 +767,8 @@ func (p *Parser) parseForUpdateStatement() Stmt {
 		}
 	}
 
-	if p.current.Type == TOKEN_INCREMENT {
+	switch p.current.Type {
+	case TOKEN_INCREMENT:
 		p.advance()
 
 		switch target := left.(type) {
@@ -788,6 +789,40 @@ func (p *Parser) parseForUpdateStatement() Stmt {
 				Value: BinaryExpr{
 					Left:  target,
 					Op:    TOKEN_PLUS,
+					Right: NumberExpr{Value: 1},
+				},
+			}
+
+		default:
+			LangErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"invalid increment target",
+			)
+		}
+	case TOKEN_DECREMENT:
+		p.advance()
+
+		switch target := left.(type) {
+		case IdentExpr:
+			return AssignStmt{
+				Name: target.Name,
+				Value: BinaryExpr{
+					Left:  IdentExpr{Name: target.Name},
+					Op:    TOKEN_MINUS,
+					Right: NumberExpr{Value: 1},
+				},
+			}
+
+		case PropertyExpr:
+			return PropertyAssignStmt{
+				Object: target.Object,
+				Name:   target.Name,
+				Value: BinaryExpr{
+					Left:  target,
+					Op:    TOKEN_MINUS,
 					Right: NumberExpr{Value: 1},
 				},
 			}

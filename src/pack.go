@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 
 	. "language.com/src/tinyerrors"
 
@@ -18,26 +17,6 @@ var embeddedRuntimeWindowsAMD64 []byte
 
 //go:embed embedded/tiny_runtime_linux_amd64
 var embeddedRuntimeLinuxAMD64 []byte
-
-func readModuleName(projectRoot string) string {
-	bytes, err := os.ReadFile(filepath.Join(projectRoot, "go.mod"))
-	if err != nil {
-		LangError(ErrorRuntime, "failed to read go.mod: %v", err)
-	}
-
-	lines := strings.Split(string(bytes), "\n")
-
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-
-		if strings.HasPrefix(line, "module ") {
-			return strings.TrimSpace(strings.TrimPrefix(line, "module "))
-		}
-	}
-
-	LangError(ErrorRuntime, "could not find module name in go.mod")
-	return ""
-}
 
 func normalizePluginPathForTarget(path string, target string) string {
 	ext := filepath.Ext(path)
@@ -85,29 +64,6 @@ replace language.com => %s
 	err := os.WriteFile(filepath.Join(tempDir, "go.mod"), []byte(code), 0644)
 	if err != nil {
 		LangError(ErrorRuntime, "failed to write packed go.mod: %v", err)
-	}
-}
-
-func findProjectRoot() string {
-	dir, err := os.Getwd()
-	if err != nil {
-		LangError(ErrorRuntime, "failed to get working directory: %v", err)
-	}
-
-	for {
-		goModPath := filepath.Join(dir, "go.mod")
-
-		if _, err := os.Stat(goModPath); err == nil {
-			return dir
-		}
-
-		parent := filepath.Dir(dir)
-
-		if parent == dir {
-			LangError(ErrorRuntime, "could not find project go.mod")
-		}
-
-		dir = parent
 	}
 }
 
@@ -210,44 +166,6 @@ func writePackedExecutable(outFile string, runtimeBytes []byte, bytecodeBytes []
 	}
 
 	return nil
-}
-
-func defaultPackedOutputName() string {
-	if runtime.GOOS == "windows" {
-		return "app.exe"
-	}
-
-	return "app"
-}
-
-func copyRuntimeFiles(tempDir string, sourceDir string) {
-	files, err := os.ReadDir(sourceDir)
-	if err != nil {
-		LangError(ErrorRuntime, "failed to read source directory: %v", err)
-	}
-
-	for _, file := range files {
-		name := file.Name()
-
-		if file.IsDir() {
-			continue
-		}
-
-		if !strings.HasSuffix(name, ".go") {
-			continue
-		}
-
-		if name == "main.go" {
-			continue
-		}
-
-		src := filepath.Join(sourceDir, name)
-		dst := filepath.Join(tempDir, name)
-
-		copyFile(src, dst)
-	}
-
-	copyGoModFiles(tempDir, sourceDir)
 }
 
 func copyFile(src string, dst string) {
