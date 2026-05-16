@@ -23,6 +23,8 @@ func main() {
 	vm.Run()
 }
 
+var tinyPackMagic = []byte("TINYAPP1")
+
 func readAppendedBytecode() []byte {
 	exePath, err := os.Executable()
 	if err != nil {
@@ -34,25 +36,57 @@ func readAppendedBytecode() []byte {
 		LangError(ErrorRuntime, "failed to read executable: %v", err)
 	}
 
-	minSize := len(magic) + 8
+	minSize := len(tinyPackMagic) + 8
+
 	if len(data) < minSize {
-		LangError(ErrorRuntime, "no embedded Tiny bytecode found")
+		LangError(ErrorRuntime, "no embedded Tiny bytecode found: executable too small")
 	}
 
-	magicStart := len(data) - len(magic)
+	magicStart := len(data) - len(tinyPackMagic)
+	magicBytes := data[magicStart:]
 
-	if string(data[magicStart:]) != string(magic) {
-		LangError(ErrorRuntime, "no embedded Tiny bytecode found")
+	if string(magicBytes) != string(tinyPackMagic) {
+		LangError(ErrorRuntime, "no embedded Tiny bytecode found: missing TINYAPP1 marker")
 	}
 
 	sizeStart := magicStart - 8
-	size := binary.LittleEndian.Uint64(data[sizeStart:magicStart])
 
-	bytecodeStart := sizeStart - int(size)
-
-	if bytecodeStart < 0 {
-		LangError(ErrorRuntime, "invalid embedded Tiny bytecode size")
+	if sizeStart < 0 {
+		LangError(ErrorRuntime, "invalid embedded Tiny bytecode: missing size")
 	}
 
-	return data[bytecodeStart:sizeStart]
+	bytecodeSize := binary.LittleEndian.Uint64(data[sizeStart:magicStart])
+
+	if bytecodeSize == 0 {
+		LangError(ErrorRuntime, "invalid embedded Tiny bytecode: size is 0")
+	}
+
+	if bytecodeSize > uint64(sizeStart) {
+		LangError(
+			ErrorRuntime,
+			"invalid embedded Tiny bytecode: size %d is larger than available data %d",
+			bytecodeSize,
+			sizeStart,
+		)
+	}
+
+	bytecodeStart := sizeStart - int(bytecodeSize)
+
+	if bytecodeStart < 0 || bytecodeStart > sizeStart {
+		LangError(
+			ErrorRuntime,
+			"invalid embedded Tiny bytecode range: start=%d sizeStart=%d size=%d",
+			bytecodeStart,
+			sizeStart,
+			bytecodeSize,
+		)
+	}
+
+	bytecode := data[bytecodeStart:sizeStart]
+
+	if len(bytecode) == 0 {
+		LangError(ErrorRuntime, "embedded Tiny bytecode is empty")
+	}
+
+	return bytecode
 }

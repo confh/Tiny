@@ -60,6 +60,74 @@ type VM struct {
 	frames []Frame
 }
 
+func intToString(n int) string {
+	if n == 0 {
+		return "0"
+	}
+
+	var buf [20]byte
+	i := len(buf)
+
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + (n % 10))
+		n /= 10
+	}
+
+	return string(buf[i:])
+}
+
+func bigIntToString(n int64) string {
+	if n == 0 {
+		return "0"
+	}
+
+	var buf [20]byte
+	i := len(buf)
+
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + (n % 10))
+		n /= 10
+	}
+
+	return string(buf[i:])
+}
+
+func FloatToString(val float64) string {
+	var sb strings.Builder
+
+	if val < 0 {
+		sb.WriteByte('-')
+		val = -val
+	}
+
+	// 2. Extract integer part
+	intPart := int64(val)
+	// Extract remaining fractional part
+	fracPart := val - float64(intPart)
+
+	// 3. Convert integer part to string
+	sb.WriteString(bigIntToString(intPart))
+
+	// 4. If precision is 0, we are done
+	// if precision <= 0 {
+	// 	return sb.String()
+	// }
+
+	sb.WriteByte('.')
+
+	// 5. Convert fractional part
+	for i := 0; i < 6; i++ {
+		fracPart *= 10
+		digit := int64(fracPart)
+		sb.WriteByte(byte('0' + digit))
+		fracPart -= float64(digit)
+	}
+
+	return sb.String()
+}
+
 func NewVM(mainInstructions []Instruction, functions map[string]Function, classes map[string]Class) *VM {
 	return &VM{
 		start:            time.Now().UnixMilli(),
@@ -627,12 +695,22 @@ func (vm *VM) step() bool {
 			}
 
 		case string:
-			r, ok := right.(string)
-			if !ok {
+			switch r := right.(type) {
+			case string:
+				vm.push(l + r)
+
+			case float64:
+				vm.push(l + FloatToString(r))
+
+			case int:
+				vm.push(l + intToString(r))
+
+			case int64:
+				vm.push(l + bigIntToString(r))
+
+			default:
 				LangError(ErrorType, "cannot add %s and %s", typeName(left), typeName(right))
 			}
-
-			vm.push(l + r)
 
 		default:
 			LangError(ErrorType, "cannot add %s and %s", typeName(left), typeName(right))
@@ -901,11 +979,12 @@ func (vm *VM) step() bool {
 			vm.push(obj.Elements[index])
 
 		case ObjectValue:
-			key := asString(indexValue)
+			key := indexValue
 
 			value, exists := obj[key]
 			if !exists {
-				LangError(ErrorName, "object has no key: %s", key)
+				obj[key] = UndefinedValue{}
+				value = obj[key]
 			}
 
 			vm.push(value)
@@ -930,7 +1009,7 @@ func (vm *VM) step() bool {
 			obj.Elements[index] = value
 
 		case ObjectValue:
-			key := asString(indexValue)
+			key := indexValue
 			obj[key] = value
 
 		default:

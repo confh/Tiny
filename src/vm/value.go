@@ -17,7 +17,7 @@ type ArrayValue struct {
 	Elements []Value
 }
 
-type ObjectValue map[string]Value
+type ObjectValue map[Value]Value
 
 type NativeTaskValue struct {
 	Done chan TaskResult
@@ -211,7 +211,12 @@ func valueToJSONCompatible(value Value) any {
 		result := map[string]any{}
 
 		for key, item := range v {
-			result[key] = valueToJSONCompatible(item)
+			strKey, ok := key.(string)
+			if !ok {
+				LangError(ErrorType, "cannot convert non-string key (%T) to JSON", key)
+				continue
+			}
+			result[strKey] = valueToJSONCompatible(item)
 		}
 
 		return result
@@ -341,7 +346,7 @@ func valueToString(value Value) string {
 		parts := []string{}
 
 		for key, item := range v {
-			parts = append(parts, key+": "+valueToString(item))
+			parts = append(parts, valueToString(key)+": "+valueToString(item))
 		}
 
 		return "{" + strings.Join(parts, ", ") + "}"

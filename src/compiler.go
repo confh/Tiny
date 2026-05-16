@@ -474,6 +474,7 @@ func (c *Compiler) CompileProgram(program Program) ([]Instruction, map[string]Fu
 }
 
 func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
+	namespaceStdImports := map[string]string{}
 	hasExplicitExports := false
 
 	for _, raw := range stmt.Statements {
@@ -506,6 +507,25 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		members[ns.Name] = NamespaceMemberRef{
 			GlobalName: ns.Name,
 		}
+	}
+
+	for _, raw := range stmt.Statements {
+		inner, _ := unwrapExport(raw)
+
+		imp, ok := inner.(ImportStmt)
+		if !ok || !imp.Std {
+			continue
+		}
+
+		alias := imp.Alias
+		if alias == "" {
+			alias = imp.Path
+		}
+
+		fullName := stmt.Name + "." + alias
+
+		namespaceStdImports[alias] = fullName
+		namespaceVariables[alias] = fullName
 	}
 
 	// 2. Collect functions
@@ -585,6 +605,33 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 				GlobalName: fullName,
 			}
 		}
+	}
+
+	for _, raw := range stmt.Statements {
+		inner, _ := unwrapExport(raw)
+
+		imp, ok := inner.(ImportStmt)
+		if !ok || !imp.Std {
+			continue
+		}
+
+		alias := imp.Alias
+		if alias == "" {
+			alias = imp.Path
+		}
+
+		fullName := stmt.Name + "." + alias
+
+		c.emit(OP_CONST, &StandardModuleValue{
+			Name: imp.Path,
+		})
+
+		c.emit(OP_STORE_GLOBAL, VariableInfo{
+			Name:     fullName,
+			Constant: true,
+		})
+
+		c.globalConstants[fullName] = true
 	}
 
 	// IMPORTANT: set namespace maps BEFORE compiling enum/var/function bodies.

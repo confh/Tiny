@@ -130,10 +130,16 @@ func addExtensionForTarget(path string, target string) string {
 	return path
 }
 
+var tinyPackMagic = []byte("TINYAPP1")
+
 func writePackedExecutable(outFile string, runtimeBytes []byte, bytecodeBytes []byte) error {
-	err := os.MkdirAll(filepath.Dir(outFile), 0755)
-	if err != nil && filepath.Dir(outFile) != "." {
-		return err
+	dir := filepath.Dir(outFile)
+
+	if dir != "." && dir != "" {
+		err := os.MkdirAll(dir, 0755)
+		if err != nil {
+			return err
+		}
 	}
 
 	f, err := os.Create(outFile)
@@ -160,7 +166,7 @@ func writePackedExecutable(outFile string, runtimeBytes []byte, bytecodeBytes []
 		return err
 	}
 
-	_, err = f.Write([]byte("TINYAPP1"))
+	_, err = f.Write(tinyPackMagic)
 	if err != nil {
 		return err
 	}

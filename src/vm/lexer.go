@@ -338,24 +338,55 @@ func (l *Lexer) readNumber() string {
 }
 
 func (l *Lexer) readString() string {
-	l.pos++ // skip opening "
+	// skip opening "
+	l.pos++
 
-	start := l.pos
+	var result []rune
 
-	for l.pos < len(l.input) && l.input[l.pos] != '"' {
+	for l.pos < len(l.input) {
+		ch := rune(l.input[l.pos])
+
+		if ch == '"' {
+			l.pos++
+			return string(result)
+		}
+
+		if ch == '\\' {
+			l.pos++
+
+			if l.pos >= len(l.input) {
+				LangError(ErrorSyntax, "unterminated escape sequence in string")
+			}
+
+			esc := rune(l.input[l.pos])
+
+			switch esc {
+			case 'n':
+				result = append(result, '\n')
+			case 'r':
+				result = append(result, '\r')
+			case 't':
+				result = append(result, '\t')
+			case '\\':
+				result = append(result, '\\')
+			case '"':
+				result = append(result, '"')
+			case '0':
+				result = append(result, '\x00')
+			default:
+				LangError(ErrorSyntax, "unknown escape sequence: \\%c", esc)
+			}
+
+			l.pos++
+			continue
+		}
+
+		result = append(result, ch)
 		l.pos++
 	}
 
-	if l.pos >= len(l.input) {
-		line, column := l.lineColumnAt(start)
-		LangErrorAt(ErrorSyntax, l.file, line, column, "unterminated string")
-	}
-
-	value := string(l.input[start:l.pos])
-
-	l.pos++ // skip closing "
-
-	return value
+	LangError(ErrorSyntax, "unterminated string")
+	return ""
 }
 
 func (l *Lexer) readBacktickString() string {
