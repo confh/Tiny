@@ -121,6 +121,29 @@ func (p *Parser) ParseProgram() Program {
 	return Program{Statements: statements}
 }
 
+func (p *Parser) parseOptionalTypeHint() TypeHint {
+	if p.current.Type != TOKEN_COLON {
+		return TypeHint{}
+	}
+
+	p.advance()
+
+	if p.current.Type != TOKEN_IDENT {
+		langErrorAt(
+			ErrorSyntax,
+			p.current.File,
+			p.current.Line,
+			p.current.Column,
+			"expected type name after :",
+		)
+	}
+
+	name := p.current.Literal
+	p.advance()
+
+	return TypeHint{Name: name}
+}
+
 func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 	left := p.parseUnary()
 
@@ -386,6 +409,8 @@ func (p *Parser) parseStatement() Stmt {
 		return p.parseThrowStatement()
 	case TOKEN_TRY:
 		return p.parseTryCatchStatement()
+	case TOKEN_ENUM:
+		return p.parseEnumStatement()
 	default:
 		return p.parseExpressionStatement()
 	}
@@ -622,13 +647,11 @@ func (p *Parser) parseIfStatement() Stmt {
 }
 
 func (p *Parser) parseBlock() []Stmt {
-	var statements []Stmt
+	p.expect(TOKEN_LBRACE)
 
-	for p.current.Type != TOKEN_RBRACE {
-		if p.current.Type == TOKEN_EOF {
-			langError(ErrorSyntax, "unexpected EOF inside block")
-		}
+	statements := []Stmt{}
 
+	for p.current.Type != TOKEN_RBRACE && p.current.Type != TOKEN_EOF {
 		statements = append(statements, p.parseStatement())
 	}
 
@@ -735,6 +758,8 @@ func (p *Parser) parseLetStatement() Stmt {
 	name := p.current.Literal
 	p.advance()
 
+	typeHint := p.parseOptionalTypeHint()
+
 	p.expect(TOKEN_ASSIGN)
 
 	value := p.parseExpression()
@@ -745,6 +770,7 @@ func (p *Parser) parseLetStatement() Stmt {
 		Name:     name,
 		Value:    value,
 		Constant: false,
+		TypeHint: typeHint,
 	}
 }
 
@@ -758,6 +784,8 @@ func (p *Parser) parseConstStatement() Stmt {
 	name := p.current.Literal
 	p.advance()
 
+	typeHint := p.parseOptionalTypeHint()
+
 	p.expect(TOKEN_ASSIGN)
 
 	value := p.parseExpression()
@@ -768,6 +796,7 @@ func (p *Parser) parseConstStatement() Stmt {
 		Name:     name,
 		Value:    value,
 		Constant: true,
+		TypeHint: typeHint,
 	}
 }
 
@@ -775,40 +804,24 @@ func (p *Parser) parseFunctionStatement() Stmt {
 	p.expect(TOKEN_FN)
 
 	if p.current.Type != TOKEN_IDENT {
-		langError(ErrorSyntax, "expected function name after fn")
+		langErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "expected function name")
 	}
 
 	name := p.current.Literal
 	p.advance()
 
-	p.expect(TOKEN_LPAREN)
-
-	params := p.parseParameterList()
-
-	p.expect(TOKEN_RPAREN)
-	p.expect(TOKEN_LBRACE)
-
-	var body []Stmt
-
-	for p.current.Type != TOKEN_RBRACE {
-		if p.current.Type == TOKEN_EOF {
-			langError(ErrorSyntax, "unexpected EOF inside function body")
-		}
-
-		body = append(body, p.parseStatement())
-	}
-
-	p.expect(TOKEN_RBRACE)
+	params, returnType, body := p.parseFunctionSignatureAndBody()
 
 	return FunctionStmt{
-		Name:   name,
-		Params: params,
-		Body:   body,
+		Name:       name,
+		Params:     params,
+		ReturnType: returnType,
+		Body:       body,
 	}
 }
 
-func (p *Parser) parseParameterList() []string {
-	var params []string
+func (p *Parser) parseParameterList() []Param {
+	params := []Param{}
 
 	if p.current.Type == TOKEN_RPAREN {
 		return params
@@ -816,12 +829,41 @@ func (p *Parser) parseParameterList() []string {
 
 	for {
 		if p.current.Type != TOKEN_IDENT {
-			langError(ErrorSyntax, "expected parameter name")
-
+			langErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"expected parameter name",
+			)
 		}
 
-		params = append(params, p.current.Literal)
+		name := p.current.Literal
 		p.advance()
+
+		typeHint := TypeHint{}
+
+		if p.current.Type == TOKEN_COLON {
+			p.advance()
+
+			if p.current.Type != TOKEN_IDENT {
+				langErrorAt(
+					ErrorSyntax,
+					p.current.File,
+					p.current.Line,
+					p.current.Column,
+					"expected type name after :",
+				)
+			}
+
+			typeHint = TypeHint{Name: p.current.Literal}
+			p.advance()
+		}
+
+		params = append(params, Param{
+			Name:     name,
+			TypeHint: typeHint,
+		})
 
 		if p.current.Type != TOKEN_COMMA {
 			break
@@ -1100,6 +1142,31 @@ func (p *Parser) parseObjectLiteral() Expr {
 	return ObjectExpr{Fields: fields}
 }
 
+func (p *Parser) parseFunctionSignatureAndBody() ([]Param, TypeHint, []Stmt) {
+	p.expect(TOKEN_LPAREN)
+
+	params := p.parseParameterList()
+
+	p.expect(TOKEN_RPAREN)
+
+	returnType := TypeHint{}
+
+	if p.current.Type == TOKEN_COLON {
+		p.advance()
+
+		if p.current.Type != TOKEN_IDENT {
+			langErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "expected return type after :")
+		}
+
+		returnType = TypeHint{Name: p.current.Literal}
+		p.advance()
+	}
+
+	body := p.parseBlock()
+
+	return params, returnType, body
+}
+
 func (p *Parser) parsePrimary() Expr {
 	switch p.current.Type {
 	case TOKEN_NUMBER:
@@ -1126,7 +1193,7 @@ func (p *Parser) parsePrimary() Expr {
 		return NumberExpr{Value: value}
 
 	case TOKEN_FN:
-		return p.parseFunctionExpression()
+		return p.parseFunctionExpr()
 
 	case TOKEN_LBRACKET:
 		return p.parseArrayLiteral()
@@ -1190,39 +1257,78 @@ func (p *Parser) parsePrimary() Expr {
 	}
 }
 
-func (p *Parser) parseFunctionExpression() Expr {
-	p.expect(TOKEN_FN)
+func (p *Parser) parseEnumStatement() Stmt {
+	p.expect(TOKEN_ENUM)
 
-	p.expect(TOKEN_LPAREN)
-
-	var params []string
-
-	if p.current.Type != TOKEN_RPAREN {
-		for {
-			if p.current.Type != TOKEN_IDENT {
-				langError(ErrorSyntax, "expected parameter name")
-			}
-
-			params = append(params, p.current.Literal)
-			p.advance()
-
-			if p.current.Type != TOKEN_COMMA {
-				break
-			}
-
-			p.advance()
-		}
+	if p.current.Type != TOKEN_IDENT {
+		langErrorAt(
+			ErrorSyntax,
+			p.current.File,
+			p.current.Line,
+			p.current.Column,
+			"expected enum name",
+		)
 	}
 
-	p.expect(TOKEN_RPAREN)
+	name := p.current.Literal
+	p.advance()
 
 	p.expect(TOKEN_LBRACE)
 
-	body := p.parseBlock()
+	members := []string{}
+
+	for p.current.Type != TOKEN_RBRACE && p.current.Type != TOKEN_EOF {
+		if p.current.Type != TOKEN_IDENT {
+			langErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"expected enum member name",
+			)
+		}
+
+		members = append(members, p.current.Literal)
+		p.advance()
+
+		if p.current.Type == TOKEN_COMMA {
+			p.advance()
+			continue
+		}
+
+		if p.current.Type != TOKEN_RBRACE {
+			langErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"expected , or } after enum member",
+			)
+		}
+	}
+
+	p.expect(TOKEN_RBRACE)
+
+	// Optional semicolon support:
+	if p.current.Type == TOKEN_SEMI {
+		p.advance()
+	}
+
+	return EnumStmt{
+		Name:    name,
+		Members: members,
+	}
+}
+
+func (p *Parser) parseFunctionExpr() Expr {
+	p.expect(TOKEN_FN)
+
+	params, returnType, body := p.parseFunctionSignatureAndBody()
 
 	return FunctionExpr{
-		Params: params,
-		Body:   body,
+		Params:     params,
+		ReturnType: returnType,
+		Body:       body,
 	}
 }
 

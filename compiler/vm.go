@@ -25,6 +25,7 @@ type Frame struct {
 	locals       []*Cell
 	constants    []bool
 	instructions []Instruction
+	localTypes   []TypeHint
 
 	returnOverride    Value
 	hasReturnOverride bool
@@ -39,6 +40,8 @@ type VM struct {
 	lastInstruction      Instruction
 	lastInstructionIndex int
 	lastFunctionName     string
+
+	globalTypes map[string]TypeHint
 
 	cliArgs []string
 
@@ -65,6 +68,7 @@ func NewVM(mainInstructions []Instruction, functions map[string]Function, classe
 		globalConstants:  map[string]bool{},
 		mu:               sync.Mutex{},
 		cliArgs:          []string{},
+		globalTypes:      map[string]TypeHint{},
 	}
 }
 
@@ -134,6 +138,7 @@ func (vm *VM) callClassWithArgs(class Class, args []Value) {
 		}
 
 		frameDepthBefore := len(vm.frames)
+		localTypes := make([]TypeHint, fn.LocalCount)
 
 		frame := Frame{
 			function:     fn,
@@ -141,6 +146,7 @@ func (vm *VM) callClassWithArgs(class Class, args []Value) {
 			locals:       locals,
 			constants:    constants,
 			instructions: fn.Instructions,
+			localTypes:   localTypes,
 		}
 
 		vm.frames = append(vm.frames, frame)
@@ -279,8 +285,19 @@ func (vm *VM) step() bool {
 		info := instr.Value.(VariableInfo)
 		value := vm.pop()
 
+		if !checkTypeHint(value, info.TypeHint) {
+			langError(
+				ErrorType,
+				"variable %s expected %s, got %s",
+				info.Name,
+				info.TypeHint.Name,
+				typeName(value),
+			)
+		}
+
 		vm.globals[info.Name] = value
 		vm.globalConstants[info.Name] = info.Constant
+		vm.globalTypes[info.Name] = info.TypeHint
 
 	case OP_LOAD_LOCAL:
 		slot := instr.Value.(int)
@@ -312,26 +329,40 @@ func (vm *VM) step() bool {
 		info := instr.Value.(VariableInfo)
 		value := vm.pop()
 
-		frame := vm.currentFrame()
-
-		if info.Slot < 0 || info.Slot >= len(frame.locals) {
-			langError(ErrorInternal, "local slot out of range: %d", info.Slot)
+		if !checkTypeHint(value, info.TypeHint) {
+			langError(
+				ErrorType,
+				"variable %s expected %s, got %s",
+				info.Name,
+				info.TypeHint.Name,
+				typeName(value),
+			)
 		}
+
+		frame := vm.currentFrame()
 
 		frame.locals[info.Slot] = &Cell{Value: value}
 		frame.constants[info.Slot] = info.Constant
+		frame.localTypes[info.Slot] = info.TypeHint
 
 	case OP_ASSIGN_GLOBAL:
 		name := instr.Value.(string)
 		value := vm.pop()
 
-		_, exists := vm.globals[name]
-		if !exists {
-			langError(ErrorName, "cannot assign to undefined variable: %s", name)
+		if vm.globalConstants[name] {
+			langError(ErrorConst, "cannot assign to constant global")
 		}
 
-		if vm.globalConstants[name] {
-			langError(ErrorConst, "cannot assign to constant: %s", name)
+		hint := vm.globalTypes[name]
+
+		if !checkTypeHint(value, hint) {
+			langError(
+				ErrorType,
+				"global %s expected %s, got %s",
+				name,
+				hint.Name,
+				typeName(value),
+			)
 		}
 
 		vm.globals[name] = value
@@ -643,14 +674,25 @@ func (vm *VM) step() bool {
 			returnValue = vm.pop()
 		}
 
-		if len(vm.frames) == 0 {
-			langError(ErrorRuntime, "return used outside of function")
-		}
-
 		returningDepth := len(vm.frames)
 		vm.removeTryHandlersAtOrAbove(returningDepth)
 
 		frame := vm.frames[len(vm.frames)-1]
+
+		if !checkTypeHint(returnValue, frame.function.ReturnType) {
+			langError(
+				ErrorType,
+				"function %s should return %s, got %s",
+				frame.function.Name,
+				frame.function.ReturnType.Name,
+				typeName(returnValue),
+			)
+		}
+
+		if len(vm.frames) == 0 {
+			langError(ErrorRuntime, "return used outside of function")
+		}
+
 		vm.frames = vm.frames[:len(vm.frames)-1]
 
 		if frame.hasReturnOverride {
@@ -918,12 +960,15 @@ func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []Value) {
 		}
 	}
 
+	localTypes := make([]TypeHint, fn.LocalCount)
+
 	frame := Frame{
 		function:     fn,
 		ip:           0,
 		locals:       locals,
 		constants:    constants,
 		instructions: fn.Instructions,
+		localTypes:   localTypes,
 	}
 
 	vm.frames = append(vm.frames, frame)
@@ -1181,12 +1226,15 @@ func (vm *VM) callMethod(method string, argCount int) {
 		}
 	}
 
+	localTypes := make([]TypeHint, fn.LocalCount)
+
 	frame := Frame{
 		function:     fn,
 		ip:           0,
 		locals:       locals,
 		constants:    constants,
 		instructions: fn.Instructions,
+		localTypes:   localTypes,
 	}
 
 	vm.frames = append(vm.frames, frame)
@@ -1293,12 +1341,34 @@ func (vm *VM) callFunction(name string, argCount int) {
 		}
 	}
 
+	localTypes := make([]TypeHint, fn.LocalCount)
+
 	frame := Frame{
 		function:     fn,
 		ip:           0,
 		locals:       locals,
 		constants:    constants,
 		instructions: fn.Instructions,
+		localTypes:   localTypes,
+	}
+
+	if len(args) != len(fn.Params) {
+		langError(ErrorRuntime, "function %s expects %d arguments, got %d", fn.Name, len(fn.Params), len(args))
+	}
+
+	for i, arg := range args {
+		param := fn.Params[i]
+
+		if !checkTypeHint(arg, param.TypeHint) {
+			langError(
+				ErrorType,
+				"function %s parameter %s expected %s, got %s",
+				fn.Name,
+				param.Name,
+				param.TypeHint.Name,
+				typeName(arg),
+			)
+		}
 	}
 
 	vm.frames = append(vm.frames, frame)

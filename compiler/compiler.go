@@ -39,6 +39,7 @@ type Compiler struct {
 	currentNamespaceVariables map[string]string
 	currentNamespaceClasses   map[string]string
 	currentNamespaceFunctions map[string]string
+	currentNamespaceEnums     map[string]string
 
 	inMethod bool
 
@@ -298,7 +299,7 @@ func (c *Compiler) compileNestedFunction(stmt FunctionStmt) {
 	c.beginScope()
 
 	for _, param := range stmt.Params {
-		c.declareVariable(param, false)
+		c.declareVariable(param.Name, false)
 	}
 
 	for _, bodyStmt := range stmt.Body {
@@ -432,13 +433,15 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 	oldNamespaceFunctions := c.currentNamespaceFunctions
 	oldNamespaceVariables := c.currentNamespaceVariables
 	oldNamespaceClasses := c.currentNamespaceClasses
+	oldNamespaceEnums := c.currentNamespaceEnums
 
 	namespaceFunctions := map[string]string{}
-	namespaceClasses := map[string]string{}
 	namespaceVariables := map[string]string{}
+	namespaceClasses := map[string]string{}
+	namespaceEnums := map[string]string{}
 	members := map[string]Value{}
 
-	// 1. Compile nested namespaces first.
+	// 1. Nested namespaces first
 	for _, raw := range stmt.Statements {
 		ns, ok := raw.(NamespaceStmt)
 		if !ok {
@@ -447,13 +450,12 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 
 		c.compileNamespace(ns)
 
-		// expose nested namespace as a member too
 		members[ns.Name] = NamespaceMemberRef{
 			GlobalName: ns.Name,
 		}
 	}
 
-	// 2. Collect functions.
+	// 2. Collect functions
 	for _, raw := range stmt.Statements {
 		fn, ok := raw.(FunctionStmt)
 		if !ok {
@@ -461,6 +463,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		}
 
 		fullName := stmt.Name + "." + fn.Name
+
 		namespaceFunctions[fn.Name] = fullName
 		members[fn.Name] = FunctionValue{Name: fullName}
 
@@ -470,7 +473,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		}
 	}
 
-	// 3. Collect variables.
+	// 3. Collect variables
 	for _, raw := range stmt.Statements {
 		v, ok := raw.(VariableStmt)
 		if !ok {
@@ -478,18 +481,77 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		}
 
 		fullName := stmt.Name + "." + v.Name
-		namespaceVariables[v.Name] = fullName
 
+		namespaceVariables[v.Name] = fullName
 		members[v.Name] = NamespaceMemberRef{
 			GlobalName: fullName,
 		}
 	}
 
+	// 4. Collect classes
+	for _, raw := range stmt.Statements {
+		classStmt, ok := raw.(ClassStmt)
+		if !ok {
+			continue
+		}
+
+		fullName := stmt.Name + "." + classStmt.Name
+
+		namespaceClasses[classStmt.Name] = fullName
+		members[classStmt.Name] = Class{Name: fullName}
+	}
+
+	// 5. Collect enums
+	for _, raw := range stmt.Statements {
+		enumStmt, ok := raw.(EnumStmt)
+		if !ok {
+			continue
+		}
+
+		fullName := stmt.Name + "." + enumStmt.Name
+
+		namespaceEnums[enumStmt.Name] = fullName
+		members[enumStmt.Name] = NamespaceMemberRef{
+			GlobalName: fullName,
+		}
+	}
+
+	// IMPORTANT: set namespace maps BEFORE compiling enum/var/function bodies.
 	c.currentNamespaceFunctions = namespaceFunctions
 	c.currentNamespaceVariables = namespaceVariables
 	c.currentNamespaceClasses = namespaceClasses
+	c.currentNamespaceEnums = namespaceEnums
 
-	// 4. Compile variables as hidden globals.
+	// 6. Compile enums as hidden globals FIRST.
+	for _, raw := range stmt.Statements {
+		enumStmt, ok := raw.(EnumStmt)
+		if !ok {
+			continue
+		}
+
+		fullName := stmt.Name + "." + enumStmt.Name
+
+		obj := ObjectValue{}
+
+		for _, member := range enumStmt.Members {
+			if _, exists := obj[member]; exists {
+				langError(ErrorName, "duplicate enum member %s.%s", enumStmt.Name, member)
+			}
+
+			obj[member] = member
+		}
+
+		c.emit(OP_CONST, obj)
+
+		c.emit(OP_STORE_GLOBAL, VariableInfo{
+			Name:     fullName,
+			Constant: true,
+		})
+
+		c.globalConstants[fullName] = true
+	}
+
+	// 7. Compile variables AFTER enums.
 	for _, raw := range stmt.Statements {
 		v, ok := raw.(VariableStmt)
 		if !ok {
@@ -503,42 +565,13 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		c.emit(OP_STORE_GLOBAL, VariableInfo{
 			Name:     fullName,
 			Constant: v.Constant,
+			TypeHint: v.TypeHint,
 		})
 
 		c.globalConstants[fullName] = v.Constant
 	}
 
-	// Collect classes.
-	for _, raw := range stmt.Statements {
-		classStmt, ok := raw.(ClassStmt)
-		if !ok {
-			continue
-		}
-
-		fullName := stmt.Name + "." + classStmt.Name
-		namespaceClasses[classStmt.Name] = fullName
-		members[classStmt.Name] = Class{Name: fullName}
-	}
-
-	// 5. Compile functions.
-	for _, raw := range stmt.Statements {
-		fn, ok := raw.(FunctionStmt)
-		if !ok {
-			continue
-		}
-
-		fullName := stmt.Name + "." + fn.Name
-
-		namespacedFn := FunctionStmt{
-			Name:   fullName,
-			Params: fn.Params,
-			Body:   fn.Body,
-		}
-
-		c.compileFunction(namespacedFn)
-	}
-
-	// Compile classes with namespaced names.
+	// 8. Compile classes
 	for _, raw := range stmt.Statements {
 		classStmt, ok := raw.(ClassStmt)
 		if !ok {
@@ -553,11 +586,31 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		c.compileClass(namespacedClass)
 	}
 
+	// 9. Compile functions
+	for _, raw := range stmt.Statements {
+		fn, ok := raw.(FunctionStmt)
+		if !ok {
+			continue
+		}
+
+		fullName := stmt.Name + "." + fn.Name
+
+		namespacedFn := FunctionStmt{
+			Name:       fullName,
+			Params:     fn.Params,
+			ReturnType: fn.ReturnType,
+			Body:       fn.Body,
+		}
+
+		c.compileFunction(namespacedFn)
+	}
+
 	c.currentNamespaceFunctions = oldNamespaceFunctions
 	c.currentNamespaceVariables = oldNamespaceVariables
 	c.currentNamespaceClasses = oldNamespaceClasses
+	c.currentNamespaceEnums = oldNamespaceEnums
 
-	// 6. Create namespace object.
+	// 10. Create namespace object.
 	c.emit(OP_CONST, NamespaceValue{
 		Name:    stmt.Name,
 		Members: members,
@@ -593,11 +646,13 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 				Name:     s.Name,
 				Slot:     binding.Slot,
 				Constant: s.Constant,
+				TypeHint: s.TypeHint,
 			})
 		} else {
 			c.emit(OP_STORE_GLOBAL, VariableInfo{
 				Name:     binding.Name,
 				Constant: s.Constant,
+				TypeHint: s.TypeHint,
 			})
 		}
 
@@ -714,8 +769,44 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 	case ClassStmt:
 		c.compileClass(s)
 
+	case EnumStmt:
+		c.compileEnum(s)
+
 	default:
 		langError(ErrorInternal, "unknown statement")
+	}
+}
+
+func (c *Compiler) compileEnum(stmt EnumStmt) {
+	if len(stmt.Members) == 0 {
+		langError(ErrorSyntax, "enum %s must have at least one member", stmt.Name)
+	}
+
+	obj := ObjectValue{}
+
+	for _, member := range stmt.Members {
+		if _, exists := obj[member]; exists {
+			langError(ErrorName, "duplicate enum member %s.%s", stmt.Name, member)
+		}
+
+		obj[member] = member
+	}
+
+	c.emit(OP_CONST, obj)
+
+	binding := c.declareVariable(stmt.Name, true)
+
+	if binding.Kind == BindingLocal {
+		c.emit(OP_STORE_LOCAL, VariableInfo{
+			Name:     stmt.Name,
+			Slot:     binding.Slot,
+			Constant: true,
+		})
+	} else {
+		c.emit(OP_STORE_GLOBAL, VariableInfo{
+			Name:     binding.Name,
+			Constant: true,
+		})
 	}
 }
 
@@ -1012,7 +1103,7 @@ func (c *Compiler) compileFunction(stmt FunctionStmt) {
 	c.beginScope()
 
 	for _, param := range stmt.Params {
-		c.declareVariable(param, false)
+		c.declareVariable(param.Name, false)
 	}
 
 	for _, bodyStmt := range stmt.Body {
@@ -1131,7 +1222,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 		c.beginScope()
 
 		for _, param := range e.Params {
-			c.declareVariable(param, false)
+			c.declareVariable(param.Name, false)
 		}
 
 		for _, bodyStmt := range e.Body {
@@ -1214,13 +1305,6 @@ func (c *Compiler) compileExpr(expr Expr) {
 		c.emit(OP_CONST, e.Value)
 
 	case IdentExpr:
-		if c.currentNamespaceClasses != nil {
-			if fullName, exists := c.currentNamespaceClasses[e.Name]; exists {
-				c.emit(OP_CONST, Class{Name: fullName})
-				return
-			}
-		}
-
 		if binding, exists := c.resolveVariable(e.Name); exists {
 			if binding.Kind == BindingLocal {
 				c.emit(OP_LOAD_LOCAL, binding.Slot)
@@ -1234,6 +1318,20 @@ func (c *Compiler) compileExpr(expr Expr) {
 		if binding, exists := c.ensureCaptured(e.Name); exists {
 			c.emit(OP_LOAD_LOCAL, binding.Slot)
 			return
+		}
+
+		if c.currentNamespaceEnums != nil {
+			if fullName, exists := c.currentNamespaceEnums[e.Name]; exists {
+				c.emit(OP_LOAD_GLOBAL, fullName)
+				return
+			}
+		}
+
+		if c.currentNamespaceClasses != nil {
+			if fullName, exists := c.currentNamespaceClasses[e.Name]; exists {
+				c.emit(OP_CONST, Class{Name: fullName})
+				return
+			}
 		}
 
 		if c.currentNamespaceFunctions != nil {
@@ -1475,11 +1573,11 @@ func (c *Compiler) compileMethod(className string, stmt FunctionStmt) {
 
 	// slot 1+ = real user parameters
 	for _, param := range stmt.Params {
-		if param == "this" {
+		if param.Name == "this" {
 			continue
 		}
 
-		c.declareVariable(param, false)
+		c.declareVariable(param.Name, false)
 	}
 
 	for _, bodyStmt := range stmt.Body {
@@ -1489,14 +1587,19 @@ func (c *Compiler) compileMethod(className string, stmt FunctionStmt) {
 	c.emit(OP_CONST, UndefinedValue{})
 	c.emit(OP_RETURN, nil)
 
-	params := []string{"this"}
+	params := []Param{{
+		Name:     "this",
+		TypeHint: TypeHint{Name: "object"},
+	}}
 
 	for _, param := range stmt.Params {
-		if param == "this" {
+		if param.Name == "this" {
 			continue
 		}
 
-		params = append(params, param)
+		params = append(params, Param{
+			Name: param.Name,
+		})
 	}
 
 	c.functions[name] = Function{

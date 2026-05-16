@@ -22,6 +22,8 @@ const (
 	TOKEN_THROW  TokenType = "THROW"
 	TOKEN_CLASS  TokenType = "CLASS"
 
+	TOKEN_ENUM TokenType = "ENUM"
+
 	TOKEN_TRY   TokenType = "TRY"
 	TOKEN_CATCH TokenType = "CATCH"
 

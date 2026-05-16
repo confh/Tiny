@@ -65,7 +65,8 @@ type Instruction struct {
 
 type Function struct {
 	Name         string
-	Params       []string
+	Params       []Param  `json:"params"`
+	ReturnType   TypeHint `json:"returnType"`
 	Instructions []Instruction
 	LocalCount   int
 	Captures     []CapturedVar
@@ -113,6 +114,7 @@ type VariableInfo struct {
 	Name     string
 	Slot     int
 	Constant bool
+	TypeHint TypeHint `json:"typeHint"`
 }
 
 type ObjectInfo struct {

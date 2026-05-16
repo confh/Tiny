@@ -26,6 +26,13 @@ type NamespaceStmt struct {
 
 func (s NamespaceStmt) stmtNode() {}
 
+type EnumStmt struct {
+	Name    string
+	Members []string
+}
+
+func (s EnumStmt) stmtNode() {}
+
 type BreakStmt struct{}
 
 func (s BreakStmt) stmtNode() {}
@@ -63,6 +70,7 @@ type VariableStmt struct {
 	Name     string
 	Value    Expr
 	Constant bool
+	TypeHint TypeHint
 }
 
 func (s VariableStmt) stmtNode() {}
@@ -113,8 +121,9 @@ type IndexExpr struct {
 func (e IndexExpr) exprNode() {}
 
 type FunctionExpr struct {
-	Params []string
-	Body   []Stmt
+	Params     []Param
+	ReturnType TypeHint
+	Body       []Stmt
 }
 
 func (e FunctionExpr) exprNode() {}
@@ -190,10 +199,16 @@ type IndexAssignStmt struct {
 
 func (s IndexAssignStmt) stmtNode() {}
 
+type Param struct {
+	Name     string   `json:"name"`
+	TypeHint TypeHint `json:"typeHint"`
+}
+
 type FunctionStmt struct {
-	Name   string
-	Params []string
-	Body   []Stmt
+	Name       string
+	Params     []Param
+	ReturnType TypeHint
+	Body       []Stmt
 }
 
 func (s FunctionStmt) stmtNode() {}

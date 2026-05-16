@@ -16,7 +16,8 @@ type BytecodeFile struct {
 
 type SerializableFunction struct {
 	Name         string                    `json:"name"`
-	Params       []string                  `json:"params"`
+	Params       []Param                   `json:"params"`
+	ReturnType   TypeHint                  `json:"returnType"`
 	LocalCount   int                       `json:"localCount"`
 	Captures     []CapturedVar             `json:"captures"`
 	Instructions []SerializableInstruction `json:"instructions"`
