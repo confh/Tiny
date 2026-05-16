@@ -1151,33 +1151,37 @@ func (vm *VM) callMethod(method string, argCount int) {
 
 	objectValue := vm.pop()
 
-	if ns, ok := objectValue.(NamespaceValue); ok {
-		vm.callNamespaceMethod(ns, method, args)
+	switch val := objectValue.(type) {
+	case NamespaceValue:
+		vm.callNamespaceMethod(val, method, args)
 		return
-	}
 
-	if ns, ok := objectValue.(*NamespaceValue); ok {
-		vm.callNamespaceMethod(*ns, method, args)
+	case *NamespaceValue:
+		vm.callNamespaceMethod(*val, method, args)
 		return
-	}
 
-	if plugin, ok := objectValue.(*NativePluginValue); ok {
-		vm.callNativePlugin(plugin, method, args)
+	case *NativePluginValue:
+		vm.callNativePlugin(val, method, args)
 		return
-	}
 
-	if app, ok := objectValue.(*NativeAppValue); ok {
-		vm.callNativeAppMethod(app, method, args)
+	case *NativeAppValue:
+		vm.callNativeAppMethod(val, method, args)
 		return
-	}
 
-	if std, ok := objectValue.(*StandardModuleValue); ok {
-		vm.callStandardModule(std.Name, method, args)
+	case *StandardModuleValue:
+		vm.callStandardModule(val.Name, method, args)
 		return
-	}
 
-	if server, ok := objectValue.(*NativeServerValue); ok {
-		vm.callServerMethod(server, method, args)
+	case *NativeServerValue:
+		vm.callServerMethod(val, method, args)
+		return
+
+	case *BufferValue:
+		vm.callBufferMethod(val, method, args)
+		return
+
+	case string:
+		vm.callStringMethod(val, method, args)
 		return
 	}
 

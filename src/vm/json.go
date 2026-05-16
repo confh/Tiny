@@ -1,0 +1,60 @@
+package vm
+
+import (
+	"encoding/json"
+
+	. "language.com/src/tinyerrors"
+)
+
+func (vm *VM) callStdJson(method string, args []Value) {
+	switch method {
+	case "stringify":
+		if len(args) != 1 {
+			LangError(ErrorRuntime, "json.stringify expects 1 argument")
+		}
+
+		value := args[0]
+
+		jsonValue := valueToJSONCompatible(value)
+
+		bytes, err := json.Marshal(jsonValue)
+		if err != nil {
+			LangError(ErrorRuntime, "failed to convert value to JSON: %v", err)
+		}
+
+		vm.push(string(bytes))
+
+	case "pretty":
+		if len(args) != 1 {
+			LangError(ErrorRuntime, "json.pretty expects 1 argument")
+		}
+
+		value := args[0]
+
+		jsonValue := valueToJSONCompatible(value)
+
+		bytes, err := json.MarshalIndent(jsonValue, "", "  ")
+		if err != nil {
+			LangError(ErrorRuntime, "failed to convert value to JSON: %v", err)
+		}
+
+		vm.push(string(bytes))
+	case "parse":
+		if len(args) != 1 {
+			LangError(ErrorRuntime, "json.parse expects 1 argument")
+		}
+
+		stringified := asString(args[0])
+
+		var result any
+
+		err := json.Unmarshal([]byte(stringified), &result)
+		if err != nil {
+			LangError(ErrorRuntime, "invalid JSON: %v", err)
+		}
+
+		vm.push(jsonToTinyValue(result))
+	default:
+		LangError(ErrorName, "unknown json function: %s", method)
+	}
+}

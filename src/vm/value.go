@@ -181,6 +181,10 @@ func typeName(value Value) string {
 		return "namespace"
 	case *NamespaceValue:
 		return "namespace"
+	case BufferValue:
+		return "buffer"
+	case *BufferValue:
+		return "buffer"
 	case NamespaceMemberRef:
 		return "namespace member ref"
 	case *NamespaceMemberRef:
@@ -229,6 +233,12 @@ func valueToJSONCompatible(value Value) any {
 		}
 
 		return result
+
+	case BufferValue:
+		return v.Bytes
+
+	case *BufferValue:
+		return v.Bytes
 
 	case NullValue:
 		return nil
@@ -359,6 +369,10 @@ func valueToString(value Value) string {
 		return "<namespace ref " + v.GlobalName + ">"
 	case *NamespaceMemberRef:
 		return "<namespace ref " + v.GlobalName + ">"
+	case BufferValue:
+		return "<buffer " + string(v.Bytes) + ">"
+	case *BufferValue:
+		return "<buffer " + string(v.Bytes) + ">"
 	default:
 		return fmt.Sprintf("%v", v)
 	}
@@ -371,6 +385,15 @@ func asString(value Value) string {
 	}
 
 	return stringValue
+}
+
+func asBuffer(value Value) *BufferValue {
+	bufferValue, ok := value.(*BufferValue)
+	if !ok {
+		LangError(ErrorSyntax, "expected buffer, got %T", value)
+	}
+
+	return bufferValue
 }
 
 func asArray(value Value) *ArrayValue {
