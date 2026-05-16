@@ -37,6 +37,12 @@ type BreakStmt struct{}
 
 func (s BreakStmt) stmtNode() {}
 
+type ExportStmt struct {
+	Inner Stmt
+}
+
+func (s ExportStmt) stmtNode() {}
+
 type ContinueStmt struct{}
 
 func (s ContinueStmt) stmtNode() {}

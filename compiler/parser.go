@@ -411,9 +411,43 @@ func (p *Parser) parseStatement() Stmt {
 		return p.parseTryCatchStatement()
 	case TOKEN_ENUM:
 		return p.parseEnumStatement()
+	case TOKEN_EXPORT:
+		return p.parseExportStatement()
 	default:
 		return p.parseExpressionStatement()
 	}
+}
+
+func (p *Parser) parseExportStatement() Stmt {
+	p.expect(TOKEN_EXPORT)
+
+	switch p.current.Type {
+	case TOKEN_CONST:
+		return ExportStmt{Inner: p.parseConstStatement()}
+
+	case TOKEN_LET:
+		return ExportStmt{Inner: p.parseLetStatement()}
+
+	case TOKEN_FN:
+		return ExportStmt{Inner: p.parseFunctionStatement()}
+
+	case TOKEN_CLASS:
+		return ExportStmt{Inner: p.parseClassStatement()}
+
+	case TOKEN_ENUM:
+		return ExportStmt{Inner: p.parseEnumStatement()}
+
+	default:
+		langErrorAt(
+			ErrorSyntax,
+			p.current.File,
+			p.current.Line,
+			p.current.Column,
+			"expected const, let, fn, class, or enum after export",
+		)
+	}
+
+	return nil
 }
 
 func (p *Parser) parseTryCatchStatement() Stmt {

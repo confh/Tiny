@@ -93,6 +93,8 @@ func (l *Lexer) NextToken() Token {
 			return l.tokenAt(start, TOKEN_CLASS, word)
 		case "enum":
 			return l.tokenAt(start, TOKEN_ENUM, word)
+		case "export":
+			return l.tokenAt(start, TOKEN_EXPORT, word)
 		default:
 			return l.tokenAt(start, TOKEN_IDENT, word)
 		}

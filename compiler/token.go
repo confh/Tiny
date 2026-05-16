@@ -36,6 +36,8 @@ const (
 	TOKEN_BREAK    TokenType = "BREAK"
 	TOKEN_CONTINUE TokenType = "CONTINUE"
 
+	TOKEN_EXPORT TokenType = "EXPORT"
+
 	TOKEN_AND TokenType = "AND"
 	TOKEN_OR  TokenType = "OR"
 

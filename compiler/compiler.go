@@ -61,6 +61,33 @@ type Compiler struct {
 	globalConstants map[string]bool
 }
 
+func unwrapExport(stmt Stmt) (Stmt, bool) {
+	if exp, ok := stmt.(ExportStmt); ok {
+		return exp.Inner, true
+	}
+
+	return stmt, false
+}
+
+func exportedName(stmt Stmt) (string, bool) {
+	switch s := stmt.(type) {
+	case VariableStmt:
+		return s.Name, true
+
+	case FunctionStmt:
+		return s.Name, true
+
+	case ClassStmt:
+		return s.Name, true
+
+	case EnumStmt:
+		return s.Name, true
+
+	default:
+		return "", false
+	}
+}
+
 func optimizeExpr(expr Expr) Expr {
 	switch e := expr.(type) {
 	case BinaryExpr:
@@ -430,6 +457,15 @@ func (c *Compiler) CompileProgram(program Program) ([]Instruction, map[string]Fu
 }
 
 func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
+	hasExplicitExports := false
+
+	for _, raw := range stmt.Statements {
+		if _, ok := raw.(ExportStmt); ok {
+			hasExplicitExports = true
+			break
+		}
+	}
+
 	oldNamespaceFunctions := c.currentNamespaceFunctions
 	oldNamespaceVariables := c.currentNamespaceVariables
 	oldNamespaceClasses := c.currentNamespaceClasses
@@ -457,7 +493,9 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 
 	// 2. Collect functions
 	for _, raw := range stmt.Statements {
-		fn, ok := raw.(FunctionStmt)
+		inner, exported := unwrapExport(raw)
+
+		fn, ok := inner.(FunctionStmt)
 		if !ok {
 			continue
 		}
@@ -465,7 +503,10 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		fullName := stmt.Name + "." + fn.Name
 
 		namespaceFunctions[fn.Name] = fullName
-		members[fn.Name] = FunctionValue{Name: fullName}
+
+		if !hasExplicitExports || exported {
+			members[fn.Name] = FunctionValue{Name: fullName}
+		}
 
 		c.functions[fullName] = Function{
 			Name:   fullName,
@@ -475,7 +516,9 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 
 	// 3. Collect variables
 	for _, raw := range stmt.Statements {
-		v, ok := raw.(VariableStmt)
+		inner, exported := unwrapExport(raw)
+
+		v, ok := inner.(VariableStmt)
 		if !ok {
 			continue
 		}
@@ -483,14 +526,17 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		fullName := stmt.Name + "." + v.Name
 
 		namespaceVariables[v.Name] = fullName
-		members[v.Name] = NamespaceMemberRef{
-			GlobalName: fullName,
+
+		if !hasExplicitExports || exported {
+			members[v.Name] = NamespaceMemberRef{GlobalName: fullName}
 		}
 	}
 
 	// 4. Collect classes
 	for _, raw := range stmt.Statements {
-		classStmt, ok := raw.(ClassStmt)
+		inner, exported := unwrapExport(raw)
+
+		classStmt, ok := inner.(ClassStmt)
 		if !ok {
 			continue
 		}
@@ -498,12 +544,17 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		fullName := stmt.Name + "." + classStmt.Name
 
 		namespaceClasses[classStmt.Name] = fullName
-		members[classStmt.Name] = Class{Name: fullName}
+
+		if !hasExplicitExports || exported {
+			members[classStmt.Name] = Class{Name: fullName}
+		}
 	}
 
 	// 5. Collect enums
 	for _, raw := range stmt.Statements {
-		enumStmt, ok := raw.(EnumStmt)
+		inner, exported := unwrapExport(raw)
+
+		enumStmt, ok := inner.(EnumStmt)
 		if !ok {
 			continue
 		}
@@ -511,8 +562,11 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		fullName := stmt.Name + "." + enumStmt.Name
 
 		namespaceEnums[enumStmt.Name] = fullName
-		members[enumStmt.Name] = NamespaceMemberRef{
-			GlobalName: fullName,
+
+		if !hasExplicitExports || exported {
+			members[enumStmt.Name] = NamespaceMemberRef{
+				GlobalName: fullName,
+			}
 		}
 	}
 
@@ -524,7 +578,9 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 
 	// 6. Compile enums as hidden globals FIRST.
 	for _, raw := range stmt.Statements {
-		enumStmt, ok := raw.(EnumStmt)
+		inner, _ := unwrapExport(raw)
+
+		enumStmt, ok := inner.(EnumStmt)
 		if !ok {
 			continue
 		}
@@ -553,7 +609,9 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 
 	// 7. Compile variables AFTER enums.
 	for _, raw := range stmt.Statements {
-		v, ok := raw.(VariableStmt)
+		inner, _ := unwrapExport(raw)
+
+		v, ok := inner.(VariableStmt)
 		if !ok {
 			continue
 		}
@@ -573,7 +631,9 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 
 	// 8. Compile classes
 	for _, raw := range stmt.Statements {
-		classStmt, ok := raw.(ClassStmt)
+		inner, _ := unwrapExport(raw)
+
+		classStmt, ok := inner.(ClassStmt)
 		if !ok {
 			continue
 		}
@@ -588,7 +648,9 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 
 	// 9. Compile functions
 	for _, raw := range stmt.Statements {
-		fn, ok := raw.(FunctionStmt)
+		inner, _ := unwrapExport(raw)
+
+		fn, ok := inner.(FunctionStmt)
 		if !ok {
 			continue
 		}
