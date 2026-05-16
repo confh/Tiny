@@ -108,6 +108,15 @@ func isNumber(value Value) bool {
 	}
 }
 
+func isString(value Value) bool {
+	switch value.(type) {
+	case string:
+		return true
+	default:
+		return false
+	}
+}
+
 func asFloat(value Value) float64 {
 	switch v := value.(type) {
 	case int:

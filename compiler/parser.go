@@ -75,7 +75,13 @@ func parseInterpolatedString(input string) Expr {
 		expr := parser.parseExpression()
 
 		if parser.current.Type != TOKEN_EOF {
-			langError(ErrorSyntax, "unexpected tokens inside interpolation")
+			langErrorAt(
+				ErrorSyntax,
+				parser.current.File,
+				parser.current.Line,
+				parser.current.Column,
+				"unexpected tokens inside interpolation",
+			)
 		}
 
 		parts = append(parts, InterpolatedStringPart{
@@ -177,7 +183,13 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 			}
 
 		default:
-			langError(ErrorSyntax, "invalid assignment target")
+			langErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"invalid assignment target",
+			)
 		}
 	case TOKEN_INCREMENT:
 		p.advance()
@@ -206,7 +218,13 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 			}
 
 		default:
-			langError(ErrorSyntax, "invalid assignment target")
+			langErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"invalid assignment target",
+			)
 		}
 
 	case TOKEN_DECREMENT:
@@ -236,7 +254,13 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 			}
 
 		default:
-			langError(ErrorSyntax, "invalid assignment target")
+			langErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"invalid assignment target",
+			)
 		}
 
 	case TOKEN_PLUS_ASSIGN:
@@ -269,7 +293,13 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 			}
 
 		default:
-			langError(ErrorSyntax, "invalid += target")
+			langErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"invalid += target",
+			)
 		}
 
 	case TOKEN_MINUS_ASSIGN:
@@ -302,7 +332,13 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 			}
 
 		default:
-			langError(ErrorSyntax, "invalid -= target")
+			langErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"invalid -= target",
+			)
 		}
 
 	case TOKEN_STAR_ASSIGN:
@@ -335,7 +371,13 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 			}
 
 		default:
-			langError(ErrorSyntax, "invalid *= target")
+			langErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"invalid *= target",
+			)
 		}
 
 	case TOKEN_SLASH_ASSIGN:
@@ -368,7 +410,13 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 			}
 
 		default:
-			langError(ErrorSyntax, "invalid /= target")
+			langErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"invalid /= target",
+			)
 		}
 	}
 
@@ -459,7 +507,13 @@ func (p *Parser) parseTryCatchStatement() Stmt {
 	p.expect(TOKEN_CATCH)
 
 	if p.current.Type != TOKEN_IDENT {
-		langError(ErrorSyntax, "expected error variable name after catch")
+		langErrorAt(
+			ErrorSyntax,
+			p.current.File,
+			p.current.Line,
+			p.current.Column,
+			"expected error variable name after catch",
+		)
 	}
 
 	errorName := p.current.Literal
@@ -555,7 +609,13 @@ func (p *Parser) parseForUpdateStatement() Stmt {
 			}
 
 		default:
-			langError(ErrorSyntax, "invalid assignment target")
+			langErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"invalid assignment target",
+			)
 		}
 	}
 
@@ -587,7 +647,13 @@ func (p *Parser) parseForUpdateStatement() Stmt {
 			}
 
 		default:
-			langError(ErrorSyntax, "invalid += target")
+			langErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"invalid += target",
+			)
 		}
 	}
 
@@ -617,7 +683,13 @@ func (p *Parser) parseForUpdateStatement() Stmt {
 			}
 
 		default:
-			langError(ErrorSyntax, "invalid increment target")
+			langErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"invalid increment target",
+			)
 		}
 	}
 
@@ -786,7 +858,13 @@ func (p *Parser) parseLetStatement() Stmt {
 	p.expect(TOKEN_LET)
 
 	if p.current.Type != TOKEN_IDENT {
-		langError(ErrorSyntax, "expected variable name after let")
+		langErrorAt(
+			ErrorSyntax,
+			p.current.File,
+			p.current.Line,
+			p.current.Column,
+			"expected variable name after let",
+		)
 	}
 
 	name := p.current.Literal
@@ -812,7 +890,13 @@ func (p *Parser) parseConstStatement() Stmt {
 	p.expect(TOKEN_CONST)
 
 	if p.current.Type != TOKEN_IDENT {
-		langError(ErrorSyntax, "expected variable name after const")
+		langErrorAt(
+			ErrorSyntax,
+			p.current.File,
+			p.current.Line,
+			p.current.Column,
+			"expected variable name after const",
+		)
 	}
 
 	name := p.current.Literal
@@ -1066,7 +1150,13 @@ func (p *Parser) parsePostfix() Expr {
 			p.advance()
 
 			if p.current.Type != TOKEN_IDENT {
-				langError(ErrorSyntax, "expected property name after dot")
+				langErrorAt(
+					ErrorSyntax,
+					p.current.File,
+					p.current.Line,
+					p.current.Column,
+					"expected property name after dot",
+				)
 			}
 
 			name := p.current.Literal
@@ -1149,7 +1239,13 @@ func (p *Parser) parseObjectLiteral() Expr {
 
 	for {
 		if p.current.Type != TOKEN_IDENT && p.current.Type != TOKEN_STRING {
-			langError(ErrorSyntax, "expected object field name")
+			langErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"expected object field name",
+			)
 		}
 
 		name := p.current.Literal
@@ -1209,7 +1305,13 @@ func (p *Parser) parsePrimary() Expr {
 		if containsDot(literal) {
 			value, err := strconv.ParseFloat(literal, 64)
 			if err != nil {
-				langError(ErrorSyntax, "invalid float: %s", literal)
+				langErrorAt(
+					ErrorSyntax,
+					p.current.File,
+					p.current.Line,
+					p.current.Column,
+					"invalid float: %s", literal,
+				)
 			}
 
 			p.advance()
@@ -1219,7 +1321,13 @@ func (p *Parser) parsePrimary() Expr {
 
 		value, err := strconv.Atoi(literal)
 		if err != nil {
-			langError(ErrorSyntax, "invalid number: %s", literal)
+			langErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"invalid number: %s", literal,
+			)
 		}
 
 		p.advance()
@@ -1286,7 +1394,13 @@ func (p *Parser) parsePrimary() Expr {
 		return p.parseUnary()
 
 	default:
-		langError(ErrorSyntax, "expected expression, got %s", p.current.Type)
+		langErrorAt(
+			ErrorSyntax,
+			p.current.File,
+			p.current.Line,
+			p.current.Column,
+			"expected expression, got %s", p.current.Type,
+		)
 		return UndefinedExpr{}
 	}
 }
@@ -1370,7 +1484,13 @@ func (p *Parser) parseClassStatement() Stmt {
 	p.expect(TOKEN_CLASS)
 
 	if p.current.Type != TOKEN_IDENT {
-		langError(ErrorSyntax, "expected class name after class")
+		langErrorAt(
+			ErrorSyntax,
+			p.current.File,
+			p.current.Line,
+			p.current.Column,
+			"expected class name after class",
+		)
 	}
 
 	name := p.current.Literal
@@ -1382,18 +1502,36 @@ func (p *Parser) parseClassStatement() Stmt {
 
 	for p.current.Type != TOKEN_RBRACE {
 		if p.current.Type == TOKEN_EOF {
-			langError(ErrorSyntax, "unexpected EOF inside class body")
+			langErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"unexpected EOF inside class body",
+			)
 		}
 
 		if p.current.Type != TOKEN_FN {
-			langError(ErrorSyntax, "expected method declaration inside class")
+			langErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"expected method declaration inside class",
+			)
 		}
 
 		method := p.parseFunctionStatement()
 
 		fn, ok := method.(FunctionStmt)
 		if !ok {
-			langError(ErrorInternal, "expected function method")
+			langErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"expected function method",
+			)
 		}
 
 		methods = append(methods, fn)

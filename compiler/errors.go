@@ -1,6 +1,10 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+)
 
 type ErrorKind string
 
@@ -50,7 +54,16 @@ func handleLangError() {
 		switch err := r.(type) {
 		case LangError:
 			if err.File != "" && err.Line > 0 {
-				fmt.Printf("%s:%d:%d %s: %s\n", err.File, err.Line, err.Column, err.Kind, err.Message)
+				root, errDir := os.Getwd()
+				if errDir != nil {
+					fmt.Println("Error getting current directory:", err)
+					return
+				}
+				relPath, errPath := filepath.Rel(root, err.File)
+				if errPath != nil {
+					relPath = err.File
+				}
+				fmt.Printf("%s:%d:%d %s: %s\n", relPath, err.Line, err.Column, err.Kind, err.Message)
 			} else {
 				fmt.Printf("%s: %s\n", err.Kind, err.Message)
 			}

@@ -411,6 +411,8 @@ func (vm *VM) step() bool {
 			} else {
 				vm.push(left.(int) + right.(int))
 			}
+		} else if isString(left) && isString(right) {
+			vm.push(left.(string) + right.(string))
 		} else {
 			langError(ErrorType, "cannot add %s and %s", typeName(left), typeName(right))
 		}

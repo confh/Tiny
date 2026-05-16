@@ -336,7 +336,8 @@ func (l *Lexer) readString() string {
 	}
 
 	if l.pos >= len(l.input) {
-		langError(ErrorSyntax, "unterminated string")
+		line, column := l.lineColumnAt(start)
+		langErrorAt(ErrorSyntax, l.file, line, column, "unterminated string")
 	}
 
 	value := string(l.input[start:l.pos])
@@ -356,8 +357,8 @@ func (l *Lexer) readBacktickString() string {
 	}
 
 	if l.pos >= len(l.input) {
-		langError(ErrorSyntax, "unterminated interpolated string")
-
+		line, column := l.lineColumnAt(start)
+		langErrorAt(ErrorSyntax, l.file, line, column, "unterminated interpolated string")
 	}
 
 	value := string(l.input[start:l.pos])
