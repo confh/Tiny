@@ -57,7 +57,9 @@ func SaveBytecode(path string, main []Instruction, functions map[string]Function
 		file.Functions[name] = SerializableFunction{
 			Name:         fn.Name,
 			Params:       fn.Params,
+			ReturnType:   fn.ReturnType,
 			LocalCount:   fn.LocalCount,
+			Captures:     fn.Captures,
 			Instructions: serializeInstructions(fn.Instructions),
 		}
 	}
@@ -79,6 +81,17 @@ func SaveBytecodeToBytes(main []Instruction, functions map[string]Function, clas
 		Main:      serializeInstructions(main),
 		Functions: map[string]SerializableFunction{},
 		Classes:   classes,
+	}
+
+	for name, fn := range functions {
+		file.Functions[name] = SerializableFunction{
+			Name:         fn.Name,
+			Params:       fn.Params,
+			ReturnType:   fn.ReturnType,
+			LocalCount:   fn.LocalCount,
+			Captures:     fn.Captures,
+			Instructions: serializeInstructions(fn.Instructions),
+		}
 	}
 
 	bytes, err := json.Marshal(file)
@@ -118,7 +131,9 @@ func LoadBytecodeFromBytes(data []byte) ([]Instruction, map[string]Function, map
 		functions[name] = Function{
 			Name:         fn.Name,
 			Params:       fn.Params,
+			ReturnType:   fn.ReturnType,
 			LocalCount:   fn.LocalCount,
+			Captures:     fn.Captures,
 			Instructions: deserializeInstructions(fn.Instructions),
 		}
 	}
@@ -264,9 +279,15 @@ func EncodeValue(value any) EncodedValue {
 		}
 
 	case ObjectValue:
+		members := map[string]EncodedValue{}
+
+		for key, val := range v {
+			members[key.(string)] = EncodeValue(val)
+		}
+
 		return EncodedValue{
-			Type: "object",
-			Data: v,
+			Type: "objectValue",
+			Data: members,
 		}
 
 	default:
@@ -334,6 +355,18 @@ func DecodeValue(value EncodedValue) any {
 		var result ObjectInfo
 		decodeInto(value.Data, &result)
 		return result
+
+	case "objectValue":
+		raw := map[string]EncodedValue{}
+		decodeInto(value.Data, &raw)
+
+		obj := ObjectValue{}
+
+		for key, encoded := range raw {
+			obj[key] = DecodeValue(encoded)
+		}
+
+		return obj
 
 	case "array":
 		var result ArrayInfo

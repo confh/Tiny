@@ -40,6 +40,7 @@ import "C"
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"slices"
 	"unsafe"
@@ -76,7 +77,7 @@ func (vm *VM) callPluginModule(method string, argCount int) {
 		}
 
 		path := asString(vm.pop())
-		path = defaultPluginPath(path, ".so")
+		path = resolvePluginPath(path, ".so")
 
 		cpath := C.CString(path)
 		defer C.free(unsafe.Pointer(cpath))
@@ -113,6 +114,42 @@ func (vm *VM) callPluginModule(method string, argCount int) {
 	default:
 		LangError(ErrorName, "unknown Plugin function: %s", method)
 	}
+}
+
+func resolvePluginPath(path string, ext string) string {
+	path = defaultPluginPath(path, ext)
+
+	if filepath.IsAbs(path) {
+		return path
+	}
+
+	// 1. Try relative to the current working directory first.
+	// This is what you want when running:
+	// tiny main.tiny
+	cwd, err := os.Getwd()
+	if err == nil {
+		candidate := filepath.Join(cwd, path)
+
+		if fileExists(candidate) {
+			return candidate
+		}
+	}
+
+	// 2. Try relative to the executable folder.
+	// This is useful for packed/dist apps:
+	// dist/app.exe
+	exePath, err := os.Executable()
+	if err == nil {
+		exeDir := filepath.Dir(exePath)
+		candidate := filepath.Join(exeDir, path)
+
+		if fileExists(candidate) {
+			return candidate
+		}
+	}
+
+	// 3. Fallback to original path so the error message stays clear.
+	return path
 }
 
 func (vm *VM) callNativePlugin(plugin *NativePluginValue, method string, args []Value) {
