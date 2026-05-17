@@ -1,7 +1,6 @@
 package vm
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,8 +9,12 @@ import (
 	"sync"
 	"time"
 
+	jsoniter "github.com/json-iterator/go"
+
 	. "language.com/src/tinyerrors"
 )
+
+var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
 type TryHandler struct {
 	CatchIP int

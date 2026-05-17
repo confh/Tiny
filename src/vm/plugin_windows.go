@@ -4,7 +4,6 @@
 package vm
 
 import (
-	"encoding/json"
 	"path/filepath"
 	"slices"
 	"syscall"

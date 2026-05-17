@@ -6,11 +6,8 @@ import (
 	"net/http"
 	"strings"
 
-	jsoniter "github.com/json-iterator/go"
 	. "language.com/src/tinyerrors"
 )
-
-var jsonn = jsoniter.ConfigCompatibleWithStandardLibrary
 
 func cleanMapForJSON(vmMap map[Value]Value) map[string]any {
 	clean := make(map[string]any, len(vmMap))
@@ -129,7 +126,7 @@ func (vm *VM) callStdHttp(method string, args []Value) {
 
 		cleanedData := cleanMapForJSON(data)
 
-		jsonData, err := jsonn.Marshal(cleanedData)
+		jsonData, err := json.Marshal(cleanedData)
 		if err != nil {
 			vm.runtimeError(ErrorRuntime, "http.post failed to encode JSON data: %s", err.Error())
 		}

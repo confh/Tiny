@@ -1,8 +1,6 @@
 package vm
 
 import (
-	"encoding/json"
-
 	. "language.com/src/tinyerrors"
 )
 
