@@ -14,7 +14,7 @@ func (vm *VM) callCore(method string, argCount int) {
 	switch method {
 	case "error":
 		if argCount != 2 {
-			LangError(ErrorRuntime, "Core.error expects 2 arguments")
+			vm.runtimeError(ErrorRuntime, "Core.error expects 2 arguments")
 		}
 
 		args := vm.popArgs(argCount)
@@ -29,7 +29,7 @@ func (vm *VM) callCore(method string, argCount int) {
 
 	case "typeOf":
 		if argCount != 1 {
-			LangError(ErrorRuntime, "Core.typeOf expects 1 argument")
+			vm.runtimeError(ErrorRuntime, "Core.typeOf expects 1 argument")
 		}
 
 		value := vm.pop()
@@ -37,7 +37,7 @@ func (vm *VM) callCore(method string, argCount int) {
 		vm.push(typeName(value))
 	case "server":
 		if argCount != 1 {
-			LangError(ErrorRuntime, "Core.server expects 1 argument")
+			vm.runtimeError(ErrorRuntime, "Core.server expects 1 argument")
 		}
 
 		port := asInt(vm.pop())
@@ -50,7 +50,7 @@ func (vm *VM) callCore(method string, argCount int) {
 		vm.push(server)
 	case "has":
 		if argCount != 2 {
-			LangError(ErrorRuntime, "Core.has expects 2 arguments")
+			vm.runtimeError(ErrorRuntime, "Core.has expects 2 arguments")
 		}
 
 		key := asString(vm.pop())
@@ -58,14 +58,14 @@ func (vm *VM) callCore(method string, argCount int) {
 
 		object, ok := objectValue.(ObjectValue)
 		if !ok {
-			LangError(ErrorType, "Core.has expected object, got %s", typeName(objectValue))
+			vm.runtimeError(ErrorType, "Core.has expected object, got %s", typeName(objectValue))
 		}
 
 		_, exists := object[key]
 		vm.push(exists)
 	case "len":
 		if argCount != 1 {
-			LangError(ErrorRuntime, "Core.len expects 1 argument")
+			vm.runtimeError(ErrorRuntime, "Core.len expects 1 argument")
 		}
 
 		value := vm.pop()
@@ -76,23 +76,23 @@ func (vm *VM) callCore(method string, argCount int) {
 		case ArrayValue:
 			vm.push(len(n.Elements))
 		default:
-			LangError(ErrorRuntime, "argument does not have a length.")
+			vm.runtimeError(ErrorRuntime, "argument does not have a length.")
 		}
 	case "clock":
 		if argCount != 0 {
-			LangError(ErrorRuntime, "Core.clock expects 0 arguments")
+			vm.runtimeError(ErrorRuntime, "Core.clock expects 0 arguments")
 		}
 
 		vm.push(int(time.Now().UnixMilli() - vm.start))
 	case "time":
 		if argCount != 0 {
-			LangError(ErrorRuntime, "Core.time expects 0 arguments")
+			vm.runtimeError(ErrorRuntime, "Core.time expects 0 arguments")
 		}
 
 		vm.push(time.Now().UnixMilli())
 	case "sleep":
 		if argCount != 1 {
-			LangError(ErrorRuntime, "Core.sleep expects 1 argument")
+			vm.runtimeError(ErrorRuntime, "Core.sleep expects 1 argument")
 		}
 
 		time.Sleep(time.Duration(asInt(vm.pop())) * time.Millisecond)
@@ -123,7 +123,7 @@ func (vm *VM) callCore(method string, argCount int) {
 		vm.push(0)
 	case "input":
 		if argCount != 1 {
-			LangError(ErrorRuntime, "Core.sleeinputp expects 1 argument")
+			vm.runtimeError(ErrorRuntime, "Core.sleeinputp expects 1 argument")
 		}
 
 		reader := bufio.NewReader(os.Stdin)
@@ -135,20 +135,20 @@ func (vm *VM) callCore(method string, argCount int) {
 		vm.push(input)
 	case "close":
 		if argCount != 0 {
-			LangError(ErrorRuntime, "Core.close expects 0 arguments")
+			vm.runtimeError(ErrorRuntime, "Core.close expects 0 arguments")
 		}
 
 		os.Exit(0)
 
 	case "exit":
 		if argCount != 1 {
-			LangError(ErrorRuntime, "Core.exit expects 1 argument")
+			vm.runtimeError(ErrorRuntime, "Core.exit expects 1 argument")
 		}
 
 		os.Exit(asInt(vm.pop()))
 	case "halt":
 		if argCount != 0 {
-			LangError(ErrorRuntime, "Core.halt expects 0 arguments")
+			vm.runtimeError(ErrorRuntime, "Core.halt expects 0 arguments")
 		}
 
 		fmt.Println("Press Enter to exit...")
@@ -158,7 +158,7 @@ func (vm *VM) callCore(method string, argCount int) {
 		vm.push(0)
 
 	default:
-		LangError(ErrorName, "unknown core function: %s", method)
+		vm.runtimeError(ErrorName, "unknown core function: %s", method)
 	}
 }
 
@@ -171,6 +171,6 @@ func (vm *VM) callBuiltin(object string, method string, argCount int) {
 		vm.callPluginModule(method, argCount)
 
 	default:
-		LangError(ErrorName, "unknown builtin module: %s", object)
+		vm.runtimeError(ErrorName, "unknown builtin module: %s", object)
 	}
 }

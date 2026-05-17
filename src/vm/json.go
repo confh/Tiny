@@ -10,7 +10,7 @@ func (vm *VM) callStdJson(method string, args []Value) {
 	switch method {
 	case "stringify":
 		if len(args) != 1 {
-			LangError(ErrorRuntime, "json.stringify expects 1 argument")
+			vm.runtimeError(ErrorRuntime, "json.stringify expects 1 argument")
 		}
 
 		value := args[0]
@@ -19,14 +19,14 @@ func (vm *VM) callStdJson(method string, args []Value) {
 
 		bytes, err := json.Marshal(jsonValue)
 		if err != nil {
-			LangError(ErrorRuntime, "failed to convert value to JSON: %v", err)
+			vm.runtimeError(ErrorRuntime, "failed to convert value to JSON: %v", err)
 		}
 
 		vm.push(string(bytes))
 
 	case "pretty":
 		if len(args) != 1 {
-			LangError(ErrorRuntime, "json.pretty expects 1 argument")
+			vm.runtimeError(ErrorRuntime, "json.pretty expects 1 argument")
 		}
 
 		value := args[0]
@@ -35,13 +35,13 @@ func (vm *VM) callStdJson(method string, args []Value) {
 
 		bytes, err := json.MarshalIndent(jsonValue, "", "  ")
 		if err != nil {
-			LangError(ErrorRuntime, "failed to convert value to JSON: %v", err)
+			vm.runtimeError(ErrorRuntime, "failed to convert value to JSON: %v", err)
 		}
 
 		vm.push(string(bytes))
 	case "parse":
 		if len(args) != 1 {
-			LangError(ErrorRuntime, "json.parse expects 1 argument")
+			vm.runtimeError(ErrorRuntime, "json.parse expects 1 argument")
 		}
 
 		stringified := asString(args[0])
@@ -50,11 +50,11 @@ func (vm *VM) callStdJson(method string, args []Value) {
 
 		err := json.Unmarshal([]byte(stringified), &result)
 		if err != nil {
-			LangError(ErrorRuntime, "invalid JSON: %v", err)
+			vm.runtimeError(ErrorRuntime, "invalid JSON: %v", err)
 		}
 
 		vm.push(jsonToTinyValue(result))
 	default:
-		LangError(ErrorName, "unknown json function: %s", method)
+		vm.runtimeError(ErrorName, "unknown json function: %s", method)
 	}
 }

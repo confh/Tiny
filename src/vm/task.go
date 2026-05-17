@@ -14,6 +14,6 @@ func (vm *VM) callTaskMethod(task *NativeTaskValue, method string, args []Value)
 		vm.push(result.Value)
 
 	default:
-		LangError(ErrorName, "unknown task function: %s", method)
+		vm.runtimeError(ErrorName, "unknown task function: %s", method)
 	}
 }

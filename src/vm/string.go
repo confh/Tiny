@@ -33,7 +33,7 @@ func (vm *VM) callStdString(method string, args []Value) {
 	switch method {
 	case "isDigit":
 		if (len(args)) != 1 {
-			LangError(ErrorRuntime, "string.isDigit expects 1 argument")
+			vm.runtimeError(ErrorRuntime, "string.isDigit expects 1 argument")
 		}
 
 		value := asString(args[0])
@@ -41,7 +41,7 @@ func (vm *VM) callStdString(method string, args []Value) {
 		vm.push(isDigit(value))
 	case "random":
 		if (len(args)) != 1 {
-			LangError(ErrorRuntime, "string.random expects 1 argument")
+			vm.runtimeError(ErrorRuntime, "string.random expects 1 argument")
 		}
 
 		length := asInt(args[0])
@@ -50,7 +50,7 @@ func (vm *VM) callStdString(method string, args []Value) {
 
 	case "upper":
 		if len(args) != 1 {
-			LangError(ErrorRuntime, "String.upper expects 1 argument")
+			vm.runtimeError(ErrorRuntime, "String.upper expects 1 argument")
 		}
 
 		text := asString(args[0])
@@ -58,7 +58,7 @@ func (vm *VM) callStdString(method string, args []Value) {
 
 	case "lower":
 		if len(args) != 1 {
-			LangError(ErrorRuntime, "String.lower expects 1 argument")
+			vm.runtimeError(ErrorRuntime, "String.lower expects 1 argument")
 		}
 
 		text := asString(args[0])
@@ -66,7 +66,7 @@ func (vm *VM) callStdString(method string, args []Value) {
 
 	case "trim":
 		if len(args) != 1 {
-			LangError(ErrorRuntime, "String.trim expects 1 argument")
+			vm.runtimeError(ErrorRuntime, "String.trim expects 1 argument")
 		}
 
 		text := asString(args[0])
@@ -74,7 +74,7 @@ func (vm *VM) callStdString(method string, args []Value) {
 
 	case "contains":
 		if len(args) != 2 {
-			LangError(ErrorRuntime, "String.contains expects 2 arguments")
+			vm.runtimeError(ErrorRuntime, "String.contains expects 2 arguments")
 		}
 
 		text := asString(args[0])
@@ -84,7 +84,7 @@ func (vm *VM) callStdString(method string, args []Value) {
 
 	case "replace":
 		if len(args) != 3 {
-			LangError(ErrorRuntime, "String.replace expects 3 arguments")
+			vm.runtimeError(ErrorRuntime, "String.replace expects 3 arguments")
 		}
 
 		text := asString(args[0])
@@ -95,7 +95,7 @@ func (vm *VM) callStdString(method string, args []Value) {
 
 	case "replaceAll":
 		if len(args) != 3 {
-			LangError(ErrorRuntime, "String.replaceAll expects 3 arguments")
+			vm.runtimeError(ErrorRuntime, "String.replaceAll expects 3 arguments")
 		}
 
 		text := asString(args[0])
@@ -106,13 +106,13 @@ func (vm *VM) callStdString(method string, args []Value) {
 
 	case "len":
 		if len(args) != 1 {
-			LangError(ErrorRuntime, "String.len expects 1 argument")
+			vm.runtimeError(ErrorRuntime, "String.len expects 1 argument")
 		}
 
 		text := asString(args[0])
 		vm.push(len(text))
 
 	default:
-		LangError(ErrorName, "unknown String function: %s", method)
+		vm.runtimeError(ErrorName, "unknown String function: %s", method)
 	}
 }

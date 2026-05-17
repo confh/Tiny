@@ -2,22 +2,22 @@ package vm
 
 import . "language.com/src/tinyerrors"
 
-func (v *VM) callStdBuffer(method string, args []Value) {
+func (vm *VM) callStdBuffer(method string, args []Value) {
 	switch method {
 	case "fromString":
 		if len(args) != 1 {
-			LangError(ErrorRuntime, "buffer.fromString expects 1 argument")
+			vm.runtimeError(ErrorRuntime, "buffer.fromString expects 1 argument")
 		}
 
 		text := asString(args[0])
 
-		v.push(&BufferValue{
+		vm.push(&BufferValue{
 			Bytes: []byte(text),
 		})
 
 	case "fromArray":
 		if len(args) != 1 {
-			LangError(ErrorRuntime, "buffer.fromArray expects 1 argument")
+			vm.runtimeError(ErrorRuntime, "buffer.fromArray expects 1 argument")
 		}
 
 		array := asArray(args[0])
@@ -35,12 +35,12 @@ func (v *VM) callStdBuffer(method string, args []Value) {
 			case float64:
 				bufferValue.Bytes = append(bufferValue.Bytes, byte(n))
 			default:
-				LangError(ErrorRuntime, "buffer.fromArray expects array of numbers")
+				vm.runtimeError(ErrorRuntime, "buffer.fromArray expects array of numbers")
 			}
 		}
 
-		v.push(bufferValue)
+		vm.push(bufferValue)
 	default:
-		LangError(ErrorName, "unknown buffer function: %s", method)
+		vm.runtimeError(ErrorName, "unknown buffer function: %s", method)
 	}
 }

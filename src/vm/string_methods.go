@@ -19,7 +19,7 @@ func (vm *VM) callStringMethod(value string, method string, args []Value) {
 
 	case "split":
 		if len(args) != 1 {
-			LangError(ErrorRuntime, "string.split expects 1 argument")
+			vm.runtimeError(ErrorRuntime, "string.split expects 1 argument")
 		}
 
 		separator := asString(args[0])
@@ -35,6 +35,6 @@ func (vm *VM) callStringMethod(value string, method string, args []Value) {
 
 		vm.push(array)
 	default:
-		LangError(ErrorName, "unknown buffer method: %s", method)
+		vm.runtimeError(ErrorName, "unknown string method: %s", method)
 	}
 }

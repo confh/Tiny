@@ -244,6 +244,21 @@ func (vm *VM) callClassByName(name string, args []Value) {
 	vm.callClassWithArgs(class, args)
 }
 
+func (vm *VM) hasActiveTryHandler() bool {
+	return len(vm.tryHandlers) > 0
+}
+
+func (vm *VM) runtimeError(kind ErrorKind, format string, args ...any) {
+	message := fmt.Sprintf(format, args...)
+
+	errObj := ObjectValue{
+		"kind":    string(kind),
+		"message": message,
+	}
+
+	vm.throwValue(errObj)
+}
+
 func (vm *VM) step() bool {
 	instructions := vm.currentInstructions()
 	ip := vm.currentIP()
@@ -1548,6 +1563,13 @@ func (vm *VM) callMethod(method string, argCount int) {
 
 	objectValue := vm.pop()
 
+	if method == "toString" {
+		if _, ok := objectValue.(*BufferValue); !ok {
+			vm.push(valueToString(objectValue))
+			return
+		}
+	}
+
 	switch val := objectValue.(type) {
 	case NamespaceValue:
 		vm.callNamespaceMethod(val, method, args)
@@ -1575,6 +1597,10 @@ func (vm *VM) callMethod(method string, argCount int) {
 
 	case *BufferValue:
 		vm.callBufferMethod(val, method, args)
+		return
+
+	case *NativeFileValue:
+		vm.callFileMethod(val, method, args)
 		return
 
 	case *ArrayValue:

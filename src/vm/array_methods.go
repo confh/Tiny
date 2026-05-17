@@ -14,7 +14,7 @@ func (vm *VM) callArrayMethod(array *ArrayValue, method string, args []Value) {
 
 	case "push":
 		if len(args) != 1 {
-			LangError(ErrorRuntime, "array.push expects 1 argument")
+			vm.runtimeError(ErrorRuntime, "array.push expects 1 argument")
 		}
 
 		array.Elements = append(array.Elements, args[0])
@@ -34,26 +34,26 @@ func (vm *VM) callArrayMethod(array *ArrayValue, method string, args []Value) {
 
 	case "get":
 		if len(args) != 1 {
-			LangError(ErrorRuntime, "array.get expects 1 argument")
+			vm.runtimeError(ErrorRuntime, "array.get expects 1 argument")
 		}
 
 		index := asInt(args[0])
 
 		if index < 0 || index >= len(array.Elements) {
-			LangError(ErrorRuntime, "array index out of range: %d", index)
+			vm.runtimeError(ErrorRuntime, "array index out of range: %d", index)
 		}
 
 		vm.push(array.Elements[index])
 
 	case "set":
 		if len(args) != 2 {
-			LangError(ErrorRuntime, "array.set expects 2 arguments")
+			vm.runtimeError(ErrorRuntime, "array.set expects 2 arguments")
 		}
 
 		index := asInt(args[0])
 
 		if index < 0 || index >= len(array.Elements) {
-			LangError(ErrorRuntime, "array index out of range: %d", index)
+			vm.runtimeError(ErrorRuntime, "array index out of range: %d", index)
 		}
 
 		array.Elements[index] = args[1]
@@ -62,7 +62,7 @@ func (vm *VM) callArrayMethod(array *ArrayValue, method string, args []Value) {
 
 	case "contains":
 		if len(args) != 1 {
-			LangError(ErrorRuntime, "array.contains expects 1 argument")
+			vm.runtimeError(ErrorRuntime, "array.contains expects 1 argument")
 		}
 
 		element := args[0]
@@ -71,7 +71,7 @@ func (vm *VM) callArrayMethod(array *ArrayValue, method string, args []Value) {
 
 	case "join":
 		if len(args) != 1 {
-			LangError(ErrorRuntime, "array.join expects 1 argument")
+			vm.runtimeError(ErrorRuntime, "array.join expects 1 argument")
 		}
 
 		separator := asString(args[0])
@@ -82,7 +82,8 @@ func (vm *VM) callArrayMethod(array *ArrayValue, method string, args []Value) {
 			if i == len(array.Elements)-1 {
 				sb.WriteString(valueToString(value))
 			} else {
-				sb.WriteString(valueToString(value) + separator)
+				sb.WriteString(valueToString(value))
+				sb.WriteString(separator)
 			}
 		}
 
@@ -95,14 +96,14 @@ func (vm *VM) callArrayMethod(array *ArrayValue, method string, args []Value) {
 
 	case "map":
 		if len(args) != 1 {
-			LangError(ErrorRuntime, "array.map expects 1 argument")
+			vm.runtimeError(ErrorRuntime, "array.map expects 1 argument")
 		}
 
 		value := args[0]
 
 		fn, ok := value.(FunctionValue)
 		if !ok {
-			LangError(ErrorType, "array.map expects function, got %s", typeName(value))
+			vm.runtimeError(ErrorType, "array.map expects function, got %s", typeName(value))
 		}
 
 		mappedArray := &ArrayValue{
@@ -119,14 +120,14 @@ func (vm *VM) callArrayMethod(array *ArrayValue, method string, args []Value) {
 
 	case "forEach":
 		if len(args) != 1 {
-			LangError(ErrorRuntime, "array.forEach expects 1 argument")
+			vm.runtimeError(ErrorRuntime, "array.forEach expects 1 argument")
 		}
 
 		value := args[0]
 
 		fn, ok := value.(FunctionValue)
 		if !ok {
-			LangError(ErrorType, "array.forEach expects function, got %s", typeName(value))
+			vm.runtimeError(ErrorType, "array.forEach expects function, got %s", typeName(value))
 		}
 
 		for i, v := range array.Elements {
@@ -137,14 +138,14 @@ func (vm *VM) callArrayMethod(array *ArrayValue, method string, args []Value) {
 
 	case "filter":
 		if len(args) != 1 {
-			LangError(ErrorRuntime, "array.filter expects 1 argument")
+			vm.runtimeError(ErrorRuntime, "array.filter expects 1 argument")
 		}
 
 		value := args[0]
 
 		fn, ok := value.(FunctionValue)
 		if !ok {
-			LangError(ErrorType, "array.filter expects function, got %s", typeName(value))
+			vm.runtimeError(ErrorType, "array.filter expects function, got %s", typeName(value))
 		}
 
 		filteredArray := &ArrayValue{
@@ -167,6 +168,6 @@ func (vm *VM) callArrayMethod(array *ArrayValue, method string, args []Value) {
 		vm.push(true)
 
 	default:
-		LangError(ErrorName, "unknown array method: %s", method)
+		vm.runtimeError(ErrorName, "unknown array method: %s", method)
 	}
 }

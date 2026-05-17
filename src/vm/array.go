@@ -10,7 +10,7 @@ func (vm *VM) callStdArray(method string, args []Value) {
 	switch method {
 	case "range":
 		if len(args) != 2 {
-			LangError(ErrorRuntime, "array.range expects 2 arguments")
+			vm.runtimeError(ErrorRuntime, "array.range expects 2 arguments")
 		}
 
 		min := asInt(args[0])
@@ -28,7 +28,7 @@ func (vm *VM) callStdArray(method string, args []Value) {
 
 	case "isArray":
 		if len(args) != 1 {
-			LangError(ErrorRuntime, "array.isArray expects 1 argument")
+			vm.runtimeError(ErrorRuntime, "array.isArray expects 1 argument")
 		}
 
 		_, ok := args[0].(*ArrayValue)
@@ -37,7 +37,7 @@ func (vm *VM) callStdArray(method string, args []Value) {
 
 	case "from":
 		if len(args) != 1 {
-			LangError(ErrorRuntime, "array.isArray expects 1 argument")
+			vm.runtimeError(ErrorRuntime, "array.isArray expects 1 argument")
 		}
 
 		switch v := args[0].(type) {
@@ -50,9 +50,9 @@ func (vm *VM) callStdArray(method string, args []Value) {
 
 			vm.push(dst)
 		default:
-			LangError(ErrorType, "type %s cannot be turned into an array", typeName(v))
+			vm.runtimeError(ErrorType, "type %s cannot be turned into an array", typeName(v))
 		}
 	default:
-		LangError(ErrorName, "unknown array function: %s", method)
+		vm.runtimeError(ErrorName, "unknown array function: %s", method)
 	}
 }

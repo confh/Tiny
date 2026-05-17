@@ -27,6 +27,9 @@ func (vm *VM) callStandardModule(module string, method string, args []Value) {
 	case "buffer":
 		vm.callStdBuffer(method, args)
 
+	case "regex":
+		vm.callStdRegex(method, args)
+
 	default:
 		LangError(ErrorName, "unknown standard module: %s", module)
 	}

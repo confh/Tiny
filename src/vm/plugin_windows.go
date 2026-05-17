@@ -30,7 +30,7 @@ func (vm *VM) callPluginModule(method string, argCount int) {
 
 		name := asString(vm.pop())
 
-		availablePlugins := []string{"array", "math", "string", "json", "fs", "app", "buffer"}
+		availablePlugins := []string{"array", "math", "string", "json", "fs", "app", "buffer", "regex"}
 
 		if slices.Contains(availablePlugins, name) {
 			vm.push(&StandardModuleValue{Name: name})

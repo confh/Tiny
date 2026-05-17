@@ -6,7 +6,7 @@ func (vm *VM) callStdApp(method string, args []Value) {
 	switch method {
 	case "new":
 		if len(args) != 1 {
-			LangError(ErrorRuntime, "app.new expects 1 argument")
+			vm.runtimeError(ErrorRuntime, "app.new expects 1 argument")
 		}
 
 		name := asString(args[0])
@@ -17,6 +17,6 @@ func (vm *VM) callStdApp(method string, args []Value) {
 		})
 
 	default:
-		LangError(ErrorName, "unknown app function: %s", method)
+		vm.runtimeError(ErrorName, "unknown app function: %s", method)
 	}
 }
