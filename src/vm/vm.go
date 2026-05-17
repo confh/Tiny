@@ -266,6 +266,42 @@ func (vm *VM) step() bool {
 	vm.incrementIP()
 
 	switch instr.Op {
+	case OP_SPAWN:
+		value := vm.pop()
+
+		fn, ok := value.(FunctionValue)
+		if !ok {
+			LangError(ErrorType, "spawn expects function, got %s", typeName(value))
+		}
+
+		task := &NativeTaskValue{
+			Done: make(chan TaskResult, 1),
+		}
+
+		taskVM := vm.CloneForTask()
+
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					task.Done <- TaskResult{
+						Error: r,
+					}
+				}
+			}()
+
+			result := taskVM.callFunctionValue(fn, []Value{})
+
+			task.Done <- TaskResult{
+				Value: result,
+			}
+		}()
+
+		vm.push(task)
+
+	case OP_TYPEOF:
+		value := vm.pop()
+		vm.push(typeName(value))
+
 	case OP_NEGATE:
 		value := vm.pop()
 
@@ -1543,6 +1579,10 @@ func (vm *VM) callMethod(method string, argCount int) {
 
 	case *ArrayValue:
 		vm.callArrayMethod(val, method, args)
+		return
+
+	case *NativeTaskValue:
+		vm.callTaskMethod(val, method, args)
 		return
 
 	case string:

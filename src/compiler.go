@@ -1758,6 +1758,14 @@ func (c *Compiler) compileExpr(expr Expr) {
 		c.compileExpr(e.Object)
 		c.emit(OP_GET_PROPERTY, e.Name)
 
+	case TypeOfExpr:
+		c.compileExpr(e.Value)
+		c.emit(OP_TYPEOF, nil)
+
+	case SpawnExpr:
+		c.compileExpr(e.Function)
+		c.emit(OP_SPAWN, nil)
+
 	case ArrayExpr:
 		for _, element := range e.Elements {
 			c.compileExpr(element)

@@ -24,9 +24,6 @@ func (vm *VM) callStandardModule(module string, method string, args []Value) {
 	case "app":
 		vm.callStdApp(method, args)
 
-	case "task":
-		vm.callTaskModule(method, args)
-
 	case "buffer":
 		vm.callStdBuffer(method, args)
 

@@ -101,6 +101,10 @@ func (l *Lexer) NextToken() Token {
 			return l.tokenAt(start, TOKEN_MATCH, word)
 		case "in":
 			return l.tokenAt(start, TOKEN_IN, word)
+		case "typeof":
+			return l.tokenAt(start, TOKEN_TYPEOF, word)
+		case "spawn":
+			return l.tokenAt(start, TOKEN_SPAWN, word)
 		default:
 			return l.tokenAt(start, TOKEN_IDENT, word)
 		}

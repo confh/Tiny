@@ -44,6 +44,9 @@ const (
 
 	TOKEN_MATCH TokenType = "MATCH"
 
+	TOKEN_TYPEOF TokenType = "TYPEOF"
+	TOKEN_SPAWN  TokenType = "SPAWN"
+
 	TOKEN_BANG           TokenType = "!"
 	TOKEN_ASSIGN         TokenType = "="
 	TOKEN_PLUS           TokenType = "+"

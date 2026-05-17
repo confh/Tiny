@@ -137,6 +137,18 @@ type ArrayExpr struct {
 
 func (e ArrayExpr) exprNode() {}
 
+type TypeOfExpr struct {
+	Value Expr
+}
+
+func (e TypeOfExpr) exprNode() {}
+
+type SpawnExpr struct {
+	Function Expr
+}
+
+func (e SpawnExpr) exprNode() {}
+
 type ThisExpr struct{}
 
 func (e ThisExpr) exprNode() {}

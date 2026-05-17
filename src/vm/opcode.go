@@ -61,6 +61,9 @@ const (
 
 	OP_NEGATE
 
+	OP_TYPEOF
+	OP_SPAWN
+
 	OP_AND
 	OP_OR
 

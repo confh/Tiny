@@ -649,6 +649,8 @@ func (p *Parser) parseForStatement() Stmt {
 
 	var init Stmt
 
+	p.expect(TOKEN_LPAREN)
+
 	switch p.current.Type {
 	case TOKEN_LET:
 		init = p.parseLetStatement()
@@ -675,6 +677,8 @@ func (p *Parser) parseForStatement() Stmt {
 	if p.current.Type != TOKEN_LBRACE {
 		update = p.parseForUpdateStatement()
 	}
+
+	p.expect(TOKEN_RPAREN)
 
 	body := p.parseBlock()
 
@@ -1698,7 +1702,8 @@ func (p *Parser) parseClassStatement() Stmt {
 }
 
 func (p *Parser) parseUnary() Expr {
-	if p.current.Type == TOKEN_MINUS || p.current.Type == TOKEN_BANG {
+	switch p.current.Type {
+	case TOKEN_MINUS, TOKEN_BANG:
 		op := p.current.Type
 		p.advance()
 
@@ -1707,6 +1712,35 @@ func (p *Parser) parseUnary() Expr {
 		return UnaryExpr{
 			Op:    op,
 			Right: right,
+		}
+
+	case TOKEN_TYPEOF:
+		p.advance()
+
+		value := p.parseUnary()
+
+		return TypeOfExpr{
+			Value: value,
+		}
+	case TOKEN_SPAWN:
+		p.advance()
+
+		fn := p.parseUnary()
+
+		_, ok := fn.(FunctionExpr)
+		if !ok {
+			LangErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"expected function after spawn, got %s",
+				p.current.Type,
+			)
+		}
+
+		return SpawnExpr{
+			Function: fn,
 		}
 	}
 
