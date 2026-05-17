@@ -390,16 +390,25 @@ func valueToString(value Value) string {
 func asString(value Value) string {
 	stringValue, ok := value.(string)
 	if !ok {
-		LangError(ErrorSyntax, "expected string, got %T", value)
+		LangError(ErrorSyntax, "expected string, got %s", typeName(value))
 	}
 
 	return stringValue
 }
 
+func asObject(value Value) ObjectValue {
+	objectValue, ok := value.(ObjectValue)
+	if !ok {
+		LangError(ErrorSyntax, "expected object, got %s", typeName(value))
+	}
+
+	return objectValue
+}
+
 func asBuffer(value Value) *BufferValue {
 	bufferValue, ok := value.(*BufferValue)
 	if !ok {
-		LangError(ErrorSyntax, "expected buffer, got %T", value)
+		LangError(ErrorSyntax, "expected buffer, gots%T", typeName(value))
 	}
 
 	return bufferValue
@@ -408,7 +417,7 @@ func asBuffer(value Value) *BufferValue {
 func asArray(value Value) *ArrayValue {
 	arrayValue, ok := value.(*ArrayValue)
 	if !ok {
-		LangError(ErrorSyntax, "expected array, got %T", value)
+		LangError(ErrorSyntax, "expected array, got %s", typeName(value))
 	}
 
 	return arrayValue
@@ -417,7 +426,7 @@ func asArray(value Value) *ArrayValue {
 func asBool(value Value) bool {
 	boolean, ok := value.(bool)
 	if !ok {
-		LangError(ErrorSyntax, "expected bool, got %T", value)
+		LangError(ErrorSyntax, "expected bool, got %s", typeName(value))
 	}
 
 	return boolean

@@ -46,7 +46,7 @@ func (vm *VM) callStdProcess(method string, args []Value) {
 
 		root, err := os.Getwd()
 		if err != nil {
-			vm.runtimeError(ErrorRuntime, "Error getting current directory:", err)
+			vm.runtimeError(ErrorRuntime, "Error getting current directory: %s", err)
 			return
 		}
 
