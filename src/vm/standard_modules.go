@@ -30,6 +30,21 @@ func (vm *VM) callStandardModule(module string, method string, args []Value) {
 	case "regex":
 		vm.callStdRegex(method, args)
 
+	case "io":
+		vm.callStdIO(method, args)
+
+	case "process":
+		vm.callStdProcess(method, args)
+
+	case "time":
+		vm.callStdTime(method, args)
+
+	case "error":
+		vm.callStdError(method, args)
+
+	case "http":
+		vm.callStdHttp(method, args)
+
 	default:
 		LangError(ErrorName, "unknown standard module: %s", module)
 	}

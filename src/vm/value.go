@@ -2,6 +2,7 @@ package vm
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -47,8 +48,11 @@ type FunctionValue struct {
 }
 
 type NativeServerValue struct {
-	Port   int
-	Routes map[string]Value
+	Port       int
+	GetRoutes  map[string]Value
+	PostRoutes map[string]Value
+	mux        *http.ServeMux
+	closed     bool
 }
 
 type NativeAppValue struct {

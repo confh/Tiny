@@ -1982,7 +1982,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 		})
 
 	case MemberCallExpr:
-		if ident, ok := e.Object.(IdentExpr); ok && (ident.Name == "Core" || ident.Name == "Plugin") {
+		if ident, ok := e.Object.(IdentExpr); ok && (ident.Name == "Plugin") {
 			for _, arg := range e.Args {
 				c.compileExpr(arg)
 			}
