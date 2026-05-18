@@ -39,7 +39,6 @@ static int tiny_close(void* handle) {
 import "C"
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
