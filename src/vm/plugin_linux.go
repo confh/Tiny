@@ -151,6 +151,11 @@ func resolvePluginPath(path string, ext string) string {
 	return path
 }
 
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
 func (vm *VM) callNativePlugin(plugin *NativePluginValue, method string, args []Value) {
 	jsonArgs := make([]any, len(args))
 	for i, arg := range args {
