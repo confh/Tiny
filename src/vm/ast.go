@@ -13,8 +13,11 @@ type Program struct {
 }
 
 type AssignStmt struct {
-	Name  string
-	Value Expr
+	Name   string
+	Value  Expr
+	File   string
+	Line   int
+	Column int
 }
 
 func (s AssignStmt) stmtNode() {}
@@ -22,6 +25,9 @@ func (s AssignStmt) stmtNode() {}
 type NamespaceStmt struct {
 	Name       string
 	Statements []Stmt
+	File       string
+	Line       int
+	Column     int
 }
 
 func (s NamespaceStmt) stmtNode() {}
@@ -29,6 +35,9 @@ func (s NamespaceStmt) stmtNode() {}
 type EnumStmt struct {
 	Name    string
 	Members []string
+	File    string
+	Line    int
+	Column  int
 }
 
 func (s EnumStmt) stmtNode() {}
@@ -38,7 +47,10 @@ type BreakStmt struct{}
 func (s BreakStmt) stmtNode() {}
 
 type ExportStmt struct {
-	Inner Stmt
+	Inner  Stmt
+	File   string
+	Line   int
+	Column int
 }
 
 func (s ExportStmt) stmtNode() {}
@@ -52,6 +64,9 @@ type ForStmt struct {
 	Condition Expr
 	Update    Stmt
 	Body      []Stmt
+	File      string
+	Line      int
+	Column    int
 }
 
 func (s ForStmt) stmtNode() {}
@@ -60,14 +75,20 @@ type PropertyAssignStmt struct {
 	Object Expr
 	Name   string
 	Value  Expr
+	File   string
+	Line   int
+	Column int
 }
 
 func (s PropertyAssignStmt) stmtNode() {}
 
 type ImportStmt struct {
-	Path  string
-	Std   bool
-	Alias string
+	Path   string
+	Std    bool
+	Alias  string
+	File   string
+	Line   int
+	Column int
 }
 
 func (s ImportStmt) stmtNode() {}
@@ -77,6 +98,9 @@ type VariableStmt struct {
 	Value    Expr
 	Constant bool
 	TypeHint TypeHint
+	File     string
+	Line     int
+	Column   int
 }
 
 func (s VariableStmt) stmtNode() {}
@@ -106,6 +130,7 @@ func (s MatchStmt) stmtNode() {}
 type ClassStmt struct {
 	Name    string
 	Methods []FunctionStmt
+	Embeds  []string
 }
 
 func (s ClassStmt) stmtNode() {}
@@ -113,6 +138,9 @@ func (s ClassStmt) stmtNode() {}
 type WhileStmt struct {
 	Condition Expr
 	Body      []Stmt
+	File      string
+	Line      int
+	Column    int
 }
 
 func (s WhileStmt) stmtNode() {}
@@ -121,6 +149,9 @@ type IfStmt struct {
 	Condition Expr
 	ThenBody  []Stmt
 	ElseBody  []Stmt
+	File      string
+	Line      int
+	Column    int
 }
 
 func (s IfStmt) stmtNode() {}
@@ -130,6 +161,13 @@ type StringExpr struct {
 }
 
 func (e StringExpr) exprNode() {}
+
+type InstanceOfExpr struct {
+	Object Expr
+	Class  Expr
+}
+
+func (e InstanceOfExpr) exprNode() {}
 
 type ArrayExpr struct {
 	Elements []Expr
@@ -232,7 +270,10 @@ type ExprStmt struct {
 }
 
 type ThrowStmt struct {
-	Value Expr
+	Value  Expr
+	File   string
+	Line   int
+	Column int
 }
 
 func (s ThrowStmt) stmtNode() {}
@@ -243,6 +284,9 @@ type IndexAssignStmt struct {
 	Object Expr
 	Index  Expr
 	Value  Expr
+	File   string
+	Line   int
+	Column int
 }
 
 func (s IndexAssignStmt) stmtNode() {}
@@ -257,6 +301,9 @@ type FunctionStmt struct {
 	Params     []Param
 	ReturnType TypeHint
 	Body       []Stmt
+	File       string
+	Line       int
+	Column     int
 }
 
 func (s FunctionStmt) stmtNode() {}
@@ -265,6 +312,9 @@ type TryCatchStmt struct {
 	TryBody   []Stmt
 	ErrorName string
 	CatchBody []Stmt
+	File      string
+	Line      int
+	Column    int
 }
 
 func (s TryCatchStmt) stmtNode() {}
@@ -272,6 +322,9 @@ func (s TryCatchStmt) stmtNode() {}
 type ReturnStmt struct {
 	Value    Expr
 	HasValue bool
+	File     string
+	Line     int
+	Column   int
 }
 
 func (s ReturnStmt) stmtNode() {}
@@ -283,13 +336,19 @@ type NumberExpr struct {
 func (e NumberExpr) exprNode() {}
 
 type IncrementStmt struct {
-	Name string
+	Name   string
+	File   string
+	Line   int
+	Column int
 }
 
 func (e IncrementStmt) stmtNode() {}
 
 type DecrementStmt struct {
-	Name string
+	Name   string
+	File   string
+	Line   int
+	Column int
 }
 
 func (e DecrementStmt) stmtNode() {}
@@ -315,8 +374,11 @@ type BinaryExpr struct {
 func (e BinaryExpr) exprNode() {}
 
 type CallExpr struct {
-	Name string
-	Args []Expr
+	Name   string
+	Args   []Expr
+	File   string
+	Line   int
+	Column int
 }
 
 func (e CallExpr) exprNode() {}
@@ -332,6 +394,9 @@ type MemberCallExpr struct {
 	Object Expr
 	Method string
 	Args   []Expr
+	File   string
+	Line   int
+	Column int
 }
 
 func (e MemberCallExpr) exprNode() {}

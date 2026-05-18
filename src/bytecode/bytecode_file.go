@@ -36,8 +36,11 @@ type SerializableNamespaceMemberRef struct {
 }
 
 type SerializableInstruction struct {
-	Op    OpCode       `json:"op"`
-	Value EncodedValue `json:"value"`
+	Op     OpCode       `json:"op"`
+	Value  EncodedValue `json:"value"`
+	File   string       `json:"file,omitempty"`
+	Line   int          `json:"line,omitempty"`
+	Column int          `json:"column,omitempty"`
 }
 
 type EncodedValue struct {
@@ -146,8 +149,11 @@ func serializeInstructions(instructions []Instruction) []SerializableInstruction
 
 	for i, instr := range instructions {
 		result[i] = SerializableInstruction{
-			Op:    instr.Op,
-			Value: EncodeValue(instr.Value),
+			Op:     instr.Op,
+			Value:  EncodeValue(instr.Value),
+			File:   instr.File,
+			Line:   instr.Line,
+			Column: instr.Column,
 		}
 	}
 
@@ -159,8 +165,11 @@ func deserializeInstructions(instructions []SerializableInstruction) []Instructi
 
 	for i, instr := range instructions {
 		result[i] = Instruction{
-			Op:    instr.Op,
-			Value: DecodeValue(instr.Value),
+			Op:     instr.Op,
+			Value:  DecodeValue(instr.Value),
+			File:   instr.File,
+			Line:   instr.Line,
+			Column: instr.Column,
 		}
 	}
 

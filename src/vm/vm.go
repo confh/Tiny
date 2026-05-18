@@ -168,7 +168,9 @@ func (vm *VM) CloneForTask() *VM {
 }
 
 func (vm *VM) callClassWithArgs(class Class, args []Value) {
-	object := ObjectValue{}
+	object := ObjectValue{
+		"__class": class.Name,
+	}
 
 	for methodName, functionName := range class.Methods {
 		object[methodName] = FunctionValue{
@@ -248,8 +250,53 @@ func (vm *VM) callClassByName(name string, args []Value) {
 	vm.callClassWithArgs(class, args)
 }
 
-func (vm *VM) hasActiveTryHandler() bool {
-	return len(vm.tryHandlers) > 0
+func (vm *VM) stackTrace() string {
+	if len(vm.frames) == 0 {
+		return "  at <main>"
+	}
+
+	lines := []string{}
+
+	for i := len(vm.frames) - 1; i >= 0; i-- {
+		frame := vm.frames[i]
+
+		name := frame.function.Name
+		if name == "" {
+			name = "<anonymous>"
+		}
+
+		location := ""
+
+		ip := frame.ip - 1
+		if ip >= 0 && ip < len(frame.instructions) {
+			instr := frame.instructions[ip]
+
+			if instr.File != "" && instr.Line > 0 {
+				location = fmt.Sprintf(" (%s:%d", instr.File, instr.Line)
+
+				if instr.Column > 0 {
+					location += fmt.Sprintf(":%d", instr.Column)
+				}
+
+				location += ")"
+			}
+		}
+
+		lines = append(lines, "  at "+name+location)
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func (vm *VM) fatalError(kind ErrorKind, format string, args ...any) {
+	message := fmt.Sprintf(format, args...)
+
+	trace := vm.stackTrace()
+
+	panic(LangErrorType{
+		Kind:    kind,
+		Message: message + "\n\nStack trace:\n" + trace,
+	})
 }
 
 func (vm *VM) runtimeError(kind ErrorKind, format string, args ...any) {
@@ -261,6 +308,48 @@ func (vm *VM) runtimeError(kind ErrorKind, format string, args ...any) {
 	}
 
 	vm.throwValue(errObj)
+}
+
+func (vm *VM) isInstanceOf(value Value, className string) bool {
+	object, ok := value.(ObjectValue)
+	if !ok {
+		return false
+	}
+
+	return vm.objectIsOrEmbedsClass(object, className)
+}
+
+func (vm *VM) objectIsOrEmbedsClass(object ObjectValue, className string) bool {
+	currentClassValue, ok := object["__class"]
+	if ok {
+		currentClassName, ok := currentClassValue.(string)
+		if ok && currentClassName == className {
+			return true
+		}
+
+		if ok {
+			class, exists := vm.classes[currentClassName]
+			if exists {
+				for _, fieldName := range class.Embeds {
+					fieldValue, exists := object[fieldName]
+					if !exists {
+						continue
+					}
+
+					embeddedObject, ok := fieldValue.(ObjectValue)
+					if !ok {
+						continue
+					}
+
+					if vm.objectIsOrEmbedsClass(embeddedObject, className) {
+						return true
+					}
+				}
+			}
+		}
+	}
+
+	return false
 }
 
 func (vm *VM) step() bool {
@@ -285,6 +374,25 @@ func (vm *VM) step() bool {
 	vm.incrementIP()
 
 	switch instr.Op {
+	case OP_INSTANCEOF:
+		classValue := vm.pop()
+		objectValue := vm.pop()
+
+		var className string
+
+		switch c := classValue.(type) {
+		case Class:
+			className = c.Name
+
+		case *Class:
+			className = c.Name
+
+		default:
+			LangError(ErrorType, "right side of instanceof must be class, got %s", typeName(classValue))
+		}
+
+		vm.push(vm.isInstanceOf(objectValue, className))
+
 	case OP_SPAWN:
 		value := vm.pop()
 
@@ -1260,9 +1368,11 @@ func (vm *VM) throwValue(value Value) {
 		message := valueToString(errorObject["message"])
 		kind := valueToString(errorObject["kind"])
 
+		trace := vm.stackTrace()
+
 		panic(LangErrorType{
 			Kind:    ErrorKind(kind),
-			Message: message,
+			Message: message + "\n\nStack trace:\n" + trace,
 		})
 	}
 
@@ -1725,6 +1835,54 @@ func (vm *VM) callNamespaceMethod(ns NamespaceValue, method string, args []Value
 	}
 }
 
+func (vm *VM) findEmbeddedMethod(object ObjectValue, method string) (ObjectValue, FunctionValue, bool) {
+	classNameValue, ok := object["__class"]
+	if !ok {
+		return nil, FunctionValue{}, false
+	}
+
+	className, ok := classNameValue.(string)
+	if !ok {
+		return nil, FunctionValue{}, false
+	}
+
+	class, ok := vm.classes[className]
+	if !ok {
+		return nil, FunctionValue{}, false
+	}
+
+	for _, fieldName := range class.Embeds {
+		fieldValue, exists := object[fieldName]
+		if !exists {
+			continue
+		}
+
+		embeddedObject, ok := fieldValue.(ObjectValue)
+		if !ok {
+			continue
+		}
+
+		methodValue, exists := embeddedObject[method]
+		if !exists {
+			// optional: recursive embedding
+			if receiver, fn, ok := vm.findEmbeddedMethod(embeddedObject, method); ok {
+				return receiver, fn, true
+			}
+
+			continue
+		}
+
+		fnValue, ok := methodValue.(FunctionValue)
+		if !ok {
+			continue
+		}
+
+		return embeddedObject, fnValue, true
+	}
+
+	return nil, FunctionValue{}, false
+}
+
 func (vm *VM) callMethod(method string, argCount int) {
 	args := vm.popArgs(argCount)
 
@@ -1788,14 +1946,27 @@ func (vm *VM) callMethod(method string, argCount int) {
 		LangError(ErrorType, "expected object, got %s", typeName(objectValue))
 	}
 
-	methodValue, exists := object[method]
-	if !exists {
-		LangError(ErrorName, "object has no method: %s", method)
-	}
+	receiver := object
 
-	fnValue, ok := methodValue.(FunctionValue)
-	if !ok {
-		LangError(ErrorType, "property %s is not callable", method)
+	methodValue, exists := object[method]
+
+	var fnValue FunctionValue
+
+	if exists {
+		var ok bool
+
+		fnValue, ok = methodValue.(FunctionValue)
+		if !ok {
+			LangError(ErrorType, "property %s is not callable", method)
+		}
+	} else {
+		embeddedReceiver, embeddedFn, ok := vm.findEmbeddedMethod(object, method)
+		if !ok {
+			LangError(ErrorName, "object has no method: %s", method)
+		}
+
+		receiver = embeddedReceiver
+		fnValue = embeddedFn
 	}
 
 	fn, ok := vm.functions[fnValue.Name]
@@ -1818,7 +1989,7 @@ func (vm *VM) callMethod(method string, argCount int) {
 	locals := make([]*Cell, fn.LocalCount)
 	constants := make([]bool, fn.LocalCount)
 
-	locals[0] = &Cell{Value: object}
+	locals[0] = &Cell{Value: receiver}
 	constants[0] = true
 
 	for i, arg := range args {

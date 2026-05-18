@@ -52,6 +52,8 @@ const (
 
 	OP_LEN
 
+	OP_INSTANCEOF
+
 	OP_EQ
 	OP_NEQ
 	OP_LT
@@ -72,8 +74,11 @@ const (
 )
 
 type Instruction struct {
-	Op    OpCode
-	Value any
+	Op     OpCode
+	Value  any
+	File   string
+	Line   int
+	Column int
 }
 
 type Function struct {
@@ -158,4 +163,5 @@ type DecrementInfo struct {
 type Class struct {
 	Name    string
 	Methods map[string]string
+	Embeds  []string
 }

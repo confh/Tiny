@@ -34,6 +34,10 @@ type Compiler struct {
 	loopStack              []LoopContext
 	anonymousFunctionCount int
 
+	currentFile   string
+	currentLine   int
+	currentColumn int
+
 	matchTempID int
 
 	currentNamespaceVariables map[string]string
@@ -211,8 +215,11 @@ func optimizeExpr(expr Expr) Expr {
 		}
 
 		return CallExpr{
-			Name: e.Name,
-			Args: args,
+			Name:   e.Name,
+			Args:   args,
+			Line:   e.Line,
+			Column: e.Column,
+			File:   e.File,
 		}
 
 	case MemberCallExpr:
@@ -226,6 +233,9 @@ func optimizeExpr(expr Expr) Expr {
 			Object: e.Object,
 			Method: e.Method,
 			Args:   args,
+			Line:   e.Line,
+			Column: e.Column,
+			File:   e.File,
 		}
 
 	case PropertyExpr:
@@ -279,24 +289,16 @@ func NewCompiler() *Compiler {
 	return c
 }
 
+func (c *Compiler) setLocation(file string, line int, column int) {
+	c.currentFile = file
+	c.currentLine = line
+	c.currentColumn = column
+}
+
 func (c *Compiler) newMatchTempName() string {
 	name := "__match_" + strconv.Itoa(c.matchTempID)
 	c.matchTempID++
 	return name
-}
-
-func (c *Compiler) collectCurrentLocalBindings() map[string]Binding {
-	result := map[string]Binding{}
-
-	for _, scope := range c.scopes {
-		for name, binding := range scope {
-			if binding.Kind == BindingLocal {
-				result[name] = binding
-			}
-		}
-	}
-
-	return result
 }
 
 func (c *Compiler) beginScope() {
@@ -705,6 +707,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		namespacedClass := ClassStmt{
 			Name:    stmt.Name + "." + classStmt.Name,
 			Methods: classStmt.Methods,
+			Embeds:  classStmt.Embeds,
 		}
 
 		c.compileClass(namespacedClass)
@@ -941,6 +944,8 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 
 		binding := c.declareVariable(s.Name, s.Constant)
 
+		c.setLocation(s.File, s.Line, s.Column)
+
 		if binding.Kind == BindingLocal {
 			c.emit(OP_STORE_LOCAL, VariableInfo{
 				Name:     s.Name,
@@ -1040,6 +1045,7 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 		c.compileExpr(s.Value)
 
 		if binding, exists := c.resolveVariable(s.Name); exists {
+			c.setLocation(s.File, s.Line, s.Column)
 			if binding.Kind == BindingLocal {
 				c.emit(OP_ASSIGN_LOCAL, binding.Slot)
 			} else {
@@ -1071,6 +1077,8 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 					}
 				}
 
+				c.setLocation(s.File, s.Line, s.Column)
+
 				c.emit(OP_ASSIGN_LOCAL, capture.InnerSlot)
 				return
 			}
@@ -1093,6 +1101,7 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 
 	case ThrowStmt:
 		c.compileExpr(s.Value)
+		c.setLocation(s.File, s.Line, s.Column)
 		c.emit(OP_THROW, nil)
 
 	case TryCatchStmt:
@@ -1114,8 +1123,10 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 		} else {
 			c.compileNestedFunction(s)
 		}
+		c.setLocation(s.File, s.Line, s.Column)
 
 	case ReturnStmt:
+		c.setLocation(s.File, s.Line, s.Column)
 		if s.HasValue {
 			c.compileExpr(s.Value)
 		} else {
@@ -1133,12 +1144,15 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 		LangError(ErrorInternal, "imports should be resolved before compiling")
 
 	case IfStmt:
+		c.setLocation(s.File, s.Line, s.Column)
 		c.compileIfStatement(s)
 
 	case WhileStmt:
+		c.setLocation(s.File, s.Line, s.Column)
 		c.compileWhileStatement(s)
 
 	case ForStmt:
+		c.setLocation(s.File, s.Line, s.Column)
 		c.compileForStatement(s)
 
 	case PropertyAssignStmt:
@@ -1376,7 +1390,6 @@ func (c *Compiler) ensureCaptured(name string) (Binding, bool) {
 }
 
 func (c *Compiler) compileClass(stmt ClassStmt) {
-
 	if _, exists := c.classes[stmt.Name]; exists {
 		LangError(ErrorName, "class already defined: %s", stmt.Name)
 	}
@@ -1399,6 +1412,7 @@ func (c *Compiler) compileClass(stmt ClassStmt) {
 	c.classes[stmt.Name] = Class{
 		Name:    stmt.Name,
 		Methods: methods,
+		Embeds:  stmt.Embeds,
 	}
 }
 
@@ -1619,6 +1633,11 @@ func (c *Compiler) compileExpr(expr Expr) {
 	expr = optimizeExpr(expr)
 
 	switch e := expr.(type) {
+	case InstanceOfExpr:
+		c.compileExpr(e.Object)
+		c.compileExpr(e.Class)
+		c.emit(OP_INSTANCEOF, nil)
+
 	case TernaryExpr:
 		c.compileExpr(e.Condition)
 
@@ -1835,6 +1854,11 @@ func (c *Compiler) compileExpr(expr Expr) {
 			return
 		}
 
+		if _, exists := c.classes[e.Name]; exists {
+			c.emit(OP_CONST, Class{Name: e.Name})
+			return
+		}
+
 		c.emit(OP_LOAD_GLOBAL, e.Name)
 
 	case BinaryExpr:
@@ -1907,6 +1931,8 @@ func (c *Compiler) compileExpr(expr Expr) {
 		for _, arg := range e.Args {
 			c.compileExpr(arg)
 		}
+
+		c.setLocation(e.File, e.Line, e.Column)
 
 		c.emit(OP_CALL, CallInfo{
 			ArgCount: len(e.Args),
@@ -1987,6 +2013,9 @@ func (c *Compiler) compileExpr(expr Expr) {
 				c.compileExpr(arg)
 			}
 
+			// IMPORTANT: set location right before emit
+			c.setLocation(e.File, e.Line, e.Column)
+
 			c.emit(OP_BUILTIN_CALL, BuiltinCallInfo{
 				Object:   ident.Name,
 				Method:   e.Method,
@@ -2001,6 +2030,9 @@ func (c *Compiler) compileExpr(expr Expr) {
 		for _, arg := range e.Args {
 			c.compileExpr(arg)
 		}
+
+		// IMPORTANT: set location right before emit
+		c.setLocation(e.File, e.Line, e.Column)
 
 		c.emit(OP_METHOD_CALL, MethodCallInfo{
 			Method:   e.Method,
@@ -2101,8 +2133,11 @@ func (c *Compiler) compileMethod(className string, stmt FunctionStmt) {
 
 func (c *Compiler) emit(op OpCode, value any) {
 	*c.currentInstructions = append(*c.currentInstructions, Instruction{
-		Op:    op,
-		Value: value,
+		Op:     op,
+		Value:  value,
+		File:   c.currentFile,
+		Line:   c.currentLine,
+		Column: c.currentColumn,
 	})
 }
 

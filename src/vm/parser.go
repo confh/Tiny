@@ -166,8 +166,11 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 		switch target := left.(type) {
 		case IdentExpr:
 			return AssignStmt{
-				Name:  target.Name,
-				Value: value,
+				Name:   target.Name,
+				Value:  value,
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
 			}
 
 		case PropertyExpr:
@@ -175,6 +178,9 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 				Object: target.Object,
 				Name:   target.Name,
 				Value:  value,
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
 			}
 
 		case IndexExpr:
@@ -182,6 +188,9 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 				Object: target.Object,
 				Index:  target.Index,
 				Value:  value,
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
 			}
 
 		default:
@@ -212,6 +221,9 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 					Op:    TOKEN_PLUS,
 					Right: NumberExpr{Value: 1},
 				},
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
 			}
 
 		default:
@@ -243,6 +255,9 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 					Op:    TOKEN_MINUS,
 					Right: NumberExpr{Value: 1},
 				},
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
 			}
 
 		default:
@@ -271,6 +286,9 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 					Op:    TOKEN_PLUS,
 					Right: value,
 				},
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
 			}
 
 		case PropertyExpr:
@@ -282,6 +300,9 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 					Op:    TOKEN_PLUS,
 					Right: value,
 				},
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
 			}
 
 		default:
@@ -310,6 +331,9 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 					Op:    TOKEN_MINUS,
 					Right: value,
 				},
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
 			}
 
 		case PropertyExpr:
@@ -321,6 +345,9 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 					Op:    TOKEN_MINUS,
 					Right: value,
 				},
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
 			}
 
 		default:
@@ -349,6 +376,9 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 					Op:    TOKEN_STAR,
 					Right: value,
 				},
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
 			}
 
 		case PropertyExpr:
@@ -360,6 +390,9 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 					Op:    TOKEN_STAR,
 					Right: value,
 				},
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
 			}
 
 		default:
@@ -388,6 +421,9 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 					Op:    TOKEN_SLASH,
 					Right: value,
 				},
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
 			}
 
 		case PropertyExpr:
@@ -399,6 +435,9 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 					Op:    TOKEN_SLASH,
 					Right: value,
 				},
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
 			}
 
 		default:
@@ -591,7 +630,10 @@ func (p *Parser) parseThrowStatement() Stmt {
 	p.expect(TOKEN_SEMI)
 
 	return ThrowStmt{
-		Value: value,
+		Value:  value,
+		Line:   p.current.Line,
+		Column: p.current.Column,
+		File:   p.current.File,
 	}
 }
 
@@ -687,6 +729,9 @@ func (p *Parser) parseForStatement() Stmt {
 		Condition: condition,
 		Update:    update,
 		Body:      body,
+		Line:      p.current.Line,
+		Column:    p.current.Column,
+		File:      p.current.File,
 	}
 }
 
@@ -701,8 +746,11 @@ func (p *Parser) parseForUpdateStatement() Stmt {
 		switch target := left.(type) {
 		case IdentExpr:
 			return AssignStmt{
-				Name:  target.Name,
-				Value: value,
+				Name:   target.Name,
+				Value:  value,
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
 			}
 
 		case PropertyExpr:
@@ -710,6 +758,9 @@ func (p *Parser) parseForUpdateStatement() Stmt {
 				Object: target.Object,
 				Name:   target.Name,
 				Value:  value,
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
 			}
 
 		default:
@@ -737,6 +788,9 @@ func (p *Parser) parseForUpdateStatement() Stmt {
 					Op:    TOKEN_PLUS,
 					Right: value,
 				},
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
 			}
 
 		case PropertyExpr:
@@ -748,6 +802,9 @@ func (p *Parser) parseForUpdateStatement() Stmt {
 					Op:    TOKEN_PLUS,
 					Right: value,
 				},
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
 			}
 
 		default:
@@ -774,6 +831,9 @@ func (p *Parser) parseForUpdateStatement() Stmt {
 					Op:    TOKEN_PLUS,
 					Right: NumberExpr{Value: 1},
 				},
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
 			}
 
 		case PropertyExpr:
@@ -785,6 +845,9 @@ func (p *Parser) parseForUpdateStatement() Stmt {
 					Op:    TOKEN_PLUS,
 					Right: NumberExpr{Value: 1},
 				},
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
 			}
 
 		default:
@@ -808,6 +871,9 @@ func (p *Parser) parseForUpdateStatement() Stmt {
 					Op:    TOKEN_MINUS,
 					Right: NumberExpr{Value: 1},
 				},
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
 			}
 
 		case PropertyExpr:
@@ -819,6 +885,9 @@ func (p *Parser) parseForUpdateStatement() Stmt {
 					Op:    TOKEN_MINUS,
 					Right: NumberExpr{Value: 1},
 				},
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
 			}
 
 		default:
@@ -861,6 +930,9 @@ func (p *Parser) parseWhileStatement() Stmt {
 	return WhileStmt{
 		Condition: condition,
 		Body:      body,
+		Line:      p.current.Line,
+		Column:    p.current.Column,
+		File:      p.current.File,
 	}
 }
 
@@ -883,6 +955,9 @@ func (p *Parser) parseIfStatement() Stmt {
 		Condition: condition,
 		ThenBody:  thenBody,
 		ElseBody:  elseBody,
+		Line:      p.current.Line,
+		Column:    p.current.Column,
+		File:      p.current.File,
 	}
 }
 
@@ -1017,6 +1092,9 @@ func (p *Parser) parseLetStatement() Stmt {
 		Value:    value,
 		Constant: false,
 		TypeHint: typeHint,
+		Line:     p.current.Line,
+		Column:   p.current.Column,
+		File:     p.current.File,
 	}
 }
 
@@ -1049,6 +1127,9 @@ func (p *Parser) parseConstStatement() Stmt {
 		Value:    value,
 		Constant: true,
 		TypeHint: typeHint,
+		Line:     p.current.Line,
+		Column:   p.current.Column,
+		File:     p.current.File,
 	}
 }
 
@@ -1069,6 +1150,9 @@ func (p *Parser) parseFunctionStatement() Stmt {
 		Params:     params,
 		ReturnType: returnType,
 		Body:       body,
+		Line:       p.current.Line,
+		Column:     p.current.Column,
+		File:       p.current.File,
 	}
 }
 
@@ -1135,6 +1219,9 @@ func (p *Parser) parseReturnStatement() Stmt {
 
 		return ReturnStmt{
 			HasValue: false,
+			Line:     p.current.Line,
+			Column:   p.current.Column,
+			File:     p.current.File,
 		}
 	}
 
@@ -1145,6 +1232,9 @@ func (p *Parser) parseReturnStatement() Stmt {
 	return ReturnStmt{
 		Value:    value,
 		HasValue: true,
+		Line:     p.current.Line,
+		Column:   p.current.Column,
+		File:     p.current.File,
 	}
 }
 
@@ -1230,17 +1320,25 @@ func (p *Parser) parseComparison() Expr {
 		p.current.Type == TOKEN_LT ||
 		p.current.Type == TOKEN_GT ||
 		p.current.Type == TOKEN_LTE ||
-		p.current.Type == TOKEN_GTE {
+		p.current.Type == TOKEN_GTE ||
+		p.current.Type == TOKEN_INSTANCEOF {
 
 		op := p.current.Type
 		p.advance()
 
 		right := p.parseAddSub()
 
-		left = BinaryExpr{
-			Left:  left,
-			Op:    op,
-			Right: right,
+		if op == TOKEN_INSTANCEOF {
+			left = InstanceOfExpr{
+				Object: left,
+				Class:  right,
+			}
+		} else {
+			left = BinaryExpr{
+				Left:  left,
+				Op:    op,
+				Right: right,
+			}
 		}
 	}
 
@@ -1316,6 +1414,10 @@ func (p *Parser) parsePostfix() Expr {
 			}
 
 			name := p.current.Literal
+			file := p.current.File
+			line := p.current.Line
+			column := p.current.Column
+
 			p.advance()
 
 			if p.current.Type == TOKEN_LPAREN {
@@ -1329,6 +1431,9 @@ func (p *Parser) parsePostfix() Expr {
 					Object: expr,
 					Method: name,
 					Args:   args,
+					Line:   line,
+					Column: column,
+					File:   file,
 				}
 
 				continue
@@ -1655,6 +1760,7 @@ func (p *Parser) parseClassStatement() Stmt {
 	p.expect(TOKEN_LBRACE)
 
 	var methods []FunctionStmt
+	embeds := []string{}
 
 	for p.current.Type != TOKEN_RBRACE {
 		if p.current.Type == TOKEN_EOF {
@@ -1667,14 +1773,22 @@ func (p *Parser) parseClassStatement() Stmt {
 			)
 		}
 
+		if p.current.Type == TOKEN_EMBED {
+			p.advance()
+
+			if p.current.Type != TOKEN_IDENT {
+				LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "expected embedded field name")
+			}
+
+			embeds = append(embeds, p.current.Literal)
+			p.advance()
+
+			p.expect(TOKEN_SEMI)
+			continue
+		}
+
 		if p.current.Type != TOKEN_FN {
-			LangErrorAt(
-				ErrorSyntax,
-				p.current.File,
-				p.current.Line,
-				p.current.Column,
-				"expected method declaration inside class",
-			)
+			LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "expected method or embed in class")
 		}
 
 		method := p.parseFunctionStatement()
@@ -1698,6 +1812,7 @@ func (p *Parser) parseClassStatement() Stmt {
 	return ClassStmt{
 		Name:    name,
 		Methods: methods,
+		Embeds:  embeds,
 	}
 }
 

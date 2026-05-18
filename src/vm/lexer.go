@@ -34,6 +34,16 @@ func (l *Lexer) peek() rune {
 	return l.input[l.pos+1]
 }
 
+func (l *Lexer) makeToken(tokenType TokenType, literal string, start int) Token {
+	return Token{
+		Type:    tokenType,
+		Literal: literal,
+		File:    l.file,
+		Line:    l.line,
+		Column:  start + 1,
+	}
+}
+
 func (l *Lexer) NextToken() Token {
 	l.skipIgnored()
 
@@ -46,68 +56,84 @@ func (l *Lexer) NextToken() Token {
 	ch := l.input[l.pos]
 
 	if unicode.IsLetter(ch) || ch == '_' {
+		line := l.line
+		column := l.column
+
 		word := l.readIdentifier()
+
+		tok := Token{
+			Literal: word,
+			File:    l.file,
+			Line:    line,
+			Column:  column,
+		}
 
 		switch word {
 		case "import":
-			return l.tokenAt(start, TOKEN_IMPORT, word)
+			tok.Type = TOKEN_IMPORT
 		case "let":
-			return l.tokenAt(start, TOKEN_LET, word)
+			tok.Type = TOKEN_LET
 		case "const":
-			return l.tokenAt(start, TOKEN_CONST, word)
+			tok.Type = TOKEN_CONST
 		case "fn":
-			return l.tokenAt(start, TOKEN_FN, word)
+			tok.Type = TOKEN_FN
 		case "return":
-			return l.tokenAt(start, TOKEN_RETURN, word)
+			tok.Type = TOKEN_RETURN
 		case "throw":
-			return l.tokenAt(start, TOKEN_THROW, word)
+			tok.Type = TOKEN_THROW
 		case "try":
-			return l.tokenAt(start, TOKEN_TRY, word)
+			tok.Type = TOKEN_TRY
 		case "catch":
-			return l.tokenAt(start, TOKEN_CATCH, word)
+			tok.Type = TOKEN_CATCH
 		case "if":
-			return l.tokenAt(start, TOKEN_IF, word)
+			tok.Type = TOKEN_IF
 		case "else":
-			return l.tokenAt(start, TOKEN_ELSE, word)
+			tok.Type = TOKEN_ELSE
 		case "while":
-			return l.tokenAt(start, TOKEN_WHILE, word)
+			tok.Type = TOKEN_WHILE
 		case "for":
-			return l.tokenAt(start, TOKEN_FOR, word)
+			tok.Type = TOKEN_FOR
 		case "break":
-			return l.tokenAt(start, TOKEN_BREAK, word)
+			tok.Type = TOKEN_BREAK
 		case "continue":
-			return l.tokenAt(start, TOKEN_CONTINUE, word)
+			tok.Type = TOKEN_CONTINUE
 		case "and":
-			return l.tokenAt(start, TOKEN_AND, word)
+			tok.Type = TOKEN_AND
 		case "or":
-			return l.tokenAt(start, TOKEN_OR, word)
+			tok.Type = TOKEN_OR
 		case "true":
-			return l.tokenAt(start, TOKEN_TRUE, word)
+			tok.Type = TOKEN_TRUE
 		case "false":
-			return l.tokenAt(start, TOKEN_FALSE, word)
+			tok.Type = TOKEN_FALSE
 		case "this":
-			return l.tokenAt(start, TOKEN_THIS, word)
+			tok.Type = TOKEN_THIS
 		case "null":
-			return l.tokenAt(start, TOKEN_NULL, word)
+			tok.Type = TOKEN_NULL
 		case "undefined":
-			return l.tokenAt(start, TOKEN_UNDEFINED, word)
+			tok.Type = TOKEN_UNDEFINED
 		case "class":
-			return l.tokenAt(start, TOKEN_CLASS, word)
+			tok.Type = TOKEN_CLASS
 		case "enum":
-			return l.tokenAt(start, TOKEN_ENUM, word)
+			tok.Type = TOKEN_ENUM
 		case "export":
-			return l.tokenAt(start, TOKEN_EXPORT, word)
+			tok.Type = TOKEN_EXPORT
 		case "match":
-			return l.tokenAt(start, TOKEN_MATCH, word)
+			tok.Type = TOKEN_MATCH
 		case "in":
-			return l.tokenAt(start, TOKEN_IN, word)
+			tok.Type = TOKEN_IN
 		case "typeof":
-			return l.tokenAt(start, TOKEN_TYPEOF, word)
+			tok.Type = TOKEN_TYPEOF
 		case "spawn":
-			return l.tokenAt(start, TOKEN_SPAWN, word)
+			tok.Type = TOKEN_SPAWN
+		case "embed":
+			tok.Type = TOKEN_EMBED
+		case "instanceof":
+			tok.Type = TOKEN_INSTANCEOF
 		default:
-			return l.tokenAt(start, TOKEN_IDENT, word)
+			tok.Type = TOKEN_IDENT
 		}
+
+		return tok
 	}
 
 	if unicode.IsDigit(ch) {
@@ -127,122 +153,288 @@ func (l *Lexer) NextToken() Token {
 
 	switch ch {
 	case '?':
+		tok := Token{
+			Type:    TOKEN_QUESTION,
+			Literal: "?",
+			File:    l.file,
+			Line:    l.line,
+			Column:  l.column,
+		}
 		l.pos++
-		return l.tokenAt(start, TOKEN_QUESTION, "?")
+		l.column++
+		return tok
 
 	case '%':
 		if l.peek() == '=' {
 			l.pos += 2
+			l.column += 2
 			return l.tokenAt(start, TOKEN_PERCENT_ASSIGN, "%=")
 		}
-
+		tok := Token{
+			Type:    TOKEN_PERCENT,
+			Literal: "%",
+			File:    l.file,
+			Line:    l.line,
+			Column:  l.column,
+		}
 		l.pos++
-		return l.tokenAt(start, TOKEN_PERCENT, "%")
+		l.column++
+		return tok
 
 	case '=':
 		if l.peek() == '=' {
 			l.pos += 2
+			l.column += 2
 			return l.tokenAt(start, TOKEN_EQ, "==")
 		}
-
+		tok := Token{
+			Type:    TOKEN_ASSIGN,
+			Literal: "=",
+			File:    l.file,
+			Line:    l.line,
+			Column:  l.column,
+		}
 		l.pos++
-		return l.tokenAt(start, TOKEN_ASSIGN, "=")
+		l.column++
+		return tok
 
 	case '!':
 		if l.peek() == '=' {
 			l.pos += 2
+			l.column += 2
 			return l.tokenAt(start, TOKEN_NEQ, "!=")
 		}
-
+		tok := Token{
+			Type:    TOKEN_LET,
+			Literal: "!",
+			File:    l.file,
+			Line:    l.line,
+			Column:  l.column,
+		}
 		l.pos++
-		return l.tokenAt(start, TOKEN_LET, "!")
+		l.column++
+		return tok
 
 	case '<':
 		if l.peek() == '=' {
 			l.pos += 2
+			l.column += 2
 			return l.tokenAt(start, TOKEN_LTE, "<=")
 		}
-
+		tok := Token{
+			Type:    TOKEN_LT,
+			Literal: "<",
+			File:    l.file,
+			Line:    l.line,
+			Column:  l.column,
+		}
 		l.pos++
-		return l.tokenAt(start, TOKEN_LT, "<")
+		l.column++
+		return tok
 
 	case '>':
 		if l.peek() == '=' {
 			l.pos += 2
+			l.column += 2
 			return l.tokenAt(start, TOKEN_GTE, ">=")
 		}
-
+		tok := Token{
+			Type:    TOKEN_GT,
+			Literal: ">",
+			File:    l.file,
+			Line:    l.line,
+			Column:  l.column,
+		}
 		l.pos++
-		return l.tokenAt(start, TOKEN_GT, ">")
+		l.column++
+		return tok
 
 	case '+':
 		if l.peek() == '+' {
 			l.pos += 2
+			l.column += 2
 			return l.tokenAt(start, TOKEN_INCREMENT, "++")
 		} else if l.peek() == '=' {
 			l.pos += 2
+			l.column += 2
 			return l.tokenAt(start, TOKEN_PLUS_ASSIGN, "+=")
 		}
-
+		tok := Token{
+			Type:    TOKEN_PLUS,
+			Literal: "+",
+			File:    l.file,
+			Line:    l.line,
+			Column:  l.column,
+		}
 		l.pos++
-		return l.tokenAt(start, TOKEN_PLUS, "+")
+		l.column++
+		return tok
+
 	case '-':
 		if l.peek() == '-' {
 			l.pos += 2
+			l.column += 2
 			return l.tokenAt(start, TOKEN_DECREMENT, "--")
 		} else if l.peek() == '=' {
 			l.pos += 2
+			l.column += 2
 			return l.tokenAt(start, TOKEN_MINUS_ASSIGN, "-=")
 		}
-
+		tok := Token{
+			Type:    TOKEN_MINUS,
+			Literal: "-",
+			File:    l.file,
+			Line:    l.line,
+			Column:  l.column,
+		}
 		l.pos++
-		return l.tokenAt(start, TOKEN_MINUS, "-")
+		l.column++
+		return tok
+
 	case '*':
 		if l.peek() == '=' {
 			l.pos += 2
+			l.column += 2
 			return l.tokenAt(start, TOKEN_STAR_ASSIGN, "*=")
 		}
-
+		tok := Token{
+			Type:    TOKEN_STAR,
+			Literal: "*",
+			File:    l.file,
+			Line:    l.line,
+			Column:  l.column,
+		}
 		l.pos++
-		return l.tokenAt(start, TOKEN_STAR, "*")
+		l.column++
+		return tok
+
 	case '/':
 		if l.peek() == '=' {
 			l.pos += 2
+			l.column += 2
 			return l.tokenAt(start, TOKEN_SLASH_ASSIGN, "/=")
 		}
+		tok := Token{
+			Type:    TOKEN_SLASH,
+			Literal: "/",
+			File:    l.file,
+			Line:    l.line,
+			Column:  l.column,
+		}
+		l.pos++
+		l.column++
+		return tok
 
-		l.pos++
-		return l.tokenAt(start, TOKEN_SLASH, "/")
 	case '(':
+		tok := Token{
+			Type:    TOKEN_LPAREN,
+			Literal: "(",
+			File:    l.file,
+			Line:    l.line,
+			Column:  l.column,
+		}
 		l.pos++
-		return l.tokenAt(start, TOKEN_LPAREN, "(")
+		l.column++
+		return tok
 	case ')':
+		tok := Token{
+			Type:    TOKEN_RPAREN,
+			Literal: ")",
+			File:    l.file,
+			Line:    l.line,
+			Column:  l.column,
+		}
 		l.pos++
-		return l.tokenAt(start, TOKEN_RPAREN, ")")
+		l.column++
+		return tok
 	case '{':
+		tok := Token{
+			Type:    TOKEN_LBRACE,
+			Literal: "{",
+			File:    l.file,
+			Line:    l.line,
+			Column:  l.column,
+		}
 		l.pos++
-		return l.tokenAt(start, TOKEN_LBRACE, "{")
+		l.column++
+		return tok
 	case '}':
+		tok := Token{
+			Type:    TOKEN_RBRACE,
+			Literal: "}",
+			File:    l.file,
+			Line:    l.line,
+			Column:  l.column,
+		}
 		l.pos++
-		return l.tokenAt(start, TOKEN_RBRACE, "}")
+		l.column++
+		return tok
 	case ',':
+		tok := Token{
+			Type:    TOKEN_COMMA,
+			Literal: ",",
+			File:    l.file,
+			Line:    l.line,
+			Column:  l.column,
+		}
 		l.pos++
-		return l.tokenAt(start, TOKEN_COMMA, ",")
+		l.column++
+		return tok
 	case ';':
+		tok := Token{
+			Type:    TOKEN_SEMI,
+			Literal: ";",
+			File:    l.file,
+			Line:    l.line,
+			Column:  l.column,
+		}
 		l.pos++
-		return l.tokenAt(start, TOKEN_SEMI, ";")
+		l.column++
+		return tok
 	case '.':
+		tok := Token{
+			Type:    TOKEN_DOT,
+			Literal: ".",
+			File:    l.file,
+			Line:    l.line,
+			Column:  l.column,
+		}
 		l.pos++
-		return l.tokenAt(start, TOKEN_DOT, ".")
+		l.column++
+		return tok
 	case ':':
+		tok := Token{
+			Type:    TOKEN_COLON,
+			Literal: ":",
+			File:    l.file,
+			Line:    l.line,
+			Column:  l.column,
+		}
 		l.pos++
-		return l.tokenAt(start, TOKEN_COLON, ":")
+		l.column++
+		return tok
 	case '[':
+		tok := Token{
+			Type:    TOKEN_LBRACKET,
+			Literal: "[",
+			File:    l.file,
+			Line:    l.line,
+			Column:  l.column,
+		}
 		l.pos++
-		return l.tokenAt(start, TOKEN_LBRACKET, "[")
+		l.column++
+		return tok
 	case ']':
+		tok := Token{
+			Type:    TOKEN_RBRACKET,
+			Literal: "]",
+			File:    l.file,
+			Line:    l.line,
+			Column:  l.column,
+		}
 		l.pos++
-		return l.tokenAt(start, TOKEN_RBRACKET, "]")
+		l.column++
+		return tok
 	default:
 		line, column := l.lineColumnAt(start)
 		LangErrorAt(ErrorSyntax, l.file, line, column, "unknown character: %q", ch)
