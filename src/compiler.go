@@ -7,6 +7,14 @@ import (
 	. "language.com/src/vm"
 )
 
+type ImportState int
+
+const (
+	ImportNotLoaded ImportState = iota
+	ImportLoading
+	ImportLoaded
+)
+
 type BindingKind int
 
 const (
@@ -33,6 +41,11 @@ type Compiler struct {
 	classes                map[string]Class
 	loopStack              []LoopContext
 	anonymousFunctionCount int
+
+	importStates map[string]ImportState
+	importStack  []string
+
+	isCompilingNamespace bool
 
 	currentFile   string
 	currentLine   int
@@ -281,6 +294,8 @@ func NewCompiler() *Compiler {
 		globalConstants:        map[string]bool{},
 		anonymousFunctionCount: 0,
 		scopes:                 []map[string]Binding{},
+		importStates:           map[string]ImportState{},
+		importStack:            []string{},
 	}
 
 	c.currentInstructions = &c.mainInstructions
@@ -490,6 +505,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 	oldNamespaceVariables := c.currentNamespaceVariables
 	oldNamespaceClasses := c.currentNamespaceClasses
 	oldNamespaceEnums := c.currentNamespaceEnums
+	oldIsCompilingNamespace := c.isCompilingNamespace
 
 	namespaceFunctions := map[string]string{}
 	namespaceVariables := map[string]string{}
@@ -641,6 +657,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 	c.currentNamespaceVariables = namespaceVariables
 	c.currentNamespaceClasses = namespaceClasses
 	c.currentNamespaceEnums = namespaceEnums
+	c.isCompilingNamespace = true
 
 	// 6. Compile enums as hidden globals FIRST.
 	for _, raw := range stmt.Statements {
@@ -738,6 +755,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 	c.currentNamespaceVariables = oldNamespaceVariables
 	c.currentNamespaceClasses = oldNamespaceClasses
 	c.currentNamespaceEnums = oldNamespaceEnums
+	c.isCompilingNamespace = oldIsCompilingNamespace
 
 	// 10. Create namespace object.
 	c.emit(OP_CONST, NamespaceValue{
@@ -1089,6 +1107,10 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 				c.emit(OP_ASSIGN_GLOBAL, fullName)
 				return
 			}
+		}
+
+		if c.isCompilingNamespace {
+			LangError(ErrorName, "undefined variable in namespace: %s", s.Name)
 		}
 
 		c.emit(OP_ASSIGN_GLOBAL, s.Name)
@@ -1849,6 +1871,12 @@ func (c *Compiler) compileExpr(expr Expr) {
 			}
 		}
 
+		if c.isCompilingNamespace {
+			LangError(ErrorName, "undefined variable in namespace: %s", e.Name)
+		}
+
+		c.emit(OP_LOAD_GLOBAL, e.Name)
+
 		if _, exists := c.functions[e.Name]; exists {
 			c.emit(OP_CONST, FunctionValue{Name: e.Name})
 			return
@@ -2101,20 +2129,23 @@ func (c *Compiler) compileMethod(className string, stmt FunctionStmt) {
 	c.emit(OP_CONST, UndefinedValue{})
 	c.emit(OP_RETURN, nil)
 
-	params := []Param{{
-		Name:     "this",
-		TypeHint: TypeHint{Name: "object"},
-	}}
+	params := make([]Param, 0, len(stmt.Params)+1)
 
-	for _, param := range stmt.Params {
-		if param.Name == "this" {
-			continue
-		}
+	params = append(params, Param{
+		Name: "this",
+	})
 
-		params = append(params, Param{
-			Name: param.Name,
-		})
-	}
+	params = append(params, stmt.Params...)
+
+	// for _, param := range stmt.Params {
+	// 	if param.Name == "this" {
+	// 		continue
+	// 	}
+
+	// 	params = append(params, Param{
+	// 		Name: param.Name,
+	// 	})
+	// }
 
 	c.functions[name] = Function{
 		Name:         name,

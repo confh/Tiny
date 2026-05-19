@@ -292,8 +292,10 @@ type IndexAssignStmt struct {
 func (s IndexAssignStmt) stmtNode() {}
 
 type Param struct {
-	Name     string   `json:"name"`
-	TypeHint TypeHint `json:"typeHint"`
+	Name         string   `json:"name"`
+	TypeHint     TypeHint `json:"typeHint"`
+	HasDefault   bool     `json:"hasDefault"`
+	DefaultValue Value    `json:"-"`
 }
 
 type FunctionStmt struct {

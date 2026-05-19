@@ -182,17 +182,7 @@ func (vm *VM) callClassWithArgs(class Class, args []Value) {
 			LangError(ErrorName, "undefined init function: %s", initName)
 		}
 
-		expectedArgs := len(fn.Params) - 1
-
-		if expectedArgs != len(args) {
-			LangError(
-				ErrorRuntime,
-				"class %s constructor expects %d arguments, got %d",
-				class.Name,
-				expectedArgs,
-				len(args),
-			)
-		}
+		args = vm.applyDefaultArgs(fn, args, 1, "class "+class.Name+" constructor")
 
 		locals := make([]*Cell, fn.LocalCount)
 		constants := make([]bool, fn.LocalCount)
@@ -1443,15 +1433,7 @@ func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []Value) {
 		LangError(ErrorName, "undefined function: %s", fnValue.Name)
 	}
 
-	if len(args) != len(fn.Params) {
-		LangError(
-			ErrorRuntime,
-			"function %s expects %d arguments, got %d",
-			fnValue.Name,
-			len(fn.Params),
-			len(args),
-		)
-	}
+	args = vm.applyDefaultArgs(fn, args, 0, fn.Name)
 
 	locals := make([]*Cell, fn.LocalCount)
 	localTypes := make([]TypeHint, fn.LocalCount)
@@ -1713,17 +1695,8 @@ func (vm *VM) callMethod(method string, argCount int) {
 		LangError(ErrorName, "undefined function: %s", fnValue.Name)
 	}
 
-	expectedArgs := len(fn.Params) - 1
-
-	if expectedArgs != argCount {
-		LangError(
-			ErrorRuntime,
-			"method %s expects %d arguments, got %d",
-			method,
-			expectedArgs,
-			argCount,
-		)
-	}
+	args = vm.applyDefaultArgs(fn, args, 1, "method "+method)
+	argCount = len(args)
 
 	locals := make([]*Cell, fn.LocalCount)
 	constants := make([]bool, fn.LocalCount)
@@ -1833,15 +1806,7 @@ func (vm *VM) callFunction(name string, argCount int) {
 
 	args := vm.popArgs(argCount)
 
-	if len(args) != len(fn.Params) {
-		LangError(
-			ErrorRuntime,
-			"function %s expects %d arguments, got %d",
-			name,
-			len(fn.Params),
-			len(args),
-		)
-	}
+	args = vm.applyDefaultArgs(fn, args, 0, "function "+fn.Name)
 
 	locals := make([]*Cell, fn.LocalCount)
 	constants := make([]bool, fn.LocalCount)

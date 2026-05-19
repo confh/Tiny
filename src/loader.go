@@ -3,29 +3,39 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 
 	. "language.com/src/tinyerrors"
 	. "language.com/src/vm"
 )
 
-func LoadProgram(path string) Program {
-	visited := map[string]bool{}
-	statements := loadFile(path, visited)
-
-	return Program{Statements: statements}
+type Loader struct {
+	states map[string]ImportState
+	stack  []string
+	cache  map[string][]Stmt
 }
 
-func loadFile(path string, visited map[string]bool) []Stmt {
+func (l *Loader) loadFile(path string) []Stmt {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		LangError(ErrorImport, "%v", err)
 	}
 
-	if visited[absPath] {
-		return nil
+	absPath = filepath.Clean(absPath)
+
+	state := l.states[absPath]
+
+	if state == ImportLoading {
+		cycle := l.formatImportCycle(absPath)
+		LangError(ErrorImport, "circular import detected: %s", cycle)
 	}
 
-	visited[absPath] = true
+	if state == ImportLoaded {
+		return l.cache[absPath]
+	}
+
+	l.states[absPath] = ImportLoading
+	l.stack = append(l.stack, absPath)
 
 	bytes, err := os.ReadFile(absPath)
 	if err != nil {
@@ -48,7 +58,7 @@ func loadFile(path string, visited map[string]bool) []Stmt {
 			}
 
 			importPath := filepath.Join(dir, s.Path)
-			importedStatements := loadFile(importPath, visited)
+			importedStatements := l.loadFile(importPath)
 
 			if s.Alias != "" {
 				result = append(result, NamespaceStmt{
@@ -65,5 +75,42 @@ func loadFile(path string, visited map[string]bool) []Stmt {
 		}
 	}
 
+	l.stack = l.stack[:len(l.stack)-1]
+	l.states[absPath] = ImportLoaded
+	l.cache[absPath] = result
+
 	return result
+}
+
+func (l *Loader) formatImportCycle(repeatedPath string) string {
+	parts := []string{}
+
+	start := 0
+
+	for i, path := range l.stack {
+		if path == repeatedPath {
+			start = i
+			break
+		}
+	}
+
+	for _, path := range l.stack[start:] {
+		parts = append(parts, filepath.Base(path))
+	}
+
+	parts = append(parts, filepath.Base(repeatedPath))
+
+	return strings.Join(parts, " -> ")
+}
+
+func LoadProgram(path string) Program {
+	loader := &Loader{
+		states: map[string]ImportState{},
+		stack:  []string{},
+		cache:  map[string][]Stmt{},
+	}
+
+	statements := loader.loadFile(path)
+
+	return Program{Statements: statements}
 }

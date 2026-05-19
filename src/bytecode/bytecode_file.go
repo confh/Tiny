@@ -17,9 +17,16 @@ type BytecodeFile struct {
 	Classes   map[string]Class                `json:"classes"`
 }
 
+type SerializableParam struct {
+	Name         string       `json:"name"`
+	TypeHint     TypeHint     `json:"typeHint"`
+	HasDefault   bool         `json:"hasDefault"`
+	DefaultValue EncodedValue `json:"defaultValue"`
+}
+
 type SerializableFunction struct {
 	Name         string                    `json:"name"`
-	Params       []Param                   `json:"params"`
+	Params       []SerializableParam       `json:"params"`
 	ReturnType   TypeHint                  `json:"returnType"`
 	LocalCount   int                       `json:"localCount"`
 	Captures     []CapturedVar             `json:"captures"`
@@ -48,6 +55,48 @@ type EncodedValue struct {
 	Data any    `json:"data,omitempty"`
 }
 
+func serializeParams(params []Param) []SerializableParam {
+	result := make([]SerializableParam, len(params))
+
+	for i, param := range params {
+		encodedDefault := EncodedValue{Type: "undefined"}
+
+		if param.HasDefault {
+			encodedDefault = EncodeValue(param.DefaultValue)
+		}
+
+		result[i] = SerializableParam{
+			Name:         param.Name,
+			TypeHint:     param.TypeHint,
+			HasDefault:   param.HasDefault,
+			DefaultValue: encodedDefault,
+		}
+	}
+
+	return result
+}
+
+func deserializeParams(params []SerializableParam) []Param {
+	result := make([]Param, len(params))
+
+	for i, param := range params {
+		defaultValue := Value(UndefinedValue{})
+
+		if param.HasDefault {
+			defaultValue = DecodeValue(param.DefaultValue).(Value)
+		}
+
+		result[i] = Param{
+			Name:         param.Name,
+			TypeHint:     param.TypeHint,
+			HasDefault:   param.HasDefault,
+			DefaultValue: defaultValue,
+		}
+	}
+
+	return result
+}
+
 func SaveBytecode(path string, main []Instruction, functions map[string]Function, classes map[string]Class) {
 	file := BytecodeFile{
 		Version:   BytecodeVersion,
@@ -59,7 +108,7 @@ func SaveBytecode(path string, main []Instruction, functions map[string]Function
 	for name, fn := range functions {
 		file.Functions[name] = SerializableFunction{
 			Name:         fn.Name,
-			Params:       fn.Params,
+			Params:       serializeParams(fn.Params),
 			ReturnType:   fn.ReturnType,
 			LocalCount:   fn.LocalCount,
 			Captures:     fn.Captures,
@@ -89,7 +138,7 @@ func SaveBytecodeToBytes(main []Instruction, functions map[string]Function, clas
 	for name, fn := range functions {
 		file.Functions[name] = SerializableFunction{
 			Name:         fn.Name,
-			Params:       fn.Params,
+			Params:       serializeParams(fn.Params),
 			ReturnType:   fn.ReturnType,
 			LocalCount:   fn.LocalCount,
 			Captures:     fn.Captures,
@@ -133,7 +182,7 @@ func LoadBytecodeFromBytes(data []byte) ([]Instruction, map[string]Function, map
 	for name, fn := range file.Functions {
 		functions[name] = Function{
 			Name:         fn.Name,
-			Params:       fn.Params,
+			Params:       deserializeParams(fn.Params),
 			ReturnType:   fn.ReturnType,
 			LocalCount:   fn.LocalCount,
 			Captures:     fn.Captures,

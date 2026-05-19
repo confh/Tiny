@@ -2,6 +2,7 @@ package vm
 
 import (
 	"strconv"
+	"strings"
 
 	. "language.com/src/tinyerrors"
 )
@@ -1091,6 +1092,82 @@ func (p *Parser) parseLetStatement() Stmt {
 	}
 }
 
+func (p *Parser) parseDefaultParamValue() Value {
+	switch p.current.Type {
+	case TOKEN_STRING:
+		value := p.current.Literal
+		p.advance()
+		return value
+
+	case TOKEN_NUMBER:
+		text := p.current.Literal
+		p.advance()
+
+		if strings.Contains(text, ".") {
+			number, err := strconv.ParseFloat(text, 64)
+			if err != nil {
+				LangError(ErrorSyntax, "invalid number default: %s", text)
+			}
+			return number
+		}
+
+		number, err := strconv.Atoi(text)
+		if err != nil {
+			LangError(ErrorSyntax, "invalid number default: %s", text)
+		}
+
+		return number
+
+	case TOKEN_TRUE:
+		p.advance()
+		return true
+
+	case TOKEN_FALSE:
+		p.advance()
+		return false
+
+	case TOKEN_NULL:
+		p.advance()
+		return NullValue{}
+
+	case TOKEN_UNDEFINED:
+		p.advance()
+		return UndefinedValue{}
+
+	case TOKEN_MINUS:
+		p.advance()
+
+		if p.current.Type != TOKEN_NUMBER {
+			LangError(ErrorSyntax, "expected number after - in default argument")
+		}
+
+		text := p.current.Literal
+		p.advance()
+
+		if strings.Contains(text, ".") {
+			number, err := strconv.ParseFloat(text, 64)
+			if err != nil {
+				LangError(ErrorSyntax, "invalid number default: -%s", text)
+			}
+			return -number
+		}
+
+		number, err := strconv.Atoi(text)
+		if err != nil {
+			LangError(ErrorSyntax, "invalid number default: -%s", text)
+		}
+
+		return -number
+
+	default:
+		LangError(
+			ErrorSyntax,
+			"default arguments currently only support constant values",
+		)
+		return UndefinedValue{}
+	}
+}
+
 func (p *Parser) parseConstStatement() Stmt {
 	p.expect(TOKEN_CONST)
 
@@ -1189,10 +1266,21 @@ func (p *Parser) parseParameterList() []Param {
 			p.advance()
 		}
 
-		params = append(params, Param{
+		param := Param{
 			Name:     name,
 			TypeHint: typeHint,
-		})
+		}
+
+		if p.current.Type == TOKEN_ASSIGN {
+			p.advance()
+
+			defaultValue := p.parseDefaultParamValue()
+
+			param.HasDefault = true
+			param.DefaultValue = defaultValue
+		}
+
+		params = append(params, param)
 
 		if p.current.Type != TOKEN_COMMA {
 			break
@@ -1201,7 +1289,86 @@ func (p *Parser) parseParameterList() []Param {
 		p.advance()
 	}
 
+	seenDefault := false
+
+	for _, param := range params {
+		if param.HasDefault {
+			seenDefault = true
+			continue
+		}
+
+		if seenDefault {
+			LangErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"required parameter cannot come after default parameter",
+			)
+		}
+	}
+
 	return params
+}
+
+func (vm *VM) applyDefaultArgs(fn Function, args []Value, paramOffset int, callableName string) []Value {
+	params := fn.Params[paramOffset:]
+
+	minArgs := 0
+
+	for _, param := range params {
+		if !param.HasDefault {
+			minArgs++
+		}
+	}
+
+	maxArgs := len(params)
+
+	if len(args) < minArgs || len(args) > maxArgs {
+		LangError(
+			ErrorRuntime,
+			"%s expects %d to %d arguments, got %d",
+			callableName,
+			minArgs,
+			maxArgs,
+			len(args),
+		)
+	}
+
+	finalArgs := make([]Value, maxArgs)
+
+	copy(finalArgs, args)
+
+	for i := len(args); i < maxArgs; i++ {
+		param := params[i]
+
+		if !param.HasDefault {
+			LangError(ErrorRuntime, "%s missing argument: %s", callableName, param.Name)
+		}
+
+		finalArgs[i] = cloneDefaultValue(param.DefaultValue)
+	}
+
+	return finalArgs
+}
+
+func cloneDefaultValue(value Value) Value {
+	switch v := value.(type) {
+	case *ArrayValue:
+		copied := make([]Value, len(v.Elements))
+		copy(copied, v.Elements)
+		return &ArrayValue{Elements: copied}
+
+	case ObjectValue:
+		copied := ObjectValue{}
+		for key, item := range v {
+			copied[key] = item
+		}
+		return copied
+
+	default:
+		return value
+	}
 }
 
 func (p *Parser) parseReturnStatement() Stmt {
