@@ -26,6 +26,24 @@ func NewLexer(input string, file string) *Lexer {
 	return l
 }
 
+func (l *Lexer) advance() rune {
+	if l.pos >= len(l.input) {
+		return 0
+	}
+
+	ch := rune(l.input[l.pos])
+	l.pos++
+
+	if ch == '\n' {
+		l.line++
+		l.column = 1
+	} else {
+		l.column++
+	}
+
+	return ch
+}
+
 func (l *Lexer) peek() rune {
 	if l.pos+1 >= len(l.input) {
 		return 0
@@ -160,8 +178,7 @@ func (l *Lexer) NextToken() Token {
 			Line:    l.line,
 			Column:  l.column,
 		}
-		l.pos++
-		l.column++
+		l.advance()
 		return tok
 
 	case '%':
@@ -177,8 +194,7 @@ func (l *Lexer) NextToken() Token {
 			Line:    l.line,
 			Column:  l.column,
 		}
-		l.pos++
-		l.column++
+		l.advance()
 		return tok
 
 	case '=':
@@ -194,8 +210,7 @@ func (l *Lexer) NextToken() Token {
 			Line:    l.line,
 			Column:  l.column,
 		}
-		l.pos++
-		l.column++
+		l.advance()
 		return tok
 
 	case '!':
@@ -205,14 +220,13 @@ func (l *Lexer) NextToken() Token {
 			return l.tokenAt(start, TOKEN_NEQ, "!=")
 		}
 		tok := Token{
-			Type:    TOKEN_LET,
+			Type:    TOKEN_BANG,
 			Literal: "!",
 			File:    l.file,
 			Line:    l.line,
 			Column:  l.column,
 		}
-		l.pos++
-		l.column++
+		l.advance()
 		return tok
 
 	case '<':
@@ -228,8 +242,7 @@ func (l *Lexer) NextToken() Token {
 			Line:    l.line,
 			Column:  l.column,
 		}
-		l.pos++
-		l.column++
+		l.advance()
 		return tok
 
 	case '>':
@@ -245,8 +258,7 @@ func (l *Lexer) NextToken() Token {
 			Line:    l.line,
 			Column:  l.column,
 		}
-		l.pos++
-		l.column++
+		l.advance()
 		return tok
 
 	case '+':
@@ -266,8 +278,7 @@ func (l *Lexer) NextToken() Token {
 			Line:    l.line,
 			Column:  l.column,
 		}
-		l.pos++
-		l.column++
+		l.advance()
 		return tok
 
 	case '-':
@@ -287,8 +298,7 @@ func (l *Lexer) NextToken() Token {
 			Line:    l.line,
 			Column:  l.column,
 		}
-		l.pos++
-		l.column++
+		l.advance()
 		return tok
 
 	case '*':
@@ -304,8 +314,7 @@ func (l *Lexer) NextToken() Token {
 			Line:    l.line,
 			Column:  l.column,
 		}
-		l.pos++
-		l.column++
+		l.advance()
 		return tok
 
 	case '/':
@@ -321,8 +330,7 @@ func (l *Lexer) NextToken() Token {
 			Line:    l.line,
 			Column:  l.column,
 		}
-		l.pos++
-		l.column++
+		l.advance()
 		return tok
 
 	case '(':
@@ -333,8 +341,7 @@ func (l *Lexer) NextToken() Token {
 			Line:    l.line,
 			Column:  l.column,
 		}
-		l.pos++
-		l.column++
+		l.advance()
 		return tok
 	case ')':
 		tok := Token{
@@ -344,8 +351,7 @@ func (l *Lexer) NextToken() Token {
 			Line:    l.line,
 			Column:  l.column,
 		}
-		l.pos++
-		l.column++
+		l.advance()
 		return tok
 	case '{':
 		tok := Token{
@@ -355,8 +361,7 @@ func (l *Lexer) NextToken() Token {
 			Line:    l.line,
 			Column:  l.column,
 		}
-		l.pos++
-		l.column++
+		l.advance()
 		return tok
 	case '}':
 		tok := Token{
@@ -366,8 +371,7 @@ func (l *Lexer) NextToken() Token {
 			Line:    l.line,
 			Column:  l.column,
 		}
-		l.pos++
-		l.column++
+		l.advance()
 		return tok
 	case ',':
 		tok := Token{
@@ -377,8 +381,7 @@ func (l *Lexer) NextToken() Token {
 			Line:    l.line,
 			Column:  l.column,
 		}
-		l.pos++
-		l.column++
+		l.advance()
 		return tok
 	case ';':
 		tok := Token{
@@ -388,8 +391,7 @@ func (l *Lexer) NextToken() Token {
 			Line:    l.line,
 			Column:  l.column,
 		}
-		l.pos++
-		l.column++
+		l.advance()
 		return tok
 	case '.':
 		tok := Token{
@@ -399,8 +401,7 @@ func (l *Lexer) NextToken() Token {
 			Line:    l.line,
 			Column:  l.column,
 		}
-		l.pos++
-		l.column++
+		l.advance()
 		return tok
 	case ':':
 		tok := Token{
@@ -410,8 +411,7 @@ func (l *Lexer) NextToken() Token {
 			Line:    l.line,
 			Column:  l.column,
 		}
-		l.pos++
-		l.column++
+		l.advance()
 		return tok
 	case '[':
 		tok := Token{
@@ -421,8 +421,7 @@ func (l *Lexer) NextToken() Token {
 			Line:    l.line,
 			Column:  l.column,
 		}
-		l.pos++
-		l.column++
+		l.advance()
 		return tok
 	case ']':
 		tok := Token{
@@ -432,8 +431,7 @@ func (l *Lexer) NextToken() Token {
 			Line:    l.line,
 			Column:  l.column,
 		}
-		l.pos++
-		l.column++
+		l.advance()
 		return tok
 	default:
 		line, column := l.lineColumnAt(start)
@@ -474,7 +472,7 @@ func (l *Lexer) skipIgnored() {
 	for {
 		// Skip whitespace
 		for l.pos < len(l.input) && unicode.IsSpace(l.input[l.pos]) {
-			l.pos++
+			l.advance()
 		}
 
 		// Skip // comments
@@ -482,7 +480,7 @@ func (l *Lexer) skipIgnored() {
 			l.pos += 2
 
 			for l.pos < len(l.input) && l.input[l.pos] != '\n' {
-				l.pos++
+				l.advance()
 			}
 
 			continue
@@ -500,7 +498,7 @@ func (l *Lexer) readIdentifier() string {
 		if !unicode.IsLetter(ch) && !unicode.IsDigit(ch) && ch != '_' {
 			break
 		}
-		l.pos++
+		l.advance()
 	}
 
 	return string(l.input[start:l.pos])
@@ -514,7 +512,7 @@ func (l *Lexer) readNumber() string {
 		ch := l.input[l.pos]
 
 		if unicode.IsDigit(ch) {
-			l.pos++
+			l.advance()
 			continue
 		}
 
@@ -522,7 +520,7 @@ func (l *Lexer) readNumber() string {
 			// Only treat "." as part of a number if the next char is a digit.
 			if l.pos+1 < len(l.input) && unicode.IsDigit(l.input[l.pos+1]) {
 				hasDot = true
-				l.pos++
+				l.advance()
 				continue
 			}
 		}
@@ -535,7 +533,7 @@ func (l *Lexer) readNumber() string {
 
 func (l *Lexer) readString() string {
 	// skip opening "
-	l.pos++
+	l.advance()
 
 	var result []rune
 
@@ -543,12 +541,12 @@ func (l *Lexer) readString() string {
 		ch := rune(l.input[l.pos])
 
 		if ch == '"' {
-			l.pos++
+			l.advance()
 			return string(result)
 		}
 
 		if ch == '\\' {
-			l.pos++
+			l.advance()
 
 			if l.pos >= len(l.input) {
 				LangError(ErrorSyntax, "unterminated escape sequence in string")
@@ -573,12 +571,12 @@ func (l *Lexer) readString() string {
 				LangError(ErrorSyntax, "unknown escape sequence: \\%c", esc)
 			}
 
-			l.pos++
+			l.advance()
 			continue
 		}
 
 		result = append(result, ch)
-		l.pos++
+		l.advance()
 	}
 
 	LangError(ErrorSyntax, "unterminated string")
@@ -586,12 +584,12 @@ func (l *Lexer) readString() string {
 }
 
 func (l *Lexer) readBacktickString() string {
-	l.pos++ // skip opening `
+	l.advance() // skip opening `
 
 	start := l.pos
 
 	for l.pos < len(l.input) && l.input[l.pos] != '`' {
-		l.pos++
+		l.advance()
 	}
 
 	if l.pos >= len(l.input) {
@@ -601,7 +599,7 @@ func (l *Lexer) readBacktickString() string {
 
 	value := string(l.input[start:l.pos])
 
-	l.pos++ // skip closing `
+	l.advance() // skip closing `
 
 	return value
 }

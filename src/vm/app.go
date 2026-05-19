@@ -9,7 +9,7 @@ func (vm *VM) callStdApp(method string, args []Value) {
 			vm.runtimeError(ErrorRuntime, "app.new expects 1 argument")
 		}
 
-		name := asString(args[0])
+		name := asString(args[0], vm)
 
 		vm.push(&NativeAppValue{
 			Name:     name,

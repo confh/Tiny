@@ -45,6 +45,9 @@ func (vm *VM) callStandardModule(module string, method string, args []Value) {
 	case "http":
 		vm.callStdHttp(method, args)
 
+	case "os":
+		vm.callStdOS(method, args)
+
 	default:
 		LangError(ErrorName, "unknown standard module: %s", module)
 	}

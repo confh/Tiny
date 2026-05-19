@@ -42,7 +42,7 @@ func (vm *VM) callStdJson(method string, args []Value) {
 			vm.runtimeError(ErrorRuntime, "json.parse expects 1 argument")
 		}
 
-		stringified := asString(args[0])
+		stringified := asString(args[0], vm)
 
 		var result any
 

@@ -9,7 +9,7 @@ func (vm *VM) callStdBuffer(method string, args []Value) {
 			vm.runtimeError(ErrorRuntime, "buffer.fromString expects 1 argument")
 		}
 
-		text := asString(args[0])
+		text := asString(args[0], vm)
 
 		vm.push(&BufferValue{
 			Bytes: []byte(text),
@@ -20,7 +20,7 @@ func (vm *VM) callStdBuffer(method string, args []Value) {
 			vm.runtimeError(ErrorRuntime, "buffer.fromArray expects 1 argument")
 		}
 
-		array := asArray(args[0])
+		array := asArray(args[0], vm)
 
 		bufferValue := &BufferValue{
 			Bytes: []byte{},

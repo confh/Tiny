@@ -22,7 +22,7 @@ func (vm *VM) callStringMethod(value string, method string, args []Value) {
 			vm.runtimeError(ErrorRuntime, "string.split expects 1 argument")
 		}
 
-		separator := asString(args[0])
+		separator := asString(args[0], vm)
 
 		splitStrings := strings.Split(value, separator)
 		elements := make([]Value, len(splitStrings))

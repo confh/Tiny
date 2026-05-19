@@ -640,9 +640,6 @@ func (p *Parser) parseThrowStatement() Stmt {
 func (p *Parser) parseForStatement() Stmt {
 	p.expect(TOKEN_FOR)
 
-	// New for-in syntax:
-	// for item in items { ... }
-	// for item, index in items { ... }
 	if p.current.Type == TOKEN_IDENT {
 		itemName := p.current.Literal
 		p.advance()
@@ -691,8 +688,6 @@ func (p *Parser) parseForStatement() Stmt {
 
 	var init Stmt
 
-	p.expect(TOKEN_LPAREN)
-
 	switch p.current.Type {
 	case TOKEN_LET:
 		init = p.parseLetStatement()
@@ -719,8 +714,6 @@ func (p *Parser) parseForStatement() Stmt {
 	if p.current.Type != TOKEN_LBRACE {
 		update = p.parseForUpdateStatement()
 	}
-
-	p.expect(TOKEN_RPAREN)
 
 	body := p.parseBlock()
 

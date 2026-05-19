@@ -14,7 +14,7 @@ func (vm *VM) callStdFs(method string, args []Value) {
 			vm.runtimeError(ErrorRuntime, "fs.open expects 1 argument")
 		}
 
-		path := asString(args[0])
+		path := asString(args[0], vm)
 
 		file, err := os.Open(path)
 		if err != nil {
@@ -31,7 +31,7 @@ func (vm *VM) callStdFs(method string, args []Value) {
 			vm.runtimeError(ErrorRuntime, "fs.readFile expects 1 argument")
 		}
 
-		fileName := asString(args[0])
+		fileName := asString(args[0], vm)
 
 		data, err := os.ReadFile(fileName)
 		if err != nil {
@@ -45,7 +45,7 @@ func (vm *VM) callStdFs(method string, args []Value) {
 			vm.runtimeError(ErrorRuntime, "fs.writeFile expects 2 arguments")
 		}
 
-		fileName := asString(args[0])
+		fileName := asString(args[0], vm)
 		data := valueToString(args[1])
 
 		err := os.WriteFile(fileName, []byte(data), 0644)
@@ -60,8 +60,8 @@ func (vm *VM) callStdFs(method string, args []Value) {
 			vm.runtimeError(ErrorRuntime, "fs.writeFile expects 2 arguments")
 		}
 
-		fileName := asString(args[0])
-		data := asBuffer(args[1])
+		fileName := asString(args[0], vm)
+		data := asBuffer(args[1], vm)
 
 		err := os.WriteFile(fileName, data.Bytes, 0644)
 		if err != nil {
@@ -75,7 +75,7 @@ func (vm *VM) callStdFs(method string, args []Value) {
 			vm.runtimeError(ErrorRuntime, "fs.exists expects 1 argument")
 		}
 
-		fileName := asString(args[0])
+		fileName := asString(args[0], vm)
 
 		_, err := os.Stat(fileName)
 
@@ -92,7 +92,7 @@ func (vm *VM) callStdFs(method string, args []Value) {
 			vm.runtimeError(ErrorRuntime, "fs.readDir expects 1 argument")
 		}
 
-		dirName := asString(args[0])
+		dirName := asString(args[0], vm)
 
 		files, err := os.ReadDir(dirName)
 		if err != nil {

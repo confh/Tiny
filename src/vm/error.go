@@ -11,8 +11,8 @@ func (vm *VM) callStdError(method string, args []Value) {
 			vm.runtimeError(ErrorRuntime, "error.new expects 2 arguments")
 		}
 
-		kind := asString(args[0])
-		message := asString(args[1])
+		kind := asString(args[0], vm)
+		message := asString(args[1], vm)
 
 		vm.push(ErrorValue{
 			Kind:    kind,

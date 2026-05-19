@@ -22,14 +22,14 @@ func (vm *VM) callStdIO(method string, args []Value) {
 
 		fmt.Println()
 
-		vm.push(true)
+		vm.push(UndefinedValue{})
 
 	case "print":
 		for _, arg := range args {
 			fmt.Print(valueToString(arg))
 		}
 
-		vm.push(true)
+		vm.push(UndefinedValue{})
 
 	case "input":
 		if len(args) != 1 {

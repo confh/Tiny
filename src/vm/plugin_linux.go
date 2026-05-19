@@ -61,9 +61,9 @@ func (vm *VM) callPluginModule(method string, argCount int) {
 			LangError(ErrorRuntime, "Plugin.std expects 1 argument")
 		}
 
-		name := asString(vm.pop())
+		name := asString(vm.pop(), vm)
 
-		availablePlugins := []string{"array", "math", "string", "json", "fs", "app", "buffer", "regex", "io", "process", "time", "error", "http"}
+		availablePlugins := []string{"array", "math", "string", "json", "fs", "app", "buffer", "regex", "io", "process", "time", "error", "http", "os"}
 
 		if slices.Contains(availablePlugins, name) {
 			vm.push(&StandardModuleValue{Name: name})
@@ -75,7 +75,7 @@ func (vm *VM) callPluginModule(method string, argCount int) {
 			LangError(ErrorRuntime, "Plugin.load expects 1 argument")
 		}
 
-		path := asString(vm.pop())
+		path := asString(vm.pop(), vm)
 		path = resolvePluginPath(path, ".so")
 
 		cpath := C.CString(path)

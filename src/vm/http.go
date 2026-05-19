@@ -23,14 +23,22 @@ func cleanMapForJSON(vmMap map[Value]Value) map[string]any {
 
 func cleanValueForJSON(val any) any {
 	switch v := val.(type) {
-	case map[Value]Value:
+	case ObjectValue:
 		// Nested object/map -> clean it recursively
 		return cleanMapForJSON(v)
 
-	case []any:
+	case ArrayValue:
 		// Nested array/slice -> clean every element inside it
-		cleanedSlice := make([]any, len(v))
-		for i, item := range v {
+		cleanedSlice := make([]any, len(v.Elements))
+		for i, item := range v.Elements {
+			cleanedSlice[i] = cleanValueForJSON(item)
+		}
+		return cleanedSlice
+
+	case *ArrayValue:
+		// Nested array/slice -> clean every element inside it
+		cleanedSlice := make([]any, len(v.Elements))
+		for i, item := range v.Elements {
 			cleanedSlice[i] = cleanValueForJSON(item)
 		}
 		return cleanedSlice
@@ -63,12 +71,12 @@ func (vm *VM) callStdHttp(method string, args []Value) {
 			vm.runtimeError(ErrorRuntime, "http.get expects 2 argument")
 		}
 
-		url := asString(args[0])
-		extra := asObject(args[1])
+		url := asString(args[0], vm)
+		extra := asObject(args[1], vm)
 
-		var headers map[string]Value
+		var headers ObjectValue
 		if h, hasHeaders := extra["headers"]; hasHeaders {
-			headers, _ = h.(map[string]Value)
+			headers, _ = h.(ObjectValue)
 		}
 
 		req, err := http.NewRequest("GET", url, nil)
@@ -79,7 +87,7 @@ func (vm *VM) callStdHttp(method string, args []Value) {
 		for key, value := range headers {
 			valStr, ok := value.(string)
 			if ok {
-				req.Header.Set(key, valStr)
+				req.Header.Set(key.(string), valStr)
 			}
 		}
 
@@ -102,7 +110,7 @@ func (vm *VM) callStdHttp(method string, args []Value) {
 		}
 
 		for k, v := range resp.Header {
-			result["headers"].(map[string]Value)[k] = strings.Join(v, ",")
+			result["headers"].(ObjectValue)[k] = strings.Join(v, ",")
 		}
 
 		vm.push(result)
@@ -112,13 +120,13 @@ func (vm *VM) callStdHttp(method string, args []Value) {
 			vm.runtimeError(ErrorRuntime, "http.post expects 2 or 3 more arguments")
 		}
 
-		url := asString(args[0])
-		data := asObject(args[1])
+		url := asString(args[0], vm)
+		data := asObject(args[1], vm)
 
 		var headers ObjectValue
 
 		if len(args) == 3 {
-			extra := asObject(args[2])
+			extra := asObject(args[2], vm)
 			if h, hasHeaders := extra["headers"]; hasHeaders {
 				headers, _ = h.(ObjectValue)
 			}

@@ -13,8 +13,8 @@ func (vm *VM) callStdRegex(method string, args []Value) {
 			vm.runtimeError(ErrorRuntime, "regex.matchString expects 2 arguments")
 		}
 
-		str := asString(args[0])
-		regex := asString(args[1])
+		str := asString(args[0], vm)
+		regex := asString(args[1], vm)
 
 		re := regexp.MustCompile(regex)
 
@@ -25,8 +25,8 @@ func (vm *VM) callStdRegex(method string, args []Value) {
 			vm.runtimeError(ErrorRuntime, "regex.findString expects 2 arguments")
 		}
 
-		str := asString(args[0])
-		regex := asString(args[1])
+		str := asString(args[0], vm)
+		regex := asString(args[1], vm)
 
 		re := regexp.MustCompile(regex)
 

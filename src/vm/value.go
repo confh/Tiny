@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -68,6 +70,11 @@ type NativeFileValue struct {
 	File   *os.File
 	Path   string
 	Closed bool
+}
+
+type NativeProcessValue struct {
+	Cmd     *exec.Cmd
+	Running bool
 }
 
 type NamespaceValue struct {
@@ -167,6 +174,8 @@ func typeName(value Value) string {
 		return "server"
 	case *NativeServerValue:
 		return "server"
+	case *NativeProcessValue:
+		return "process"
 	case ErrorValue:
 		return "error"
 	case *ErrorValue:
@@ -347,13 +356,32 @@ func valueToString(value Value) string {
 	case nil:
 		return "nil"
 	case ObjectValue:
-		parts := []string{}
+		type objectEntry struct {
+			keyText string
+			value   Value
+		}
+
+		entries := make([]objectEntry, 0, len(v))
 
 		for key, item := range v {
-			parts = append(parts, valueToString(key)+": "+valueToString(item))
+			entries = append(entries, objectEntry{
+				keyText: valueToString(key),
+				value:   item,
+			})
+		}
+
+		sort.Slice(entries, func(i, j int) bool {
+			return entries[i].keyText < entries[j].keyText
+		})
+
+		parts := make([]string, 0, len(entries))
+
+		for _, entry := range entries {
+			parts = append(parts, entry.keyText+": "+valueToString(entry.value))
 		}
 
 		return "{" + strings.Join(parts, ", ") + "}"
+
 	case FunctionValue:
 		return "<function " + v.Name + ">"
 	case NativeServerValue:
@@ -382,51 +410,53 @@ func valueToString(value Value) string {
 		return "<buffer " + string(v.Bytes) + ">"
 	case *BufferValue:
 		return "<buffer " + string(v.Bytes) + ">"
+	case *NativeProcessValue:
+		return "<process>"
 	default:
 		return fmt.Sprintf("%v", v)
 	}
 }
 
-func asString(value Value) string {
+func asString(value Value, vm *VM) string {
 	stringValue, ok := value.(string)
 	if !ok {
-		LangError(ErrorSyntax, "expected string, got %s", typeName(value))
+		vm.runtimeError(ErrorSyntax, "expected string, got %s", typeName(value))
 	}
 
 	return stringValue
 }
 
-func asObject(value Value) ObjectValue {
+func asObject(value Value, vm *VM) ObjectValue {
 	objectValue, ok := value.(ObjectValue)
 	if !ok {
-		LangError(ErrorSyntax, "expected object, got %s", typeName(value))
+		vm.runtimeError(ErrorSyntax, "expected object, got %s", typeName(value))
 	}
 
 	return objectValue
 }
 
-func asBuffer(value Value) *BufferValue {
+func asBuffer(value Value, vm *VM) *BufferValue {
 	bufferValue, ok := value.(*BufferValue)
 	if !ok {
-		LangError(ErrorSyntax, "expected buffer, gots%T", typeName(value))
+		vm.runtimeError(ErrorSyntax, "expected buffer, got %s", typeName(value))
 	}
 
 	return bufferValue
 }
 
-func asArray(value Value) *ArrayValue {
+func asArray(value Value, vm *VM) *ArrayValue {
 	arrayValue, ok := value.(*ArrayValue)
 	if !ok {
-		LangError(ErrorSyntax, "expected array, got %s", typeName(value))
+		vm.runtimeError(ErrorSyntax, "expected array, got %s", typeName(value))
 	}
 
 	return arrayValue
 }
 
-func asBool(value Value) bool {
+func asBool(value Value, vm *VM) bool {
 	boolean, ok := value.(bool)
 	if !ok {
-		LangError(ErrorSyntax, "expected bool, got %s", typeName(value))
+		vm.runtimeError(ErrorSyntax, "expected bool, got %s", typeName(value))
 	}
 
 	return boolean

@@ -36,7 +36,7 @@ func (vm *VM) callStdString(method string, args []Value) {
 			vm.runtimeError(ErrorRuntime, "string.isDigit expects 1 argument")
 		}
 
-		value := asString(args[0])
+		value := asString(args[0], vm)
 
 		vm.push(isDigit(value))
 	case "random":
@@ -53,7 +53,7 @@ func (vm *VM) callStdString(method string, args []Value) {
 			vm.runtimeError(ErrorRuntime, "String.upper expects 1 argument")
 		}
 
-		text := asString(args[0])
+		text := asString(args[0], vm)
 		vm.push(strings.ToUpper(text))
 
 	case "lower":
@@ -61,7 +61,7 @@ func (vm *VM) callStdString(method string, args []Value) {
 			vm.runtimeError(ErrorRuntime, "String.lower expects 1 argument")
 		}
 
-		text := asString(args[0])
+		text := asString(args[0], vm)
 		vm.push(strings.ToLower(text))
 
 	case "trim":
@@ -69,7 +69,7 @@ func (vm *VM) callStdString(method string, args []Value) {
 			vm.runtimeError(ErrorRuntime, "String.trim expects 1 argument")
 		}
 
-		text := asString(args[0])
+		text := asString(args[0], vm)
 		vm.push(strings.TrimSpace(text))
 
 	case "contains":
@@ -77,8 +77,8 @@ func (vm *VM) callStdString(method string, args []Value) {
 			vm.runtimeError(ErrorRuntime, "String.contains expects 2 arguments")
 		}
 
-		text := asString(args[0])
-		search := asString(args[1])
+		text := asString(args[0], vm)
+		search := asString(args[1], vm)
 
 		vm.push(strings.Contains(text, search))
 
@@ -87,9 +87,9 @@ func (vm *VM) callStdString(method string, args []Value) {
 			vm.runtimeError(ErrorRuntime, "String.replace expects 3 arguments")
 		}
 
-		text := asString(args[0])
-		oldText := asString(args[1])
-		newText := asString(args[2])
+		text := asString(args[0], vm)
+		oldText := asString(args[1], vm)
+		newText := asString(args[2], vm)
 
 		vm.push(strings.Replace(text, oldText, newText, 1))
 
@@ -98,9 +98,9 @@ func (vm *VM) callStdString(method string, args []Value) {
 			vm.runtimeError(ErrorRuntime, "String.replaceAll expects 3 arguments")
 		}
 
-		text := asString(args[0])
-		oldText := asString(args[1])
-		newText := asString(args[2])
+		text := asString(args[0], vm)
+		oldText := asString(args[1], vm)
+		newText := asString(args[2], vm)
 
 		vm.push(strings.ReplaceAll(text, oldText, newText))
 
@@ -109,7 +109,7 @@ func (vm *VM) callStdString(method string, args []Value) {
 			vm.runtimeError(ErrorRuntime, "String.len expects 1 argument")
 		}
 
-		text := asString(args[0])
+		text := asString(args[0], vm)
 		vm.push(len(text))
 
 	default:

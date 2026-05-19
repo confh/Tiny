@@ -74,7 +74,7 @@ func (vm *VM) callArrayMethod(array *ArrayValue, method string, args []Value) {
 			vm.runtimeError(ErrorRuntime, "array.join expects 1 argument")
 		}
 
-		separator := asString(args[0])
+		separator := asString(args[0], vm)
 
 		var sb strings.Builder
 
