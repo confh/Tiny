@@ -101,6 +101,8 @@ func (l *Lexer) NextToken() Token {
 			tok.Type = TOKEN_THROW
 		case "try":
 			tok.Type = TOKEN_TRY
+		case "finally":
+			tok.Type = TOKEN_FINALLY
 		case "catch":
 			tok.Type = TOKEN_CATCH
 		case "if":

@@ -311,12 +311,13 @@ type FunctionStmt struct {
 func (s FunctionStmt) stmtNode() {}
 
 type TryCatchStmt struct {
-	TryBody   []Stmt
-	ErrorName string
-	CatchBody []Stmt
-	File      string
-	Line      int
-	Column    int
+	TryBody     []Stmt
+	ErrorName   string
+	CatchBody   []Stmt
+	FinallyBody []Stmt
+	File        string
+	Line        int
+	Column      int
 }
 
 func (s TryCatchStmt) stmtNode() {}

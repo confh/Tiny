@@ -1270,12 +1270,16 @@ func (c *Compiler) compileTryCatchStatement(stmt TryCatchStmt) {
 	setupIndex := c.emitJump(OP_SETUP_TRY)
 	(*c.currentInstructions)[setupIndex].Value = info
 
+	// try body
 	c.compileScopedBlock(stmt.TryBody)
 
+	// If try succeeds, remove try handler.
 	c.emit(OP_POP_TRY, nil)
 
+	// Normal path should skip catch and go to finally.
 	jumpOverCatch := c.emitJump(OP_JUMP)
 
+	// catch starts here
 	catchStart := len(*c.currentInstructions)
 
 	c.beginScope()
@@ -1299,7 +1303,13 @@ func (c *Compiler) compileTryCatchStatement(stmt TryCatchStmt) {
 
 	c.endScope()
 
+	// finally starts here
+	// Normal try path jumps here.
 	c.patchJump(jumpOverCatch)
+
+	if len(stmt.FinallyBody) > 0 {
+		c.compileScopedBlock(stmt.FinallyBody)
+	}
 }
 
 func (c *Compiler) compileForStatement(stmt ForStmt) {

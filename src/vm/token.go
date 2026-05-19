@@ -24,8 +24,9 @@ const (
 
 	TOKEN_ENUM TokenType = "ENUM"
 
-	TOKEN_TRY   TokenType = "TRY"
-	TOKEN_CATCH TokenType = "CATCH"
+	TOKEN_TRY     TokenType = "TRY"
+	TOKEN_CATCH   TokenType = "CATCH"
+	TOKEN_FINALLY TokenType = "FINALLY"
 
 	TOKEN_IF   TokenType = "IF"
 	TOKEN_ELSE TokenType = "ELSE"
