@@ -363,6 +363,19 @@ func (vm *VM) step() bool {
 	vm.incrementIP()
 
 	switch instr.Op {
+	case OP_STRING_JOIN:
+		count := instr.Value.(int)
+
+		values := vm.popArgs(count)
+
+		var builder strings.Builder
+
+		for _, value := range values {
+			builder.WriteString(valueToString(value))
+		}
+
+		vm.push(builder.String())
+
 	case OP_CALL_DIRECT:
 		info := instr.Value.(DirectCallInfo)
 

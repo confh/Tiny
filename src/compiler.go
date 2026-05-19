@@ -138,6 +138,10 @@ func optimizeExpr(expr Expr) Expr {
 
 		if leftIsString && rightIsString {
 			switch e.Op {
+			case TOKEN_PLUS:
+				return StringExpr{
+					Value: leftString.Value + rightString.Value,
+				}
 			case TOKEN_EQ:
 				return BoolExpr{Value: leftString.Value == rightString.Value}
 			case TOKEN_NEQ:
@@ -1661,6 +1665,28 @@ func (c *Compiler) emitIncrementForName(name string, intAmount int, floatAmount 
 	c.emit(OP_INC_GLOBAL, info)
 }
 
+func flattenStringConcat(expr Expr, parts *[]Expr) bool {
+	bin, ok := expr.(BinaryExpr)
+	if !ok || bin.Op != TOKEN_PLUS {
+		*parts = append(*parts, expr)
+		return isProbablyStringExpr(expr)
+	}
+
+	leftStringy := flattenStringConcat(bin.Left, parts)
+	rightStringy := flattenStringConcat(bin.Right, parts)
+
+	return leftStringy || rightStringy
+}
+
+func isProbablyStringExpr(expr Expr) bool {
+	switch expr.(type) {
+	case StringExpr, InterpolatedStringExpr:
+		return true
+	default:
+		return false
+	}
+}
+
 func (c *Compiler) compileExpr(expr Expr) {
 	expr = optimizeExpr(expr)
 
@@ -1900,6 +1926,20 @@ func (c *Compiler) compileExpr(expr Expr) {
 		c.emit(OP_LOAD_GLOBAL, e.Name)
 
 	case BinaryExpr:
+		if e.Op == TOKEN_PLUS {
+			parts := []Expr{}
+			hasString := flattenStringConcat(e, &parts)
+
+			if hasString && len(parts) >= 3 {
+				for _, part := range parts {
+					c.compileExpr(part)
+				}
+
+				c.emit(OP_STRING_JOIN, len(parts))
+				return
+			}
+		}
+
 		c.compileExpr(e.Left)
 		c.compileExpr(e.Right)
 
