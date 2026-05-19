@@ -84,13 +84,29 @@ func normalizeTarget(target string) string {
 }
 
 func packCommand(args []string) {
-	if len(args) < 1 {
-		LangError(ErrorRuntime, "usage: tiny pack <file.tiny> -o <output> [--target windows-amd64|linux-amd64]")
-	}
-
-	entryFile := args[0]
+	entryFile := ""
+	outFile := ""
 	target := normalizeTarget("")
-	outFile := defaultPackOutputName(entryFile, target)
+
+	if len(args) == 0 {
+		config, ok := loadTinyConfig()
+		if !ok {
+			LangError(ErrorRuntime, "usage: tiny pack <file.tiny> -o <output>")
+		}
+
+		entryFile = config.Entry
+
+		name := config.Name
+		if name == "" {
+			name = "app"
+		}
+
+		outFile = filepath.Join(config.OutDir, name)
+		target = config.Target
+	} else {
+		entryFile = args[0]
+		outFile = defaultPackOutputName(entryFile, target)
+	}
 
 	for i := 1; i < len(args); i++ {
 		switch args[i] {

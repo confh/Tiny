@@ -251,6 +251,9 @@ func EncodeValue(value any) EncodedValue {
 	case CallInfo:
 		return EncodedValue{Type: "call", Data: v}
 
+	case DirectCallInfo:
+		return EncodedValue{Type: "directCall", Data: v}
+
 	case BuiltinCallInfo:
 		return EncodedValue{Type: "builtinCall", Data: v}
 
@@ -381,6 +384,11 @@ func DecodeValue(value EncodedValue) any {
 
 	case "call":
 		var result CallInfo
+		decodeInto(value.Data, &result)
+		return result
+
+	case "directCall":
+		var result DirectCallInfo
 		decodeInto(value.Data, &result)
 		return result
 

@@ -48,6 +48,9 @@ func (vm *VM) callStandardModule(module string, method string, args []Value) {
 	case "os":
 		vm.callStdOS(method, args)
 
+	case "runtime":
+		vm.callStdRuntime(method, args)
+
 	default:
 		LangError(ErrorName, "unknown standard module: %s", module)
 	}

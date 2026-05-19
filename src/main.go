@@ -43,6 +43,10 @@ func main() {
 		case "dist":
 			DistCommand(os.Args[2:])
 			return
+
+		case "init":
+			initCommand(os.Args[2:])
+			return
 		}
 	}
 
@@ -50,12 +54,23 @@ func main() {
 }
 
 func runSourceCommand(args []string) {
-	entryFile := "main.tiny"
+	var entryFile string
 	cliArgs := []string{}
 
 	if len(args) >= 1 {
 		entryFile = args[0]
 		cliArgs = args[1:]
+	}
+
+	if len(args) == 0 {
+		config, ok := loadTinyConfig()
+		if !ok {
+			LangError(ErrorRuntime, "usage: tiny run <file.tiny> or create tiny.json with tiny init")
+		}
+
+		entryFile = config.Entry
+	} else {
+		entryFile = args[0]
 	}
 
 	program := LoadProgram(entryFile)

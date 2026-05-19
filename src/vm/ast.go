@@ -363,7 +363,10 @@ type FloatExpr struct {
 func (e FloatExpr) exprNode() {}
 
 type IdentExpr struct {
-	Name string
+	Name   string
+	File   string
+	Line   int
+	Column int
 }
 
 func (e IdentExpr) exprNode() {}

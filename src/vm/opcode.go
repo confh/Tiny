@@ -54,6 +54,8 @@ const (
 
 	OP_INSTANCEOF
 
+	OP_CALL_DIRECT
+
 	OP_EQ
 	OP_NEQ
 	OP_LT
@@ -97,6 +99,11 @@ type CapturedVar struct {
 }
 
 type CallInfo struct {
+	Name     string
+	ArgCount int
+}
+
+type DirectCallInfo struct {
 	Name     string
 	ArgCount int
 }

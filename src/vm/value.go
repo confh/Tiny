@@ -110,9 +110,45 @@ func asInt(value Value) int {
 		return int(n)
 	case uint64:
 		return int(n)
+	case float64:
+		return int(n)
+	case float32:
+		return int(n)
 	default:
 		LangError(ErrorSyntax, "expected number, got %T", value)
 		return -1
+	}
+}
+
+func asFloat32(value Value) float32 {
+	switch n := value.(type) {
+	case float32:
+		return n
+	case float64:
+		return float32(n)
+	default:
+		LangError(ErrorSyntax, "expected float, got %T", value)
+		return -1
+	}
+}
+
+func asFloat64(value Value) float64 {
+	switch v := value.(type) {
+	case int:
+		return float64(v)
+
+	case int64:
+		return float64(v)
+
+	case float32:
+		return float64(v)
+
+	case float64:
+		return v
+
+	default:
+		LangError(ErrorType, "expected number, got %s", typeName(value))
+		return 0
 	}
 }
 

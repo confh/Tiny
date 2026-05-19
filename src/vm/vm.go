@@ -2,6 +2,7 @@ package vm
 
 import (
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -362,6 +363,19 @@ func (vm *VM) step() bool {
 	vm.incrementIP()
 
 	switch instr.Op {
+	case OP_CALL_DIRECT:
+		info := instr.Value.(DirectCallInfo)
+
+		args := vm.popArgs(info.ArgCount)
+
+		fn, ok := vm.functions[info.Name]
+		if !ok {
+			vm.runtimeError(ErrorName, "undefined function: %s", info.Name)
+			return false
+		}
+
+		vm.callFunctionDirect(fn, args)
+
 	case OP_INSTANCEOF:
 		classValue := vm.pop()
 		objectValue := vm.pop()
@@ -1100,6 +1114,24 @@ func (vm *VM) step() bool {
 
 			vm.push(l % r)
 
+		case float32:
+			r := asFloat64(right)
+
+			if r == 0 {
+				LangError(ErrorRuntime, "cannot modulo by zero")
+			}
+
+			vm.push(math.Mod(float64(l), r))
+
+		case float64:
+			r := asFloat64(right)
+
+			if r == 0 {
+				LangError(ErrorRuntime, "cannot modulo by zero")
+			}
+
+			vm.push(math.Mod(l, r))
+
 		default:
 			LangError(ErrorType, "cannot modulo %s and %s", typeName(left), typeName(right))
 		}
@@ -1464,6 +1496,36 @@ func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []Value) {
 		}
 
 		locals[slot] = cell
+	}
+
+	for i := range locals {
+		if locals[i] == nil {
+			locals[i] = &Cell{Value: UndefinedValue{}}
+		}
+	}
+
+	frame := Frame{
+		function:     fn,
+		ip:           0,
+		locals:       locals,
+		constants:    constants,
+		instructions: fn.Instructions,
+		localTypes:   localTypes,
+	}
+
+	vm.frames = append(vm.frames, frame)
+}
+
+func (vm *VM) callFunctionDirect(fn Function, args []Value) {
+	args = vm.applyDefaultArgs(fn, args, 0, "function "+fn.Name)
+
+	locals := make([]*Cell, fn.LocalCount)
+	constants := make([]bool, fn.LocalCount)
+	localTypes := make([]TypeHint, fn.LocalCount)
+
+	for i, arg := range args {
+		locals[i] = &Cell{Value: arg}
+		constants[i] = false
 	}
 
 	for i := range locals {

@@ -6,15 +6,17 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
-func (vm *VM) callStdOS(method string, args []Value) {
+func (vm *VM) callStdRuntime(method string, args []Value) {
 	switch method {
-	case "name":
-		vm.push(runtime.GOOS)
+	case "lockThread":
+		runtime.LockOSThread()
+		vm.push(UndefinedValue{})
 
-	case "arch":
-		vm.push(runtime.GOARCH)
+	case "unlockThread":
+		runtime.UnlockOSThread()
+		vm.push(UndefinedValue{})
 
 	default:
-		vm.runtimeError(ErrorName, "unknown buffer function: %s", method)
+		vm.runtimeError(ErrorName, "unknown runtime function: %s", method)
 	}
 }

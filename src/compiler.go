@@ -1937,12 +1937,15 @@ func (c *Compiler) compileExpr(expr Expr) {
 		}
 
 	case CallExpr:
+		// Fast path: known normal function call
 		if _, exists := c.functions[e.Name]; exists {
 			for _, arg := range e.Args {
 				c.compileExpr(arg)
 			}
 
-			c.emit(OP_CALL, CallInfo{
+			c.setLocation(e.File, e.Line, e.Column)
+
+			c.emit(OP_CALL_DIRECT, DirectCallInfo{
 				Name:     e.Name,
 				ArgCount: len(e.Args),
 			})
@@ -1950,11 +1953,14 @@ func (c *Compiler) compileExpr(expr Expr) {
 			return
 		}
 
+		// Class constructor call stays as OP_CALL
 		if _, exists := c.classes[e.Name]; exists {
 			for _, arg := range e.Args {
 				c.compileExpr(arg)
 			}
 
+			c.setLocation(e.File, e.Line, e.Column)
+
 			c.emit(OP_CALL, CallInfo{
 				Name:     e.Name,
 				ArgCount: len(e.Args),
@@ -1963,8 +1969,31 @@ func (c *Compiler) compileExpr(expr Expr) {
 			return
 		}
 
+		// Namespace-local function fast path
+		if c.currentNamespaceFunctions != nil {
+			if fullName, exists := c.currentNamespaceFunctions[e.Name]; exists {
+				for _, arg := range e.Args {
+					c.compileExpr(arg)
+				}
+
+				c.setLocation(e.File, e.Line, e.Column)
+
+				c.emit(OP_CALL_DIRECT, DirectCallInfo{
+					Name:     fullName,
+					ArgCount: len(e.Args),
+				})
+
+				return
+			}
+		}
+
 		// Otherwise treat it as a function value variable.
-		c.compileExpr(IdentExpr{Name: e.Name})
+		c.compileExpr(IdentExpr{
+			Name:   e.Name,
+			File:   e.File,
+			Line:   e.Line,
+			Column: e.Column,
+		})
 
 		for _, arg := range e.Args {
 			c.compileExpr(arg)
