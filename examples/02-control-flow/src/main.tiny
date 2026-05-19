@@ -1,0 +1,69 @@
+import std "io";
+import std "json";
+
+enum State {
+    Small,
+    Medium,
+    Large
+}
+
+let values = [1, 2, 3, 4, 5, 6, 7];
+let evenValues = [];
+let labels = [];
+let index = 0;
+const step = 1;
+
+while index < values.length() {
+    const value = values.get(index);
+    index = index + step;
+
+    if value == 5 {
+        continue;
+    }
+
+    if value > 6 {
+        break;
+    }
+
+    if value % 2 == 0 {
+        evenValues.push(value);
+    }
+}
+
+for let i = 0; i < values.length(); i = i + step {
+    const value = values.get(i);
+    const label = value < 4 ? "low" : "high";
+    labels.push(label);
+}
+
+let states = [];
+
+for value in values {
+    let state = State.Small;
+
+    if value >= 3 and value <= 5 {
+        state = State.Medium;
+    }
+
+    if value > 5 {
+        state = State.Large;
+    }
+
+    match state {
+        "Small" {
+            states.push("small");
+        }
+        "Medium" {
+            states.push("medium");
+        }
+        _ {
+            states.push("large");
+        }
+    }
+}
+
+io.println(json.pretty({
+    evenValues: evenValues,
+    labels: labels,
+    states: states
+}));

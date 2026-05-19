@@ -8,12 +8,8 @@ import (
 	"sync"
 	"time"
 
-	jsoniter "github.com/json-iterator/go"
-
 	. "language.com/src/tinyerrors"
 )
-
-var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
 type TryHandler struct {
 	CatchIP int
@@ -41,6 +37,8 @@ type VM struct {
 	mainInstructions []Instruction
 	functions        map[string]Function
 	classes          map[string]Class
+
+	top int
 
 	lastInstruction      Instruction
 	lastInstructionIndex int
@@ -142,6 +140,8 @@ func NewVM(mainInstructions []Instruction, functions map[string]Function, classe
 		mu:               sync.Mutex{},
 		cliArgs:          []string{},
 		globalTypes:      map[string]TypeHint{},
+		top:              0,
+		stack:            make([]Value, 256),
 	}
 }
 
@@ -155,7 +155,7 @@ func (vm *VM) CloneForTask() *VM {
 		functions:        vm.functions,
 		classes:          vm.classes,
 
-		stack:       []Value{},
+		stack:       make([]Value, 256),
 		frames:      []Frame{},
 		tryHandlers: []TryHandler{},
 
@@ -568,7 +568,7 @@ func (vm *VM) step() bool {
 
 	case OP_LOAD_LOCAL:
 		slot := instr.Value.(int)
-		frame := vm.currentFrame()
+		frame := &vm.frames[len(vm.frames)-1]
 
 		if slot < 0 || slot >= len(frame.locals) {
 			LangError(
@@ -802,9 +802,9 @@ func (vm *VM) step() bool {
 
 	case OP_ASSIGN_LOCAL:
 		slot := instr.Value.(int)
-		value := vm.pop()
+		value := vm.popFast()
 
-		frame := vm.currentFrame()
+		frame := &vm.frames[len(vm.frames)-1]
 
 		if slot < 0 || slot >= len(frame.locals) {
 			LangError(
@@ -844,8 +844,8 @@ func (vm *VM) step() bool {
 		frame.locals[slot].Value = value
 
 	case OP_ADD:
-		right := vm.pop()
-		left := vm.pop()
+		right := vm.popFast()
+		left := vm.popFast()
 
 		switch l := left.(type) {
 		case int:
@@ -895,8 +895,8 @@ func (vm *VM) step() bool {
 		}
 
 	case OP_SUB:
-		right := vm.pop()
-		left := vm.pop()
+		right := vm.popFast()
+		left := vm.popFast()
 
 		if isNumber(left) && isNumber(right) {
 			if _, ok := left.(float64); ok {
@@ -913,8 +913,8 @@ func (vm *VM) step() bool {
 		}
 
 	case OP_MUL:
-		right := vm.pop()
-		left := vm.pop()
+		right := vm.popFast()
+		left := vm.popFast()
 
 		if isNumber(left) && isNumber(right) {
 			if _, ok := left.(float64); ok {
@@ -929,8 +929,8 @@ func (vm *VM) step() bool {
 		}
 
 	case OP_DIV:
-		right := vm.pop()
-		left := vm.pop()
+		right := vm.popFast()
+		left := vm.popFast()
 
 		if !isNumber(left) || !isNumber(right) {
 			LangError(ErrorType, "cannot divide %s and %s", typeName(left), typeName(right))
@@ -939,18 +939,18 @@ func (vm *VM) step() bool {
 		vm.push(asFloat(left) / asFloat(right))
 
 	case OP_EQ:
-		right := vm.pop()
-		left := vm.pop()
+		right := vm.popFast()
+		left := vm.popFast()
 		vm.push(valuesEqual(left, right))
 
 	case OP_NEQ:
-		right := vm.pop()
-		left := vm.pop()
+		right := vm.popFast()
+		left := vm.popFast()
 		vm.push(!valuesEqual(left, right))
 
 	case OP_LT:
-		right := vm.pop()
-		left := vm.pop()
+		right := vm.popFast()
+		left := vm.popFast()
 
 		switch l := left.(type) {
 		case int:
@@ -982,8 +982,8 @@ func (vm *VM) step() bool {
 		}
 
 	case OP_GT:
-		right := vm.pop()
-		left := vm.pop()
+		right := vm.popFast()
+		left := vm.popFast()
 
 		if !isNumber(left) || !isNumber(right) {
 			LangError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
@@ -992,8 +992,8 @@ func (vm *VM) step() bool {
 		vm.push(asFloat(left) > asFloat(right))
 
 	case OP_LTE:
-		right := vm.pop()
-		left := vm.pop()
+		right := vm.popFast()
+		left := vm.popFast()
 
 		if !isNumber(left) || !isNumber(right) {
 			LangError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
@@ -1002,8 +1002,8 @@ func (vm *VM) step() bool {
 		vm.push(asFloat(left) <= asFloat(right))
 
 	case OP_GTE:
-		right := vm.pop()
-		left := vm.pop()
+		right := vm.popFast()
+		left := vm.popFast()
 
 		if !isNumber(left) || !isNumber(right) {
 			LangError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
@@ -1012,13 +1012,13 @@ func (vm *VM) step() bool {
 		vm.push(asFloat(left) >= asFloat(right))
 
 	case OP_AND:
-		right := vm.pop()
-		left := vm.pop()
+		right := vm.popFast()
+		left := vm.popFast()
 		vm.push(isTruthy(left) && isTruthy(right))
 
 	case OP_OR:
-		right := vm.pop()
-		left := vm.pop()
+		right := vm.popFast()
+		left := vm.popFast()
 		vm.push(isTruthy(left) || isTruthy(right))
 
 	case OP_JUMP:
@@ -1105,8 +1105,8 @@ func (vm *VM) step() bool {
 		vm.callBuiltin(info.Object, info.Method, info.ArgCount)
 
 	case OP_MOD:
-		right := vm.pop()
-		left := vm.pop()
+		right := vm.popFast()
+		left := vm.popFast()
 
 		switch l := left.(type) {
 		case int:
@@ -1675,11 +1675,35 @@ func (vm *VM) findEmbeddedMethod(object ObjectValue, method string) (ObjectValue
 	return nil, FunctionValue{}, false
 }
 
-func (vm *VM) callMethod(method string, argCount int) {
-	args := vm.popArgs(argCount)
+func (vm *VM) callMethodFast(method string, argCount int) {
+	switch argCount {
+	case 0:
+		objectValue := vm.pop()
+		vm.callMethodResolved(method, objectValue, nil)
+		return
 
-	objectValue := vm.pop()
+	case 1:
+		arg0 := vm.pop()
+		objectValue := vm.pop()
+		vm.callMethodResolved(method, objectValue, []Value{arg0})
+		return
 
+	case 2:
+		arg1 := vm.pop()
+		arg0 := vm.pop()
+		objectValue := vm.pop()
+		vm.callMethodResolved(method, objectValue, []Value{arg0, arg1})
+		return
+
+	default:
+		args := vm.popArgs(argCount)
+		objectValue := vm.pop()
+		vm.callMethodResolved(method, objectValue, args)
+		return
+	}
+}
+
+func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value) {
 	if method == "toString" {
 		if _, ok := objectValue.(*BufferValue); !ok {
 			vm.push(valueToString(objectValue))
@@ -1732,6 +1756,10 @@ func (vm *VM) callMethod(method string, argCount int) {
 		vm.callProcessMethod(val, method, args)
 		return
 
+	case *NativeStringBuilderValue:
+		vm.callTextBuilderMethod(val, method, args)
+		return
+
 	case string:
 		vm.callStringMethod(val, method, args)
 		return
@@ -1771,7 +1799,7 @@ func (vm *VM) callMethod(method string, argCount int) {
 	}
 
 	args = vm.applyDefaultArgs(fn, args, 1, "method "+method)
-	argCount = len(args)
+	// argCount = len(args)
 
 	locals := make([]*Cell, fn.LocalCount)
 	constants := make([]bool, fn.LocalCount)
@@ -1802,6 +1830,10 @@ func (vm *VM) callMethod(method string, argCount int) {
 	}
 
 	vm.frames = append(vm.frames, frame)
+}
+
+func (vm *VM) callMethod(method string, argCount int) {
+	vm.callMethodFast(method, argCount)
 }
 
 func (vm *VM) runNativeApp(app *NativeAppValue) {
@@ -1982,46 +2014,61 @@ func (vm *VM) currentFrame() *Frame {
 }
 
 func (vm *VM) popArgs(count int) []Value {
-	if len(vm.stack) < count {
-		LangError(
-			ErrorInternal,
-			"not enough values for args: need=%d have=%d at function=%s ip=%d op=%v value=%#v stack=%#v",
-			count,
-			len(vm.stack),
-			vm.lastFunctionName,
-			vm.lastInstructionIndex,
-			vm.lastInstruction.Op,
-			vm.lastInstruction.Value,
-			vm.stack,
-		)
+	if vm.top < count {
+		vm.handleUnderflow()
 	}
 
 	args := make([]Value, count)
 
-	for i := count - 1; i >= 0; i-- {
-		args[i] = vm.pop()
+	start := vm.top - count
+
+	copy(args, vm.stack[start:vm.top])
+
+	for i := start; i < vm.top; i++ {
+		vm.stack[i] = nil
 	}
+
+	vm.top = start
 
 	return args
 }
 
 func (vm *VM) push(value Value) {
-	vm.stack = append(vm.stack, value)
+	if vm.top == len(vm.stack) {
+		newStack := make([]Value, len(vm.stack)*2)
+		copy(newStack, vm.stack)
+		vm.stack = newStack
+	}
+
+	vm.stack[vm.top] = value
+	vm.top++
 }
 
 func (vm *VM) pop() Value {
-	if len(vm.stack) == 0 {
-		LangError(
-			ErrorInternal,
-			"stack underflow at function=%s ip=%d op=%v value=%#v",
-			vm.lastFunctionName,
-			vm.lastInstructionIndex,
-			vm.lastInstruction.Op,
-			vm.lastInstruction.Value,
-		)
+	if vm.top == 0 {
+		vm.handleUnderflow()
 	}
 
-	value := vm.stack[len(vm.stack)-1]
-	vm.stack = vm.stack[:len(vm.stack)-1]
-	return value
+	vm.top--
+	val := vm.stack[vm.top]
+
+	return val
+}
+
+func (vm *VM) handleUnderflow() {
+	LangError(
+		ErrorInternal,
+		"stack underflow at function=%s ip=%d op=%v value=%#v",
+		vm.lastFunctionName,
+		vm.lastInstructionIndex,
+		vm.lastInstruction.Op,
+		vm.lastInstruction.Value,
+	)
+}
+
+func (vm *VM) popFast() Value {
+	vm.top--
+	val := vm.stack[vm.top]
+	vm.stack[vm.top] = nil
+	return val
 }

@@ -52,16 +52,6 @@ func (l *Lexer) peek() rune {
 	return l.input[l.pos+1]
 }
 
-func (l *Lexer) makeToken(tokenType TokenType, literal string, start int) Token {
-	return Token{
-		Type:    tokenType,
-		Literal: literal,
-		File:    l.file,
-		Line:    l.line,
-		Column:  start + 1,
-	}
-}
-
 func (l *Lexer) NextToken() Token {
 	l.skipIgnored()
 

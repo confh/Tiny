@@ -1,0 +1,29 @@
+import std "http";
+import std "io";
+import std "json";
+
+let server = http.server(8090);
+
+server.get("/", fn(req) {
+    return json.stringify({
+        message: "hello from Tiny",
+        routes: ["/echo?text=hello"]
+    });
+});
+
+server.get("/echo", fn(req) {
+    let text = "missing text query";
+
+    if typeof req.query["text"] != "undefined" {
+        text = req.query["text"];
+    }
+
+    return json.stringify({
+        path: req.path,
+        method: req.method,
+        text: text
+    });
+});
+
+io.println("Tiny server running at http://localhost:8090");
+server.start();

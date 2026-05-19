@@ -1,0 +1,4 @@
+{
+  "name": "Tiny",
+  "features": ["lexer", "parser", "vm"]
+}

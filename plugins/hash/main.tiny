@@ -1,0 +1,8 @@
+import std "io";
+
+const hashPlugin = Plugin.load("./hash");
+
+io.println(hashPlugin.hash({
+    text: "hello",
+    method: "md5"
+}));

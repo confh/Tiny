@@ -1,8 +1,10 @@
 *.tiny
+!counter.tiny
+!main.tiny
 *.exe
+tiny_runtime_linux_amd64
 *.syso
 *.tbc
 *.txt
 dist/
-plugins/
 test/

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 
+	json "github.com/goccy/go-json"
 	. "language.com/src/tinyerrors"
 )
 
@@ -101,93 +102,47 @@ func (vm *VM) callServerMethod(server *NativeServerValue, method string, args []
 		}
 
 		mux := http.NewServeMux()
-
 		server.mux = mux
 
-		for path, handler := range server.GetRoutes {
-			if server.closed {
-				return
-			}
-
-			routeHandler := handler
-
-			mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodGet {
-					return
-				}
-				switch h := routeHandler.(type) {
-				case string:
-					writeServerResponse(w, h)
-
-				case FunctionValue:
-					bodyBytes, err := io.ReadAll(r.Body)
-					if err != nil {
-						LangError(ErrorRuntime, "failed to read request body: %v", err)
-					}
-					body := string(bodyBytes)
-
-					reqObj := ObjectValue{
-						"path":   r.URL.Path,
-						"method": r.Method,
-						"query": func() ObjectValue {
-							queryMap := make(ObjectValue)
-							for key, values := range r.URL.Query() {
-								if len(values) > 0 {
-									queryMap[key] = values[0]
-								} else {
-									queryMap[key] = ""
-								}
-							}
-							return queryMap
-						}(),
-
-						"headers": func() ObjectValue {
-							headers := make(ObjectValue)
-							for k, v := range r.Header {
-								if len(v) > 0 {
-									headers[k] = v[0]
-								} else {
-									headers[k] = ""
-								}
-							}
-							return headers
-						}(),
-
-						"body": body,
-					}
-
-					vm.mu.Lock()
-					defer vm.mu.Unlock()
-
-					var result Value
-
-					if async {
-						requestVM := vm.CloneForTask()
-						result = requestVM.callFunctionValue(h, []Value{reqObj})
-					} else {
-						result = vm.callFunctionValue(h, []Value{reqObj})
-					}
-
-					writeServerResponse(w, valueToString(result))
-
-				default:
-					LangError(ErrorType, "invalid route handler: %s", typeName(routeHandler))
-				}
-			})
+		// Collect all unique paths for GET and POST
+		pathMap := make(map[string]struct{})
+		for path := range server.GetRoutes {
+			pathMap[path] = struct{}{}
+		}
+		for path := range server.PostRoutes {
+			pathMap[path] = struct{}{}
 		}
 
-		for path, handler := range server.PostRoutes {
-			if server.closed {
-				return
-			}
-
-			routeHandler := handler
+		for path := range pathMap {
+			getHandler, hasGet := server.GetRoutes[path]
+			postHandler, hasPost := server.PostRoutes[path]
 
 			mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodPost {
+				if server.closed {
 					return
 				}
-				switch h := routeHandler.(type) {
+
+				var handler any
+				switch r.Method {
+				case http.MethodGet:
+					if !hasGet {
+						http.NotFound(w, r)
+						return
+					}
+					handler = getHandler
+				case http.MethodPost:
+					if !hasPost {
+						http.NotFound(w, r)
+						return
+					}
+					handler = postHandler
+				default:
+					// Only support GET and POST
+					http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+					return
+				}
+
+				switch h := handler.(type) {
 				case string:
 					writeServerResponse(w, h)
 
@@ -198,41 +153,73 @@ func (vm *VM) callServerMethod(server *NativeServerValue, method string, args []
 					}
 					body := string(bodyBytes)
 
-					reqObj := ObjectValue{
-						"path":   r.URL.Path,
-						"method": r.Method,
-						"query": func() map[string]string {
-							queryMap := make(map[string]string)
-							for key, values := range r.URL.Query() {
-								if len(values) > 0 {
-									queryMap[key] = values[0]
-								} else {
-									queryMap[key] = ""
+					var reqObj Value
+					if r.Method == http.MethodGet {
+						reqObj = ObjectValue{
+							"path":   r.URL.Path,
+							"method": r.Method,
+							"query": func() ObjectValue {
+								queryMap := make(ObjectValue)
+								for key, values := range r.URL.Query() {
+									if len(values) > 0 {
+										queryMap[key] = values[0]
+									} else {
+										queryMap[key] = ""
+									}
 								}
-							}
-							return queryMap
-						}(),
+								return queryMap
+							}(),
 
-						"headers": func() map[string]string {
-							headers := make(map[string]string)
-							for k, v := range r.Header {
-								if len(v) > 0 {
-									headers[k] = v[0]
-								} else {
-									headers[k] = ""
+							"headers": func() ObjectValue {
+								headers := make(ObjectValue)
+								for k, v := range r.Header {
+									if len(v) > 0 {
+										headers[k] = v[0]
+									} else {
+										headers[k] = ""
+									}
 								}
-							}
-							return headers
-						}(),
+								return headers
+							}(),
 
-						"body": body,
+							"body": body,
+						}
+					} else {
+						reqObj = ObjectValue{
+							"path":   r.URL.Path,
+							"method": r.Method,
+							"query": func() map[string]string {
+								queryMap := make(map[string]string)
+								for key, values := range r.URL.Query() {
+									if len(values) > 0 {
+										queryMap[key] = values[0]
+									} else {
+										queryMap[key] = ""
+									}
+								}
+								return queryMap
+							}(),
+
+							"headers": func() map[string]string {
+								headers := make(map[string]string)
+								for k, v := range r.Header {
+									if len(v) > 0 {
+										headers[k] = v[0]
+									} else {
+										headers[k] = ""
+									}
+								}
+								return headers
+							}(),
+
+							"body": body,
+						}
 					}
 
 					vm.mu.Lock()
 					defer vm.mu.Unlock()
 
 					var result Value
-
 					if async {
 						requestVM := vm.CloneForTask()
 						result = requestVM.callFunctionValue(h, []Value{reqObj})
@@ -243,7 +230,7 @@ func (vm *VM) callServerMethod(server *NativeServerValue, method string, args []
 					writeServerResponse(w, valueToString(result))
 
 				default:
-					vm.runtimeError(ErrorType, "invalid route handler: %s", typeName(routeHandler))
+					LangError(ErrorType, "invalid route handler: %s", typeName(handler))
 				}
 			})
 		}

@@ -1,0 +1,37 @@
+import std "array";
+import std "io";
+import std "json";
+
+let words = ["tiny", "language", "syntax"];
+
+words.push("examples");
+
+let uppercase = words.map(fn(index, word) {
+    return word.toUpperCase();
+});
+
+let longWords = words.filter(fn(index, word) {
+    return word.length() > 5;
+});
+
+let user = {
+    name: "Sam",
+    tags: words,
+    meta: {
+        created: true
+    }
+};
+
+user["note"] = "bracket access can set fields";
+
+let output = {
+    range: array.range(1, 4),
+    firstWord: words.get(0),
+    joined: words.join(", "),
+    uppercase: uppercase,
+    longWords: longWords,
+    containsTiny: words.contains("tiny"),
+    user: user
+};
+
+io.println(json.pretty(output));

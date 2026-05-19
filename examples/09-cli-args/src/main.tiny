@@ -1,0 +1,30 @@
+import std "io";
+import std "process";
+
+let args = process.args();
+
+if args.length() == 0 {
+    io.println("usage: tiny src/main.tiny upper|join <words>");
+    process.close();
+}
+
+const command = args.get(0);
+let words = [];
+
+for word, index in args {
+    if index > 0 {
+        words.push(word);
+    }
+}
+
+match command {
+    "upper" {
+        io.println(words.join(" ").toUpperCase());
+    }
+    "join" {
+        io.println(words.join("-"));
+    }
+    _ {
+        io.println("unknown command:", command);
+    }
+}

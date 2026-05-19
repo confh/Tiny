@@ -1,7 +1,6 @@
 package vm
 
 import (
-	"fmt"
 	"strconv"
 	"strings"
 
@@ -625,9 +624,7 @@ func (p *Parser) parseTryCatchStatement() Stmt {
 
 	if p.current.Type == TOKEN_FINALLY {
 		p.expect(TOKEN_FINALLY)
-		fmt.Println("Caught finally")
 		finallyBody := p.parseBlock()
-		p.advance()
 		statement.FinallyBody = finallyBody
 	}
 

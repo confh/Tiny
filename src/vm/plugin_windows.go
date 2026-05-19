@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"unsafe"
 
+	json "github.com/goccy/go-json"
+
 	. "language.com/src/tinyerrors"
 )
 

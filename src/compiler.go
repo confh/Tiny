@@ -1578,9 +1578,10 @@ func (c *Compiler) collectCapturableBindings() map[string]Binding {
 	}
 
 	if c.outerBindings != nil {
-		for name := range c.outerBindings {
-			binding, ok := c.ensureCaptured(name)
-			if ok {
+		for name, binding := range c.outerBindings {
+			// Only expose real locals from outer functions.
+			// Do NOT force-capture everything here.
+			if binding.Kind == BindingLocal {
 				result[name] = binding
 			}
 		}
@@ -1864,6 +1865,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 		c.emit(OP_CONST, e.Value)
 
 	case IdentExpr:
+		// 1. Normal local/global variable resolution first.
 		if binding, exists := c.resolveVariable(e.Name); exists {
 			if binding.Kind == BindingLocal {
 				c.emit(OP_LOAD_LOCAL, binding.Slot)
@@ -1874,11 +1876,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 			return
 		}
 
-		if binding, exists := c.ensureCaptured(e.Name); exists {
-			c.emit(OP_LOAD_LOCAL, binding.Slot)
-			return
-		}
-
+		// 2. Namespace symbols.
 		if c.currentNamespaceEnums != nil {
 			if fullName, exists := c.currentNamespaceEnums[e.Name]; exists {
 				c.emit(OP_LOAD_GLOBAL, fullName)
@@ -1907,23 +1905,35 @@ func (c *Compiler) compileExpr(expr Expr) {
 			}
 		}
 
-		if c.isCompilingNamespace {
-			LangError(ErrorName, "undefined variable in namespace: %s", e.Name)
+		// 3. Only capture REAL outer locals.
+		// Do NOT capture imports/std namespaces/globals.
+		if binding, exists := c.ensureCaptured(e.Name); exists {
+			if binding.Kind == BindingLocal {
+				c.emit(OP_LOAD_LOCAL, binding.Slot)
+				return
+			}
 		}
 
-		c.emit(OP_LOAD_GLOBAL, e.Name)
-
+		// 4. Known global function.
 		if _, exists := c.functions[e.Name]; exists {
 			c.emit(OP_CONST, FunctionValue{Name: e.Name})
 			return
 		}
 
+		// 5. Known global class.
 		if _, exists := c.classes[e.Name]; exists {
 			c.emit(OP_CONST, Class{Name: e.Name})
 			return
 		}
 
+		// 6. Namespace files should not see random parent globals.
+		if c.isCompilingNamespace {
+			LangError(ErrorName, "undefined variable in namespace: %s", e.Name)
+		}
+
+		// 7. Fallback global.
 		c.emit(OP_LOAD_GLOBAL, e.Name)
+		return
 
 	case BinaryExpr:
 		if e.Op == TOKEN_PLUS {

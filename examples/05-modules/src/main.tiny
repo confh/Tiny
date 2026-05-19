@@ -1,0 +1,16 @@
+import std "io";
+import std "json";
+
+import "text.tiny" as Text;
+import "numbers.tiny" as Numbers;
+
+const words = ["Tiny", "module", "example"];
+const numbers = [2, 4, 6, 8];
+
+io.println(json.pretty({
+    slug: Text.slug(words.join(" ")),
+    sentence: Text.sentence(words),
+    total: Numbers.sum(numbers),
+    average: Numbers.average(numbers),
+    exportedConstant: Numbers.defaultStep
+}));

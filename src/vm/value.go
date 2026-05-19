@@ -72,6 +72,10 @@ type NativeFileValue struct {
 	Closed bool
 }
 
+type NativeStringBuilderValue struct {
+	Builder *strings.Builder
+}
+
 type NativeProcessValue struct {
 	Cmd     *exec.Cmd
 	Running bool
@@ -230,6 +234,8 @@ func typeName(value Value) string {
 		return "namespace"
 	case *NamespaceValue:
 		return "namespace"
+	case *NativeStringBuilderValue:
+		return "string builder"
 	case BufferValue:
 		return "buffer"
 	case *BufferValue:
@@ -444,6 +450,8 @@ func valueToString(value Value) string {
 		return "<namespace ref " + v.GlobalName + ">"
 	case BufferValue:
 		return "<buffer " + string(v.Bytes) + ">"
+	case *NativeStringBuilderValue:
+		return "<string builder>"
 	case *BufferValue:
 		return "<buffer " + string(v.Bytes) + ">"
 	case *NativeProcessValue:
