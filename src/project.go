@@ -10,7 +10,7 @@ import (
 
 type TinyProjectConfig struct {
 	Name            string                    `json:"name"`
-	Version         string                    `json:"version"`
+	Version         float64                   `json:"version"`
 	Entry           string                    `json:"entry"`
 	OutDir          string                    `json:"outDir"`
 	Target          string                    `json:"target"`
@@ -33,7 +33,7 @@ type TinyCompilerOptions struct {
 func defaultTinyConfig(projectName string) TinyProjectConfig {
 	return TinyProjectConfig{
 		Name:    projectName,
-		Version: "0.1.0",
+		Version: 0.1,
 		Entry:   "src/main.tiny",
 		OutDir:  "dist",
 		Target:  defaultProjectTarget(),

@@ -1747,6 +1747,11 @@ func (vm *VM) step() bool {
 			returnValue = vm.pop()
 		}
 
+		if len(vm.frames) == 0 {
+			vm.push(returnValue)
+			return true
+		}
+
 		returningDepth := len(vm.frames)
 		vm.removeTryHandlersAtOrAbove(returningDepth)
 

@@ -1,0 +1,44 @@
+import std "fs";
+import std "process";
+import std "io";
+import std "json";
+import std "math";
+
+const args = process.args();
+let moduleName = "";
+
+if (args.length() != 1) {
+    io.println("usage: tiny new_std_module.tiny <module_name>");
+    return;
+}
+
+moduleName = args[0];
+
+const fileName = `./src/vm/std_${moduleName}.go`;
+
+fs.writeFile(fileName, `package vm
+
+import (
+	. "language.com/src/tinyerrors"
+)
+
+var std${moduleName.upper()}Methods = map[string]StdModuleFunc{
+	"helloWorld": ${moduleName}HelloWorld,
+}
+
+func (vm *VM) callStd${moduleName.upper()}(method string, args []Value) {
+	fn, ok := std${moduleName.upper()}Methods[method]
+	if !ok {
+		vm.runtimeError(ErrorName, "unknown ${moduleName} function: %s", method)
+		return
+	}
+
+	fn(vm, args)
+}
+
+func ${moduleName}HelloWorld(vm *VM, args []Value) {
+	dontExpectArgs(vm, "${moduleName}.helloWorld", args)
+
+	vm.push("hello world")
+}
+`);

@@ -1,6 +1,7 @@
 *.tiny
 !counter.tiny
 !main.tiny
+!new_std_module.tiny
 *.exe
 tiny_runtime_linux_amd64
 *.syso

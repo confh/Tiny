@@ -47,6 +47,10 @@ func main() {
 		case "init":
 			initCommand(os.Args[2:])
 			return
+
+		case "task":
+			taskCommand(os.Args[2:])
+			return
 		}
 	}
 

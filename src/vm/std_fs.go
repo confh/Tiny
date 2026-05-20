@@ -14,6 +14,7 @@ var stdFsMethods = map[string]StdModuleFunc{
 	"writeBytes": stdFsWriteBytes,
 	"exists":     stdFsExists,
 	"readDir":    stdFsReadDir,
+	"mkDir":      stdFsMkDir,
 }
 
 func (vm *VM) callStdFs(method string, args []Value) {
@@ -26,8 +27,8 @@ func (vm *VM) callStdFs(method string, args []Value) {
 }
 
 func stdFsOpen(vm *VM, args []Value) {
-
 	expectArgs(vm, "fs.open", args, 1)
+
 	path := argString(vm, "fs.open", args, 0)
 	file, err := os.Open(path)
 	if err != nil {
@@ -103,4 +104,16 @@ func stdFsReadDir(vm *VM, args []Value) {
 		fileNames.Elements = append(fileNames.Elements, file.Name())
 	}
 	vm.push(fileNames)
+}
+
+func stdFsMkDir(vm *VM, args []Value) {
+	expectArgs(vm, "fs.mkDir", args, 1)
+
+	dirName := argString(vm, "fs.mkDir", args, 0)
+	err := os.Mkdir(dirName, 0755)
+	if err != nil {
+		vm.runtimeError(ErrorRuntime, "error creating directory: %s", err)
+	}
+
+	vm.push(UndefinedValue{})
 }

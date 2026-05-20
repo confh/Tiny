@@ -94,6 +94,7 @@ func float64SliceToBytes(data []float64) []byte {
 
 func stdMathToFloat(vm *VM, args []Value) {
 	expectArgs(vm, "math.toFloat", args, 1)
+
 	vm.push(asFloat(args[0]))
 }
 

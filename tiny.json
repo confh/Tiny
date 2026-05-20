@@ -1,0 +1,8 @@
+{
+  "entry": "examples/01-basics/src/main.tiny",
+  "name": "tiny",
+  "scripts": {
+    "std": "tiny src/scripts/new_std_module.tiny"
+  },
+  "version": 0.1
+}

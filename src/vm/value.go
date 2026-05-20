@@ -118,6 +118,14 @@ func asInt(value Value) int {
 		return int(n)
 	case float32:
 		return int(n)
+	case string:
+		f64, err := strconv.ParseFloat(n, 64)
+		f := int(f64)
+		if err != nil {
+			LangError(ErrorType, "cannot parse string '%s' as number: %v", n, err)
+			return 0
+		}
+		return f
 	default:
 		LangError(ErrorSyntax, "expected number, got %T", value)
 		return -1
@@ -150,6 +158,14 @@ func asFloat64(value Value) float64 {
 	case float64:
 		return v
 
+	case string:
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			LangError(ErrorType, "cannot parse string '%s' as number: %v", v, err)
+			return 0
+		}
+		return f
+
 	default:
 		LangError(ErrorType, "expected number, got %s", typeName(value))
 		return 0
@@ -180,6 +196,13 @@ func asFloat(value Value) float64 {
 		return float64(v)
 	case float64:
 		return v
+	case string:
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			LangError(ErrorType, "cannot parse string '%s' as float: %v", v, err)
+			return 0
+		}
+		return f
 	default:
 		LangError(ErrorType, "expected number, got %s", typeName(value))
 		return 0

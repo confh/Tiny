@@ -13,6 +13,8 @@ func init() {
 		"length":      stringLength,
 		"toUpperCase": stringToUpperCase,
 		"toLowerCase": stringToLowerCase,
+		"upper":       stringUpper,
+		"lower":       stringLower,
 		"split":       stringSplit,
 		"includes":    stringIncludes,
 		"trim":        stringTrim,
@@ -46,6 +48,22 @@ func stringToLowerCase(vm *VM, value string, args []Value) {
 	expectArgs(vm, "string.toLowerCase", args, 0)
 
 	vm.push(strings.ToLower(value))
+}
+
+func stringUpper(vm *VM, value string, args []Value) {
+	expectArgs(vm, "string.upper", args, 0)
+
+	result := strings.ToUpper(value[:1]) + value[1:]
+
+	vm.push(result)
+}
+
+func stringLower(vm *VM, value string, args []Value) {
+	expectArgs(vm, "string.lower", args, 0)
+
+	result := strings.ToLower(value[:1]) + value[1:]
+
+	vm.push(result)
 }
 
 func stringSplit(vm *VM, value string, args []Value) {
