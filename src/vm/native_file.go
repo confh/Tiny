@@ -7,6 +7,26 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
+// Metadata for native File type
+var fileNativeMetadata = NativeTypeInfo{
+	Name: "file",
+	Methods: map[string]StdMethodInfo{
+		"read": {
+			Name: "read",
+			Args: []StdArg{
+				{Name: "size", Type: "number"},
+			},
+			Returns:     "string",
+			Description: "Reads up to the specified number of bytes from the file.",
+		},
+		"close": {
+			Name:        "close",
+			Returns:     "bool",
+			Description: "Closes the file.",
+		},
+	},
+}
+
 var fileMethods map[string]NativeModuleFunc[*NativeFileValue]
 
 func init() {
@@ -14,6 +34,7 @@ func init() {
 		"read":  fileRead,
 		"close": fileClose,
 	}
+	registerNativeType(fileNativeMetadata)
 }
 
 func (vm *VM) callFileMethod(file *NativeFileValue, method string, args []Value) {

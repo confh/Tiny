@@ -4,10 +4,45 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
+var stdArrayMetadata = StdModuleInfo{
+	Name: "array",
+	Methods: map[string]StdMethodInfo{
+		"range": {
+			Name: "range",
+			Args: []StdArg{
+				{Name: "min", Type: "int", Optional: false},
+				{Name: "max", Type: "int", Optional: false},
+			},
+			Returns:     "Array",
+			Description: "Creates an array containing all integers from min to max (inclusive).",
+		},
+		"isArray": {
+			Name: "isArray",
+			Args: []StdArg{
+				{Name: "value", Type: "any", Optional: false},
+			},
+			Returns:     "bool",
+			Description: "Returns true if value is an array.",
+		},
+		"from": {
+			Name: "from",
+			Args: []StdArg{
+				{Name: "value", Type: "any", Optional: false},
+			},
+			Returns:     "Array",
+			Description: "Converts a string or array-like value into an Array.",
+		},
+	},
+}
+
 var stdArrayMethods = map[string]StdModuleFunc{
 	"range":   stdArrayRange,
 	"isArray": stdArrayIsArray,
 	"from":    stdArrayFrom,
+}
+
+func init() {
+	registerStdModule(stdArrayMetadata)
 }
 
 func (vm *VM) callStdArray(method string, args []Value) {

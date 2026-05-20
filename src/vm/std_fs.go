@@ -7,6 +7,70 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
+var stdFsMetadata = StdModuleInfo{
+	Name: "fs",
+	Methods: map[string]StdMethodInfo{
+		"open": {
+			Name: "open",
+			Args: []StdArg{
+				{Name: "path", Type: "string", Optional: false},
+			},
+			Returns:     "File",
+			Description: "Opens a file and returns a file object.",
+		},
+		"readFile": {
+			Name: "readFile",
+			Args: []StdArg{
+				{Name: "fileName", Type: "string", Optional: false},
+			},
+			Returns:     "string",
+			Description: "Reads an entire file and returns its contents as a string.",
+		},
+		"writeFile": {
+			Name: "writeFile",
+			Args: []StdArg{
+				{Name: "fileName", Type: "string", Optional: false},
+				{Name: "data", Type: "string", Optional: false},
+			},
+			Returns:     "bool",
+			Description: "Writes the provided string to a file, returning true if successful.",
+		},
+		"writeBytes": {
+			Name: "writeBytes",
+			Args: []StdArg{
+				{Name: "fileName", Type: "string", Optional: false},
+				{Name: "buffer", Type: "buffer", Optional: false},
+			},
+			Returns:     "bool",
+			Description: "Writes the buffer's bytes to a file, returning true if successful.",
+		},
+		"exists": {
+			Name: "exists",
+			Args: []StdArg{
+				{Name: "fileName", Type: "string", Optional: false},
+			},
+			Returns:     "bool",
+			Description: "Returns true if the file (or directory) exists, false otherwise.",
+		},
+		"readDir": {
+			Name: "readDir",
+			Args: []StdArg{
+				{Name: "dirName", Type: "string", Optional: false},
+			},
+			Returns:     "Array",
+			Description: "Returns an array of filenames in the given directory.",
+		},
+		"mkDir": {
+			Name: "mkDir",
+			Args: []StdArg{
+				{Name: "dirName", Type: "string", Optional: false},
+			},
+			Returns:     "undefined",
+			Description: "Creates a new directory.",
+		},
+	},
+}
+
 var stdFsMethods = map[string]StdModuleFunc{
 	"open":       stdFsOpen,
 	"readFile":   stdFsReadFile,
@@ -15,6 +79,10 @@ var stdFsMethods = map[string]StdModuleFunc{
 	"exists":     stdFsExists,
 	"readDir":    stdFsReadDir,
 	"mkDir":      stdFsMkDir,
+}
+
+func init() {
+	registerStdModule(stdFsMetadata)
 }
 
 func (vm *VM) callStdFs(method string, args []Value) {

@@ -12,6 +12,170 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
+var stdMathMetadata = StdModuleInfo{
+	Name: "math",
+	Methods: map[string]StdMethodInfo{
+		"toFloat": {
+			Name: "toFloat",
+			Args: []StdArg{
+				{Name: "value", Type: "any", Optional: false},
+			},
+			Returns:     "float",
+			Description: "Converts a value to a float.",
+		},
+		"toInt": {
+			Name: "toInt",
+			Args: []StdArg{
+				{Name: "value", Type: "any", Optional: false},
+			},
+			Returns:     "int",
+			Description: "Converts a value to an int.",
+		},
+		"abs": {
+			Name: "abs",
+			Args: []StdArg{
+				{Name: "x", Type: "float", Optional: false},
+			},
+			Returns:     "float",
+			Description: "Returns the absolute value of a number.",
+		},
+		"pow": {
+			Name: "pow",
+			Args: []StdArg{
+				{Name: "base", Type: "float", Optional: false},
+				{Name: "exp", Type: "float", Optional: false},
+			},
+			Returns:     "float",
+			Description: "Raises base to the power of exp.",
+		},
+		"sqrt": {
+			Name: "sqrt",
+			Args: []StdArg{
+				{Name: "x", Type: "float", Optional: false},
+			},
+			Returns:     "float",
+			Description: "Returns the square root of a number.",
+		},
+		"ceil": {
+			Name: "ceil",
+			Args: []StdArg{
+				{Name: "x", Type: "float", Optional: false},
+			},
+			Returns:     "float",
+			Description: "Rounds a number upward to the nearest integer.",
+		},
+		"floor": {
+			Name: "floor",
+			Args: []StdArg{
+				{Name: "x", Type: "float", Optional: false},
+			},
+			Returns:     "float",
+			Description: "Rounds a number downward to the nearest integer.",
+		},
+		"round": {
+			Name: "round",
+			Args: []StdArg{
+				{Name: "x", Type: "float", Optional: false},
+			},
+			Returns:     "float",
+			Description: "Rounds a number to the nearest integer.",
+		},
+		"clamp": {
+			Name: "clamp",
+			Args: []StdArg{
+				{Name: "value", Type: "float", Optional: false},
+				{Name: "min", Type: "float", Optional: false},
+				{Name: "max", Type: "float", Optional: false},
+			},
+			Returns:     "float",
+			Description: "Clamps a float value between min and max.",
+		},
+		"sin": {
+			Name: "sin",
+			Args: []StdArg{
+				{Name: "radians", Type: "float", Optional: false},
+			},
+			Returns:     "float",
+			Description: "Returns the sine of an angle (in radians).",
+		},
+		"cos": {
+			Name: "cos",
+			Args: []StdArg{
+				{Name: "radians", Type: "float", Optional: false},
+			},
+			Returns:     "float",
+			Description: "Returns the cosine of an angle (in radians).",
+		},
+		"tan": {
+			Name: "tan",
+			Args: []StdArg{
+				{Name: "radians", Type: "float", Optional: false},
+			},
+			Returns:     "float",
+			Description: "Returns the tangent of an angle (in radians).",
+		},
+		"radToDeg": {
+			Name: "radToDeg",
+			Args: []StdArg{
+				{Name: "radians", Type: "float", Optional: false},
+			},
+			Returns:     "float",
+			Description: "Converts radians to degrees.",
+		},
+		"degToRad": {
+			Name: "degToRad",
+			Args: []StdArg{
+				{Name: "degrees", Type: "float", Optional: false},
+			},
+			Returns:     "float",
+			Description: "Converts degrees to radians.",
+		},
+		"atan2": {
+			Name: "atan2",
+			Args: []StdArg{
+				{Name: "y", Type: "float", Optional: false},
+				{Name: "x", Type: "float", Optional: false},
+			},
+			Returns:     "float",
+			Description: "Returns atan2(y, x).",
+		},
+		"sum": {
+			Name: "sum",
+			Args: []StdArg{
+				{Name: "buffer", Type: "buffer", Optional: false},
+			},
+			Returns:     "float",
+			Description: "Returns the sum of all float64 values in a buffer.",
+		},
+		"matMul": {
+			Name: "matMul",
+			Args: []StdArg{
+				{Name: "a", Type: "Object", Optional: false},
+				{Name: "b", Type: "Object", Optional: false},
+			},
+			Returns:     "Object",
+			Description: "Performs matrix multiplication (returns a new matrix object).",
+		},
+		"matTranspose": {
+			Name: "matTranspose",
+			Args: []StdArg{
+				{Name: "matrix", Type: "Object", Optional: false},
+			},
+			Returns:     "Object",
+			Description: "Returns the transpose of a matrix object.",
+		},
+		"matScale": {
+			Name: "matScale",
+			Args: []StdArg{
+				{Name: "matrix", Type: "Object", Optional: false},
+				{Name: "scalar", Type: "float", Optional: false},
+			},
+			Returns:     "Object",
+			Description: "Scales a matrix by a scalar (returns a new matrix object).",
+		},
+	},
+}
+
 var stdMathMethods = map[string]StdModuleFunc{
 	"toFloat":      stdMathToFloat,
 	"toInt":        stdMathToInt,
@@ -32,6 +196,10 @@ var stdMathMethods = map[string]StdModuleFunc{
 	"matMul":       stdMathMatMul,
 	"matTranspose": stdMathMatTranspose,
 	"matScale":     stdMathMatScale,
+}
+
+func init() {
+	registerStdModule(stdMathMetadata)
 }
 
 func (vm *VM) callStdMath(method string, args []Value) {

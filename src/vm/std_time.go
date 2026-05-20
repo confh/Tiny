@@ -6,11 +6,45 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
+var stdTimeMetadata = StdModuleInfo{
+	Name: "time",
+	Methods: map[string]StdMethodInfo{
+		"sleep": {
+			Name:        "sleep",
+			Args:        []StdArg{{Name: "ms", Type: "number", Optional: false}},
+			Returns:     "undefined",
+			Description: "Sleeps for the given number of milliseconds.",
+		},
+		"nowMs": {
+			Name:        "nowMs",
+			Args:        []StdArg{},
+			Returns:     "number",
+			Description: "Returns the current Unix epoch time in milliseconds.",
+		},
+		"nowSec": {
+			Name:        "nowSec",
+			Args:        []StdArg{},
+			Returns:     "number",
+			Description: "Returns the current Unix epoch time in seconds.",
+		},
+		"clock": {
+			Name:        "clock",
+			Args:        []StdArg{},
+			Returns:     "number",
+			Description: "Returns the milliseconds elapsed since VM start.",
+		},
+	},
+}
+
 var stdTimeMethods = map[string]StdModuleFunc{
 	"sleep":  stdTimeSleep,
 	"nowMs":  stdTimeNowMs,
 	"nowSec": stdTimeNowSec,
 	"clock":  stdTimeClock,
+}
+
+func init() {
+	registerStdModule(stdTimeMetadata)
 }
 
 func (vm *VM) callStdTime(method string, args []Value) {

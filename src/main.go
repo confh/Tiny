@@ -51,6 +51,10 @@ func main() {
 		case "task":
 			taskCommand(os.Args[2:])
 			return
+
+		case "lsp":
+			runLSP()
+			return
 		}
 	}
 

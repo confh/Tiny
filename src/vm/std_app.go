@@ -2,8 +2,26 @@ package vm
 
 import . "language.com/src/tinyerrors"
 
+var stdAppMetadata = StdModuleInfo{
+	Name: "app",
+	Methods: map[string]StdMethodInfo{
+		"new": {
+			Name: "new",
+			Args: []StdArg{
+				{Name: "name", Type: "string", Optional: false},
+			},
+			Returns:     "App",
+			Description: "Creates a new app object.",
+		},
+	},
+}
+
 var stdAppMethods = map[string]StdModuleFunc{
 	"new": stdAppNew,
+}
+
+func init() {
+	registerStdModule(stdAppMetadata)
 }
 
 func (vm *VM) callStdApp(method string, args []Value) {

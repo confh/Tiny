@@ -11,10 +11,65 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
+var stdHttpMetadata = StdModuleInfo{
+	Name: "http",
+	Methods: map[string]StdMethodInfo{
+		"server": {
+			Name: "server",
+			Args: []StdArg{
+				{Name: "port", Type: "int", Optional: false},
+			},
+			Returns:     "Server",
+			Description: "Creates a new HTTP server object on the given port.",
+		},
+		"get": {
+			Name: "get",
+			Args: []StdArg{
+				{Name: "url", Type: "string", Optional: false},
+				{Name: "extra", Type: "Object", Optional: false},
+			},
+			Returns:     "Object",
+			Description: "Sends an HTTP GET request to the given URL with optional headers.",
+		},
+		"post": {
+			Name: "post",
+			Args: []StdArg{
+				{Name: "url", Type: "string", Optional: false},
+				{Name: "data", Type: "Object", Optional: false},
+				{Name: "extra", Type: "Object", Optional: true},
+			},
+			Returns:     "Object",
+			Description: "Sends an HTTP POST request to the given URL with a data object and optional headers.",
+		},
+		"json": {
+			Name: "json",
+			Args: []StdArg{
+				{Name: "data", Type: "Object", Optional: false},
+			},
+			Returns:     "HttpResponse",
+			Description: "Creates a JSON HTTP response value with the given data.",
+		},
+		"text": {
+			Name: "text",
+			Args: []StdArg{
+				{Name: "data", Type: "string", Optional: false},
+			},
+			Returns:     "HttpResponse",
+			Description: "Creates a text HTTP response value with the given string.",
+		},
+	},
+}
+
 var stdHttpMethods = map[string]StdModuleFunc{
 	"server": stdHttpServer,
 	"get":    stdHttpGet,
 	"post":   stdHttpPost,
+	"json":   stdHttpJsonResponse,
+	"text":   stdHttpTextResponse,
+}
+
+func init() {
+	registerStdModule(stdHttpMetadata)
 }
 
 func (vm *VM) callStdHttp(method string, args []Value) {
@@ -142,6 +197,28 @@ func stdHttpPost(vm *VM, args []Value) {
 	}
 
 	vm.push(result)
+}
+
+func stdHttpJsonResponse(vm *VM, args []Value) {
+	expectArgs(vm, "http.json", args, 1)
+
+	jsonValue := argObject(vm, "http.json", args, 0)
+
+	vm.push(NativeHttpResponseValue{
+		Type:  HttpJson,
+		Value: jsonValue,
+	})
+}
+
+func stdHttpTextResponse(vm *VM, args []Value) {
+	expectArgs(vm, "http.text", args, 1)
+
+	strValue := argString(vm, "http.text", args, 0)
+
+	vm.push(NativeHttpResponseValue{
+		Type:  HttpText,
+		Value: strValue,
+	})
 }
 
 func cleanMapForJSON(vmMap map[Value]Value) map[string]any {

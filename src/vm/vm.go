@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	json "github.com/goccy/go-json"
 	. "language.com/src/tinyerrors"
 )
 
@@ -2011,7 +2012,7 @@ func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []Value) {
 		LangError(ErrorName, "undefined function: %s", fnValue.Name)
 	}
 
-	expected := len(fn.Params) - 1
+	expected := len(fn.Params)
 
 	if fn.HasDefaults {
 		args = vm.applyDefaultArgs(fn, args, 0, fn.Name)
@@ -2068,20 +2069,19 @@ func (vm *VM) Run() {
 	}
 }
 
-func writeServerResponse(w http.ResponseWriter, text string) {
-	trimmed := strings.TrimSpace(text)
-
-	isJSON := len(trimmed) > 0 &&
-		((trimmed[0] == '{' && trimmed[len(trimmed)-1] == '}') ||
-			(trimmed[0] == '[' && trimmed[len(trimmed)-1] == ']'))
-
-	if isJSON {
+func writeServerResponse(w http.ResponseWriter, value any, responseType HttpResponseType) {
+	switch responseType {
+	case HttpJson:
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, trimmed)
-		return
-	}
+		jsonValue := valueToJSONCompatible(value)
+		bytes, _ := json.Marshal(jsonValue)
+		fmt.Fprint(w, string(bytes))
 
-	fmt.Fprint(w, text)
+	case HttpText:
+		stringValue, _ := value.(string)
+		trimmed := strings.TrimSpace(stringValue)
+		fmt.Fprint(w, trimmed)
+	}
 }
 
 func (vm *VM) callNamespaceMethod(ns NamespaceValue, method string, args []Value) {
@@ -2281,7 +2281,7 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 		LangError(ErrorName, "undefined function: %s", fnValue.Name)
 	}
 
-	expected := len(fn.Params) - 1
+	expected := len(fn.Params)
 
 	if fn.HasDefaults {
 		args = vm.applyDefaultArgs(fn, args, 1, "method "+method)

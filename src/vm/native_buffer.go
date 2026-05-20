@@ -6,16 +6,50 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
+var bufferNativeMetadata = NativeTypeInfo{
+	Name: "buffer",
+	Methods: map[string]StdMethodInfo{
+		"toHex": {
+			Name:        "toHex",
+			Returns:     "string",
+			Description: "Returns the buffer as a hexadecimal string.",
+		},
+		"length": {
+			Name:        "length",
+			Returns:     "number",
+			Description: "Returns the length of the buffer.",
+		},
+		"getU8": {
+			Name: "getU8",
+			Args: []StdArg{
+				{Name: "offset", Type: "number"},
+			},
+			Returns:     "number",
+			Description: "Gets the unsigned 8-bit integer at the specified offset.",
+		},
+		"setU8": {
+			Name: "setU8",
+			Args: []StdArg{
+				{Name: "offset", Type: "number"},
+				{Name: "value", Type: "number"},
+			},
+			Returns:     "bool",
+			Description: "Sets the unsigned 8-bit integer at the specified offset.",
+		},
+	},
+}
+
 var bufferMethods map[string]NativeModuleFunc[*BufferValue]
 
 func init() {
 	bufferMethods = map[string]NativeModuleFunc[*BufferValue]{
-		"toString": bufferToString,
-		"toHex":    bufferToHex,
-		"length":   bufferLength,
-		"getU8":    bufferGetU8,
-		"setU8":    bufferSetU8,
+		"toHex":  bufferToHex,
+		"length": bufferLength,
+		"getU8":  bufferGetU8,
+		"setU8":  bufferSetU8,
 	}
+
+	registerNativeType(bufferNativeMetadata)
 }
 
 func (vm *VM) callBufferMethod(buffer *BufferValue, method string, args []Value) {
@@ -26,12 +60,6 @@ func (vm *VM) callBufferMethod(buffer *BufferValue, method string, args []Value)
 	}
 
 	fn(vm, buffer, args)
-}
-
-func bufferToString(vm *VM, buffer *BufferValue, args []Value) {
-	expectArgs(vm, "buffer.toString", args, 0)
-
-	vm.push(string(buffer.Bytes))
 }
 
 func bufferToHex(vm *VM, buffer *BufferValue, args []Value) {

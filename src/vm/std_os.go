@@ -6,9 +6,31 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
+var stdOSMetadata = StdModuleInfo{
+	Name: "os",
+	Methods: map[string]StdMethodInfo{
+		"name": {
+			Name:        "name",
+			Args:        []StdArg{},
+			Returns:     "string",
+			Description: "Returns the operating system name.",
+		},
+		"arch": {
+			Name:        "arch",
+			Args:        []StdArg{},
+			Returns:     "string",
+			Description: "Returns the current architecture.",
+		},
+	},
+}
+
 var stdOSMethods = map[string]StdModuleFunc{
 	"name": osName,
 	"arch": osArch,
+}
+
+func init() {
+	registerStdModule(stdOSMetadata)
 }
 
 func (vm *VM) callStdOS(method string, args []Value) {

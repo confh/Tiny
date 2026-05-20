@@ -12,6 +12,13 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
+type HttpResponseType = int
+
+const (
+	HttpJson HttpResponseType = iota
+	HttpText
+)
+
 type NullValue struct{}
 
 type UndefinedValue struct{}
@@ -55,6 +62,11 @@ type NativeServerValue struct {
 	PostRoutes map[string]Value
 	mux        *http.ServeMux
 	closed     bool
+}
+
+type NativeHttpResponseValue struct {
+	Type  HttpResponseType
+	Value Value
 }
 
 type NativeAppValue struct {
@@ -478,7 +490,7 @@ func valueToString(value Value) string {
 	case *NativeStringBuilderValue:
 		return "<string builder>"
 	case *BufferValue:
-		return "<buffer " + string(v.Bytes) + ">"
+		return string(v.Bytes)
 	case *NativeProcessValue:
 		return "<process>"
 	default:

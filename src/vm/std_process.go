@@ -10,6 +10,92 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
+var stdProcessMetadata = StdModuleInfo{
+	Name: "process",
+	Methods: map[string]StdMethodInfo{
+		"args": {
+			Name:        "args",
+			Args:        []StdArg{},
+			Returns:     "Array",
+			Description: "Returns an array of command-line arguments with which the process was started.",
+		},
+		"exit": {
+			Name:        "exit",
+			Args:        []StdArg{{Name: "code", Type: "int", Optional: false}},
+			Returns:     "Never",
+			Description: "Ends the process with the specified exit code.",
+		},
+		"close": {
+			Name:        "close",
+			Args:        []StdArg{},
+			Returns:     "Never",
+			Description: "Ends the process with exit code 0.",
+		},
+		"cwd": {
+			Name:        "cwd",
+			Args:        []StdArg{},
+			Returns:     "string",
+			Description: "Returns the current working directory of the process.",
+		},
+		"getEnv": {
+			Name:        "getEnv",
+			Args:        []StdArg{{Name: "key", Type: "string", Optional: false}},
+			Returns:     "string",
+			Description: "Gets the value of an environment variable.",
+		},
+		"setEnv": {
+			Name: "setEnv",
+			Args: []StdArg{
+				{Name: "key", Type: "string", Optional: false},
+				{Name: "value", Type: "string", Optional: false},
+			},
+			Returns:     "void",
+			Description: "Sets the value of an environment variable.",
+		},
+		"unsetEnv": {
+			Name:        "unsetEnv",
+			Args:        []StdArg{{Name: "key", Type: "string", Optional: false}},
+			Returns:     "void",
+			Description: "Removes an environment variable.",
+		},
+		"halt": {
+			Name:        "halt",
+			Args:        []StdArg{},
+			Returns:     "void",
+			Description: "Pauses execution and waits for Enter (console halt for debugging).",
+		},
+		"run": {
+			Name: "run",
+			Args: []StdArg{
+				{Name: "command", Type: "string", Optional: false},
+				{Name: "args", Type: "Array", Optional: true},
+				{Name: "options", Type: "Object", Optional: true},
+			},
+			Returns:     "Object",
+			Description: "Runs a command synchronously, optionally in a different directory and with stdio capture.",
+		},
+		"shell": {
+			Name: "shell",
+			Args: []StdArg{
+				{Name: "command", Type: "string", Optional: false},
+				{Name: "options", Type: "Object", Optional: true},
+			},
+			Returns:     "Object",
+			Description: "Runs a shell command (platform-dependent).",
+		},
+		"start": {
+			Name: "start",
+			Args: []StdArg{
+				{Name: "command", Type: "string", Optional: false},
+				{Name: "args", Type: "Array", Optional: true},
+				{Name: "options", Type: "Object", Optional: true},
+			},
+			Returns:     "Process",
+			Description: "Spawns a new process asynchronously.",
+		},
+	},
+}
+
 var stdProcessMethods = map[string]StdModuleFunc{
 	"args":     processArgs,
 	"exit":     processExit,
@@ -22,6 +108,10 @@ var stdProcessMethods = map[string]StdModuleFunc{
 	"run":      processRun,
 	"shell":    processShell,
 	"start":    processStart,
+}
+
+func init() {
+	registerStdModule(stdProcessMetadata)
 }
 
 func (vm *VM) callStdProcess(method string, args []Value) {

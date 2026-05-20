@@ -149,7 +149,7 @@ func serverStart(vm *VM, server *NativeServerValue, args []Value) {
 
 			switch h := handler.(type) {
 			case string:
-				writeServerResponse(w, h)
+				writeServerResponse(w, h, HttpText)
 
 			case FunctionValue:
 				bodyBytes, err := io.ReadAll(r.Body)
@@ -199,8 +199,12 @@ func serverStart(vm *VM, server *NativeServerValue, args []Value) {
 					result = vm.callFunctionValue(h, []Value{reqObj})
 				}
 
-				writeServerResponse(w, valueToString(result))
+				httpResponseObject, ok := result.(NativeHttpResponseValue)
+				if !ok {
+					vm.runtimeError(ErrorRuntime, "expected httpResponse, got %s.", typeName(result))
+				}
 
+				writeServerResponse(w, httpResponseObject.Value, httpResponseObject.Type)
 			default:
 				vm.runtimeError(ErrorType, "invalid route handler: %s", typeName(handler))
 			}

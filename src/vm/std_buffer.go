@@ -6,10 +6,45 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
+var stdBufferMetadata = StdModuleInfo{
+	Name: "buffer",
+	Methods: map[string]StdMethodInfo{
+		"alloc": {
+			Name: "alloc",
+			Args: []StdArg{
+				{Name: "size", Type: "int", Optional: false},
+				{Name: "fill", Type: "float", Optional: false},
+			},
+			Returns:     "buffer",
+			Description: "Allocates a buffer of floats of a given size, filled with the given value.",
+		},
+		"fromString": {
+			Name: "fromString",
+			Args: []StdArg{
+				{Name: "text", Type: "string", Optional: false},
+			},
+			Returns:     "buffer",
+			Description: "Creates a buffer from a string's raw bytes.",
+		},
+		"fromArray": {
+			Name: "fromArray",
+			Args: []StdArg{
+				{Name: "array", Type: "Array", Optional: false},
+			},
+			Returns:     "buffer",
+			Description: "Creates a buffer from an array of numbers, as a float64 buffer.",
+		},
+	},
+}
+
 var stdBufferMethods = map[string]StdModuleFunc{
 	"fromString": bufferFromString,
 	"fromArray":  bufferFromArray,
 	"alloc":      bufferAlloc,
+}
+
+func init() {
+	registerStdModule(stdBufferMetadata)
 }
 
 func (vm *VM) callStdBuffer(method string, args []Value) {

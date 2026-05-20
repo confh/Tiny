@@ -9,11 +9,51 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
+var stdIOMetadata = StdModuleInfo{
+	Name: "io",
+	Methods: map[string]StdMethodInfo{
+		"print": {
+			Name: "print",
+			Args: []StdArg{
+				{Name: "value", Type: "any", Optional: true},
+			},
+			Returns:     "bool",
+			Description: "Prints a value.",
+		},
+		"println": {
+			Name: "println",
+			Args: []StdArg{
+				{Name: "value", Type: "any", Optional: true},
+			},
+			Returns:     "bool",
+			Description: "Prints a value with a newline.",
+		},
+		"input": {
+			Name: "input",
+			Args: []StdArg{
+				{Name: "prompt", Type: "string", Optional: true},
+			},
+			Returns:     "string",
+			Description: "Reads input from the terminal.",
+		},
+		"readLine": {
+			Name:        "readLine",
+			Args:        []StdArg{},
+			Returns:     "string",
+			Description: "Reads one line of input from the terminal.",
+		},
+	},
+}
+
 var stdIOMethods = map[string]StdModuleFunc{
 	"println":  stdIOPrintln,
 	"print":    stdIOPrint,
 	"input":    stdIOInput,
 	"readLine": stdIOReadLine,
+}
+
+func init() {
+	registerStdModule(stdIOMetadata)
 }
 
 func (vm *VM) callStdIO(method string, args []Value) {

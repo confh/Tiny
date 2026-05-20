@@ -9,10 +9,42 @@ import (
 
 const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
+var stdStringMetadata = StdModuleInfo{
+	Name: "string",
+	Methods: map[string]StdMethodInfo{
+		"newBuilder": {
+			Name:        "newBuilder",
+			Args:        []StdArg{},
+			Returns:     "StringBuilder",
+			Description: "Returns a new string builder object.",
+		},
+		"isDigit": {
+			Name: "isDigit",
+			Args: []StdArg{
+				{Name: "input", Type: "string", Optional: false},
+			},
+			Returns:     "bool",
+			Description: "Returns true if the string only contains digits.",
+		},
+		"random": {
+			Name: "random",
+			Args: []StdArg{
+				{Name: "length", Type: "int", Optional: false},
+			},
+			Returns:     "string",
+			Description: "Returns a random string of the given length using alphanumeric characters.",
+		},
+	},
+}
+
 var stdStringMethods = map[string]StdModuleFunc{
 	"newBuilder": stdStringNewBuilder,
 	"isDigit":    stdStringIsDigit,
 	"random":     stdStringRandom,
+}
+
+func init() {
+	registerStdModule(stdStringMetadata)
 }
 
 func generateRandomString(length int) string {

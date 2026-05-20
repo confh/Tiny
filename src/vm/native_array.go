@@ -7,6 +7,101 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
+var arrayNativeMetadata = NativeTypeInfo{
+	Name: "array",
+	Methods: map[string]StdMethodInfo{
+		"length": {
+			Name:        "length",
+			Returns:     "number",
+			Description: "Returns the array length.",
+		},
+		"push": {
+			Name: "push",
+			Args: []StdArg{
+				{Name: "value", Type: "any"},
+			},
+			Returns:     "array",
+			Description: "Adds a value to the array.",
+		},
+		"get": {
+			Name: "get",
+			Args: []StdArg{
+				{Name: "index", Type: "number"},
+			},
+			Returns:     "any",
+			Description: "Gets an item by index.",
+		},
+		"pop": {
+			Name:        "pop",
+			Returns:     "any",
+			Description: "Removes the last element from the array and returns it.",
+		},
+		"set": {
+			Name: "set",
+			Args: []StdArg{
+				{Name: "index", Type: "number"},
+				{Name: "value", Type: "any"},
+			},
+			Returns:     "array",
+			Description: "Sets the value at the given index.",
+		},
+		"contains": {
+			Name: "contains",
+			Args: []StdArg{
+				{Name: "value", Type: "any"},
+			},
+			Returns:     "bool",
+			Description: "Returns true if the array contains the value.",
+		},
+		"join": {
+			Name: "join",
+			Args: []StdArg{
+				{Name: "separator", Type: "string"},
+			},
+			Returns:     "string",
+			Description: "Joins array elements into a string, separated by the given separator.",
+		},
+		"reverse": {
+			Name:        "reverse",
+			Returns:     "array",
+			Description: "Reverses the array elements in place.",
+		},
+		"map": {
+			Name: "map",
+			Args: []StdArg{
+				{Name: "fn", Type: "function"},
+			},
+			Returns:     "array",
+			Description: "Returns a new array with the results of calling a function on every element.",
+		},
+		"forEach": {
+			Name: "forEach",
+			Args: []StdArg{
+				{Name: "fn", Type: "function"},
+			},
+			Returns:     "bool",
+			Description: "Calls a function for each element in the array.",
+		},
+		"filter": {
+			Name: "filter",
+			Args: []StdArg{
+				{Name: "fn", Type: "function"},
+			},
+			Returns:     "array",
+			Description: "Returns a new array with the elements that pass the test implemented by the function.",
+		},
+		"clear": {
+			Name:        "clear",
+			Returns:     "bool",
+			Description: "Removes all elements from the array.",
+		},
+	},
+}
+
+func init() {
+	registerNativeType(arrayNativeMetadata)
+}
+
 var arrayMethods map[string]NativeModuleFunc[*ArrayValue]
 
 func init() {
@@ -24,6 +119,8 @@ func init() {
 		"filter":   arrayFilter,
 		"clear":    arrayClear,
 	}
+
+	registerNativeType(arrayNativeMetadata)
 }
 
 func (vm *VM) callArrayMethod(array *ArrayValue, method string, args []Value) {
