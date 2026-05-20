@@ -10,116 +10,107 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
-func (vm *VM) callProcessMethod(process *NativeProcessValue, method string, args []Value) {
-	switch method {
-	case "pid":
-		if len(args) != 0 {
-			vm.runtimeError(ErrorRuntime, "process.pid expects 0 arguments")
-		}
+var processMethods map[string]NativeModuleFunc[*NativeProcessValue]
 
-		vm.push(process.Cmd.Process.Pid)
-
-	case "wait":
-		if len(args) != 0 {
-			vm.runtimeError(ErrorRuntime, "process.wait expects 0 arguments")
-		}
-
-		process.Cmd.Wait()
-
-		vm.push(UndefinedValue{})
-
-	case "kill":
-		if len(args) != 0 {
-			vm.runtimeError(ErrorRuntime, "process.kill expects 0 arguments")
-		}
-
-		err := process.Cmd.Process.Kill()
-		if err != nil {
-			vm.runtimeError(ErrorInternal, "could not kill process: %d", process.Cmd.Process.Pid)
-		}
-
-		process.Running = false
-
-		vm.push(UndefinedValue{})
-
-	case "killTree":
-		if len(args) != 0 {
-			vm.runtimeError(ErrorRuntime, "process.killTree expects 0 arguments")
-		}
-
-		switch runtime.GOOS {
-		case "windows":
-			exec.Command("taskkill", "/F", "/T", "/PID", fmt.Sprint(process.Cmd.Process.Pid)).Run()
-
-		case "linux":
-			process.Cmd.Process.Signal(os.Interrupt)
-
-		default:
-			vm.runtimeError(ErrorInternal, "process.killTree is not supported on %s", runtime.GOOS)
-		}
-
-		process.Running = false
-
-		vm.push(UndefinedValue{})
-
-	case "interrupt":
-		if len(args) != 0 {
-			vm.runtimeError(ErrorRuntime, "process.interrupt expects 0 arguments")
-		}
-
-		switch runtime.GOOS {
-		case "windows":
-			process.Cmd.Process.Kill()
-
-		case "linux":
-			process.Cmd.Process.Signal(os.Interrupt)
-
-		default:
-			vm.runtimeError(ErrorInternal, "process.killTree is not supported on %s", runtime.GOOS)
-		}
-
-		process.Running = false
-
-		vm.push(UndefinedValue{})
-
-	case "isRunning":
-		if len(args) != 0 {
-			vm.runtimeError(ErrorRuntime, "process.isRunning expects 0 arguments")
-		}
-
-		vm.push(process.Running)
-
-	case "signal":
-		if len(args) != 1 {
-			vm.runtimeError(ErrorRuntime, "process.signal expects 1 argument")
-		}
-
-		if runtime.GOOS != "linux" {
-			vm.runtimeError(ErrorRuntime, "process.signal is only supported on linux.")
-		}
-
-		availableSignals := []string{
-			"interrupt",
-			"kill",
-		}
-
-		signal := asString(args[0], vm)
-
-		if slices.Contains(availableSignals, signal) {
-			vm.runtimeError(ErrorRuntime, "signal \"%s\" is not a valid signal.", signal)
-		}
-
-		switch signal {
-		case "interrupt":
-			process.Cmd.Process.Signal(os.Interrupt)
-
-		case "kill":
-			process.Cmd.Process.Signal(os.Kill)
-		}
-
-		vm.push(UndefinedValue{})
-
-	default:
-		vm.runtimeError(ErrorName, "unknown process method: %s", method)
+func init() {
+	processMethods = map[string]NativeModuleFunc[*NativeProcessValue]{
+		"pid":       processPid,
+		"wait":      processWait,
+		"kill":      processKill,
+		"killTree":  processKillTree,
+		"interrupt": processInterrupt,
+		"isRunning": processIsRunning,
+		"signal":    processSignal,
 	}
+}
+
+func (vm *VM) callProcessMethod(process *NativeProcessValue, method string, args []Value) {
+	fn, ok := processMethods[method]
+	if !ok {
+		vm.runtimeError(ErrorName, "unknown process method: %s", method)
+		return
+	}
+	fn(vm, process, args)
+}
+
+func processPid(vm *VM, process *NativeProcessValue, args []Value) {
+	expectArgs(vm, "process.pid", args, 0)
+
+	vm.push(process.Cmd.Process.Pid)
+}
+
+func processWait(vm *VM, process *NativeProcessValue, args []Value) {
+	expectArgs(vm, "process.wait", args, 0)
+	process.Cmd.Wait()
+	vm.push(UndefinedValue{})
+}
+
+func processKill(vm *VM, process *NativeProcessValue, args []Value) {
+	expectArgs(vm, "process.kill", args, 0)
+	err := process.Cmd.Process.Kill()
+	if err != nil {
+		vm.runtimeError(ErrorInternal, "could not kill process: %d", process.Cmd.Process.Pid)
+	}
+	process.Running = false
+	vm.push(UndefinedValue{})
+}
+
+func processKillTree(vm *VM, process *NativeProcessValue, args []Value) {
+	expectArgs(vm, "process.killTree", args, 0)
+	switch runtime.GOOS {
+	case "windows":
+		_ = exec.Command("taskkill", "/F", "/T", "/PID", fmt.Sprint(process.Cmd.Process.Pid)).Run()
+	case "linux":
+		_ = process.Cmd.Process.Signal(os.Interrupt)
+	default:
+		vm.runtimeError(ErrorInternal, "process.killTree is not supported on %s", runtime.GOOS)
+	}
+	process.Running = false
+	vm.push(UndefinedValue{})
+}
+
+func processInterrupt(vm *VM, process *NativeProcessValue, args []Value) {
+	expectArgs(vm, "process.interrupt", args, 0)
+	switch runtime.GOOS {
+	case "windows":
+		_ = process.Cmd.Process.Kill()
+	case "linux":
+		_ = process.Cmd.Process.Signal(os.Interrupt)
+	default:
+		vm.runtimeError(ErrorInternal, "process.killTree is not supported on %s", runtime.GOOS)
+	}
+	process.Running = false
+	vm.push(UndefinedValue{})
+}
+
+func processIsRunning(vm *VM, process *NativeProcessValue, args []Value) {
+	expectArgs(vm, "process.isRunning", args, 0)
+	vm.push(process.Running)
+}
+
+func processSignal(vm *VM, process *NativeProcessValue, args []Value) {
+	expectArgs(vm, "process.signal", args, 1)
+	if runtime.GOOS != "linux" {
+		vm.runtimeError(ErrorRuntime, "process.signal is only supported on linux.")
+		return
+	}
+
+	availableSignals := []string{
+		"interrupt",
+		"kill",
+	}
+	signal := argString(vm, "process.signal", args, 0)
+
+	if !slices.Contains(availableSignals, signal) {
+		vm.runtimeError(ErrorRuntime, "signal \"%s\" is not a valid signal.", signal)
+		return
+	}
+
+	switch signal {
+	case "interrupt":
+		_ = process.Cmd.Process.Signal(os.Interrupt)
+	case "kill":
+		_ = process.Cmd.Process.Signal(os.Kill)
+	}
+	vm.push(UndefinedValue{})
 }

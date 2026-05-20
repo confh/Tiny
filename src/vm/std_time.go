@@ -6,39 +6,40 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
+var stdTimeMethods = map[string]StdModuleFunc{
+	"sleep":  stdTimeSleep,
+	"nowMs":  stdTimeNowMs,
+	"nowSec": stdTimeNowSec,
+	"clock":  stdTimeClock,
+}
+
 func (vm *VM) callStdTime(method string, args []Value) {
-	switch method {
-	case "sleep":
-		if len(args) != 1 {
-			vm.runtimeError(ErrorRuntime, "time.sleep expects 1 argument")
-		}
-
-		time.Sleep(time.Duration(asInt(args[0])) * time.Millisecond)
-
-		vm.push(UndefinedValue{})
-
-	case "nowMs":
-		if len(args) != 0 {
-			vm.runtimeError(ErrorRuntime, "time.nowMs expects 0 arguments")
-		}
-
-		vm.push(time.Now().UnixMilli())
-
-	case "nowSec":
-		if len(args) != 0 {
-			vm.runtimeError(ErrorRuntime, "time.nowSec expects 0 arguments")
-		}
-
-		vm.push(time.Now().Unix())
-
-	case "clock":
-		if len(args) != 0 {
-			vm.runtimeError(ErrorRuntime, "time.clock() expects 0 arguments")
-		}
-
-		vm.push(int(time.Now().UnixMilli() - vm.start))
-
-	default:
+	fn, ok := stdTimeMethods[method]
+	if !ok {
 		vm.runtimeError(ErrorName, "unknown time function: %s", method)
+		return
 	}
+	fn(vm, args)
+}
+
+func stdTimeSleep(vm *VM, args []Value) {
+	expectArgs(vm, "time.sleep", args, 1)
+	ms := argInt(vm, "time.sleep", args, 0)
+	time.Sleep(time.Duration(ms) * time.Millisecond)
+	vm.push(UndefinedValue{})
+}
+
+func stdTimeNowMs(vm *VM, args []Value) {
+	dontExpectArgs(vm, "time.nowMs", args)
+	vm.push(time.Now().UnixMilli())
+}
+
+func stdTimeNowSec(vm *VM, args []Value) {
+	dontExpectArgs(vm, "time.nowSec", args)
+	vm.push(time.Now().Unix())
+}
+
+func stdTimeClock(vm *VM, args []Value) {
+	dontExpectArgs(vm, "time.clock", args)
+	vm.push(int(time.Now().UnixMilli() - vm.start))
 }

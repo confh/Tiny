@@ -6,15 +6,28 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
+var stdOSMethods = map[string]StdModuleFunc{
+	"name": osName,
+	"arch": osArch,
+}
+
 func (vm *VM) callStdOS(method string, args []Value) {
-	switch method {
-	case "name":
-		vm.push(runtime.GOOS)
-
-	case "arch":
-		vm.push(runtime.GOARCH)
-
-	default:
-		vm.runtimeError(ErrorName, "unknown buffer function: %s", method)
+	fn, ok := stdOSMethods[method]
+	if !ok {
+		vm.runtimeError(ErrorName, "unknown os function: %s", method)
+		return
 	}
+	fn(vm, args)
+}
+
+func osName(vm *VM, args []Value) {
+	dontExpectArgs(vm, "os.name", args)
+
+	vm.push(runtime.GOOS)
+}
+
+func osArch(vm *VM, args []Value) {
+	dontExpectArgs(vm, "os.arch", args)
+
+	vm.push(runtime.GOARCH)
 }

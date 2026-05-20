@@ -9,6 +9,12 @@ import (
 
 const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
+var stdStringMethods = map[string]StdModuleFunc{
+	"newBuilder": stdStringNewBuilder,
+	"isDigit":    stdStringIsDigit,
+	"random":     stdStringRandom,
+}
+
 func generateRandomString(length int) string {
 	b := make([]byte, length)
 	for i := range b {
@@ -30,35 +36,33 @@ func isDigit(s string) bool {
 }
 
 func (vm *VM) callStdString(method string, args []Value) {
-	switch method {
-	case "newBuilder":
-		if len(args) != 0 {
-			vm.runtimeError(ErrorRuntime, "string.newBuilder expects 0 arguments")
-		}
-
-		sb := &strings.Builder{}
-		vm.push(&NativeStringBuilderValue{
-			Builder: sb,
-		})
-
-	case "isDigit":
-		if (len(args)) != 1 {
-			vm.runtimeError(ErrorRuntime, "string.isDigit expects 1 argument")
-		}
-
-		value := asString(args[0], vm)
-
-		vm.push(isDigit(value))
-	case "random":
-		if (len(args)) != 1 {
-			vm.runtimeError(ErrorRuntime, "string.random expects 1 argument")
-		}
-
-		length := asInt(args[0])
-
-		vm.push(generateRandomString(length))
-
-	default:
+	fn, ok := stdStringMethods[method]
+	if !ok {
 		vm.runtimeError(ErrorName, "unknown String function: %s", method)
+		return
 	}
+	fn(vm, args)
+}
+
+func stdStringNewBuilder(vm *VM, args []Value) {
+	dontExpectArgs(vm, "string.newBuilder", args)
+
+	sb := &strings.Builder{}
+	vm.push(&NativeStringBuilderValue{
+		Builder: sb,
+	})
+}
+
+func stdStringIsDigit(vm *VM, args []Value) {
+	expectArgs(vm, "string.isDigit", args, 1)
+
+	value := argString(vm, "string.isDigit", args, 0)
+	vm.push(isDigit(value))
+}
+
+func stdStringRandom(vm *VM, args []Value) {
+	expectArgs(vm, "string.random", args, 1)
+
+	length := argInt(vm, "string.random", args, 0)
+	vm.push(generateRandomString(length))
 }

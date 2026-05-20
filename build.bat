@@ -2,6 +2,7 @@
 setlocal
 
 echo Building Tiny Windows runtime...
+set CGO_LDFLAGS=-LC:\msys64\mingw64\lib -lopenblas
 set GOOS=windows
 set GOARCH=amd64
 go build -ldflags "-s -w" -o src\embedded\tiny_runtime_windows_amd64.exe .\src\cmd\tiny_runtime
