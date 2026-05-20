@@ -10,6 +10,50 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
+var processNativeMetadata = NativeTypeInfo{
+	Name: "process",
+	Methods: map[string]StdMethodInfo{
+		"pid": {
+			Name:        "pid",
+			Returns:     "number",
+			Description: "Returns the process PID.",
+		},
+		"wait": {
+			Name:        "wait",
+			Returns:     "void",
+			Description: "Waits for the process to exit.",
+		},
+		"kill": {
+			Name:        "kill",
+			Returns:     "void",
+			Description: "Kills the process.",
+		},
+		"killTree": {
+			Name:        "killTree",
+			Returns:     "void",
+			Description: "Kills the process and its child processes.",
+		},
+		"interrupt": {
+			Name:        "interrupt",
+			Returns:     "void",
+			Description: "Interrupts the process.",
+		},
+		"isRunning": {
+			Name:        "isRunning",
+			Returns:     "bool",
+			Description: "Returns true if the process is still running.",
+		},
+		"signal": {
+			Name: "signal",
+			Args: []StdArg{
+				{Name: "signal", Type: "string"},
+			},
+			Returns:     "void",
+			Description: "Sends a signal to the process (linux only).",
+		},
+	},
+}
+
 var processMethods map[string]NativeModuleFunc[*NativeProcessValue]
 
 func init() {
@@ -22,6 +66,7 @@ func init() {
 		"isRunning": processIsRunning,
 		"signal":    processSignal,
 	}
+	registerNativeType(processNativeMetadata)
 }
 
 func (vm *VM) callProcessMethod(process *NativeProcessValue, method string, args []Value) {
@@ -35,7 +80,6 @@ func (vm *VM) callProcessMethod(process *NativeProcessValue, method string, args
 
 func processPid(vm *VM, process *NativeProcessValue, args []Value) {
 	expectArgs(vm, "process.pid", args, 0)
-
 	vm.push(process.Cmd.Process.Pid)
 }
 

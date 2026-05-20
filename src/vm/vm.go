@@ -2240,7 +2240,7 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 		return
 
 	case *NativeStringBuilderValue:
-		vm.callTextBuilderMethod(val, method, args)
+		vm.callStringBuilderMethod(val, method, args)
 		return
 
 	case string:

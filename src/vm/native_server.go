@@ -9,6 +9,47 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
+var serverNativeMetadata = NativeTypeInfo{
+	Name: "server",
+	Methods: map[string]StdMethodInfo{
+		"getPrettyJSON": {
+			Name:        "getPrettyJSON",
+			Args:        []StdArg{{Name: "path", Type: "string"}, {Name: "value", Type: "any"}},
+			Returns:     "void",
+			Description: "Register a GET route that responds with pretty-printed JSON.",
+		},
+		"getJSON": {
+			Name:        "getJSON",
+			Args:        []StdArg{{Name: "path", Type: "string"}, {Name: "value", Type: "any"}},
+			Returns:     "void",
+			Description: "Register a GET route that responds with minified JSON.",
+		},
+		"get": {
+			Name:        "get",
+			Args:        []StdArg{{Name: "path", Type: "string"}, {Name: "handler", Type: "string|function"}},
+			Returns:     "void",
+			Description: "Register a GET route. Handler can be a string or a function.",
+		},
+		"post": {
+			Name:        "post",
+			Args:        []StdArg{{Name: "path", Type: "string"}, {Name: "handler", Type: "string|function"}},
+			Returns:     "void",
+			Description: "Register a POST route. Handler can be a string or a function.",
+		},
+		"stop": {
+			Name:        "stop",
+			Returns:     "bool",
+			Description: "Stops the server.",
+		},
+		"start": {
+			Name:        "start",
+			Args:        []StdArg{{Name: "async", Type: "bool", Optional: true}},
+			Returns:     "void",
+			Description: "Starts the server. Pass 'true' to run asynchronously.",
+		},
+	},
+}
+
 var serverMethods map[string]NativeModuleFunc[*NativeServerValue]
 
 func init() {
@@ -20,6 +61,7 @@ func init() {
 		"stop":          serverStop,
 		"start":         serverStart,
 	}
+	registerNativeType(serverNativeMetadata)
 }
 
 func (vm *VM) callServerMethod(server *NativeServerValue, method string, args []Value) {

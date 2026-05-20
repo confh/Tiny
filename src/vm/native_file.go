@@ -7,7 +7,6 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
-// Metadata for native File type
 var fileNativeMetadata = NativeTypeInfo{
 	Name: "file",
 	Methods: map[string]StdMethodInfo{

@@ -893,7 +893,6 @@ func handleLSPMessage(msg LSPMessage) {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					lspDebug("signatureHelp panic: %v", r)
 					result = nil
 				}
 			}()
@@ -917,7 +916,6 @@ func handleLSPMessage(msg LSPMessage) {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					lspDebug("definition panic: %v", r)
 					result = nil
 				}
 			}()
@@ -944,7 +942,6 @@ func handleLSPMessage(msg LSPMessage) {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					lspDebug("documentSymbol panic: %v", r)
 					result = []DocumentSymbol{}
 				}
 			}()
@@ -968,7 +965,6 @@ func handleLSPMessage(msg LSPMessage) {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					lspDebug("formatting panic: %v", r)
 					result = []TextEdit{}
 				}
 			}()
@@ -999,7 +995,6 @@ func handleLSPMessage(msg LSPMessage) {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					lspDebug("hover panic: %v", r)
 					result = nil
 				}
 			}()
@@ -1080,14 +1075,15 @@ func initLSPLogger() {
 	}
 }
 
-func lspDebug(format string, args ...any) {
-	if lspLogFile == nil {
-		return
-	}
+// func lspDebug(format string, args ...any) {
+// 	if lspLogFile == nil {
+// 		return
+// 	}
 
-	fmt.Fprintf(lspLogFile, "[tiny-lsp] "+format+"\n", args...)
-	lspLogFile.Sync()
-}
+// 	fmt.Fprintf(lspLogFile, "[tiny-lsp] "+format+"\n", args...)
+// 	lspLogFile.Sync()
+// }
+
 func publishDiagnostics(uri string, text string) {
 	_, parseDiagnostics := parseTinyForLSP(uri, text)
 
