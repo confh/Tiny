@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -37,6 +38,8 @@ type VM struct {
 	mainInstructions []Instruction
 	functions        map[string]Function
 	classes          map[string]Class
+	framePool        []Frame
+	functionList     []Function
 
 	top int
 
@@ -130,10 +133,13 @@ func FloatToString(val float64) string {
 }
 
 func NewVM(mainInstructions []Instruction, functions map[string]Function, classes map[string]Class) *VM {
+	mainInstructions, functions, functionList := normalizeFunctionIDs(mainInstructions, functions)
+
 	return &VM{
 		start:            time.Now().UnixMilli(),
 		mainInstructions: mainInstructions,
 		functions:        functions,
+		functionList:     functionList,
 		classes:          classes,
 		globals:          map[string]Value{},
 		globalConstants:  map[string]bool{},
@@ -141,12 +147,159 @@ func NewVM(mainInstructions []Instruction, functions map[string]Function, classe
 		cliArgs:          []string{},
 		globalTypes:      map[string]TypeHint{},
 		top:              0,
-		stack:            make([]Value, 256),
+		stack:            make([]Value, 1024),
+		framePool:        make([]Frame, 0, 1024),
 	}
+}
+
+func normalizeFunctionIDs(
+	mainInstructions []Instruction,
+	functions map[string]Function,
+) ([]Instruction, map[string]Function, []Function) {
+	names := make([]string, 0, len(functions))
+
+	for name := range functions {
+		names = append(names, name)
+	}
+
+	sort.Strings(names)
+
+	ids := map[string]int{}
+	functionList := make([]Function, len(names))
+
+	for id, name := range names {
+		ids[name] = id
+
+		fn := functions[name]
+		fn.ID = id
+		functions[name] = fn
+	}
+
+	remapDirectCallIDs(mainInstructions, ids)
+
+	for name, fn := range functions {
+		remapDirectCallIDs(fn.Instructions, ids)
+
+		id := ids[name]
+		fn.ID = id
+		functions[name] = fn
+		functionList[id] = fn
+	}
+
+	return mainInstructions, functions, functionList
+}
+
+func remapDirectCallIDs(instructions []Instruction, ids map[string]int) {
+	for i := range instructions {
+		if instructions[i].Op != OP_CALL_DIRECT {
+			continue
+		}
+
+		info, ok := instructions[i].Value.(DirectCallInfo)
+		if !ok {
+			continue
+		}
+
+		id, exists := ids[info.Name]
+		if !exists {
+			continue
+		}
+
+		info.ID = id
+		instructions[i].Value = info
+	}
+}
+
+func buildFunctionList(functions map[string]Function) []Function {
+	maxID := -1
+
+	for _, fn := range functions {
+		if fn.ID > maxID {
+			maxID = fn.ID
+		}
+	}
+
+	if maxID < 0 {
+		return []Function{}
+	}
+
+	list := make([]Function, maxID+1)
+
+	for _, fn := range functions {
+		if fn.ID >= 0 {
+			list[fn.ID] = fn
+		}
+	}
+
+	return list
 }
 
 func (vm *VM) SetCLIArgs(args []string) {
 	vm.cliArgs = args
+}
+
+func (vm *VM) getFrame(fn Function) Frame {
+	var frame Frame
+
+	if len(vm.framePool) > 0 {
+		last := len(vm.framePool) - 1
+		frame = vm.framePool[last]
+		vm.framePool = vm.framePool[:last]
+	}
+
+	if cap(frame.locals) < fn.LocalCount {
+		frame.locals = make([]*Cell, fn.LocalCount)
+	} else {
+		frame.locals = frame.locals[:fn.LocalCount]
+	}
+
+	if cap(frame.constants) < fn.LocalCount {
+		frame.constants = make([]bool, fn.LocalCount)
+	} else {
+		frame.constants = frame.constants[:fn.LocalCount]
+	}
+
+	if cap(frame.localTypes) < fn.LocalCount {
+		frame.localTypes = make([]TypeHint, fn.LocalCount)
+	} else {
+		frame.localTypes = frame.localTypes[:fn.LocalCount]
+	}
+
+	for i := 0; i < fn.LocalCount; i++ {
+		if frame.locals[i] == nil {
+			frame.locals[i] = &Cell{}
+		}
+
+		frame.locals[i].Value = UndefinedValue{}
+		frame.constants[i] = false
+		frame.localTypes[i] = TypeHint{}
+	}
+
+	frame.function = fn
+	frame.ip = 0
+	frame.instructions = fn.Instructions
+
+	return frame
+}
+
+func (vm *VM) releaseFrame(frame Frame) {
+	// Keep pool from growing forever.
+	if len(vm.framePool) >= 1024 {
+		return
+	}
+
+	// Clear references so big objects can be GC'd.
+	for i := range frame.locals {
+		if frame.locals[i] != nil {
+			frame.locals[i].Value = nil
+		}
+	}
+
+	frame.function = Function{}
+	frame.instructions = nil
+	frame.ip = 0
+
+	vm.framePool = append(vm.framePool, frame)
 }
 
 func (vm *VM) CloneForTask() *VM {
@@ -154,8 +307,10 @@ func (vm *VM) CloneForTask() *VM {
 		mainInstructions: vm.mainInstructions,
 		functions:        vm.functions,
 		classes:          vm.classes,
+		functionList:     vm.functionList,
 
 		stack:       make([]Value, 256),
+		framePool:   make([]Frame, 0, 256),
 		frames:      []Frame{},
 		tryHandlers: []TryHandler{},
 
@@ -183,35 +338,30 @@ func (vm *VM) callClassWithArgs(class Class, args []Value) {
 			LangError(ErrorName, "undefined init function: %s", initName)
 		}
 
-		args = vm.applyDefaultArgs(fn, args, 1, "class "+class.Name+" constructor")
+		expected := len(fn.Params) - 1
 
-		locals := make([]*Cell, fn.LocalCount)
-		constants := make([]bool, fn.LocalCount)
-
-		locals[0] = &Cell{Value: object}
-		constants[0] = true
-
-		for i, arg := range args {
-			locals[i+1] = &Cell{Value: arg}
-			constants[i+1] = false
-		}
-
-		for i := range locals {
-			if locals[i] == nil {
-				locals[i] = &Cell{Value: UndefinedValue{}}
-			}
+		if fn.HasDefaults {
+			args = vm.applyDefaultArgs(fn, args, 1, "class "+class.Name+" constructor")
+		} else if len(args) != expected {
+			vm.runtimeError(
+				ErrorRuntime,
+				"class %s constructor expects %d arguments, got %d",
+				class.Name,
+				expected,
+				len(args),
+			)
 		}
 
 		frameDepthBefore := len(vm.frames)
-		localTypes := make([]TypeHint, fn.LocalCount)
 
-		frame := Frame{
-			function:     fn,
-			ip:           0,
-			locals:       locals,
-			constants:    constants,
-			instructions: fn.Instructions,
-			localTypes:   localTypes,
+		frame := vm.getFrame(fn)
+
+		frame.locals[0].Value = object
+		frame.constants[0] = true
+
+		for i, arg := range args {
+			frame.locals[i+1].Value = arg
+			frame.constants[i+1] = false
 		}
 
 		vm.frames = append(vm.frames, frame)
@@ -341,6 +491,70 @@ func (vm *VM) objectIsOrEmbedsClass(object ObjectValue, className string) bool {
 	return false
 }
 
+func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableName string) {
+	// If function has defaults, use the old path because args may need to be filled.
+	if fn.HasDefaults {
+		args := vm.popArgs(argCount)
+		args = vm.applyDefaultArgs(fn, args, 0, callableName)
+		vm.callFunctionDirect(fn, args)
+		return
+	}
+
+	if argCount != len(fn.Params) {
+		vm.runtimeError(
+			ErrorRuntime,
+			"%s expects %d arguments, got %d",
+			callableName,
+			len(fn.Params),
+			argCount,
+		)
+		return
+	}
+
+	if vm.top < argCount {
+		vm.handleUnderflow()
+		return
+	}
+
+	frame := vm.getFrame(fn)
+
+	start := vm.top - argCount
+
+	if fn.HasTypeHints {
+		for i := 0; i < argCount; i++ {
+			arg := vm.stack[start+i]
+			param := fn.Params[i]
+
+			if !param.TypeHint.IsEmpty() && !checkTypeHint(arg, param.TypeHint) {
+				LangError(
+					ErrorType,
+					"function %s parameter %s expected %s, got %s",
+					fn.Name,
+					param.Name,
+					param.TypeHint.Name,
+					typeName(arg),
+				)
+			}
+
+			frame.locals[i].Value = arg
+			frame.constants[i] = false
+			frame.localTypes[i] = param.TypeHint
+
+			vm.stack[start+i] = nil
+		}
+	} else {
+		for i := 0; i < argCount; i++ {
+			frame.locals[i].Value = vm.stack[start+i]
+			frame.constants[i] = false
+
+			vm.stack[start+i] = nil
+		}
+	}
+
+	vm.top = start
+	vm.frames = append(vm.frames, frame)
+}
+
 func (vm *VM) step() bool {
 	instructions := vm.currentInstructions()
 	ip := vm.currentIP()
@@ -363,6 +577,320 @@ func (vm *VM) step() bool {
 	vm.incrementIP()
 
 	switch instr.Op {
+	case OP_JUMP_LOCAL_GE_LOCAL:
+		info := instr.Value.(JumpLocalGELocalInfo)
+
+		frame := &vm.frames[len(vm.frames)-1]
+
+		leftCell := frame.locals[info.LeftSlot]
+		rightCell := frame.locals[info.RightSlot]
+
+		if leftCell == nil || rightCell == nil {
+			LangError(ErrorInternal, "nil local in OP_JUMP_LOCAL_GE_LOCAL")
+		}
+
+		left := leftCell.Value
+		right := rightCell.Value
+
+		shouldJump := false
+
+		switch l := left.(type) {
+		case int:
+			switch r := right.(type) {
+			case int:
+				shouldJump = l >= r
+			case int64:
+				shouldJump = int64(l) >= r
+			case float64:
+				shouldJump = float64(l) >= r
+			default:
+				LangError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
+			}
+
+		case int64:
+			switch r := right.(type) {
+			case int:
+				shouldJump = l >= int64(r)
+			case int64:
+				shouldJump = l >= r
+			case float64:
+				shouldJump = float64(l) >= r
+			default:
+				LangError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
+			}
+
+		case float64:
+			shouldJump = l >= asFloat64(right)
+
+		default:
+			LangError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
+		}
+
+		if shouldJump {
+			frame.ip = info.Target
+		}
+
+	case OP_JUMP_MOD_LOCAL_LOCAL_NOT_ZERO:
+		info := instr.Value.(JumpModLocalLocalNotZeroInfo)
+
+		frame := &vm.frames[len(vm.frames)-1]
+
+		leftCell := frame.locals[info.LeftSlot]
+		rightCell := frame.locals[info.RightSlot]
+
+		if leftCell == nil || rightCell == nil {
+			LangError(ErrorInternal, "nil local in OP_JUMP_MOD_LOCAL_LOCAL_NOT_ZERO")
+		}
+
+		left := leftCell.Value
+		right := rightCell.Value
+
+		shouldJump := false
+
+		switch l := left.(type) {
+		case int:
+			r := asInt(right)
+			if r == 0 {
+				LangError(ErrorRuntime, "cannot modulo by zero")
+			}
+			shouldJump = l%r != 0
+
+		case int64:
+			r := int64(asInt(right))
+			if r == 0 {
+				LangError(ErrorRuntime, "cannot modulo by zero")
+			}
+			shouldJump = l%r != 0
+
+		case float64:
+			r := asFloat64(right)
+			if r == 0 {
+				LangError(ErrorRuntime, "cannot modulo by zero")
+			}
+			shouldJump = math.Mod(l, r) != 0
+
+		default:
+			LangError(ErrorType, "cannot modulo %s and %s", typeName(left), typeName(right))
+		}
+
+		if shouldJump {
+			frame.ip = info.Target
+		}
+
+	case OP_ADD_ASSIGN_LOCAL:
+		info := instr.Value.(AssignLocalInfo)
+
+		frame := &vm.frames[len(vm.frames)-1]
+
+		if info.TargetSlot < 0 || info.TargetSlot >= len(frame.locals) {
+			LangError(ErrorInternal, "target local slot out of range in OP_ADD_ASSIGN_LOCAL")
+		}
+
+		if info.SourceSlot < 0 || info.SourceSlot >= len(frame.locals) {
+			LangError(ErrorInternal, "source local slot out of range in OP_ADD_ASSIGN_LOCAL")
+		}
+
+		targetCell := frame.locals[info.TargetSlot]
+		sourceCell := frame.locals[info.SourceSlot]
+
+		if targetCell == nil || sourceCell == nil {
+			LangError(ErrorInternal, "nil local cell in OP_ADD_ASSIGN_LOCAL")
+		}
+
+		if frame.constants[info.TargetSlot] {
+			LangError(ErrorConst, "cannot assign to constant local")
+		}
+
+		switch target := targetCell.Value.(type) {
+		case int:
+			switch source := sourceCell.Value.(type) {
+			case int:
+				targetCell.Value = target + source
+			case int64:
+				targetCell.Value = int64(target) + source
+			case float64:
+				targetCell.Value = float64(target) + source
+			case float32:
+				targetCell.Value = float32(target) + source
+			default:
+				LangError(ErrorType, "cannot add %s and %s", typeName(targetCell.Value), typeName(sourceCell.Value))
+			}
+
+		case int64:
+			switch source := sourceCell.Value.(type) {
+			case int:
+				targetCell.Value = target + int64(source)
+			case int64:
+				targetCell.Value = target + source
+			case float64:
+				targetCell.Value = float64(target) + source
+			case float32:
+				targetCell.Value = float32(target) + source
+			default:
+				LangError(ErrorType, "cannot add %s and %s", typeName(targetCell.Value), typeName(sourceCell.Value))
+			}
+
+		case float64:
+			switch source := sourceCell.Value.(type) {
+			case int:
+				targetCell.Value = target + float64(source)
+			case int64:
+				targetCell.Value = target + float64(source)
+			case float64:
+				targetCell.Value = target + source
+			case float32:
+				targetCell.Value = target + float64(source)
+			default:
+				LangError(ErrorType, "cannot add %s and %s", typeName(targetCell.Value), typeName(sourceCell.Value))
+			}
+
+		case float32:
+			switch source := sourceCell.Value.(type) {
+			case int:
+				targetCell.Value = target + float32(source)
+			case int64:
+				targetCell.Value = target + float32(source)
+			case float64:
+				targetCell.Value = float64(target) + source
+			case float32:
+				targetCell.Value = target + source
+			default:
+				LangError(ErrorType, "cannot add %s and %s", typeName(targetCell.Value), typeName(sourceCell.Value))
+			}
+
+		case string:
+			targetCell.Value = target + valueToString(sourceCell.Value)
+
+		default:
+			LangError(ErrorType, "cannot add to %s", typeName(targetCell.Value))
+		}
+
+	case OP_SUB_ASSIGN_LOCAL:
+		info := instr.Value.(AssignLocalInfo)
+
+		frame := &vm.frames[len(vm.frames)-1]
+
+		if info.TargetSlot < 0 || info.TargetSlot >= len(frame.locals) {
+			LangError(ErrorInternal, "target local slot out of range in OP_SUB_ASSIGN_LOCAL")
+		}
+
+		if info.SourceSlot < 0 || info.SourceSlot >= len(frame.locals) {
+			LangError(ErrorInternal, "source local slot out of range in OP_SUB_ASSIGN_LOCAL")
+		}
+
+		targetCell := frame.locals[info.TargetSlot]
+		sourceCell := frame.locals[info.SourceSlot]
+
+		if targetCell == nil || sourceCell == nil {
+			LangError(ErrorInternal, "nil local cell in OP_SUB_ASSIGN_LOCAL")
+		}
+
+		if frame.constants[info.TargetSlot] {
+			LangError(ErrorConst, "cannot assign to constant local")
+		}
+
+		switch target := targetCell.Value.(type) {
+		case int:
+			switch source := sourceCell.Value.(type) {
+			case int:
+				targetCell.Value = target - source
+			case int64:
+				targetCell.Value = int64(target) - source
+			case float64:
+				targetCell.Value = float64(target) - source
+			case float32:
+				targetCell.Value = float32(target) - source
+			default:
+				LangError(ErrorType, "cannot subtract %s and %s", typeName(targetCell.Value), typeName(sourceCell.Value))
+			}
+
+		case int64:
+			switch source := sourceCell.Value.(type) {
+			case int:
+				targetCell.Value = target - int64(source)
+			case int64:
+				targetCell.Value = target - source
+			case float64:
+				targetCell.Value = float64(target) - source
+			case float32:
+				targetCell.Value = float32(target) - source
+			default:
+				LangError(ErrorType, "cannot subtract %s and %s", typeName(targetCell.Value), typeName(sourceCell.Value))
+			}
+
+		case float64:
+			switch source := sourceCell.Value.(type) {
+			case int:
+				targetCell.Value = target - float64(source)
+			case int64:
+				targetCell.Value = target - float64(source)
+			case float64:
+				targetCell.Value = target - source
+			case float32:
+				targetCell.Value = target - float64(source)
+			default:
+				LangError(ErrorType, "cannot subtract %s and %s", typeName(targetCell.Value), typeName(sourceCell.Value))
+			}
+
+		case float32:
+			switch source := sourceCell.Value.(type) {
+			case int:
+				targetCell.Value = target - float32(source)
+			case int64:
+				targetCell.Value = target - float32(source)
+			case float64:
+				targetCell.Value = float64(target) - source
+			case float32:
+				targetCell.Value = target - source
+			default:
+				LangError(ErrorType, "cannot subtract %s and %s", typeName(targetCell.Value), typeName(sourceCell.Value))
+			}
+
+		default:
+			LangError(ErrorType, "cannot subtract to %s", typeName(targetCell.Value))
+		}
+
+	case OP_JUMP_LOCAL_GE_CONST:
+		info := instr.Value.(JumpLocalGEConstInfo)
+
+		frame := &vm.frames[len(vm.frames)-1]
+
+		if info.Slot < 0 || info.Slot >= len(frame.locals) {
+			LangError(ErrorInternal, "local slot out of range in OP_JUMP_LOCAL_GE_CONST")
+		}
+
+		cell := frame.locals[info.Slot]
+		if cell == nil {
+			LangError(ErrorInternal, "local cell is nil in OP_JUMP_LOCAL_GE_CONST")
+		}
+
+		shouldJump := false
+
+		switch v := cell.Value.(type) {
+		case int:
+			shouldJump = v >= info.Value
+
+		case int64:
+			shouldJump = v >= int64(info.Value)
+
+		case float64:
+			shouldJump = v >= float64(info.Value)
+
+		case float32:
+			shouldJump = v >= float32(info.Value)
+
+		default:
+			LangError(ErrorType, "cannot compare %s and number", typeName(cell.Value))
+		}
+
+		if shouldJump {
+			if len(vm.frames) == 0 {
+				vm.ip = info.Target
+			} else {
+				vm.frames[len(vm.frames)-1].ip = info.Target
+			}
+		}
+
 	case OP_STRING_JOIN:
 		count := instr.Value.(int)
 
@@ -379,15 +907,28 @@ func (vm *VM) step() bool {
 	case OP_CALL_DIRECT:
 		info := instr.Value.(DirectCallInfo)
 
-		args := vm.popArgs(info.ArgCount)
+		var fn Function
+		var ok bool
 
-		fn, ok := vm.functions[info.Name]
-		if !ok {
-			vm.runtimeError(ErrorName, "undefined function: %s", info.Name)
-			return false
+		if info.ID >= 0 && info.ID < len(vm.functionList) {
+			fn = vm.functionList[info.ID]
+
+			if fn.Name != info.Name {
+				fn, ok = vm.functions[info.Name]
+				if !ok {
+					vm.runtimeError(ErrorName, "undefined function: %s", info.Name)
+					return false
+				}
+			}
+		} else {
+			fn, ok = vm.functions[info.Name]
+			if !ok {
+				vm.runtimeError(ErrorName, "invalid function id for %s", info.Name)
+				return false
+			}
 		}
 
-		vm.callFunctionDirect(fn, args)
+		vm.callFunctionDirectFromStack(fn, info.ArgCount, "function "+info.Name)
 
 	case OP_INSTANCEOF:
 		classValue := vm.pop()
@@ -719,53 +1260,38 @@ func (vm *VM) step() bool {
 
 	case OP_INC_LOCAL:
 		info := instr.Value.(IncrementInfo)
-		slot := info.Slot
 
-		frame := vm.currentFrame()
+		frame := &vm.frames[len(vm.frames)-1]
 
-		if slot < 0 || slot >= len(frame.locals) {
-			LangError(
-				ErrorInternal,
-				"local slot out of range: function=%s slot=%d locals=%d",
-				frame.function.Name,
-				slot,
-				len(frame.locals),
-			)
+		if info.Slot < 0 || info.Slot >= len(frame.locals) {
+			LangError(ErrorInternal, "local slot out of range in OP_INC_LOCAL")
 		}
 
-		if frame.locals[slot] == nil {
-			LangError(
-				ErrorInternal,
-				"local slot is nil during increment: function=%s slot=%d locals=%d",
-				frame.function.Name,
-				slot,
-				len(frame.locals),
-			)
+		cell := frame.locals[info.Slot]
+
+		if cell == nil {
+			LangError(ErrorInternal, "local cell is nil in OP_INC_LOCAL")
 		}
 
-		if frame.constants[slot] {
-			LangError(ErrorConst, "cannot increment constant local")
+		if frame.constants[info.Slot] {
+			LangError(ErrorConst, "cannot assign to constant local")
 		}
 
-		value := frame.locals[slot].Value
-
-		switch v := value.(type) {
+		switch v := cell.Value.(type) {
 		case int:
-			if info.IsFloat {
-				frame.locals[slot].Value = float64(v) + info.FloatAmount
-			} else {
-				frame.locals[slot].Value = v + info.IntAmount
-			}
+			cell.Value = v + info.IntAmount
+
+		case int64:
+			cell.Value = v + int64(info.IntAmount)
 
 		case float64:
-			if info.IsFloat {
-				frame.locals[slot].Value = v + info.FloatAmount
-			} else {
-				frame.locals[slot].Value = v + float64(info.IntAmount)
-			}
+			cell.Value = v + info.FloatAmount
+
+		case float32:
+			cell.Value = v + float32(info.FloatAmount)
 
 		default:
-			LangError(ErrorType, "cannot increment %s", typeName(value))
+			vm.runtimeError(ErrorType, "cannot increment %s", typeName(cell.Value))
 		}
 
 	case OP_INC_GLOBAL:
@@ -1242,6 +1768,8 @@ func (vm *VM) step() bool {
 
 		vm.frames = vm.frames[:len(vm.frames)-1]
 
+		vm.releaseFrame(frame)
+
 		if frame.hasReturnOverride {
 			vm.push(frame.returnOverride)
 		} else {
@@ -1478,52 +2006,19 @@ func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []Value) {
 		LangError(ErrorName, "undefined function: %s", fnValue.Name)
 	}
 
-	args = vm.applyDefaultArgs(fn, args, 0, fn.Name)
+	expected := len(fn.Params) - 1
 
-	locals := make([]*Cell, fn.LocalCount)
-	localTypes := make([]TypeHint, fn.LocalCount)
-	constants := make([]bool, fn.LocalCount)
+	if fn.HasDefaults {
+		args = vm.applyDefaultArgs(fn, args, 0, fn.Name)
+	} else if len(args) != expected {
+		vm.runtimeError(ErrorRuntime, "function %s expects %d arguments, got %d", fn.Name, expected, len(args))
+	}
+
+	frame := vm.getFrame(fn)
 
 	for i, arg := range args {
-		param := fn.Params[i]
-
-		if !param.TypeHint.IsEmpty() && !checkTypeHint(arg, param.TypeHint) {
-			LangError(
-				ErrorType,
-				"function %s parameter %s expected %s, got %s",
-				fn.Name,
-				param.Name,
-				param.TypeHint.Name,
-				typeName(arg),
-			)
-		}
-
-		locals[i] = &Cell{Value: arg}
-		constants[i] = false
-		localTypes[i] = param.TypeHint
-	}
-
-	for slot, cell := range fnValue.Captures {
-		if slot < 0 || slot >= len(locals) {
-			LangError(ErrorInternal, "closure capture slot out of range")
-		}
-
-		locals[slot] = cell
-	}
-
-	for i := range locals {
-		if locals[i] == nil {
-			locals[i] = &Cell{Value: UndefinedValue{}}
-		}
-	}
-
-	frame := Frame{
-		function:     fn,
-		ip:           0,
-		locals:       locals,
-		constants:    constants,
-		instructions: fn.Instructions,
-		localTypes:   localTypes,
+		frame.locals[i].Value = arg
+		frame.constants[i] = false
 	}
 
 	vm.frames = append(vm.frames, frame)
@@ -1532,28 +2027,11 @@ func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []Value) {
 func (vm *VM) callFunctionDirect(fn Function, args []Value) {
 	args = vm.applyDefaultArgs(fn, args, 0, "function "+fn.Name)
 
-	locals := make([]*Cell, fn.LocalCount)
-	constants := make([]bool, fn.LocalCount)
-	localTypes := make([]TypeHint, fn.LocalCount)
+	frame := vm.getFrame(fn)
 
 	for i, arg := range args {
-		locals[i] = &Cell{Value: arg}
-		constants[i] = false
-	}
-
-	for i := range locals {
-		if locals[i] == nil {
-			locals[i] = &Cell{Value: UndefinedValue{}}
-		}
-	}
-
-	frame := Frame{
-		function:     fn,
-		ip:           0,
-		locals:       locals,
-		constants:    constants,
-		instructions: fn.Instructions,
-		localTypes:   localTypes,
+		frame.locals[i].Value = arg
+		frame.constants[i] = false
 	}
 
 	vm.frames = append(vm.frames, frame)
@@ -1798,35 +2276,39 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 		LangError(ErrorName, "undefined function: %s", fnValue.Name)
 	}
 
-	args = vm.applyDefaultArgs(fn, args, 1, "method "+method)
+	expected := len(fn.Params) - 1
+
+	if fn.HasDefaults {
+		args = vm.applyDefaultArgs(fn, args, 1, "method "+method)
+	} else if len(args) != expected {
+		vm.runtimeError(ErrorRuntime, "method %s expects %d arguments, got %d", method, expected, len(args))
+	}
 	// argCount = len(args)
 
-	locals := make([]*Cell, fn.LocalCount)
-	constants := make([]bool, fn.LocalCount)
+	frame := vm.getFrame(fn)
 
-	locals[0] = &Cell{Value: receiver}
-	constants[0] = true
+	frame.locals[0].Value = receiver
+	frame.constants[0] = true
 
 	for i, arg := range args {
-		locals[i+1] = &Cell{Value: arg}
-		constants[i+1] = false
-	}
+		param := fn.Params[i+1]
 
-	for i := range locals {
-		if locals[i] == nil {
-			locals[i] = &Cell{Value: UndefinedValue{}}
+		if fn.HasTypeHints {
+			if !param.TypeHint.IsEmpty() && !checkTypeHint(arg, param.TypeHint) {
+				LangError(
+					ErrorType,
+					"method %s parameter %s expected %s, got %s",
+					method,
+					param.Name,
+					param.TypeHint.Name,
+					typeName(arg),
+				)
+			}
 		}
-	}
 
-	localTypes := make([]TypeHint, fn.LocalCount)
-
-	frame := Frame{
-		function:     fn,
-		ip:           0,
-		locals:       locals,
-		constants:    constants,
-		instructions: fn.Instructions,
-		localTypes:   localTypes,
+		frame.locals[i+1].Value = arg
+		frame.constants[i+1] = false
+		frame.localTypes[i+1] = param.TypeHint
 	}
 
 	vm.frames = append(vm.frames, frame)
@@ -1915,9 +2397,9 @@ func (vm *VM) callFunction(name string, argCount int) {
 
 	args = vm.applyDefaultArgs(fn, args, 0, "function "+fn.Name)
 
-	locals := make([]*Cell, fn.LocalCount)
-	constants := make([]bool, fn.LocalCount)
-	localTypes := make([]TypeHint, fn.LocalCount)
+	args = vm.applyDefaultArgs(fn, args, 0, "function "+fn.Name)
+
+	frame := vm.getFrame(fn)
 
 	for i, arg := range args {
 		param := fn.Params[i]
@@ -1933,43 +2415,9 @@ func (vm *VM) callFunction(name string, argCount int) {
 			)
 		}
 
-		locals[i] = &Cell{Value: arg}
-		constants[i] = false
-		localTypes[i] = param.TypeHint
-	}
-
-	// Very important: fill empty local slots.
-	for i := range locals {
-		if locals[i] == nil {
-			locals[i] = &Cell{Value: UndefinedValue{}}
-		}
-	}
-	frame := Frame{
-		function:     fn,
-		ip:           0,
-		locals:       locals,
-		constants:    constants,
-		instructions: fn.Instructions,
-		localTypes:   localTypes,
-	}
-
-	if len(args) != len(fn.Params) {
-		LangError(ErrorRuntime, "function %s expects %d arguments, got %d", fn.Name, len(fn.Params), len(args))
-	}
-
-	for i, arg := range args {
-		param := fn.Params[i]
-
-		if !checkTypeHint(arg, param.TypeHint) {
-			LangError(
-				ErrorType,
-				"function %s parameter %s expected %s, got %s",
-				fn.Name,
-				param.Name,
-				param.TypeHint.Name,
-				typeName(arg),
-			)
-		}
+		frame.locals[i].Value = arg
+		frame.constants[i] = false
+		frame.localTypes[i] = param.TypeHint
 	}
 
 	vm.frames = append(vm.frames, frame)

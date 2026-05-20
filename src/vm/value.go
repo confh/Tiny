@@ -253,6 +253,8 @@ func valueToJSONCompatible(value Value) any {
 	switch v := value.(type) {
 	case int:
 		return v
+	case int64:
+		return v
 	case float64:
 		return v
 

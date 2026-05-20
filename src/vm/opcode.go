@@ -35,6 +35,9 @@ const (
 	OP_DEC_LOCAL
 	OP_DEC_GLOBAL
 
+	OP_ADD_ASSIGN_LOCAL
+	OP_SUB_ASSIGN_LOCAL
+
 	OP_BUILTIN_CALL
 	OP_METHOD_CALL
 	OP_CALL
@@ -75,6 +78,9 @@ const (
 
 	OP_JUMP
 	OP_JUMP_IF_FALSE
+	OP_JUMP_LOCAL_GE_CONST
+	OP_JUMP_LOCAL_GE_LOCAL
+	OP_JUMP_MOD_LOCAL_LOCAL_NOT_ZERO
 )
 
 type Instruction struct {
@@ -86,12 +92,15 @@ type Instruction struct {
 }
 
 type Function struct {
-	Name         string
-	Params       []Param  `json:"params"`
-	ReturnType   TypeHint `json:"returnType"`
-	Instructions []Instruction
-	LocalCount   int
+	ID           int           `json:"id"`
+	Name         string        `json:"name"`
+	Params       []Param       `json:"params"`
+	ReturnType   TypeHint      `json:"returnType"`
+	Instructions []Instruction `json:"instructions"`
+	LocalCount   int           `json:"localCount"`
 	Captures     []CapturedVar
+	HasDefaults  bool `json:"hasDefaults"`
+	HasTypeHints bool `json:"hasTypeHints"`
 }
 
 type CapturedVar struct {
@@ -106,8 +115,15 @@ type CallInfo struct {
 }
 
 type DirectCallInfo struct {
-	Name     string
-	ArgCount int
+	ID       int    `json:"id"`
+	Name     string `json:"name"`
+	ArgCount int    `json:"argCount"`
+}
+
+type JumpLocalGELocalInfo struct {
+	LeftSlot  int
+	RightSlot int
+	Target    int
 }
 
 type TryInfo struct {
@@ -115,6 +131,12 @@ type TryInfo struct {
 	Name    string
 	Slot    int
 	IsLocal bool
+}
+
+type JumpLocalGEConstInfo struct {
+	Slot   int
+	Value  int
+	Target int
 }
 
 type ArrayInfo struct {
@@ -167,6 +189,17 @@ type DecrementInfo struct {
 	IntAmount   int
 	FloatAmount float64
 	IsFloat     bool
+}
+
+type AssignLocalInfo struct {
+	TargetSlot int
+	SourceSlot int
+}
+
+type JumpModLocalLocalNotZeroInfo struct {
+	LeftSlot  int
+	RightSlot int
+	Target    int
 }
 
 type Class struct {

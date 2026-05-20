@@ -1,8 +1,9 @@
 package bytecode
 
 import (
-	"encoding/json"
 	"os"
+
+	json "github.com/goccy/go-json"
 
 	. "language.com/src/tinyerrors"
 	. "language.com/src/vm"
@@ -25,6 +26,7 @@ type SerializableParam struct {
 }
 
 type SerializableFunction struct {
+	ID           int                       `json:"id"`
 	Name         string                    `json:"name"`
 	Params       []SerializableParam       `json:"params"`
 	ReturnType   TypeHint                  `json:"returnType"`
@@ -107,6 +109,7 @@ func SaveBytecode(path string, main []Instruction, functions map[string]Function
 
 	for name, fn := range functions {
 		file.Functions[name] = SerializableFunction{
+			ID:           fn.ID,
 			Name:         fn.Name,
 			Params:       serializeParams(fn.Params),
 			ReturnType:   fn.ReturnType,
@@ -181,6 +184,7 @@ func LoadBytecodeFromBytes(data []byte) ([]Instruction, map[string]Function, map
 
 	for name, fn := range file.Functions {
 		functions[name] = Function{
+			ID:           fn.ID,
 			Name:         fn.Name,
 			Params:       deserializeParams(fn.Params),
 			ReturnType:   fn.ReturnType,
@@ -260,6 +264,9 @@ func EncodeValue(value any) EncodedValue {
 	case MethodCallInfo:
 		return EncodedValue{Type: "methodCall", Data: v}
 
+	case JumpLocalGELocalInfo:
+		return EncodedValue{Type: "jumpLocalGELocal", Data: v}
+
 	case InterpolateInfo:
 		return EncodedValue{Type: "interpolate", Data: v}
 
@@ -268,6 +275,9 @@ func EncodeValue(value any) EncodedValue {
 
 	case ClosureInfo:
 		return EncodedValue{Type: "closure", Data: v}
+
+	case JumpLocalGEConstInfo:
+		return EncodedValue{Type: "jumpLocalGEConst", Data: v}
 
 	case ArrayInfo:
 		return EncodedValue{Type: "array", Data: v}
@@ -280,6 +290,15 @@ func EncodeValue(value any) EncodedValue {
 
 	case UndefinedValue:
 		return EncodedValue{Type: "undefined"}
+
+	case IncrementInfo:
+		return EncodedValue{Type: "incLocal", Data: v}
+
+	case AssignLocalInfo:
+		return EncodedValue{Type: "assignLocal", Data: v}
+
+	case JumpModLocalLocalNotZeroInfo:
+		return EncodedValue{Type: "jumpModLocalLocalNotZero", Data: v}
 
 	case NamespaceValue:
 		members := map[string]EncodedValue{}
@@ -377,8 +396,33 @@ func DecodeValue(value EncodedValue) any {
 	case "bool":
 		return value.Data.(bool)
 
+	case "incLocal":
+		var result IncrementInfo
+		decodeInto(value.Data, &result)
+		return result
+
+	case "assignLocal":
+		var result AssignLocalInfo
+		decodeInto(value.Data, &result)
+		return result
+
+	case "jumpLocalGEConst":
+		var result JumpLocalGEConstInfo
+		decodeInto(value.Data, &result)
+		return result
+
+	case "jumpLocalGELocal":
+		var result JumpLocalGELocalInfo
+		decodeInto(value.Data, &result)
+		return result
+
 	case "variable":
 		var result VariableInfo
+		decodeInto(value.Data, &result)
+		return result
+
+	case "jumpModLocalLocalNotZero":
+		var result JumpModLocalLocalNotZeroInfo
 		decodeInto(value.Data, &result)
 		return result
 

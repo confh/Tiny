@@ -9,6 +9,7 @@ import (
 
 	. "language.com/src/bytecode"
 	. "language.com/src/tinyerrors"
+	. "language.com/src/vm"
 )
 
 func DistCommand(args []string) {
@@ -123,6 +124,12 @@ func packToOutput(entryFile string, outFile string, target string) {
 
 	compiler := NewCompiler()
 	mainInstructions, functions, classes := compiler.CompileProgram(program)
+	mainInstructions = OptimizeBytecode(mainInstructions)
+
+	for name, fn := range functions {
+		fn.Instructions = OptimizeBytecode(fn.Instructions)
+		functions[name] = fn
+	}
 
 	bytecodeBytes := SaveBytecodeToBytes(mainInstructions, functions, classes)
 

@@ -1,6 +1,10 @@
 package vm
 
-import . "language.com/src/tinyerrors"
+import (
+	"unsafe"
+
+	. "language.com/src/tinyerrors"
+)
 
 func (vm *VM) callStdBuffer(method string, args []Value) {
 	switch method {
@@ -40,6 +44,22 @@ func (vm *VM) callStdBuffer(method string, args []Value) {
 		}
 
 		vm.push(bufferValue)
+
+	case "alloc":
+		if len(args) != 2 {
+			vm.runtimeError(ErrorRuntime, "buffer.alloc expects 2 arguments")
+		}
+		totalElements := asInt(args[0])
+		defaultValue := asFloat64(args[1])
+
+		data := make([]float64, totalElements)
+		for i := range data {
+			data[i] = defaultValue
+		}
+
+		vm.push(&BufferValue{
+			Bytes: unsafe.Slice((*byte)(unsafe.Pointer(&data[0])), len(data)*8),
+		})
 	default:
 		vm.runtimeError(ErrorName, "unknown buffer function: %s", method)
 	}

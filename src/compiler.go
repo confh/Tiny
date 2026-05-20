@@ -41,6 +41,10 @@ type Compiler struct {
 	classes                map[string]Class
 	loopStack              []LoopContext
 	anonymousFunctionCount int
+	declaredFunctions      map[string]bool
+
+	functionIDs    map[string]int
+	nextFunctionID int
 
 	importStates map[string]ImportState
 	importStack  []string
@@ -297,6 +301,8 @@ func NewCompiler() *Compiler {
 		localCount:             0,
 		globalConstants:        map[string]bool{},
 		anonymousFunctionCount: 0,
+		functionIDs:            map[string]int{},
+		declaredFunctions:      map[string]bool{},
 		scopes:                 []map[string]Binding{},
 		importStates:           map[string]ImportState{},
 		importStack:            []string{},
@@ -306,6 +312,38 @@ func NewCompiler() *Compiler {
 	c.beginScope()
 
 	return c
+}
+
+func (c *Compiler) predeclareFunctions(statements []Stmt) {
+	for _, stmt := range statements {
+		switch s := stmt.(type) {
+		case FunctionStmt:
+			c.declaredFunctions[s.Name] = true
+			c.getFunctionID(s.Name)
+
+		case NamespaceStmt:
+			for _, nsStmt := range s.Statements {
+				if fn, ok := nsStmt.(FunctionStmt); ok {
+					fullName := s.Name + "." + fn.Name
+					c.declaredFunctions[fullName] = true
+					c.getFunctionID(fullName)
+				}
+			}
+		}
+	}
+}
+
+func (c *Compiler) getFunctionID(name string) int {
+	if id, exists := c.functionIDs[name]; exists {
+		return id
+	}
+
+	id := c.nextFunctionID
+	c.nextFunctionID++
+
+	c.functionIDs[name] = id
+
+	return id
 }
 
 func (c *Compiler) setLocation(file string, line int, column int) {
@@ -338,6 +376,23 @@ func (c *Compiler) currentScope() map[string]Binding {
 	}
 
 	return c.scopes[len(c.scopes)-1]
+}
+
+func getParamFlags(params []Param) (bool, bool) {
+	hasDefaults := false
+	hasTypeHints := false
+
+	for _, param := range params {
+		if param.HasDefault {
+			hasDefaults = true
+		}
+
+		if !param.TypeHint.IsEmpty() {
+			hasTypeHints = true
+		}
+	}
+
+	return hasDefaults, hasTypeHints
 }
 
 func (c *Compiler) compileNestedFunction(stmt FunctionStmt) {
@@ -382,12 +437,17 @@ func (c *Compiler) compileNestedFunction(stmt FunctionStmt) {
 
 	localCount := c.localCount
 
+	hasDefaults, hasTypeHints := getParamFlags(stmt.Params)
+
 	c.functions[compiledName] = Function{
+		ID:           c.getFunctionID(compiledName),
 		Name:         compiledName,
 		Params:       stmt.Params,
 		Instructions: functionInstructions,
 		LocalCount:   localCount,
 		Captures:     captures,
+		HasDefaults:  hasDefaults,
+		HasTypeHints: hasTypeHints,
 	}
 
 	c.currentInstructions = oldInstructions
@@ -485,6 +545,8 @@ func (c *Compiler) compileScopedBlock(body []Stmt) {
 }
 
 func (c *Compiler) CompileProgram(program Program) ([]Instruction, map[string]Function, map[string]Class) {
+	c.predeclareFunctions(program.Statements)
+
 	for _, stmt := range program.Statements {
 		c.compileStatement(stmt)
 	}
@@ -568,6 +630,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		}
 
 		c.functions[fullName] = Function{
+			ID:     c.getFunctionID(fullName),
 			Name:   fullName,
 			Params: fn.Params,
 		}
@@ -1508,10 +1571,15 @@ func (c *Compiler) compileFunction(stmt FunctionStmt) {
 		LangError(ErrorName, "function already defined: %s", stmt.Name)
 	}
 
+	hasDefaults, hasTypeHints := getParamFlags(stmt.Params)
+
 	// Predeclare function so recursion works.
 	c.functions[stmt.Name] = Function{
-		Name:   stmt.Name,
-		Params: stmt.Params,
+		ID:           c.getFunctionID(stmt.Name),
+		Name:         stmt.Name,
+		Params:       stmt.Params,
+		HasDefaults:  hasDefaults,
+		HasTypeHints: hasTypeHints,
 	}
 
 	oldInstructions := c.currentInstructions
@@ -1546,10 +1614,13 @@ func (c *Compiler) compileFunction(stmt FunctionStmt) {
 	localCount := c.localCount
 
 	c.functions[stmt.Name] = Function{
+		ID:           c.getFunctionID(stmt.Name),
 		Name:         stmt.Name,
 		Params:       stmt.Params,
 		Instructions: functionInstructions,
 		LocalCount:   localCount,
+		HasDefaults:  hasDefaults,
+		HasTypeHints: hasTypeHints,
 	}
 
 	c.currentInstructions = oldInstructions
@@ -1792,6 +1863,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 		localCount := c.localCount
 
 		c.functions[name] = Function{
+			ID:           c.getFunctionID(name),
 			Name:         name,
 			Params:       e.Params,
 			Instructions: functionInstructions,
@@ -1987,8 +2059,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 		}
 
 	case CallExpr:
-		// Fast path: known normal function call
-		if _, exists := c.functions[e.Name]; exists {
+		if c.declaredFunctions[e.Name] {
 			for _, arg := range e.Args {
 				c.compileExpr(arg)
 			}
@@ -1996,6 +2067,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 			c.setLocation(e.File, e.Line, e.Column)
 
 			c.emit(OP_CALL_DIRECT, DirectCallInfo{
+				ID:       c.getFunctionID(e.Name),
 				Name:     e.Name,
 				ArgCount: len(e.Args),
 			})
@@ -2003,23 +2075,6 @@ func (c *Compiler) compileExpr(expr Expr) {
 			return
 		}
 
-		// Class constructor call stays as OP_CALL
-		if _, exists := c.classes[e.Name]; exists {
-			for _, arg := range e.Args {
-				c.compileExpr(arg)
-			}
-
-			c.setLocation(e.File, e.Line, e.Column)
-
-			c.emit(OP_CALL, CallInfo{
-				Name:     e.Name,
-				ArgCount: len(e.Args),
-			})
-
-			return
-		}
-
-		// Namespace-local function fast path
 		if c.currentNamespaceFunctions != nil {
 			if fullName, exists := c.currentNamespaceFunctions[e.Name]; exists {
 				for _, arg := range e.Args {
@@ -2029,6 +2084,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 				c.setLocation(e.File, e.Line, e.Column)
 
 				c.emit(OP_CALL_DIRECT, DirectCallInfo{
+					ID:       c.getFunctionID(fullName),
 					Name:     fullName,
 					ArgCount: len(e.Args),
 				})
@@ -2037,7 +2093,22 @@ func (c *Compiler) compileExpr(expr Expr) {
 			}
 		}
 
-		// Otherwise treat it as a function value variable.
+		if _, exists := c.classes[e.Name]; exists {
+			for _, arg := range e.Args {
+				c.compileExpr(arg)
+			}
+
+			c.setLocation(e.File, e.Line, e.Column)
+
+			c.emit(OP_CALL_DIRECT, DirectCallInfo{
+				ID:       c.getFunctionID(e.Name),
+				Name:     e.Name,
+				ArgCount: len(e.Args),
+			})
+
+			return
+		}
+
 		c.compileExpr(IdentExpr{
 			Name:   e.Name,
 			File:   e.File,
@@ -2063,7 +2134,8 @@ func (c *Compiler) compileExpr(expr Expr) {
 						c.compileExpr(arg)
 					}
 
-					c.emit(OP_CALL, CallInfo{
+					c.emit(OP_CALL_DIRECT, DirectCallInfo{
+						ID:       c.getFunctionID(fullName),
 						Name:     fullName,
 						ArgCount: len(e.Args),
 					})
@@ -2078,7 +2150,8 @@ func (c *Compiler) compileExpr(expr Expr) {
 						c.compileExpr(arg)
 					}
 
-					c.emit(OP_CALL, CallInfo{
+					c.emit(OP_CALL_DIRECT, DirectCallInfo{
+						ID:       c.getFunctionID(fullName),
 						Name:     fullName,
 						ArgCount: len(e.Args),
 					})
@@ -2092,7 +2165,8 @@ func (c *Compiler) compileExpr(expr Expr) {
 					c.compileExpr(arg)
 				}
 
-				c.emit(OP_CALL, CallInfo{
+				c.emit(OP_CALL_DIRECT, DirectCallInfo{
+					ID:       c.getFunctionID(ident.Name),
 					Name:     ident.Name,
 					ArgCount: len(e.Args),
 				})
@@ -2105,7 +2179,8 @@ func (c *Compiler) compileExpr(expr Expr) {
 					c.compileExpr(arg)
 				}
 
-				c.emit(OP_CALL, CallInfo{
+				c.emit(OP_CALL_DIRECT, DirectCallInfo{
+					ID:       c.getFunctionID(ident.Name),
 					Name:     ident.Name,
 					ArgCount: len(e.Args),
 				})
@@ -2236,11 +2311,16 @@ func (c *Compiler) compileMethod(className string, stmt FunctionStmt) {
 	// 	})
 	// }
 
+	hasDefaults, hasTypeHints := getParamFlags(stmt.Params)
+
 	c.functions[name] = Function{
+		ID:           c.getFunctionID(name),
 		Name:         name,
 		Params:       params,
 		Instructions: functionInstructions,
 		LocalCount:   c.localCount,
+		HasDefaults:  hasDefaults,
+		HasTypeHints: hasTypeHints,
 	}
 
 	c.currentInstructions = oldInstructions

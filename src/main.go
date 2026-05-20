@@ -78,6 +78,13 @@ func runSourceCommand(args []string) {
 	compiler := NewCompiler()
 	mainBytecode, functions, classes := compiler.CompileProgram(program)
 
+	mainBytecode = OptimizeBytecode(mainBytecode)
+
+	for name, fn := range functions {
+		fn.Instructions = OptimizeBytecode(fn.Instructions)
+		functions[name] = fn
+	}
+
 	vm := NewVM(mainBytecode, functions, classes)
 	vm.SetCLIArgs(cliArgs)
 	vm.Run()
@@ -102,6 +109,13 @@ func buildCommand(args []string) {
 
 	compiler := NewCompiler()
 	mainBytecode, functions, classes := compiler.CompileProgram(program)
+
+	mainBytecode = OptimizeBytecode(mainBytecode)
+
+	for name, fn := range functions {
+		fn.Instructions = OptimizeBytecode(fn.Instructions)
+		functions[name] = fn
+	}
 
 	SaveBytecode(outFile, mainBytecode, functions, classes)
 
