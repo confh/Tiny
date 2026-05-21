@@ -2,6 +2,7 @@ package vm
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -62,6 +63,17 @@ type NativeServerValue struct {
 	PostRoutes map[string]Value
 	mux        *http.ServeMux
 	closed     bool
+}
+
+type NativeTcpServerValue struct {
+	Host              string
+	Port              int
+	Listener          *net.Listener
+	ConnectionHandler *FunctionValue
+}
+
+type NativeTcpConnectionValue struct {
+	Connection net.Conn
 }
 
 type NativeHttpResponseValue struct {
@@ -179,7 +191,7 @@ func asFloat64(value Value) float64 {
 		return f
 
 	default:
-		LangError(ErrorType, "expected number, got %s", typeName(value))
+		LangError(ErrorType, "expected number, got %s", TypeName(value))
 		return 0
 	}
 }
@@ -216,12 +228,12 @@ func asFloat(value Value) float64 {
 		}
 		return f
 	default:
-		LangError(ErrorType, "expected number, got %s", typeName(value))
+		LangError(ErrorType, "expected number, got %s", TypeName(value))
 		return 0
 	}
 }
 
-func typeName(value Value) string {
+func TypeName(value Value) string {
 	switch v := value.(type) {
 	case int:
 		return "number"
@@ -233,7 +245,7 @@ func typeName(value Value) string {
 		return "bool"
 	case ArrayValue:
 		return "array"
-	case NullValue:
+	case NullValue, NullExpr:
 		return "null"
 	case UndefinedValue:
 		return "undefined"
@@ -249,6 +261,10 @@ func typeName(value Value) string {
 		return "server"
 	case *NativeServerValue:
 		return "server"
+	case *NativeTcpServerValue:
+		return "tcp server"
+	case *NativeTcpConnectionValue:
+		return "tcp connection"
 	case *NativeProcessValue:
 		return "process"
 	case ErrorValue:
@@ -347,7 +363,7 @@ func valueToJSONCompatible(value Value) any {
 		return nil
 
 	default:
-		LangError(ErrorType, "cannot convert %s to JSON", typeName(value))
+		LangError(ErrorType, "cannot convert %s to JSON", TypeName(value))
 		return nil
 	}
 }
@@ -467,6 +483,10 @@ func valueToString(value Value) string {
 		return "<server :" + strconv.Itoa(v.Port) + ">"
 	case *NativeServerValue:
 		return "<server :" + strconv.Itoa(v.Port) + ">"
+	case *NativeTcpServerValue:
+		return "<tcp server :" + strconv.Itoa(v.Port) + ">"
+	case *NativeTcpConnectionValue:
+		return "<tcp connection :" + v.Connection.RemoteAddr().String() + ">"
 	case *NativePluginValue:
 		return "<plugin " + v.Path + ">"
 	case *StandardModuleValue:
@@ -501,7 +521,7 @@ func valueToString(value Value) string {
 func asString(value Value, vm *VM) string {
 	stringValue, ok := value.(string)
 	if !ok {
-		vm.runtimeError(ErrorSyntax, "expected string, got %s", typeName(value))
+		vm.runtimeError(ErrorSyntax, "expected string, got %s", TypeName(value))
 	}
 
 	return stringValue
@@ -510,7 +530,7 @@ func asString(value Value, vm *VM) string {
 func asObject(value Value, vm *VM) ObjectValue {
 	objectValue, ok := value.(ObjectValue)
 	if !ok {
-		vm.runtimeError(ErrorSyntax, "expected object, got %s", typeName(value))
+		vm.runtimeError(ErrorSyntax, "expected object, got %s", TypeName(value))
 	}
 
 	return objectValue
@@ -519,7 +539,7 @@ func asObject(value Value, vm *VM) ObjectValue {
 func asBuffer(value Value, vm *VM) *BufferValue {
 	bufferValue, ok := value.(*BufferValue)
 	if !ok {
-		vm.runtimeError(ErrorSyntax, "expected buffer, got %s", typeName(value))
+		vm.runtimeError(ErrorSyntax, "expected buffer, got %s", TypeName(value))
 	}
 
 	return bufferValue
@@ -528,7 +548,7 @@ func asBuffer(value Value, vm *VM) *BufferValue {
 func asArray(value Value, vm *VM) *ArrayValue {
 	arrayValue, ok := value.(*ArrayValue)
 	if !ok {
-		vm.runtimeError(ErrorSyntax, "expected array, got %s", typeName(value))
+		vm.runtimeError(ErrorSyntax, "expected array, got %s", TypeName(value))
 	}
 
 	return arrayValue
@@ -537,7 +557,7 @@ func asArray(value Value, vm *VM) *ArrayValue {
 func asBool(value Value, vm *VM) bool {
 	boolean, ok := value.(bool)
 	if !ok {
-		vm.runtimeError(ErrorSyntax, "expected bool, got %s", typeName(value))
+		vm.runtimeError(ErrorSyntax, "expected bool, got %s", TypeName(value))
 	}
 
 	return boolean

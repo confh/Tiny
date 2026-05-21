@@ -132,9 +132,24 @@ type ClassStmt struct {
 	Name    string
 	Methods []FunctionStmt
 	Embeds  []string
+	Locals  []*Cell
+	Fields  []FieldStmt
 }
 
 func (s ClassStmt) stmtNode() {}
+
+type FieldStmt struct {
+	Name     string
+	Value    Expr
+	TypeHint TypeHint
+	Constant bool
+	Private  bool
+	File     string
+	Line     int
+	Column   int
+}
+
+func (s FieldStmt) stmtNode() {}
 
 type WhileStmt struct {
 	Condition Expr
@@ -169,6 +184,16 @@ type InstanceOfExpr struct {
 }
 
 func (e InstanceOfExpr) exprNode() {}
+
+type ObjectInExpr struct {
+	Key    Expr
+	Object Expr
+	File   string
+	Line   int
+	Column int
+}
+
+func (e ObjectInExpr) exprNode() {}
 
 type ArrayExpr struct {
 	Elements []Expr

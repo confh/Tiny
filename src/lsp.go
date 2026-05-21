@@ -129,11 +129,14 @@ var tinyKeywords = map[string]bool{
 	"as":     true,
 	"export": true,
 
-	"fn":    true,
-	"let":   true,
-	"const": true,
-	"class": true,
-	"embed": true,
+	"fn":      true,
+	"let":     true,
+	"const":   true,
+	"class":   true,
+	"embed":   true,
+	"field":   true,
+	"private": true,
+	"public":  true,
 
 	"if":    true,
 	"else":  true,
@@ -1223,6 +1226,9 @@ func scopeCompletions(scope *Scope) []CompletionItem {
 		{Label: "const", Kind: 14, Detail: "constant"},
 		{Label: "class", Kind: 7, Detail: "class"},
 		{Label: "embed", Kind: 14, Detail: "embed class methods"},
+		{Label: "field", Kind: 14, Detail: "class field"},
+		{Label: "private", Kind: 14, Detail: "private field"},
+		{Label: "public", Kind: 14, Detail: "public field"},
 		{Label: "if", Kind: 14, Detail: "if statement"},
 		{Label: "else", Kind: 14, Detail: "else"},
 		{Label: "while", Kind: 14, Detail: "while loop"},
@@ -1260,6 +1266,44 @@ func scopeCompletions(scope *Scope) []CompletionItem {
 	return items
 }
 
+func dedupeCompletionItems(items []CompletionItem) []CompletionItem {
+	seen := map[string]bool{}
+	result := []CompletionItem{}
+
+	for _, item := range items {
+		if seen[item.Label] {
+			continue
+		}
+
+		seen[item.Label] = true
+		result = append(result, item)
+	}
+
+	return result
+}
+
+func classNameAtPosition(text string, pos Position) string {
+	lines := strings.Split(text, "\n")
+
+	currentLine := pos.Line
+	if currentLine >= len(lines) {
+		currentLine = len(lines) - 1
+	}
+
+	for i := currentLine; i >= 0; i-- {
+		line := cleanLine(lines[i])
+
+		if strings.HasPrefix(line, "class ") {
+			match := classLineRegex.FindStringSubmatch(line)
+			if match != nil {
+				return match[1]
+			}
+		}
+	}
+
+	return ""
+}
+
 func getCompletions(uri string, text string, pos Position) []CompletionItem {
 	line := getLine(text, pos.Line)
 
@@ -1280,6 +1324,34 @@ func getCompletions(uri string, text string, pos Position) []CompletionItem {
 		return scopeCompletions(scope)
 	}
 
+	if receiver == "this" {
+		className := classNameAtPosition(text, pos)
+		if className != "" {
+			classSym, ok := scope.Resolve(className)
+			if ok && classSym.Kind == SymbolClass {
+				items := []CompletionItem{}
+
+				for _, field := range classSym.Fields {
+					items = append(items, CompletionItem{
+						Label:  field.Name,
+						Kind:   symbolKindToCompletionKind(field.Kind),
+						Detail: field.Detail + " : " + field.Type,
+					})
+				}
+
+				for _, method := range classSym.Methods {
+					items = append(items, CompletionItem{
+						Label:  method.Name,
+						Kind:   2,
+						Detail: formatFunctionSignature(method.Name, method.Params, method.Returns),
+					})
+				}
+
+				return dedupeCompletionItems(items)
+			}
+		}
+	}
+
 	sym, ok := scope.Resolve(receiver)
 	if !ok {
 		return []CompletionItem{}
@@ -1289,9 +1361,9 @@ func getCompletions(uri string, text string, pos Position) []CompletionItem {
 		return completionItemsFromMembers(sym.Members)
 	}
 
-	if sym.Type == "object" && sym.Fields != nil {
-		return completionItemsFromMembers(sym.Fields)
-	}
+	// if sym.Type == "object" && sym.Fields != nil {
+	// 	return completionItemsFromMembers(sym.Fields)
+	// }
 
 	if strings.HasPrefix(sym.Type, "std:") {
 		module := strings.TrimPrefix(sym.Type, "std:")
@@ -1306,7 +1378,45 @@ func getCompletions(uri string, text string, pos Position) []CompletionItem {
 			return []CompletionItem{}
 		}
 
-		return completionItemsFromMembers(classSym.Methods)
+		items := []CompletionItem{}
+
+		for _, field := range classSym.Fields {
+			if strings.Contains(field.Detail, "private field") {
+				continue
+			}
+
+			items = append(items, CompletionItem{
+				Label:  field.Name,
+				Kind:   symbolKindToCompletionKind(field.Kind),
+				Detail: field.Detail + " : " + field.Type,
+			})
+		}
+
+		for _, method := range classSym.Methods {
+			items = append(items, CompletionItem{
+				Label:  method.Name,
+				Kind:   2,
+				Detail: formatFunctionSignature(method.Name, method.Params, method.Returns),
+			})
+		}
+
+		return dedupeCompletionItems(items)
+	}
+
+	if sym.Type == "object" {
+		items := []CompletionItem{}
+
+		for _, field := range sym.Fields {
+			items = append(items, CompletionItem{
+				Label:  field.Name,
+				Kind:   symbolKindToCompletionKind(field.Kind),
+				Detail: field.Detail + " : " + field.Type,
+			})
+		}
+
+		items = append(items, getNativeTypeCompletions("object")...)
+
+		return dedupeCompletionItems(items)
 	}
 
 	return getNativeTypeCompletions(sym.Type)
@@ -1417,31 +1527,6 @@ func parseStdImports(text string) map[string]string {
 	}
 
 	return result
-}
-
-func topLevelCompletions(uri string, text string) []CompletionItem {
-	analysis := analyzeTiny(uri, text)
-
-	items := []CompletionItem{
-		{Label: "import", Kind: 14, Detail: "import statement"},
-		{Label: "fn", Kind: 14, Detail: "function"},
-		{Label: "let", Kind: 14, Detail: "variable"},
-		{Label: "const", Kind: 14, Detail: "constant"},
-		{Label: "class", Kind: 7, Detail: "class"},
-		{Label: "if", Kind: 14, Detail: "if statement"},
-		{Label: "while", Kind: 14, Detail: "while loop"},
-		{Label: "return", Kind: 14, Detail: "return"},
-	}
-
-	for _, sym := range analysis.GlobalScope.Symbols {
-		items = append(items, CompletionItem{
-			Label:  sym.Name,
-			Kind:   symbolKindToCompletionKind(sym.Kind),
-			Detail: sym.Detail + " : " + sym.Type,
-		})
-	}
-
-	return items
 }
 
 func symbolKindToCompletionKind(kind SymbolKind) int {

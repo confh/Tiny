@@ -164,14 +164,25 @@ func fallbackScopeAtPosition(uri string, text string, pos Position) *Scope {
 	}
 
 	// Pass 1: cheap one-line functions/classes so constructors/calls are known early.
+	// Scan class names, but don't leak class methods as global functions.
+	classBlocks := findBlocks(text, "class")
+
 	for lineIndex := 0; lineIndex <= maxLine; lineIndex++ {
 		line := cleanLine(lines[lineIndex])
 		if line == "" {
 			continue
 		}
 
+		// Always scan classes.
 		scanClassLine(scope, line, lineIndex+1, uri)
-		scanFunctionLine(scope, line, lineIndex+1, uri)
+
+		lineOffset := offsetAtLine(text, lineIndex+1)
+		insideClass := blockInsideAny(lineOffset, classBlocks)
+
+		// Only scan functions if this line is NOT inside a class.
+		if !insideClass {
+			scanFunctionLine(scope, line, lineIndex+1, uri)
+		}
 	}
 
 	// Pass 2: full blocks. This overwrites cheap symbols with params/methods/return types.
@@ -309,6 +320,93 @@ func scanFullFunctions(scope *Scope, text string, maxLine int, uri string) {
 	}
 }
 
+func scanClassFields(scope *Scope, classBody string, uri string, baseLine int) map[string]SymbolInfo {
+	fields := map[string]SymbolInfo{}
+	lines := strings.Split(classBody, "\n")
+
+	for i, raw := range lines {
+		line := cleanLine(raw)
+
+		if !strings.HasPrefix(line, "field ") {
+			continue
+		}
+
+		line = strings.TrimSpace(strings.TrimPrefix(line, "field "))
+
+		isPrivate := false
+		isConst := false
+
+		// Remove modifiers after "field".
+		// Keep looping so this works:
+		// field private const name = "x";
+		// field const private name = "x";
+		for {
+			if strings.HasPrefix(line, "public ") {
+				line = strings.TrimSpace(strings.TrimPrefix(line, "public "))
+				continue
+			}
+
+			if strings.HasPrefix(line, "private ") {
+				isPrivate = true
+				line = strings.TrimSpace(strings.TrimPrefix(line, "private "))
+				continue
+			}
+
+			if strings.HasPrefix(line, "const ") {
+				isConst = true
+				line = strings.TrimSpace(strings.TrimPrefix(line, "const "))
+				continue
+			}
+
+			break
+		}
+
+		// Support fields without default:
+		// field name: string;
+		// Turn it into a fake assignment for variableLineRegex.
+		fakeLine := "let " + line
+		if !strings.Contains(fakeLine, "=") {
+			fakeLine = strings.TrimSuffix(fakeLine, ";") + " = undefined;"
+		}
+
+		match := variableLineRegex.FindStringSubmatch(fakeLine)
+		if match == nil {
+			continue
+		}
+
+		name := match[1]
+		typeHint := match[2]
+		expr := strings.TrimSpace(match[3])
+
+		typ := "unknown"
+		if typeHint != "" {
+			typ = typeHint
+		} else {
+			typ = inferExprTypeFromText(scope, expr)
+		}
+
+		detail := "field " + name
+		if isPrivate {
+			detail = "private " + detail
+		}
+		if isConst {
+			detail = "const " + detail
+		}
+
+		fields[name] = SymbolInfo{
+			Name:      name,
+			Kind:      SymbolField,
+			Type:      typ,
+			Detail:    detail,
+			Line:      baseLine + i,
+			Column:    indexColumn(raw, name),
+			SourceURI: uri,
+		}
+	}
+
+	return fields
+}
+
 func scanFullClasses(scope *Scope, text string, maxLine int, uri string) {
 	// Two passes let embed work even if classes appear later.
 	classBlocks := findBlocks(text, "class")
@@ -358,6 +456,8 @@ func scanFullClasses(scope *Scope, text string, maxLine int, uri string) {
 			}
 		}
 
+		fields := scanClassFields(scope, block.Body, uri, block.Line)
+
 		scope.Define(SymbolInfo{
 			Name:      block.Name,
 			Kind:      SymbolClass,
@@ -367,13 +467,14 @@ func scanFullClasses(scope *Scope, text string, maxLine int, uri string) {
 			Column:    block.Column,
 			SourceURI: uri,
 			Methods:   methods,
+			Fields:    fields,
 		})
 	}
 }
 
 func blockInsideAny(offset int, blocks []blockInfo) bool {
 	for _, block := range blocks {
-		if offset > block.Start && offset < block.End {
+		if offset >= block.Start && offset < block.End {
 			return true
 		}
 	}
@@ -698,7 +799,7 @@ func inferExprTypeFromText(scope *Scope, expr string) string {
 		return "unknown"
 	}
 
-	if strings.HasPrefix(expr, `"`) || strings.HasPrefix(expr, "`") {
+	if strings.HasPrefix(expr, `"`) || strings.HasPrefix(expr, "`") || strings.HasPrefix(expr, "'") {
 		return "string"
 	}
 
@@ -738,6 +839,14 @@ func inferExprTypeFromText(scope *Scope, expr string) string {
 		return "number"
 	}
 
+	if typ := inferTernaryTypeFromText(scope, expr); typ != "" {
+		return typ
+	}
+
+	if isComparisonExprText(expr) {
+		return "bool"
+	}
+
 	if typ := inferMemberCallTypeFromText(scope, expr); typ != "" {
 		return typ
 	}
@@ -751,6 +860,24 @@ func inferExprTypeFromText(scope *Scope, expr string) string {
 	}
 
 	return "unknown"
+}
+
+func isComparisonExprText(expr string) bool {
+	ops := []string{
+		"==", "!=", "<=", ">=", "<", ">",
+		" instanceof ",
+		" in ",
+		" and ",
+		" or ",
+	}
+
+	for _, op := range ops {
+		if strings.Contains(expr, op) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func inferMemberCallTypeFromText(scope *Scope, expr string) string {
@@ -1468,6 +1595,38 @@ func typeHintName(hint TypeHint, fallback string) string {
 	return hint.Name
 }
 
+func inferTernaryTypeFromText(scope *Scope, expr string) string {
+	q := strings.Index(expr, "?")
+	if q < 0 {
+		return ""
+	}
+
+	colon := strings.LastIndex(expr, ":")
+	if colon < 0 || colon < q {
+		return ""
+	}
+
+	thenExpr := strings.TrimSpace(expr[q+1 : colon])
+	elseExpr := strings.TrimSpace(expr[colon+1:])
+
+	thenType := inferExprTypeFromText(scope, thenExpr)
+	elseType := inferExprTypeFromText(scope, elseExpr)
+
+	if thenType == elseType {
+		return thenType
+	}
+
+	if thenType == "unknown" {
+		return elseType
+	}
+
+	if elseType == "unknown" {
+		return thenType
+	}
+
+	return "any"
+}
+
 func inferExprType(scope *Scope, expr Expr) string {
 	switch e := expr.(type) {
 	case StringExpr:
@@ -1482,6 +1641,39 @@ func inferExprType(scope *Scope, expr Expr) string {
 		return "object"
 	case NullExpr:
 		return "null"
+	case TernaryExpr:
+		thenType := inferExprType(scope, e.ThenExpr)
+		elseType := inferExprType(scope, e.ElseExpr)
+
+		if thenType == elseType {
+			return thenType
+		}
+
+		if thenType == "unknown" {
+			return elseType
+		}
+
+		if elseType == "unknown" {
+			return thenType
+		}
+
+		return "any"
+	case BinaryExpr:
+		switch e.Op {
+		case TOKEN_EQ, TOKEN_NEQ, TOKEN_LT, TOKEN_GT, TOKEN_LTE, TOKEN_GTE, TOKEN_AND, TOKEN_OR, TOKEN_INSTANCEOF, TOKEN_IN:
+			return "bool"
+		case TOKEN_PLUS_ASSIGN, TOKEN_MINUS, TOKEN_STAR, TOKEN_SLASH, TOKEN_PERCENT:
+			left := inferExprType(scope, e.Left)
+			right := inferExprType(scope, e.Right)
+
+			if e.Op == TOKEN_PLUS && (left == "string" || right == "string") {
+				return "string"
+			}
+
+			return "number"
+		default:
+			return "unknown"
+		}
 	case IdentExpr:
 		if sym, ok := scope.Resolve(e.Name); ok {
 			return sym.Type

@@ -55,11 +55,30 @@ func argString(vm *VM, fnName string, args []Value, index int) string {
 			"%s argument %d expected string, got %s",
 			fnName,
 			index+1,
-			typeName(args[index]),
+			TypeName(args[index]),
 		)
 	}
 
 	return str
+}
+
+func argFn(vm *VM, fnName string, args []Value, index int) FunctionValue {
+	if index < 0 || index >= len(args) {
+		vm.runtimeError(ErrorRuntime, "%s missing argument %d", fnName, index)
+	}
+
+	fn, ok := args[index].(FunctionValue)
+	if !ok {
+		vm.runtimeError(
+			ErrorType,
+			"%s argument %d expected function, got %s",
+			fnName,
+			index+1,
+			TypeName(args[index]),
+		)
+	}
+
+	return fn
 }
 
 func argBool(vm *VM, fnName string, args []Value, index int) bool {
@@ -74,7 +93,7 @@ func argBool(vm *VM, fnName string, args []Value, index int) bool {
 			"%s argument %d expected bool, got %s",
 			fnName,
 			index+1,
-			typeName(args[index]),
+			TypeName(args[index]),
 		)
 	}
 
@@ -98,7 +117,7 @@ func argArray(vm *VM, fnName string, args []Value, index int) *ArrayValue {
 			"%s argument %d expected array, got %s",
 			fnName,
 			index+1,
-			typeName(args[index]),
+			TypeName(args[index]),
 		)
 	}
 
@@ -122,7 +141,7 @@ func argObject(vm *VM, fnName string, args []Value, index int) ObjectValue {
 			"%s argument %d expected object, got %s",
 			fnName,
 			index+1,
-			typeName(args[index]),
+			TypeName(args[index]),
 		)
 	}
 
@@ -141,7 +160,7 @@ func argInt(vm *VM, fnName string, args []Value, index int) int {
 			"%s argument %d expected number, got %s",
 			fnName,
 			index+1,
-			typeName(args[index]),
+			TypeName(args[index]),
 		)
 	}
 
@@ -160,7 +179,7 @@ func argFloat64(vm *VM, fnName string, args []Value, index int) float64 {
 			"%s argument %d expected number, got %s",
 			fnName,
 			index+1,
-			typeName(args[index]),
+			TypeName(args[index]),
 		)
 	}
 

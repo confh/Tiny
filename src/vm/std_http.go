@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 
 	json "github.com/goccy/go-json"
@@ -57,15 +58,25 @@ var stdHttpMetadata = StdModuleInfo{
 			Returns:     "HttpResponse",
 			Description: "Creates a text HTTP response value with the given string.",
 		},
+		"downloadFile": {
+			Name: "downloadFile",
+			Args: []StdArg{
+				{Name: "filePath", Type: "string", Optional: false},
+				{Name: "url", Type: "string", Optional: false},
+			},
+			Returns:     "bool",
+			Description: "Downloads a file from the given URL and saves it to the specified file path. Returns true on success, throws error on failure.",
+		},
 	},
 }
 
 var stdHttpMethods = map[string]StdModuleFunc{
-	"server": stdHttpServer,
-	"get":    stdHttpGet,
-	"post":   stdHttpPost,
-	"json":   stdHttpJsonResponse,
-	"text":   stdHttpTextResponse,
+	"server":       stdHttpServer,
+	"get":          stdHttpGet,
+	"post":         stdHttpPost,
+	"json":         stdHttpJsonResponse,
+	"text":         stdHttpTextResponse,
+	"downloadFile": stdHttpDownloadFile,
 }
 
 func init() {
@@ -97,7 +108,7 @@ func stdHttpGet(vm *VM, args []Value) {
 	expectArgs(vm, "http.get", args, 2)
 
 	url := argString(vm, "http.get", args, 0)
-	extra := asObject(args[1], vm)
+	extra := argObject(vm, "http.get", args, 1)
 
 	var headers ObjectValue
 	if h, hasHeaders := extra["headers"]; hasHeaders {
@@ -144,13 +155,18 @@ func stdHttpPost(vm *VM, args []Value) {
 	expectArgsRange(vm, "http.post", args, 2, 3)
 
 	url := argString(vm, "http.post", args, 0)
-	data := asObject(args[1], vm)
+	data := argObject(vm, "http.post", args, 1)
 
 	var headers ObjectValue
+	returnBytes := false
 	if len(args) == 3 {
-		extra := asObject(args[2], vm)
-		if h, hasHeaders := extra["headers"]; hasHeaders {
+		options := asObject(args[2], vm)
+		if h, hasHeaders := options["headers"]; hasHeaders {
 			headers, _ = h.(ObjectValue)
+		}
+
+		if h, hasHeaders := options["bytes"]; hasHeaders {
+			returnBytes, _ = h.(bool)
 		}
 	}
 
@@ -189,7 +205,12 @@ func stdHttpPost(vm *VM, args []Value) {
 	result := ObjectValue{
 		"status":  resp.StatusCode,
 		"headers": ObjectValue{},
-		"body":    string(bodyBytes),
+	}
+
+	if returnBytes {
+		result["body"] = bodyBytes
+	} else {
+		result["body"] = string(bodyBytes)
 	}
 
 	for k, v := range resp.Header {
@@ -219,6 +240,29 @@ func stdHttpTextResponse(vm *VM, args []Value) {
 		Type:  HttpText,
 		Value: strValue,
 	})
+}
+
+func stdHttpDownloadFile(vm *VM, args []Value) {
+	expectArgs(vm, "http.downloadFile", args, 2)
+
+	path := argString(vm, "http.downloadFile", args, 0)
+	url := argString(vm, "http.downloadFile", args, 1)
+
+	out, err := os.Create(path)
+	if err != nil {
+		vm.runtimeError(ErrorRuntime, "error while creating file to download: %s", err)
+	}
+	defer out.Close()
+
+	resp, err := http.Get(url)
+	if err != nil {
+		vm.runtimeError(ErrorRuntime, "error while downloading file: %s", err)
+	}
+	defer resp.Body.Close()
+
+	_, err = io.Copy(out, resp.Body)
+
+	vm.push(true)
 }
 
 func cleanMapForJSON(vmMap map[Value]Value) map[string]any {

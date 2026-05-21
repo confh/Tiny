@@ -99,6 +99,6 @@ func stdArrayFrom(vm *VM, args []Value) {
 		vm.push(&ArrayValue{Elements: dst})
 
 	default:
-		vm.runtimeError(ErrorType, "type %s cannot be turned into an array", typeName(v))
+		vm.runtimeError(ErrorType, "type %s cannot be turned into an array", TypeName(v))
 	}
 }

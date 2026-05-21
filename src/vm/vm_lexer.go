@@ -83,6 +83,8 @@ func (l *Lexer) NextToken() Token {
 			tok.Type = TOKEN_LET
 		case "const":
 			tok.Type = TOKEN_CONST
+		case "field":
+			tok.Type = TOKEN_FIELD
 		case "fn":
 			tok.Type = TOKEN_FN
 		case "return":
@@ -137,6 +139,10 @@ func (l *Lexer) NextToken() Token {
 			tok.Type = TOKEN_SPAWN
 		case "embed":
 			tok.Type = TOKEN_EMBED
+		case "private":
+			tok.Type = TOKEN_PRIVATE
+		case "public":
+			tok.Type = TOKEN_PUBLIC
 		case "instanceof":
 			tok.Type = TOKEN_INSTANCEOF
 		default:
@@ -151,7 +157,7 @@ func (l *Lexer) NextToken() Token {
 		return l.tokenAt(start, TOKEN_NUMBER, num)
 	}
 
-	if ch == '"' {
+	if ch == '"' || ch == '\'' {
 		str := l.readString()
 		return l.tokenAt(start, TOKEN_STRING, str)
 	}
@@ -532,7 +538,7 @@ func (l *Lexer) readString() string {
 	for l.pos < len(l.input) {
 		ch := rune(l.input[l.pos])
 
-		if ch == '"' {
+		if ch == '"' || ch == '\'' {
 			l.advance()
 			return string(result)
 		}
@@ -540,28 +546,7 @@ func (l *Lexer) readString() string {
 		if ch == '\\' {
 			l.advance()
 
-			if l.pos >= len(l.input) {
-				LangError(ErrorSyntax, "unterminated escape sequence in string")
-			}
-
-			esc := rune(l.input[l.pos])
-
-			switch esc {
-			case 'n':
-				result = append(result, '\n')
-			case 'r':
-				result = append(result, '\r')
-			case 't':
-				result = append(result, '\t')
-			case '\\':
-				result = append(result, '\\')
-			case '"':
-				result = append(result, '"')
-			case '0':
-				result = append(result, '\x00')
-			default:
-				LangError(ErrorSyntax, "unknown escape sequence: \\%c", esc)
-			}
+			result = append(result, l.readEscapedRune())
 
 			l.advance()
 			continue
@@ -575,23 +560,69 @@ func (l *Lexer) readString() string {
 	return ""
 }
 
+func (l *Lexer) readEscapedRune() rune {
+	if l.pos >= len(l.input) {
+		LangError(ErrorSyntax, "unterminated escape sequence in string")
+	}
+
+	esc := rune(l.input[l.pos])
+
+	switch esc {
+	case 'n':
+		return '\n'
+	case 'r':
+		return '\r'
+	case 't':
+		return '\t'
+	case '\\':
+		return '\\'
+	case '"':
+		return '"'
+	case '`':
+		return '`'
+	case '$':
+		return '$'
+	case '0':
+		return '\x00'
+	default:
+		LangError(ErrorSyntax, "unknown escape sequence: \\%c", esc)
+		return esc
+	}
+}
+
 func (l *Lexer) readBacktickString() string {
 	l.advance() // skip opening `
 
 	start := l.pos
+	var result []rune
 
-	for l.pos < len(l.input) && l.input[l.pos] != '`' {
+	for l.pos < len(l.input) {
+		ch := rune(l.input[l.pos])
+
+		if ch == '`' {
+			l.advance()
+			return string(result)
+		}
+
+		if ch == '\\' {
+			l.advance()
+
+			if l.pos >= len(l.input) {
+				line, column := l.lineColumnAt(start)
+				LangErrorAt(ErrorSyntax, l.file, line, column, "unterminated escape sequence in interpolated string")
+			}
+
+			result = append(result, l.readEscapedRune())
+
+			l.advance()
+			continue
+		}
+
+		result = append(result, ch)
 		l.advance()
 	}
 
-	if l.pos >= len(l.input) {
-		line, column := l.lineColumnAt(start)
-		LangErrorAt(ErrorSyntax, l.file, line, column, "unterminated interpolated string")
-	}
-
-	value := string(l.input[start:l.pos])
-
-	l.advance() // skip closing `
-
-	return value
+	line, column := l.lineColumnAt(start)
+	LangErrorAt(ErrorSyntax, l.file, line, column, "unterminated interpolated string")
+	return ""
 }

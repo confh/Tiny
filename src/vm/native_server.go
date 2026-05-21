@@ -243,12 +243,12 @@ func serverStart(vm *VM, server *NativeServerValue, args []Value) {
 
 				httpResponseObject, ok := result.(NativeHttpResponseValue)
 				if !ok {
-					vm.runtimeError(ErrorRuntime, "expected httpResponse, got %s.", typeName(result))
+					vm.runtimeError(ErrorRuntime, "expected httpResponse, got %s.", TypeName(result))
 				}
 
 				writeServerResponse(w, httpResponseObject.Value, httpResponseObject.Type)
 			default:
-				vm.runtimeError(ErrorType, "invalid route handler: %s", typeName(handler))
+				vm.runtimeError(ErrorType, "invalid route handler: %s", TypeName(handler))
 			}
 		})
 	}

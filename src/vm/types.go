@@ -8,7 +8,7 @@ func (t TypeHint) IsEmpty() bool {
 	return t.Name == ""
 }
 
-func checkTypeHint(value Value, hint TypeHint) bool {
+func CheckTypeHint(value Value, hint TypeHint) bool {
 	if hint.IsEmpty() {
 		return true
 	}
@@ -19,48 +19,60 @@ func checkTypeHint(value Value, hint TypeHint) bool {
 
 	case "number":
 		switch value.(type) {
-		case int, int64, float64, float32:
+		case int, int64, float64, float32, NumberExpr:
 			return true
 		default:
 			return false
 		}
 
 	case "string":
-		_, ok := value.(string)
-		return ok
+		switch value.(type) {
+		case string, StringExpr:
+			return true
+		default:
+			return false
+		}
 
 	case "bool":
-		_, ok := value.(bool)
-		return ok
+		switch value.(type) {
+		case bool, BoolExpr:
+			return true
+		default:
+			return false
+		}
 
 	case "array":
 		switch value.(type) {
-		case ArrayValue, *ArrayValue:
+		case ArrayValue, *ArrayValue, ArrayExpr:
 			return true
 		default:
 			return false
 		}
 
 	case "object":
-		_, ok := value.(ObjectValue)
-		return ok
+		switch value.(type) {
+		case ObjectValue, ObjectExpr:
+			return true
+		default:
+			return false
+		}
 
 	case "function":
 		switch value.(type) {
-		case FunctionValue, *FunctionValue:
+		case FunctionValue, *FunctionValue, FunctionExpr:
 			return true
 		default:
 			return false
 		}
 
 	case "null":
-		return value == nil || typeName(value) == "null"
+		return value == nil || TypeName(value) == "null"
 
 	case "undefined":
-		return typeName(value) == "undefined"
+		return TypeName(value) == "undefined"
 
 	default:
 		// Later: class names.
-		return typeName(value) == hint.Name
+		return TypeName(value) == hint.Name
 	}
 }

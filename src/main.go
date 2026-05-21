@@ -66,12 +66,22 @@ func runSourceCommand(args []string) {
 	var entryFile string
 	cliArgs := []string{}
 
-	if len(args) >= 1 {
-		entryFile = args[0]
-		cliArgs = args[1:]
+	disableCache := false
+	filteredArgs := []string{}
+	for _, arg := range args {
+		if arg == "--disable-cache" {
+			disableCache = true
+		} else {
+			filteredArgs = append(filteredArgs, arg)
+		}
 	}
 
-	if len(args) == 0 {
+	if len(filteredArgs) >= 1 {
+		entryFile = filteredArgs[0]
+		cliArgs = filteredArgs[1:]
+	}
+
+	if len(filteredArgs) == 0 {
 		config, ok := loadTinyConfig()
 		if !ok {
 			LangError(ErrorRuntime, "usage: tiny run <file.tiny> or create tiny.json with tiny init")
@@ -79,7 +89,7 @@ func runSourceCommand(args []string) {
 
 		entryFile = config.Entry
 	} else {
-		entryFile = args[0]
+		entryFile = filteredArgs[0]
 	}
 
 	sourceBytes, err := os.ReadFile(entryFile)
@@ -96,15 +106,13 @@ func runSourceCommand(args []string) {
 	}
 
 	cachePath, err := tinyCachePath(entryFile, hash)
-	if err == nil && fileExists(cachePath) {
+	if !disableCache && err == nil && fileExists(cachePath) {
 		runBytecodeFile(cachePath)
 		return
 	}
 
 	deleteTinyCacheContent(entryFile)
-
 	saveBytecodeFile(entryFile, cachePath)
-
 	runBytecodeFile(cachePath)
 }
 

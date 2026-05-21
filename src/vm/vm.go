@@ -29,6 +29,7 @@ type Frame struct {
 	constants    []bool
 	instructions []Instruction
 	localTypes   []TypeHint
+	methodClass  string
 
 	returnOverride    Value
 	hasReturnOverride bool
@@ -211,28 +212,22 @@ func remapDirectCallIDs(instructions []Instruction, ids map[string]int) {
 	}
 }
 
-func buildFunctionList(functions map[string]Function) []Function {
-	maxID := -1
-
-	for _, fn := range functions {
-		if fn.ID > maxID {
-			maxID = fn.ID
-		}
+func methodOwnerClass(functionName string) string {
+	dot := strings.LastIndex(functionName, ".")
+	if dot == -1 {
+		return ""
 	}
 
-	if maxID < 0 {
-		return []Function{}
+	return functionName[:dot]
+}
+
+func (vm *VM) currentMethodClass() string {
+	if len(vm.frames) == 0 {
+		return ""
 	}
 
-	list := make([]Function, maxID+1)
-
-	for _, fn := range functions {
-		if fn.ID >= 0 {
-			list[fn.ID] = fn
-		}
-	}
-
-	return list
+	frame := vm.frames[len(vm.frames)-1]
+	return frame.methodClass
 }
 
 func (vm *VM) SetCLIArgs(args []string) {
@@ -322,14 +317,106 @@ func (vm *VM) CloneForTask() *VM {
 	}
 }
 
+func cloneValue(value Value) Value {
+	switch v := value.(type) {
+	case ObjectValue:
+		copyObj := ObjectValue{}
+
+		for key, val := range v {
+			copyObj[key] = cloneValue(val)
+		}
+
+		return copyObj
+
+	case *ObjectValue:
+		copyObj := ObjectValue{}
+
+		for key, val := range *v {
+			copyObj[key] = cloneValue(val)
+		}
+
+		return copyObj
+
+	case *ArrayValue:
+		copyArr := &ArrayValue{
+			Elements: make([]Value, len(v.Elements)),
+		}
+
+		for i, val := range v.Elements {
+			copyArr.Elements[i] = cloneValue(val)
+		}
+
+		return copyArr
+
+	case ArrayValue:
+		copyArr := ArrayValue{
+			Elements: make([]Value, len(v.Elements)),
+		}
+
+		for i, val := range v.Elements {
+			copyArr.Elements[i] = cloneValue(val)
+		}
+
+		return copyArr
+
+	case *BufferValue:
+		bytes := make([]byte, len(v.Bytes))
+		copy(bytes, v.Bytes)
+
+		return &BufferValue{
+			Bytes: bytes,
+		}
+
+	case BufferValue:
+		bytes := make([]byte, len(v.Bytes))
+		copy(bytes, v.Bytes)
+
+		return BufferValue{
+			Bytes: bytes,
+		}
+
+	default:
+		return value
+	}
+}
+
+func (vm *VM) canAccessField(object ObjectValue, field string) bool {
+	className, isClass := object["__class"]
+	if !isClass {
+		return true
+	}
+	privateFields := object["__privateFields"].(map[string]bool)
+	if _, fieldIsPrivate := privateFields[field]; fieldIsPrivate {
+		return vm.currentMethodClass() == className
+	}
+
+	return true
+}
+
 func (vm *VM) callClassWithArgs(class Class, args []Value) {
 	object := ObjectValue{
-		"__class": class.Name,
+		"__class":         class.Name,
+		"__constFields":   map[string]bool{},
+		"__privateFields": map[string]bool{},
 	}
+
+	constFields, _ := object["__constFields"].(map[string]bool)
+	privateFields, _ := object["__privateFields"].(map[string]bool)
 
 	for methodName, functionName := range class.Methods {
 		object[methodName] = FunctionValue{
 			Name: functionName,
+		}
+	}
+
+	for _, field := range class.Fields {
+		object[field.Name] = cloneValue(field.Value)
+		if field.Constant {
+			constFields[field.Name] = true
+		}
+
+		if field.Private {
+			privateFields[field.Name] = true
 		}
 	}
 
@@ -526,14 +613,14 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 			arg := vm.stack[start+i]
 			param := fn.Params[i]
 
-			if !param.TypeHint.IsEmpty() && !checkTypeHint(arg, param.TypeHint) {
+			if !param.TypeHint.IsEmpty() && !CheckTypeHint(arg, param.TypeHint) {
 				LangError(
 					ErrorType,
 					"function %s parameter %s expected %s, got %s",
 					fn.Name,
 					param.Name,
 					param.TypeHint.Name,
-					typeName(arg),
+					TypeName(arg),
 				)
 			}
 
@@ -605,7 +692,7 @@ func (vm *VM) step() bool {
 			case float64:
 				shouldJump = float64(l) >= r
 			default:
-				LangError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
+				LangError(ErrorType, "cannot compare %s and %s", TypeName(left), TypeName(right))
 			}
 
 		case int64:
@@ -617,14 +704,14 @@ func (vm *VM) step() bool {
 			case float64:
 				shouldJump = float64(l) >= r
 			default:
-				LangError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
+				LangError(ErrorType, "cannot compare %s and %s", TypeName(left), TypeName(right))
 			}
 
 		case float64:
 			shouldJump = l >= asFloat64(right)
 
 		default:
-			LangError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
+			LangError(ErrorType, "cannot compare %s and %s", TypeName(left), TypeName(right))
 		}
 
 		if shouldJump {
@@ -671,7 +758,7 @@ func (vm *VM) step() bool {
 			shouldJump = math.Mod(l, r) != 0
 
 		default:
-			LangError(ErrorType, "cannot modulo %s and %s", typeName(left), typeName(right))
+			LangError(ErrorType, "cannot modulo %s and %s", TypeName(left), TypeName(right))
 		}
 
 		if shouldJump {
@@ -714,7 +801,7 @@ func (vm *VM) step() bool {
 			case float32:
 				targetCell.Value = float32(target) + source
 			default:
-				LangError(ErrorType, "cannot add %s and %s", typeName(targetCell.Value), typeName(sourceCell.Value))
+				LangError(ErrorType, "cannot add %s and %s", TypeName(targetCell.Value), TypeName(sourceCell.Value))
 			}
 
 		case int64:
@@ -728,7 +815,7 @@ func (vm *VM) step() bool {
 			case float32:
 				targetCell.Value = float32(target) + source
 			default:
-				LangError(ErrorType, "cannot add %s and %s", typeName(targetCell.Value), typeName(sourceCell.Value))
+				LangError(ErrorType, "cannot add %s and %s", TypeName(targetCell.Value), TypeName(sourceCell.Value))
 			}
 
 		case float64:
@@ -742,7 +829,7 @@ func (vm *VM) step() bool {
 			case float32:
 				targetCell.Value = target + float64(source)
 			default:
-				LangError(ErrorType, "cannot add %s and %s", typeName(targetCell.Value), typeName(sourceCell.Value))
+				LangError(ErrorType, "cannot add %s and %s", TypeName(targetCell.Value), TypeName(sourceCell.Value))
 			}
 
 		case float32:
@@ -756,14 +843,14 @@ func (vm *VM) step() bool {
 			case float32:
 				targetCell.Value = target + source
 			default:
-				LangError(ErrorType, "cannot add %s and %s", typeName(targetCell.Value), typeName(sourceCell.Value))
+				LangError(ErrorType, "cannot add %s and %s", TypeName(targetCell.Value), TypeName(sourceCell.Value))
 			}
 
 		case string:
 			targetCell.Value = target + valueToString(sourceCell.Value)
 
 		default:
-			LangError(ErrorType, "cannot add to %s", typeName(targetCell.Value))
+			LangError(ErrorType, "cannot add to %s", TypeName(targetCell.Value))
 		}
 
 	case OP_SUB_ASSIGN_LOCAL:
@@ -802,7 +889,7 @@ func (vm *VM) step() bool {
 			case float32:
 				targetCell.Value = float32(target) - source
 			default:
-				LangError(ErrorType, "cannot subtract %s and %s", typeName(targetCell.Value), typeName(sourceCell.Value))
+				LangError(ErrorType, "cannot subtract %s and %s", TypeName(targetCell.Value), TypeName(sourceCell.Value))
 			}
 
 		case int64:
@@ -816,7 +903,7 @@ func (vm *VM) step() bool {
 			case float32:
 				targetCell.Value = float32(target) - source
 			default:
-				LangError(ErrorType, "cannot subtract %s and %s", typeName(targetCell.Value), typeName(sourceCell.Value))
+				LangError(ErrorType, "cannot subtract %s and %s", TypeName(targetCell.Value), TypeName(sourceCell.Value))
 			}
 
 		case float64:
@@ -830,7 +917,7 @@ func (vm *VM) step() bool {
 			case float32:
 				targetCell.Value = target - float64(source)
 			default:
-				LangError(ErrorType, "cannot subtract %s and %s", typeName(targetCell.Value), typeName(sourceCell.Value))
+				LangError(ErrorType, "cannot subtract %s and %s", TypeName(targetCell.Value), TypeName(sourceCell.Value))
 			}
 
 		case float32:
@@ -844,11 +931,11 @@ func (vm *VM) step() bool {
 			case float32:
 				targetCell.Value = target - source
 			default:
-				LangError(ErrorType, "cannot subtract %s and %s", typeName(targetCell.Value), typeName(sourceCell.Value))
+				LangError(ErrorType, "cannot subtract %s and %s", TypeName(targetCell.Value), TypeName(sourceCell.Value))
 			}
 
 		default:
-			LangError(ErrorType, "cannot subtract to %s", typeName(targetCell.Value))
+			LangError(ErrorType, "cannot subtract to %s", TypeName(targetCell.Value))
 		}
 
 	case OP_JUMP_LOCAL_GE_CONST:
@@ -881,7 +968,7 @@ func (vm *VM) step() bool {
 			shouldJump = v >= float32(info.Value)
 
 		default:
-			LangError(ErrorType, "cannot compare %s and number", typeName(cell.Value))
+			LangError(ErrorType, "cannot compare %s and number", TypeName(cell.Value))
 		}
 
 		if shouldJump {
@@ -931,6 +1018,15 @@ func (vm *VM) step() bool {
 
 		vm.callFunctionDirectFromStack(fn, info.ArgCount, "function "+info.Name)
 
+	case OP_OBJECT_IN:
+		keyValue := vm.pop()
+		objectValue := asObject(vm.pop(), vm)
+
+		found := false
+		_, found = objectValue[keyValue]
+
+		vm.push(found)
+
 	case OP_INSTANCEOF:
 		classValue := vm.pop()
 		objectValue := vm.pop()
@@ -945,7 +1041,7 @@ func (vm *VM) step() bool {
 			className = c.Name
 
 		default:
-			LangError(ErrorType, "right side of instanceof must be class, got %s", typeName(classValue))
+			LangError(ErrorType, "right side of instanceof must be class, got %s", TypeName(classValue))
 		}
 
 		vm.push(vm.isInstanceOf(objectValue, className))
@@ -955,7 +1051,7 @@ func (vm *VM) step() bool {
 
 		fn, ok := value.(FunctionValue)
 		if !ok {
-			LangError(ErrorType, "spawn expects function, got %s", typeName(value))
+			LangError(ErrorType, "spawn expects function, got %s", TypeName(value))
 		}
 
 		task := &NativeTaskValue{
@@ -984,7 +1080,7 @@ func (vm *VM) step() bool {
 
 	case OP_TYPEOF:
 		value := vm.pop()
-		vm.push(typeName(value))
+		vm.push(TypeName(value))
 
 	case OP_NEGATE:
 		value := vm.pop()
@@ -1003,7 +1099,7 @@ func (vm *VM) step() bool {
 			vm.push(-v)
 
 		default:
-			LangError(ErrorType, "cannot negate %s", typeName(value))
+			LangError(ErrorType, "cannot negate %s", TypeName(value))
 		}
 	case OP_CLOSURE:
 		info := instr.Value.(ClosureInfo)
@@ -1057,13 +1153,36 @@ func (vm *VM) step() bool {
 
 		object, ok := objectValue.(ObjectValue)
 		if !ok {
-			LangError(ErrorType, "expected object, got %s", typeName(objectValue))
+			LangError(ErrorType, "expected object, got %s", TypeName(objectValue))
+		}
+
+		_, isClass := object["__class"]
+		if isClass {
+			constFields := object["__constFields"].(map[string]bool)
+			if _, isConstant := constFields[name]; isConstant {
+				vm.runtimeError(ErrorRuntime, "cannot assign to constant field: %s", name)
+			}
+
+			if !vm.canAccessField(object, name) {
+				LangError(ErrorRuntime, "cannot assign private field: %s", name)
+			}
 		}
 
 		object[name] = value
 
 	case OP_LOAD_GLOBAL:
-		name := instr.Value.(string)
+		var name string
+
+		switch operand := instr.Value.(type) {
+		case string:
+			name = operand
+
+		case VariableInfo:
+			name = operand.Name
+
+		default:
+			vm.runtimeError(ErrorRuntime, "OP_LOAD_GLOBAL expected string or VariableInfo, got %v", instr)
+		}
 
 		value, ok := vm.globals[name]
 		if !ok {
@@ -1094,13 +1213,13 @@ func (vm *VM) step() bool {
 		info := instr.Value.(VariableInfo)
 		value := vm.pop()
 
-		if !checkTypeHint(value, info.TypeHint) {
+		if !CheckTypeHint(value, info.TypeHint) {
 			LangError(
 				ErrorType,
 				"variable %s expected %s, got %s",
 				info.Name,
 				info.TypeHint.Name,
-				typeName(value),
+				TypeName(value),
 			)
 		}
 
@@ -1144,13 +1263,13 @@ func (vm *VM) step() bool {
 			LangError(ErrorInternal, "local slot out of range: %d", info.Slot)
 		}
 
-		if !info.TypeHint.IsEmpty() && !checkTypeHint(value, info.TypeHint) {
+		if !info.TypeHint.IsEmpty() && !CheckTypeHint(value, info.TypeHint) {
 			LangError(
 				ErrorType,
 				"variable %s expected %s, got %s",
 				info.Name,
 				info.TypeHint.Name,
-				typeName(value),
+				TypeName(value),
 			)
 		}
 
@@ -1168,13 +1287,13 @@ func (vm *VM) step() bool {
 
 		hint := vm.globalTypes[name]
 
-		if !hint.IsEmpty() && !checkTypeHint(value, hint) {
+		if !hint.IsEmpty() && !CheckTypeHint(value, hint) {
 			LangError(
 				ErrorType,
 				"global %s expected %s, got %s",
 				name,
 				hint.Name,
-				typeName(value),
+				TypeName(value),
 			)
 		}
 
@@ -1228,7 +1347,7 @@ func (vm *VM) step() bool {
 			}
 
 		default:
-			LangError(ErrorType, "cannot increment %s", typeName(value))
+			LangError(ErrorType, "cannot increment %s", TypeName(value))
 		}
 
 	case OP_DEC_GLOBAL:
@@ -1256,7 +1375,7 @@ func (vm *VM) step() bool {
 			}
 
 		default:
-			LangError(ErrorType, "cannot increment %s", typeName(value))
+			LangError(ErrorType, "cannot increment %s", TypeName(value))
 		}
 
 	case OP_INC_LOCAL:
@@ -1292,7 +1411,7 @@ func (vm *VM) step() bool {
 			cell.Value = v + float32(info.FloatAmount)
 
 		default:
-			vm.runtimeError(ErrorType, "cannot increment %s", typeName(cell.Value))
+			vm.runtimeError(ErrorType, "cannot increment %s", TypeName(cell.Value))
 		}
 
 	case OP_INC_GLOBAL:
@@ -1324,7 +1443,7 @@ func (vm *VM) step() bool {
 			}
 
 		default:
-			LangError(ErrorType, "cannot increment %s", typeName(value))
+			LangError(ErrorType, "cannot increment %s", TypeName(value))
 		}
 
 	case OP_ASSIGN_LOCAL:
@@ -1359,12 +1478,12 @@ func (vm *VM) step() bool {
 
 		hint := frame.localTypes[slot]
 
-		if !hint.IsEmpty() && !checkTypeHint(value, hint) {
+		if !hint.IsEmpty() && !CheckTypeHint(value, hint) {
 			LangError(
 				ErrorType,
 				"local variable expected %s, got %s",
 				hint.Name,
-				typeName(value),
+				TypeName(value),
 			)
 		}
 
@@ -1384,7 +1503,7 @@ func (vm *VM) step() bool {
 				vm.push(float64(l) + r)
 
 			default:
-				LangError(ErrorType, "cannot add %s and %s", typeName(left), typeName(right))
+				LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
 			}
 
 		case float64:
@@ -1396,7 +1515,7 @@ func (vm *VM) step() bool {
 				vm.push(l + r)
 
 			default:
-				LangError(ErrorType, "cannot add %s and %s", typeName(left), typeName(right))
+				LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
 			}
 
 		case string:
@@ -1414,11 +1533,11 @@ func (vm *VM) step() bool {
 				vm.push(l + bigIntToString(r))
 
 			default:
-				LangError(ErrorType, "cannot add %s and %s", typeName(left), typeName(right))
+				LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
 			}
 
 		default:
-			LangError(ErrorType, "cannot add %s and %s", typeName(left), typeName(right))
+			LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
 		}
 
 	case OP_SUB:
@@ -1436,7 +1555,7 @@ func (vm *VM) step() bool {
 				vm.push(left.(int) - right.(int))
 			}
 		} else {
-			LangError(ErrorType, "cannot subtract %s and %s", typeName(left), typeName(right))
+			LangError(ErrorType, "cannot subtract %s and %s", TypeName(left), TypeName(right))
 		}
 
 	case OP_MUL:
@@ -1452,7 +1571,7 @@ func (vm *VM) step() bool {
 				vm.push(left.(int) * right.(int))
 			}
 		} else {
-			LangError(ErrorType, "cannot multiply %s and %s", typeName(left), typeName(right))
+			LangError(ErrorType, "cannot multiply %s and %s", TypeName(left), TypeName(right))
 		}
 
 	case OP_DIV:
@@ -1460,7 +1579,7 @@ func (vm *VM) step() bool {
 		left := vm.popFast()
 
 		if !isNumber(left) || !isNumber(right) {
-			LangError(ErrorType, "cannot divide %s and %s", typeName(left), typeName(right))
+			LangError(ErrorType, "cannot divide %s and %s", TypeName(left), TypeName(right))
 		}
 
 		vm.push(asFloat(left) / asFloat(right))
@@ -1489,7 +1608,7 @@ func (vm *VM) step() bool {
 				vm.push(float64(l) < r)
 
 			default:
-				LangError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
+				LangError(ErrorType, "cannot compare %s and %s", TypeName(left), TypeName(right))
 			}
 
 		case float64:
@@ -1501,11 +1620,11 @@ func (vm *VM) step() bool {
 				vm.push(l < r)
 
 			default:
-				LangError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
+				LangError(ErrorType, "cannot compare %s and %s", TypeName(left), TypeName(right))
 			}
 
 		default:
-			LangError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
+			LangError(ErrorType, "cannot compare %s and %s", TypeName(left), TypeName(right))
 		}
 
 	case OP_GT:
@@ -1513,7 +1632,7 @@ func (vm *VM) step() bool {
 		left := vm.popFast()
 
 		if !isNumber(left) || !isNumber(right) {
-			LangError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
+			LangError(ErrorType, "cannot compare %s and %s", TypeName(left), TypeName(right))
 		}
 
 		vm.push(asFloat(left) > asFloat(right))
@@ -1523,7 +1642,7 @@ func (vm *VM) step() bool {
 		left := vm.popFast()
 
 		if !isNumber(left) || !isNumber(right) {
-			LangError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
+			LangError(ErrorType, "cannot compare %s and %s", TypeName(left), TypeName(right))
 		}
 
 		vm.push(asFloat(left) <= asFloat(right))
@@ -1533,7 +1652,7 @@ func (vm *VM) step() bool {
 		left := vm.popFast()
 
 		if !isNumber(left) || !isNumber(right) {
-			LangError(ErrorType, "cannot compare %s and %s", typeName(left), typeName(right))
+			LangError(ErrorType, "cannot compare %s and %s", TypeName(left), TypeName(right))
 		}
 
 		vm.push(asFloat(left) >= asFloat(right))
@@ -1588,7 +1707,7 @@ func (vm *VM) step() bool {
 			vm.push(len(v.Bytes))
 
 		default:
-			LangError(ErrorType, "cannot get length of %s", typeName(value))
+			LangError(ErrorType, "cannot get length of %s", TypeName(value))
 		}
 
 	case OP_CALL:
@@ -1624,7 +1743,7 @@ func (vm *VM) step() bool {
 			vm.callClassByName(v.Name, args)
 
 		default:
-			LangError(ErrorType, "expected function or class, got %s", typeName(callee))
+			LangError(ErrorType, "expected function or class, got %s", TypeName(callee))
 		}
 
 	case OP_BUILTIN_CALL:
@@ -1673,7 +1792,7 @@ func (vm *VM) step() bool {
 			vm.push(math.Mod(l, r))
 
 		default:
-			LangError(ErrorType, "cannot modulo %s and %s", typeName(left), typeName(right))
+			LangError(ErrorType, "cannot modulo %s and %s", TypeName(left), TypeName(right))
 		}
 
 	case OP_ARRAY:
@@ -1713,7 +1832,7 @@ func (vm *VM) step() bool {
 			vm.push(value)
 
 		default:
-			LangError(ErrorType, "cannot index %s", typeName(objectValue))
+			LangError(ErrorType, "cannot index %s", TypeName(objectValue))
 		}
 
 	case OP_SET_INDEX:
@@ -1733,10 +1852,13 @@ func (vm *VM) step() bool {
 
 		case ObjectValue:
 			key := indexValue
+			if className, isClass := obj["__class"]; isClass {
+				vm.runtimeError(ErrorRuntime, "cannot modify class '%s' by index operator.", className)
+			}
 			obj[key] = value
 
 		default:
-			LangError(ErrorType, "cannot index assign %s", typeName(objectValue))
+			LangError(ErrorType, "cannot index assign %s", TypeName(objectValue))
 		}
 
 	case OP_RETURN:
@@ -1758,13 +1880,13 @@ func (vm *VM) step() bool {
 
 		frame := vm.frames[len(vm.frames)-1]
 
-		if !checkTypeHint(returnValue, frame.function.ReturnType) {
+		if !CheckTypeHint(returnValue, frame.function.ReturnType) {
 			LangError(
 				ErrorType,
 				"function %s should return %s, got %s",
 				frame.function.Name,
 				frame.function.ReturnType.Name,
-				typeName(returnValue),
+				TypeName(returnValue),
 			)
 		}
 
@@ -1896,7 +2018,11 @@ func (vm *VM) step() bool {
 
 		object, ok := objectValue.(ObjectValue)
 		if !ok {
-			LangError(ErrorType, "expected object, got %s", typeName(objectValue))
+			LangError(ErrorType, "expected object, got %s", TypeName(objectValue))
+		}
+
+		if !vm.canAccessField(object, name) {
+			LangError(ErrorRuntime, "cannot access private field: %s", name)
 		}
 
 		value, exists := object[name]
@@ -2219,6 +2345,14 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 		vm.callServerMethod(val, method, args)
 		return
 
+	case *NativeTcpServerValue:
+		vm.callTcpServerMethod(val, method, args)
+		return
+
+	case *NativeTcpConnectionValue:
+		vm.callTcpConnMethod(val, method, args)
+		return
+
 	case *BufferValue:
 		vm.callBufferMethod(val, method, args)
 		return
@@ -2250,7 +2384,7 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 
 	object, ok := objectValue.(ObjectValue)
 	if !ok {
-		LangError(ErrorType, "expected object, got %s", typeName(objectValue))
+		LangError(ErrorType, "expected object, got %s", TypeName(objectValue))
 	}
 
 	receiver := object
@@ -2281,16 +2415,23 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 		LangError(ErrorName, "undefined function: %s", fnValue.Name)
 	}
 
-	expected := len(fn.Params)
+	ownerClass := methodOwnerClass(fnValue.Name)
+
+	expectedArgs := len(fn.Params)
+
+	if expectedArgs > 0 && fn.Params[0].Name == "this" {
+		expectedArgs--
+	}
 
 	if fn.HasDefaults {
 		args = vm.applyDefaultArgs(fn, args, 1, "method "+method)
-	} else if len(args) != expected {
-		vm.runtimeError(ErrorRuntime, "method %s expects %d arguments, got %d", method, expected, len(args))
+	} else if len(args) != expectedArgs {
+		vm.runtimeError(ErrorRuntime, "method %s expects %d arguments, got %d", method, expectedArgs, len(args))
 	}
 	// argCount = len(args)
 
 	frame := vm.getFrame(fn)
+	frame.methodClass = ownerClass
 
 	frame.locals[0].Value = receiver
 	frame.constants[0] = true
@@ -2299,14 +2440,14 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 		param := fn.Params[i+1]
 
 		if fn.HasTypeHints {
-			if !param.TypeHint.IsEmpty() && !checkTypeHint(arg, param.TypeHint) {
+			if !param.TypeHint.IsEmpty() && !CheckTypeHint(arg, param.TypeHint) {
 				LangError(
 					ErrorType,
 					"method %s parameter %s expected %s, got %s",
 					method,
 					param.Name,
 					param.TypeHint.Name,
-					typeName(arg),
+					TypeName(arg),
 				)
 			}
 		}
@@ -2409,14 +2550,14 @@ func (vm *VM) callFunction(name string, argCount int) {
 	for i, arg := range args {
 		param := fn.Params[i]
 
-		if !param.TypeHint.IsEmpty() && !checkTypeHint(arg, param.TypeHint) {
+		if !param.TypeHint.IsEmpty() && !CheckTypeHint(arg, param.TypeHint) {
 			LangError(
 				ErrorType,
 				"function %s parameter %s expected %s, got %s",
 				fn.Name,
 				param.Name,
 				param.TypeHint.Name,
-				typeName(arg),
+				TypeName(arg),
 			)
 		}
 

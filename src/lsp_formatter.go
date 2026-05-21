@@ -43,19 +43,27 @@ func formatTinyDocument(text string) string {
 			continue
 		}
 
-		if startsWithClosingBrace(line) {
-			indent--
-			if indent < 0 {
-				indent = 0
-			}
-		}
-
 		line = formatTinyLine(line)
+
+		leadingClosings := countLeadingClosingBraces(line)
+
+		indent -= leadingClosings
+		if indent < 0 {
+			indent = 0
+		}
 
 		formatted = append(formatted, strings.Repeat("    ", indent)+line)
 
-		indent += braceIndentDelta(line)
+		opens, closes := countBracesOutsideStrings(line)
 
+		// We already handled leading closing braces before printing,
+		// so do NOT subtract them again.
+		closes -= leadingClosings
+		if closes < 0 {
+			closes = 0
+		}
+
+		indent += opens - closes
 		if indent < 0 {
 			indent = 0
 		}
@@ -63,7 +71,6 @@ func formatTinyDocument(text string) string {
 
 	result := strings.Join(formatted, "\n")
 
-	// Keep one final newline if the original had one.
 	if strings.HasSuffix(text, "\n") && !strings.HasSuffix(result, "\n") {
 		result += "\n"
 	}
@@ -71,15 +78,29 @@ func formatTinyDocument(text string) string {
 	return result
 }
 
-func startsWithClosingBrace(line string) bool {
+func countLeadingClosingBraces(line string) int {
 	line = strings.TrimSpace(line)
-	return strings.HasPrefix(line, "}") || strings.HasPrefix(line, "]")
+
+	count := 0
+
+	for _, ch := range line {
+		if ch == '}' {
+			count++
+			continue
+		}
+
+		break
+	}
+
+	return count
 }
 
-func braceIndentDelta(line string) int {
+func countBracesOutsideStrings(line string) (int, int) {
 	code := stripLineCommentAware(line)
 
-	delta := 0
+	opens := 0
+	closes := 0
+
 	inString := false
 	stringQuote := rune(0)
 	escaped := false
@@ -111,13 +132,13 @@ func braceIndentDelta(line string) int {
 
 		switch ch {
 		case '{':
-			delta++
+			opens++
 		case '}':
-			delta--
+			closes++
 		}
 	}
 
-	return delta
+	return opens, closes
 }
 
 func formatTinyLine(line string) string {

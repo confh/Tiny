@@ -22,8 +22,24 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
+var std${moduleName.upper()}Metadata = StdModuleInfo{
+	Name: "${moduleName}",
+	Methods: map[string]StdMethodInfo{
+		"helloWorld": {
+			Name:        "helloWorld",
+			Args:        []StdArg{},
+			Returns:     "string",
+			Description: "Return hello world",
+		},
+	},
+}
+
 var std${moduleName.upper()}Methods = map[string]StdModuleFunc{
 	"helloWorld": ${moduleName}HelloWorld,
+}
+
+func init() {
+	registerStdModule(std${moduleName.upper()}Metadata)
 }
 
 func (vm *VM) callStd${moduleName.upper()}(method string, args []Value) {

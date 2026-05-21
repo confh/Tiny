@@ -140,6 +140,7 @@ func SaveBytecodeToBytes(main []Instruction, functions map[string]Function, clas
 
 	for name, fn := range functions {
 		file.Functions[name] = SerializableFunction{
+			ID:           fn.ID,
 			Name:         fn.Name,
 			Params:       serializeParams(fn.Params),
 			ReturnType:   fn.ReturnType,
@@ -358,6 +359,12 @@ func EncodeValue(value any) EncodedValue {
 			Data: *v,
 		}
 
+	case TryInfo:
+		return EncodedValue{
+			Type: "try",
+			Data: v,
+		}
+
 	case ObjectValue:
 		members := map[string]EncodedValue{}
 
@@ -403,6 +410,11 @@ func DecodeValue(value EncodedValue) any {
 
 	case "assignLocal":
 		var result AssignLocalInfo
+		decodeInto(value.Data, &result)
+		return result
+
+	case "try":
+		var result TryInfo
 		decodeInto(value.Data, &result)
 		return result
 

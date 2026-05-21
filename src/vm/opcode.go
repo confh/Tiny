@@ -58,6 +58,7 @@ const (
 	OP_LEN
 
 	OP_INSTANCEOF
+	OP_OBJECT_IN
 
 	OP_CALL_DIRECT
 
@@ -204,6 +205,15 @@ type JumpModLocalLocalNotZeroInfo struct {
 
 type Class struct {
 	Name    string
+	Fields  []ClassField
 	Methods map[string]string
 	Embeds  []string
+}
+
+type ClassField struct {
+	Constant bool
+	Name     string
+	Value    Value
+	TypeHint TypeHint
+	Private  bool
 }

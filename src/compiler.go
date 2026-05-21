@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"path/filepath"
 	"strconv"
 
@@ -349,7 +348,6 @@ func (c *Compiler) getFunctionID(name string) int {
 }
 
 func (c *Compiler) setLocation(file string, line int, column int) {
-	fmt.Printf("Reading current: %s", file)
 	c.currentFile = file
 	c.currentLine = line
 	c.currentColumn = column
@@ -1053,6 +1051,28 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 	case NamespaceStmt:
 		c.compileNamespace(s)
 
+	case FieldStmt:
+		c.compileExpr(s.Value)
+
+		binding := c.declareVariable(s.Name, s.Constant)
+
+		c.setLocation(s.File, s.Line, s.Column)
+
+		if binding.Kind == BindingLocal {
+			c.emit(OP_STORE_LOCAL, VariableInfo{
+				Name:     s.Name,
+				Slot:     binding.Slot,
+				Constant: s.Constant,
+				TypeHint: s.TypeHint,
+			})
+		} else {
+			c.emit(OP_STORE_GLOBAL, VariableInfo{
+				Name:     binding.Name,
+				Constant: s.Constant,
+				TypeHint: s.TypeHint,
+			})
+		}
+
 	case VariableStmt:
 		c.compileExpr(s.Value)
 
@@ -1565,12 +1585,59 @@ func (c *Compiler) ensureCaptured(name string) (Binding, bool) {
 	}, true
 }
 
+func (c *Compiler) evalConstantExpr(expr Expr) Value {
+	switch e := expr.(type) {
+	case StringExpr:
+		return e.Value
+
+	case NumberExpr:
+		return e.Value
+
+	case BoolExpr:
+		return e.Value
+
+	case NullExpr:
+		return NullValue{}
+
+	case ArrayExpr:
+		arr := &ArrayValue{
+			Elements: []Value{},
+		}
+
+		for _, element := range e.Elements {
+			arr.Elements = append(arr.Elements, c.evalConstantExpr(element))
+		}
+
+		return arr
+
+	case ObjectExpr:
+		obj := ObjectValue{}
+
+		for _, pair := range e.Fields {
+			obj[pair.Name] = c.evalConstantExpr(pair.Value)
+		}
+
+		return obj
+
+	default:
+		LangError(
+			ErrorType,
+			c.currentFile,
+			c.currentLine,
+			c.currentColumn,
+			"class field default must be constant",
+		)
+		return UndefinedValue{}
+	}
+}
+
 func (c *Compiler) compileClass(stmt ClassStmt) {
 	if _, exists := c.classes[stmt.Name]; exists {
 		LangError(ErrorName, "class already defined: %s", stmt.Name)
 	}
 
 	methods := map[string]string{}
+	fields := []ClassField{}
 
 	for _, method := range stmt.Methods {
 		compiledName := stmt.Name + "." + method.Name
@@ -1585,10 +1652,36 @@ func (c *Compiler) compileClass(stmt ClassStmt) {
 		c.compileMethod(stmt.Name, classMethod)
 	}
 
+	for _, field := range stmt.Fields {
+		classField := ClassField{
+			Constant: field.Constant,
+			Name:     field.Name,
+			Value:    field.Value,
+			TypeHint: field.TypeHint,
+			Private:  field.Private,
+		}
+
+		fields = append(fields, classField)
+
+		if !CheckTypeHint(field.Value, field.TypeHint) {
+			LangError(
+				ErrorType,
+				"field %s in class '%s' expected %s, got %s",
+				field.Name,
+				stmt.Name,
+				field.TypeHint.Name,
+				TypeName(field.Value),
+			)
+		}
+
+		c.compileStatement(field)
+	}
+
 	c.classes[stmt.Name] = Class{
 		Name:    stmt.Name,
 		Methods: methods,
 		Embeds:  stmt.Embeds,
+		Fields:  fields,
 	}
 }
 
@@ -1845,6 +1938,12 @@ func (c *Compiler) compileExpr(expr Expr) {
 		c.compileExpr(e.Class)
 		c.emit(OP_INSTANCEOF, nil)
 
+	case ObjectInExpr:
+		c.compileExpr(e.Object)
+		c.compileExpr(e.Key)
+		c.setLocation(e.File, e.Line, e.Column)
+		c.emit(OP_OBJECT_IN, nil)
+
 	case TernaryExpr:
 		c.compileExpr(e.Condition)
 
@@ -2080,6 +2179,32 @@ func (c *Compiler) compileExpr(expr Expr) {
 			LangError(ErrorName, "undefined variable in namespace: %s", e.Name)
 		}
 
+		if c.declaredFunctions[e.Name] {
+			c.emit(OP_LOAD_GLOBAL, e.Name)
+			return
+		}
+
+		// 4. classes
+		if _, ok := c.classes[e.Name]; ok {
+			c.emit(OP_LOAD_GLOBAL, e.Name)
+			return
+		}
+
+		// 5. known global variables/imports
+		if _, ok := c.globalConstants[e.Name]; ok {
+			c.emit(OP_LOAD_GLOBAL, e.Name)
+			return
+		}
+
+		LangErrorAt(
+			ErrorName,
+			e.File,
+			e.Line,
+			e.Column,
+			"undefined variable: %s",
+			e.Name,
+		)
+
 		// 7. Fallback global.
 		c.emit(OP_LOAD_GLOBAL, e.Name)
 		return
@@ -2136,6 +2261,21 @@ func (c *Compiler) compileExpr(expr Expr) {
 		}
 
 	case CallExpr:
+		if _, exists := c.classes[e.Name]; exists {
+			for _, arg := range e.Args {
+				c.compileExpr(arg)
+			}
+
+			c.setLocation(e.File, e.Line, e.Column)
+
+			c.emit(OP_CALL, CallInfo{
+				Name:     e.Name,
+				ArgCount: len(e.Args),
+			})
+
+			return
+		}
+
 		if c.declaredFunctions[e.Name] {
 			for _, arg := range e.Args {
 				c.compileExpr(arg)
@@ -2170,22 +2310,6 @@ func (c *Compiler) compileExpr(expr Expr) {
 			}
 		}
 
-		if _, exists := c.classes[e.Name]; exists {
-			for _, arg := range e.Args {
-				c.compileExpr(arg)
-			}
-
-			c.setLocation(e.File, e.Line, e.Column)
-
-			c.emit(OP_CALL_DIRECT, DirectCallInfo{
-				ID:       c.getFunctionID(e.Name),
-				Name:     e.Name,
-				ArgCount: len(e.Args),
-			})
-
-			return
-		}
-
 		c.compileExpr(IdentExpr{
 			Name:   e.Name,
 			File:   e.File,
@@ -2211,8 +2335,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 						c.compileExpr(arg)
 					}
 
-					c.emit(OP_CALL_DIRECT, DirectCallInfo{
-						ID:       c.getFunctionID(fullName),
+					c.emit(OP_CALL, CallInfo{
 						Name:     fullName,
 						ArgCount: len(e.Args),
 					})
@@ -2256,8 +2379,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 					c.compileExpr(arg)
 				}
 
-				c.emit(OP_CALL_DIRECT, DirectCallInfo{
-					ID:       c.getFunctionID(ident.Name),
+				c.emit(OP_CALL, CallInfo{
 					Name:     ident.Name,
 					ArgCount: len(e.Args),
 				})
@@ -2349,6 +2471,8 @@ func (c *Compiler) compileMethod(className string, stmt FunctionStmt) {
 	c.outerBindings = nil
 	c.currentCaptures = nil
 
+	class := c.classes[className]
+
 	c.beginScope()
 
 	// slot 0 = this
@@ -2361,6 +2485,10 @@ func (c *Compiler) compileMethod(className string, stmt FunctionStmt) {
 		}
 
 		c.declareVariable(param.Name, false)
+	}
+
+	for _, param := range class.Fields {
+		c.declareVariable(param.Name, param.Constant)
 	}
 
 	for _, bodyStmt := range stmt.Body {

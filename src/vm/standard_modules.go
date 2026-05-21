@@ -51,6 +51,9 @@ func (vm *VM) callStandardModule(module string, method string, args []Value) {
 	case "runtime":
 		vm.callStdRuntime(method, args)
 
+	case "net":
+		vm.callStdNet(method, args)
+
 	default:
 		LangError(ErrorName, "unknown standard module: %s", module)
 	}

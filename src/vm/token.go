@@ -14,13 +14,16 @@ const (
 	TOKEN_NULL            TokenType = "NULL"
 	TOKEN_UNDEFINED       TokenType = "UNDEFINED"
 
-	TOKEN_IMPORT TokenType = "IMPORT"
-	TOKEN_LET    TokenType = "LET"
-	TOKEN_CONST  TokenType = "CONST"
-	TOKEN_FN     TokenType = "FN"
-	TOKEN_RETURN TokenType = "RETURN"
-	TOKEN_THROW  TokenType = "THROW"
-	TOKEN_CLASS  TokenType = "CLASS"
+	TOKEN_IMPORT  TokenType = "IMPORT"
+	TOKEN_LET     TokenType = "LET"
+	TOKEN_FIELD   TokenType = "FIELD"
+	TOKEN_CONST   TokenType = "CONST"
+	TOKEN_FN      TokenType = "FN"
+	TOKEN_RETURN  TokenType = "RETURN"
+	TOKEN_THROW   TokenType = "THROW"
+	TOKEN_CLASS   TokenType = "CLASS"
+	TOKEN_PRIVATE TokenType = "PRIVATE"
+	TOKEN_PUBLIC  TokenType = "PUBLIC"
 
 	TOKEN_ENUM TokenType = "ENUM"
 

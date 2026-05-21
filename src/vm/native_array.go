@@ -204,7 +204,7 @@ func arrayMap(vm *VM, array *ArrayValue, args []Value) {
 	expectArgs(vm, "array.map", args, 1)
 	fn, ok := args[0].(FunctionValue)
 	if !ok {
-		vm.runtimeError(ErrorType, "array.map expects function, got %s", typeName(args[0]))
+		vm.runtimeError(ErrorType, "array.map expects function, got %s", TypeName(args[0]))
 		return
 	}
 	mappedArray := &ArrayValue{
@@ -221,7 +221,7 @@ func arrayForEach(vm *VM, array *ArrayValue, args []Value) {
 	expectArgs(vm, "array.forEach", args, 1)
 	fn, ok := args[0].(FunctionValue)
 	if !ok {
-		vm.runtimeError(ErrorType, "array.forEach expects function, got %s", typeName(args[0]))
+		vm.runtimeError(ErrorType, "array.forEach expects function, got %s", TypeName(args[0]))
 		return
 	}
 	for i, v := range array.Elements {
@@ -234,7 +234,7 @@ func arrayFilter(vm *VM, array *ArrayValue, args []Value) {
 	expectArgs(vm, "array.filter", args, 1)
 	fn, ok := args[0].(FunctionValue)
 	if !ok {
-		vm.runtimeError(ErrorType, "array.filter expects function, got %s", typeName(args[0]))
+		vm.runtimeError(ErrorType, "array.filter expects function, got %s", TypeName(args[0]))
 		return
 	}
 	filteredArray := &ArrayValue{

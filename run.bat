@@ -1,4 +1,4 @@
 @echo off
 setlocal
-go run ./src %*
+go run ./src %* --disable-cache
 endlocal

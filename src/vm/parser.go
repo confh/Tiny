@@ -1117,6 +1117,57 @@ func (p *Parser) parseImportStatement() Stmt {
 	}
 }
 
+func (p *Parser) parseFieldStatement() Stmt {
+	p.expect(TOKEN_FIELD)
+
+	constant := false
+	private := false
+
+	if p.current.Type == TOKEN_PRIVATE {
+		p.expect(TOKEN_PRIVATE)
+		private = true
+	} else if p.current.Type == TOKEN_PUBLIC {
+		p.expect(TOKEN_PUBLIC)
+	}
+
+	if p.current.Type == TOKEN_CONST {
+		p.expect(TOKEN_CONST)
+		constant = true
+	}
+
+	if p.current.Type != TOKEN_IDENT {
+		LangErrorAt(
+			ErrorSyntax,
+			p.current.File,
+			p.current.Line,
+			p.current.Column,
+			"expected variable name after field",
+		)
+	}
+
+	name := p.current.Literal
+	p.advance()
+
+	typeHint := p.parseOptionalTypeHint()
+
+	p.expect(TOKEN_ASSIGN)
+
+	value := p.parseExpression()
+
+	p.expect(TOKEN_SEMI)
+
+	return FieldStmt{
+		Name:     name,
+		Value:    value,
+		TypeHint: typeHint,
+		Constant: constant,
+		Private:  private,
+		File:     p.current.File,
+		Line:     p.current.Line,
+		Column:   p.current.Column,
+	}
+}
+
 func (p *Parser) parseLetStatement() Stmt {
 	p.expect(TOKEN_LET)
 
@@ -1541,19 +1592,31 @@ func (p *Parser) parseComparison() Expr {
 		p.current.Type == TOKEN_GT ||
 		p.current.Type == TOKEN_LTE ||
 		p.current.Type == TOKEN_GTE ||
-		p.current.Type == TOKEN_INSTANCEOF {
+		p.current.Type == TOKEN_INSTANCEOF ||
+		p.current.Type == TOKEN_IN {
 
 		op := p.current.Type
 		p.advance()
 
 		right := p.parseAddSub()
 
-		if op == TOKEN_INSTANCEOF {
+		switch op {
+		case TOKEN_INSTANCEOF:
 			left = InstanceOfExpr{
 				Object: left,
 				Class:  right,
 			}
-		} else {
+
+		case TOKEN_IN:
+			left = ObjectInExpr{
+				Key:    right,
+				Object: left,
+				File:   p.current.File,
+				Line:   p.current.Line,
+				Column: p.current.Column,
+			}
+
+		default:
 			left = BinaryExpr{
 				Left:  left,
 				Op:    op,
@@ -1981,6 +2044,7 @@ func (p *Parser) parseClassStatement() Stmt {
 
 	var methods []FunctionStmt
 	embeds := []string{}
+	fields := []FieldStmt{}
 
 	for p.current.Type != TOKEN_RBRACE {
 		if p.current.Type == TOKEN_EOF {
@@ -1991,6 +2055,22 @@ func (p *Parser) parseClassStatement() Stmt {
 				p.current.Column,
 				"unexpected EOF inside class body",
 			)
+		}
+
+		if p.current.Type == TOKEN_FIELD {
+			field, ok := p.parseFieldStatement().(FieldStmt)
+			if !ok {
+				LangErrorAt(
+					ErrorSyntax,
+					p.current.File,
+					p.current.Line,
+					p.current.Column,
+					"expected field",
+				)
+			}
+
+			fields = append(fields, field)
+			continue
 		}
 
 		if p.current.Type == TOKEN_EMBED {
@@ -2008,7 +2088,7 @@ func (p *Parser) parseClassStatement() Stmt {
 		}
 
 		if p.current.Type != TOKEN_FN {
-			LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "expected method or embed in class")
+			LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "expected declared variable, method or embed in class")
 		}
 
 		method := p.parseFunctionStatement()
@@ -2033,6 +2113,7 @@ func (p *Parser) parseClassStatement() Stmt {
 		Name:    name,
 		Methods: methods,
 		Embeds:  embeds,
+		Fields:  fields,
 	}
 }
 
