@@ -9,3 +9,5 @@ tiny_runtime_linux_amd64
 *.txt
 dist/
 test/
+.tinycache
+tiny.exe~

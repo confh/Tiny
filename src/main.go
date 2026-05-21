@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	. "language.com/src/bytecode"
 	. "language.com/src/tinyerrors"
@@ -81,6 +82,89 @@ func runSourceCommand(args []string) {
 		entryFile = args[0]
 	}
 
+	sourceBytes, err := os.ReadFile(entryFile)
+	if err != nil {
+		panic(err)
+	}
+
+	sourceText := string(sourceBytes)
+
+	hash, err := hashTinyProject(entryFile, sourceText)
+	if err != nil {
+		compileAndRun(entryFile, cliArgs)
+		return
+	}
+
+	cachePath, err := tinyCachePath(entryFile, hash)
+	if err == nil && fileExists(cachePath) {
+		runBytecodeFile(cachePath)
+		return
+	}
+
+	deleteTinyCacheContent(entryFile)
+
+	saveBytecodeFile(entryFile, cachePath)
+
+	runBytecodeFile(cachePath)
+}
+
+func deleteTinyCacheContent(entryFile string) {
+	abs, err := filepath.Abs(entryFile)
+	if err != nil {
+		panic(err)
+	}
+
+	dir := filepath.Dir(abs)
+
+	cacheDir := filepath.Join(dir, ".tinycache")
+
+	files, err := os.ReadDir(cacheDir)
+	if err != nil {
+		panic(err)
+	}
+
+	for _, file := range files {
+		filePath := filepath.Join(cacheDir, file.Name())
+
+		err = os.Remove(filePath)
+		if err != nil {
+			panic(err)
+		}
+	}
+}
+
+func runBytecodeFile(path string) {
+	mainBytecode, functions, classes := LoadBytecode(path)
+
+	mainBytecode = OptimizeBytecode(mainBytecode)
+
+	for name, fn := range functions {
+		fn.Instructions = OptimizeBytecode(fn.Instructions)
+		functions[name] = fn
+	}
+
+	vm := NewVM(mainBytecode, functions, classes)
+	vm.SetCLIArgs(getScriptArgs())
+	vm.Run()
+}
+
+func saveBytecodeFile(entryFile string, outFile string) {
+	program := LoadProgram(entryFile)
+
+	compiler := NewCompiler()
+	mainBytecode, functions, classes := compiler.CompileProgram(program)
+
+	mainBytecode = OptimizeBytecode(mainBytecode)
+
+	for name, fn := range functions {
+		fn.Instructions = OptimizeBytecode(fn.Instructions)
+		functions[name] = fn
+	}
+
+	SaveBytecode(outFile, mainBytecode, functions, classes)
+}
+
+func compileAndRun(entryFile string, cliArgs []string) {
 	program := LoadProgram(entryFile)
 
 	compiler := NewCompiler()
@@ -113,19 +197,7 @@ func buildCommand(args []string) {
 		}
 	}
 
-	program := LoadProgram(entryFile)
-
-	compiler := NewCompiler()
-	mainBytecode, functions, classes := compiler.CompileProgram(program)
-
-	mainBytecode = OptimizeBytecode(mainBytecode)
-
-	for name, fn := range functions {
-		fn.Instructions = OptimizeBytecode(fn.Instructions)
-		functions[name] = fn
-	}
-
-	SaveBytecode(outFile, mainBytecode, functions, classes)
+	saveBytecodeFile(entryFile, outFile)
 
 	fmt.Println("Built", outFile)
 }
@@ -135,9 +207,5 @@ func runBytecodeCommand(args []string) {
 		LangError(ErrorRuntime, "usage: tiny run <file.tbc>")
 	}
 
-	mainBytecode, functions, classes := LoadBytecode(args[0])
-
-	vm := NewVM(mainBytecode, functions, classes)
-	vm.SetCLIArgs(getScriptArgs())
-	vm.Run()
+	runBytecodeFile(args[0])
 }

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"path/filepath"
 	"strconv"
 
 	. "language.com/src/tinyerrors"
@@ -347,6 +349,7 @@ func (c *Compiler) getFunctionID(name string) int {
 }
 
 func (c *Compiler) setLocation(file string, line int, column int) {
+	fmt.Printf("Reading current: %s", file)
 	c.currentFile = file
 	c.currentLine = line
 	c.currentColumn = column
@@ -558,6 +561,7 @@ func (c *Compiler) CompileProgram(program Program) ([]Instruction, map[string]Fu
 
 func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 	namespaceStdImports := map[string]string{}
+	namespacePluginImports := map[string]string{}
 	hasExplicitExports := false
 
 	for _, raw := range stmt.Statements {
@@ -597,7 +601,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		inner, _ := unwrapExport(raw)
 
 		imp, ok := inner.(ImportStmt)
-		if !ok || !imp.Std {
+		if !ok || (!imp.Std && !imp.Plugin) {
 			continue
 		}
 
@@ -608,8 +612,15 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 
 		fullName := stmt.Name + "." + alias
 
-		namespaceStdImports[alias] = fullName
 		namespaceVariables[alias] = fullName
+
+		if imp.Std {
+			namespaceStdImports[alias] = fullName
+		}
+
+		if imp.Plugin {
+			namespacePluginImports[alias] = fullName
+		}
 	}
 
 	// 2. Collect functions
@@ -696,7 +707,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		inner, _ := unwrapExport(raw)
 
 		imp, ok := inner.(ImportStmt)
-		if !ok || !imp.Std {
+		if !ok || (!imp.Std && !imp.Plugin) {
 			continue
 		}
 
@@ -707,9 +718,27 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 
 		fullName := stmt.Name + "." + alias
 
-		c.emit(OP_CONST, &StandardModuleValue{
-			Name: imp.Path,
-		})
+		resolvedPath := imp.Path
+
+		if imp.Plugin {
+			resolvedPath = c.resolveImportPath(imp.Path)
+		}
+
+		c.emit(OP_CONST, resolvedPath)
+
+		if imp.Std {
+			c.emit(OP_BUILTIN_CALL, BuiltinCallInfo{
+				Object:   "Plugin",
+				Method:   "std",
+				ArgCount: 1,
+			})
+		} else if imp.Plugin {
+			c.emit(OP_BUILTIN_CALL, BuiltinCallInfo{
+				Object:   "Plugin",
+				Method:   "load",
+				ArgCount: 1,
+			})
+		}
 
 		c.emit(OP_STORE_GLOBAL, VariableInfo{
 			Name:     fullName,
@@ -1230,6 +1259,11 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 			return
 		}
 
+		if s.Plugin {
+			c.compilePluginImport(s)
+			return
+		}
+
 		LangError(ErrorInternal, "imports should be resolved before compiling")
 
 	case IfStmt:
@@ -1293,6 +1327,45 @@ func (c *Compiler) compileEnum(stmt EnumStmt) {
 	}
 }
 
+func (c *Compiler) storeImportedAlias(name string, constant bool) {
+	binding := c.declareVariable(name, constant)
+
+	if c.isCompilingNamespace {
+		if c.currentNamespaceVariables == nil {
+			c.currentNamespaceVariables = map[string]string{}
+		}
+
+		c.currentNamespaceVariables[name] = binding.Name
+	}
+
+	if binding.Kind == BindingLocal {
+		c.emit(OP_STORE_LOCAL, VariableInfo{
+			Name:     name,
+			Slot:     binding.Slot,
+			Constant: constant,
+		})
+		return
+	}
+
+	c.emit(OP_STORE_GLOBAL, VariableInfo{
+		Name:     binding.Name,
+		Constant: constant,
+	})
+}
+
+func (c *Compiler) resolveImportPath(importPath string) string {
+	if filepath.IsAbs(importPath) {
+		return importPath
+	}
+
+	if c.currentFile != "" {
+		baseDir := filepath.Dir(c.currentFile)
+		return filepath.Join(baseDir, importPath)
+	}
+
+	return importPath
+}
+
 func (c *Compiler) compileStdImport(stmt ImportStmt) {
 	name := stmt.Alias
 
@@ -1300,8 +1373,6 @@ func (c *Compiler) compileStdImport(stmt ImportStmt) {
 		name = stmt.Path
 	}
 
-	// Same as:
-	// const name = Plugin.std("module");
 	c.emit(OP_CONST, stmt.Path)
 
 	c.emit(OP_BUILTIN_CALL, BuiltinCallInfo{
@@ -1310,20 +1381,26 @@ func (c *Compiler) compileStdImport(stmt ImportStmt) {
 		ArgCount: 1,
 	})
 
-	binding := c.declareVariable(name, true)
+	c.storeImportedAlias(name, true)
+}
 
-	if binding.Kind == BindingLocal {
-		c.emit(OP_STORE_LOCAL, VariableInfo{
-			Name:     name,
-			Slot:     binding.Slot,
-			Constant: true,
-		})
-	} else {
-		c.emit(OP_STORE_GLOBAL, VariableInfo{
-			Name:     binding.Name,
-			Constant: true,
-		})
+func (c *Compiler) compilePluginImport(stmt ImportStmt) {
+	name := stmt.Alias
+
+	if name == "" {
+		name = stmt.Path
 	}
+
+	resolvedPath := c.resolveImportPath(stmt.Path)
+	c.emit(OP_CONST, resolvedPath)
+
+	c.emit(OP_BUILTIN_CALL, BuiltinCallInfo{
+		Object:   "Plugin",
+		Method:   "load",
+		ArgCount: 1,
+	})
+
+	c.storeImportedAlias(name, true)
 }
 
 func (c *Compiler) compileTryCatchStatement(stmt TryCatchStmt) {

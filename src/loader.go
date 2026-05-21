@@ -57,6 +57,15 @@ func (l *Loader) loadFile(path string) []Stmt {
 				continue
 			}
 
+			if s.Plugin {
+				if !filepath.IsAbs(s.Path) {
+					s.Path = filepath.Clean(filepath.Join(dir, s.Path))
+				}
+
+				result = append(result, s)
+				continue
+			}
+
 			importPath := filepath.Join(dir, s.Path)
 			importedStatements := l.loadFile(importPath)
 
@@ -69,7 +78,6 @@ func (l *Loader) loadFile(path string) []Stmt {
 			}
 
 			result = append(result, importedStatements...)
-
 		default:
 			result = append(result, stmt)
 		}

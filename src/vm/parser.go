@@ -1022,6 +1022,57 @@ func (p *Parser) parseImportStatement() Stmt {
 			Std:   true,
 			Alias: alias,
 		}
+	} else if p.current.Type == TOKEN_IDENT && p.current.Literal == "plugin" {
+		p.advance()
+
+		if p.current.Type != TOKEN_STRING {
+			LangErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"expected plugin path after import plugin",
+			)
+		}
+
+		pluginPath := p.current.Literal
+		p.advance()
+
+		alias := ""
+
+		if p.current.Type == TOKEN_IDENT && p.current.Literal == "as" {
+			p.advance()
+
+			if p.current.Type != TOKEN_IDENT {
+				LangErrorAt(
+					ErrorSyntax,
+					p.current.File,
+					p.current.Line,
+					p.current.Column,
+					"expected alias name after as",
+				)
+			}
+
+			alias = p.current.Literal
+			p.advance()
+		} else {
+			LangErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"expected alias name",
+			)
+		}
+
+		p.expect(TOKEN_SEMI)
+
+		return ImportStmt{
+			Path:   pluginPath,
+			Plugin: true,
+			Std:    false,
+			Alias:  alias,
+		}
 	}
 
 	if p.current.Type != TOKEN_STRING {
@@ -1059,9 +1110,10 @@ func (p *Parser) parseImportStatement() Stmt {
 	p.expect(TOKEN_SEMI)
 
 	return ImportStmt{
-		Path:  path,
-		Std:   false,
-		Alias: alias,
+		Path:   path,
+		Plugin: false,
+		Std:    false,
+		Alias:  alias,
 	}
 }
 

@@ -15,6 +15,8 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
+var pluginSearchPaths []string
+
 func defaultPluginPath(path string, ext string) string {
 	if filepath.Ext(path) == "" {
 		return path + ext
@@ -82,32 +84,32 @@ func resolvePluginPath(path string, ext string) string {
 		return path
 	}
 
-	// 1. Try relative to the current working directory first.
-	// This is what you want when running:
-	// tiny main.tiny
+	candidates := []string{}
+
+	// 1. Try relative to current working directory.
 	cwd, err := os.Getwd()
 	if err == nil {
-		candidate := filepath.Join(cwd, path)
-
-		if fileExists(candidate) {
-			return candidate
-		}
+		candidates = append(candidates, filepath.Join(cwd, path))
 	}
 
-	// 2. Try relative to the executable folder.
-	// This is useful for packed/dist apps:
-	// dist/app.exe
+	// 2. Try relative to executable folder.
 	exePath, err := os.Executable()
 	if err == nil {
 		exeDir := filepath.Dir(exePath)
-		candidate := filepath.Join(exeDir, path)
+		candidates = append(candidates, filepath.Join(exeDir, path))
+	}
 
+	// 3. Try registered source/import folders.
+	for _, base := range pluginSearchPaths {
+		candidates = append(candidates, filepath.Join(base, path))
+	}
+
+	for _, candidate := range candidates {
 		if fileExists(candidate) {
 			return candidate
 		}
 	}
 
-	// 3. Fallback to original path so the error message stays clear.
 	return path
 }
 

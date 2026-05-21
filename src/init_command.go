@@ -77,6 +77,7 @@ tiny dist
 		filepath.Join(targetDir, ".gitignore"),
 		`dist/
 *.tbc
+.tinycache/
 `,
 	)
 

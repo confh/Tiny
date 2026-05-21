@@ -1,8 +1,13 @@
 import std "io";
+import plugin "./hash" as hashPlugin;
 
-const hashPlugin = Plugin.load("./hash");
+export enum methods {
+    md5
+}
 
-io.println(hashPlugin.hash({
-    text: "hello",
-    method: "md5"
-}));
+export fn hash(text: string, method: methods): object {
+    return hashPlugin.hash({
+        text: text,
+        method: method
+    });
+}

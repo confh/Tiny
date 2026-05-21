@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 
 	. "language.com/src/bytecode"
 	. "language.com/src/tinyerrors"
@@ -109,14 +108,6 @@ func defaultDistOutputName(entryFile string, target string) string {
 	return filepath.Join("dist", name)
 }
 
-func addExeExtensionIfNeeded(path string) string {
-	if runtime.GOOS == "windows" && filepath.Ext(path) == "" {
-		return path + ".exe"
-	}
-
-	return path
-}
-
 func packToOutput(entryFile string, outFile string, target string) {
 	target = normalizeTarget(target)
 
@@ -164,33 +155,6 @@ func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
 }
-
-func dirExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
-}
-
-func copyDir(src string, dst string) error {
-	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		rel, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-
-		target := filepath.Join(dst, rel)
-
-		if info.IsDir() {
-			return os.MkdirAll(target, info.Mode())
-		}
-
-		return cpFile(path, target)
-	})
-}
-
 func cpFile(src string, dst string) error {
 	err := os.MkdirAll(filepath.Dir(dst), 0755)
 	if err != nil {

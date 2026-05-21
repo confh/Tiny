@@ -390,8 +390,6 @@ func formatStdSignature(module string, method StdMethodInfo) string {
 }
 
 func runLSP() {
-	initLSPLogger()
-
 	reader := bufio.NewReader(os.Stdin)
 
 	for {
