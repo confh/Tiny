@@ -329,6 +329,7 @@ type FunctionStmt struct {
 	Params     []Param
 	ReturnType TypeHint
 	Body       []Stmt
+	Private    bool
 	File       string
 	Line       int
 	Column     int

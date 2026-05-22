@@ -465,6 +465,10 @@ func (vm *VM) callClassWithArgs(class Class, args []Value) {
 		}
 	}
 
+	for methodName, functionName := range class.Methods {
+		object[methodName] = FunctionValue{Name: functionName}
+	}
+
 	vm.push(object)
 }
 

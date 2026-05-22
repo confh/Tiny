@@ -15,7 +15,7 @@ type BytecodeFile struct {
 	Version   int                             `json:"version"`
 	Main      []SerializableInstruction       `json:"main"`
 	Functions map[string]SerializableFunction `json:"functions"`
-	Classes   map[string]Class                `json:"classes"`
+	Classes   map[string]SerializableClass    `json:"classes"`
 }
 
 type SerializableParam struct {
@@ -33,6 +33,21 @@ type SerializableFunction struct {
 	LocalCount   int                       `json:"localCount"`
 	Captures     []CapturedVar             `json:"captures"`
 	Instructions []SerializableInstruction `json:"instructions"`
+}
+
+type SerializableClassField struct {
+	Name     string       `json:"name"`
+	Value    EncodedValue `json:"value"`
+	TypeHint TypeHint     `json:"typeHint"`
+	Constant bool         `json:"constant"`
+	Private  bool         `json:"private"`
+}
+
+type SerializableClass struct {
+	Name    string                   `json:"name"`
+	Fields  []SerializableClassField `json:"fields"`
+	Methods map[string]string        `json:"methods"`
+	Embeds  []string                 `json:"embeds"`
 }
 
 type SerializableNamespaceValue struct {
@@ -104,7 +119,7 @@ func SaveBytecode(path string, main []Instruction, functions map[string]Function
 		Version:   BytecodeVersion,
 		Main:      serializeInstructions(main),
 		Functions: map[string]SerializableFunction{},
-		Classes:   classes,
+		Classes:   serializeClasses(classes),
 	}
 
 	for name, fn := range functions {
@@ -135,7 +150,7 @@ func SaveBytecodeToBytes(main []Instruction, functions map[string]Function, clas
 		Version:   BytecodeVersion,
 		Main:      serializeInstructions(main),
 		Functions: map[string]SerializableFunction{},
-		Classes:   classes,
+		Classes:   serializeClasses(classes),
 	}
 
 	for name, fn := range functions {
@@ -195,7 +210,61 @@ func LoadBytecodeFromBytes(data []byte) ([]Instruction, map[string]Function, map
 		}
 	}
 
-	return main, functions, file.Classes
+	return main, functions, deserializeClasses(file.Classes)
+}
+
+func serializeClasses(classes map[string]Class) map[string]SerializableClass {
+	result := map[string]SerializableClass{}
+
+	for name, class := range classes {
+		fields := []SerializableClassField{}
+
+		for _, field := range class.Fields {
+			fields = append(fields, SerializableClassField{
+				Name:     field.Name,
+				Value:    EncodeValue(field.Value),
+				TypeHint: field.TypeHint,
+				Constant: field.Constant,
+				Private:  field.Private,
+			})
+		}
+
+		result[name] = SerializableClass{
+			Name:    class.Name,
+			Fields:  fields,
+			Methods: class.Methods,
+			Embeds:  class.Embeds,
+		}
+	}
+
+	return result
+}
+
+func deserializeClasses(classes map[string]SerializableClass) map[string]Class {
+	result := map[string]Class{}
+
+	for name, class := range classes {
+		fields := []ClassField{}
+
+		for _, field := range class.Fields {
+			fields = append(fields, ClassField{
+				Name:     field.Name,
+				Value:    DecodeValue(field.Value),
+				TypeHint: field.TypeHint,
+				Constant: field.Constant,
+				Private:  field.Private,
+			})
+		}
+
+		result[name] = Class{
+			Name:    class.Name,
+			Fields:  fields,
+			Methods: class.Methods,
+			Embeds:  class.Embeds,
+		}
+	}
+
+	return result
 }
 
 func serializeInstructions(instructions []Instruction) []SerializableInstruction {

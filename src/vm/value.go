@@ -53,6 +53,7 @@ type ErrorValue struct {
 }
 
 type FunctionValue struct {
+	ID       int
 	Name     string
 	Captures map[int]*Cell
 }

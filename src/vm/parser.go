@@ -2087,6 +2087,15 @@ func (p *Parser) parseClassStatement() Stmt {
 			continue
 		}
 
+		functionPrivate := false
+
+		if p.current.Type == TOKEN_PRIVATE {
+			p.expect(TOKEN_PRIVATE)
+			functionPrivate = true
+		} else if p.current.Type == TOKEN_PUBLIC {
+			p.expect(TOKEN_PUBLIC)
+		}
+
 		if p.current.Type != TOKEN_FN {
 			LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "expected declared variable, method or embed in class")
 		}
@@ -2103,6 +2112,8 @@ func (p *Parser) parseClassStatement() Stmt {
 				"expected function method",
 			)
 		}
+
+		fn.Private = functionPrivate
 
 		methods = append(methods, fn)
 	}

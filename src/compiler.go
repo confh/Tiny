@@ -840,6 +840,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 			Params:     fn.Params,
 			ReturnType: fn.ReturnType,
 			Body:       fn.Body,
+			Private:    fn.Private,
 		}
 
 		c.compileFunction(namespacedFn)
@@ -1644,9 +1645,10 @@ func (c *Compiler) compileClass(stmt ClassStmt) {
 		methods[method.Name] = compiledName
 
 		classMethod := FunctionStmt{
-			Name:   method.Name,
-			Params: method.Params,
-			Body:   method.Body,
+			Name:    method.Name,
+			Params:  method.Params,
+			Body:    method.Body,
+			Private: method.Private,
 		}
 
 		c.compileMethod(stmt.Name, classMethod)
@@ -1656,7 +1658,7 @@ func (c *Compiler) compileClass(stmt ClassStmt) {
 		classField := ClassField{
 			Constant: field.Constant,
 			Name:     field.Name,
-			Value:    field.Value,
+			Value:    c.evalConstantExpr(field.Value),
 			TypeHint: field.TypeHint,
 			Private:  field.Private,
 		}
