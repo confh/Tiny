@@ -71,7 +71,8 @@ type AnalysisResult struct {
 }
 
 var variableLineRegex = regexp.MustCompile(`^(?:let|const)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*([A-Za-z_][A-Za-z0-9_]*))?\s*=\s*(.+?);?$`)
-var functionLineRegex = regexp.MustCompile(`^fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*(?::\s*([A-Za-z_][A-Za-z0-9_]*))?`)
+var fieldLineRegex = regexp.MustCompile(`^(?:field)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*([A-Za-z_][A-Za-z0-9_]*))?\s*=\s*(.+?);?$`)
+var functionLineRegex = regexp.MustCompile(`^(?:(?:public|private)\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*(?::\s*([A-Za-z_][A-Za-z0-9_]*))?`)
 var classLineRegex = regexp.MustCompile(`^class\s+([A-Za-z_][A-Za-z0-9_]*)`)
 var memberCallRegex = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
 var normalCallRegex = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
@@ -79,6 +80,7 @@ var classEmbedRegex = regexp.MustCompile(`\bembed\s+([A-Za-z_][A-Za-z0-9_]*)\s*;
 var returnRegex = regexp.MustCompile(`return\s+(.+?);`)
 var fileImportRegex = regexp.MustCompile(`import\s+"([^"]+)"(?:\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?\s*;?`)
 var exportLineRegex = regexp.MustCompile(`^\s*export\s+`)
+var memberAccessRegex = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\b`)
 
 type blockInfo struct {
 	Kind       string
@@ -92,6 +94,300 @@ type blockInfo struct {
 	Line       int
 	Column     int
 	Exported   bool
+}
+
+func checkUndefinedMethodOnLine(scope *Scope, rawLine string, lineIndex int) []map[string]any {
+	diagnostics := []map[string]any{}
+	code := stripStringsAndComments(rawLine)
+
+	matches := memberAccessRegex.FindAllStringSubmatchIndex(code, -1)
+
+	for _, match := range matches {
+		receiver := code[match[2]:match[3]]
+		member := code[match[4]:match[5]]
+
+		// Ignore this.field for now. It needs current-class tracking.
+		if receiver == "this" {
+			receiverSym, ok := scope.Resolve("this")
+			if !ok {
+				diagnostics = append(diagnostics, makeRangeDiagnostic(
+					lineIndex,
+					match[2],
+					match[3],
+					2,
+					"undefined variable: this",
+				))
+				continue
+			}
+
+			if memberExistsOnSymbol(scope, receiverSym, member) {
+				continue
+			}
+
+			diagnostics = append(diagnostics, makeRangeDiagnostic(
+				lineIndex,
+				match[4],
+				match[5],
+				2,
+				"undefined method or property: this."+member,
+			))
+
+			continue
+		}
+
+		receiverSym, ok := scope.Resolve(receiver)
+		if !ok {
+			continue
+		}
+
+		if memberExistsOnSymbol(scope, receiverSym, member) {
+			continue
+		}
+
+		diagnostics = append(diagnostics, makeRangeDiagnostic(
+			lineIndex,
+			match[4],
+			match[5],
+			2,
+			"undefined method or property: "+receiver+"."+member,
+		))
+	}
+
+	return diagnostics
+}
+
+func memberExistsOnSymbol(scope *Scope, sym SymbolInfo, member string) bool {
+	if strings.HasPrefix(sym.Type, "task:") {
+		return member == "await"
+	}
+
+	if sym.Kind == SymbolNamespace {
+		_, ok := sym.Members[member]
+		return ok
+	}
+
+	if strings.HasPrefix(sym.Type, "std:") {
+		module := strings.TrimPrefix(sym.Type, "std:")
+
+		info, ok := GetStdModuleInfo(module)
+		if !ok {
+			return false
+		}
+
+		_, ok = info.Methods[member]
+		return ok
+	}
+
+	if strings.HasPrefix(sym.Type, "class:") {
+		className := strings.TrimPrefix(sym.Type, "class:")
+
+		classSym, ok := scope.Resolve(className)
+		if !ok || classSym.Kind != SymbolClass {
+			return false
+		}
+
+		if _, ok := classSym.Methods[member]; ok {
+			return true
+		}
+
+		if _, ok := classSym.Fields[member]; ok {
+			return true
+		}
+
+		return false
+	}
+
+	if sym.Type == "object" && sym.Fields != nil {
+		if _, ok := sym.Fields[member]; ok {
+			return true
+		}
+	}
+
+	if _, ok := GetNativeMethodInfo(sym.Type, member); ok {
+		return true
+	}
+
+	// Global fallback.
+	if member == "toString" {
+		return true
+	}
+
+	return false
+}
+
+var identifierRegex = regexp.MustCompile(`\b[A-Za-z_][A-Za-z0-9_]*\b`)
+
+func checkUndefinedVariablesOnLine(scope *Scope, rawLine string, lineIndex int) []map[string]any {
+	diagnostics := []map[string]any{}
+	code := stripStringsAndComments(rawLine)
+
+	matches := identifierRegex.FindAllStringIndex(code, -1)
+
+	for _, match := range matches {
+		name := code[match[0]:match[1]]
+
+		if shouldIgnoreIdentifierInSemanticCheck(code, name, match[0], match[1]) {
+			continue
+		}
+
+		if _, ok := scope.Resolve(name); ok {
+			continue
+		}
+
+		diagnostics = append(diagnostics, makeRangeDiagnostic(
+			lineIndex,
+			match[0],
+			match[1],
+			2,
+			"undefined variable: "+name,
+		))
+	}
+
+	return diagnostics
+}
+
+func shouldIgnoreIdentifierInSemanticCheck(code string, name string, start int, end int) bool {
+	if tinyKeywords[name] {
+		return true
+	}
+
+	switch name {
+	case "true", "false", "null", "undefined":
+		return true
+	case "string", "number", "bool", "object", "array", "any", "void":
+		return true
+	}
+
+	trimmed := strings.TrimSpace(code)
+
+	// declarations
+	declLine := strings.TrimSpace(trimmed)
+
+	if strings.HasPrefix(declLine, "private ") {
+		declLine = strings.TrimSpace(strings.TrimPrefix(declLine, "private "))
+	}
+
+	if strings.HasPrefix(declLine, "public ") {
+		declLine = strings.TrimSpace(strings.TrimPrefix(declLine, "public "))
+	}
+
+	if strings.HasPrefix(declLine, "let "+name) ||
+		strings.HasPrefix(declLine, "const "+name) ||
+		strings.HasPrefix(declLine, "fn "+name) ||
+		strings.HasPrefix(declLine, "class "+name) ||
+		strings.HasPrefix(declLine, "field "+name) {
+		return true
+	}
+	// Ignore property/member names after dot: obj.name
+	if start > 0 && code[start-1] == '.' {
+		return true
+	}
+
+	// Ignore receiver member access member name with spaces: obj . name
+	i := start - 1
+	for i >= 0 && (code[i] == ' ' || code[i] == '\t') {
+		i--
+	}
+	if i >= 0 && code[i] == '.' {
+		return true
+	}
+
+	// Ignore object literal keys: { name: "confis" }
+	j := end
+	for j < len(code) && (code[j] == ' ' || code[j] == '\t') {
+		j++
+	}
+	if j < len(code) && code[j] == ':' {
+		return true
+	}
+
+	// Ignore type hints: name: string
+	i = start - 1
+	for i >= 0 && (code[i] == ' ' || code[i] == '\t') {
+		i--
+	}
+	if i >= 0 && code[i] == ':' {
+		return true
+	}
+
+	return false
+}
+
+func makeRangeDiagnostic(line int, start int, end int, severity int, message string) map[string]any {
+	if start < 0 {
+		start = 0
+	}
+
+	if end <= start {
+		end = start + 1
+	}
+
+	return map[string]any{
+		"range": map[string]any{
+			"start": map[string]any{
+				"line":      line,
+				"character": start,
+			},
+			"end": map[string]any{
+				"line":      line,
+				"character": end,
+			},
+		},
+		"severity": severity,
+		"message":  message,
+		"source":   "tiny",
+	}
+}
+
+func stripStringsAndComments(line string) string {
+	var out strings.Builder
+
+	inString := byte(0)
+	escaped := false
+
+	for i := 0; i < len(line); i++ {
+		ch := line[i]
+
+		if inString != 0 {
+			if escaped {
+				escaped = false
+				out.WriteByte(' ')
+				continue
+			}
+
+			if ch == '\\' {
+				escaped = true
+				out.WriteByte(' ')
+				continue
+			}
+
+			if ch == inString {
+				inString = 0
+				out.WriteByte(' ')
+				continue
+			}
+
+			out.WriteByte(' ')
+			continue
+		}
+
+		if i+1 < len(line) && ch == '/' && line[i+1] == '/' {
+			for ; i < len(line); i++ {
+				out.WriteByte(' ')
+			}
+			break
+		}
+
+		if ch == '"' || ch == '\'' || ch == '`' {
+			inString = ch
+			out.WriteByte(' ')
+			continue
+		}
+
+		out.WriteByte(ch)
+	}
+
+	return out.String()
 }
 
 func uriToPath(uri string) string {
@@ -198,6 +494,7 @@ func fallbackScopeAtPosition(uri string, text string, pos Position) *Scope {
 		}
 
 		scanVariableLine(scope, line, lineIndex+1, uri)
+		scanFieldLine(scope, line, lineIndex+1, uri)
 	}
 
 	return scope
@@ -253,6 +550,41 @@ func scanClassLine(scope *Scope, line string, lineNumber int, uri string) {
 		Column:    indexColumn(line, name),
 		SourceURI: uri,
 		Methods:   map[string]SymbolInfo{},
+	})
+}
+
+func scanFieldLine(scope *Scope, line string, lineNumber int, uri string) {
+	line = strings.Replace(strings.Replace(strings.Replace(line, "private ", "", 1), "public ", "", 1), "const ", "", 1)
+	match := fieldLineRegex.FindStringSubmatch(line)
+	if match == nil {
+		return
+	}
+
+	name := match[1]
+	typeHint := match[2]
+	exprText := strings.TrimSpace(match[3])
+
+	typ := "unknown"
+	fields := map[string]SymbolInfo(nil)
+
+	if typeHint != "" {
+		typ = typeHint
+	} else {
+		typ = inferExprTypeFromText(scope, exprText)
+		if typ == "object" {
+			fields = inferObjectFieldsFromText(scope, exprText, uri, lineNumber)
+		}
+	}
+
+	scope.Define(SymbolInfo{
+		Name:      name,
+		Kind:      SymbolVariable,
+		Type:      typ,
+		Detail:    "field " + name,
+		Line:      lineNumber,
+		Column:    indexColumn(line, name),
+		SourceURI: uri,
+		Fields:    fields,
 	})
 }
 
@@ -1570,6 +1902,14 @@ func analyzeTopLevelStmt(result AnalysisResult, scope *Scope, stmt Stmt) {
 			Kind:   SymbolVariable,
 			Type:   inferExprType(scope, s.Value),
 			Detail: "variable " + s.Name,
+		})
+
+	case FieldStmt:
+		scope.Define(SymbolInfo{
+			Name:   s.Name,
+			Kind:   SymbolVariable,
+			Type:   inferExprType(scope, s.Value),
+			Detail: "field " + s.Name,
 		})
 	}
 }

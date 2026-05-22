@@ -2,7 +2,9 @@ package vm
 
 import (
 	"errors"
+	"io"
 	"os"
+	"path/filepath"
 
 	. "language.com/src/tinyerrors"
 )
@@ -68,6 +70,31 @@ var stdFsMetadata = StdModuleInfo{
 			Returns:     "undefined",
 			Description: "Creates a new directory.",
 		},
+		"stat": {
+			Name: "stat",
+			Args: []StdArg{
+				{Name: "path", Type: "string", Optional: false},
+			},
+			Returns:     "Object",
+			Description: "Returns file statistics (name, size, isDir, modTime) for the given path.",
+		},
+		"copy": {
+			Name: "copy",
+			Args: []StdArg{
+				{Name: "src", Type: "string", Optional: false},
+				{Name: "dst", Type: "string", Optional: false},
+			},
+			Returns:     "undefined",
+			Description: "Copies a file from src to dst.",
+		},
+		"remove": {
+			Name: "remove",
+			Args: []StdArg{
+				{Name: "path", Type: "string", Optional: false},
+			},
+			Returns:     "undefined",
+			Description: "Removes a file or directory at the given path.",
+		},
 	},
 }
 
@@ -79,6 +106,9 @@ var stdFsMethods = map[string]StdModuleFunc{
 	"exists":     stdFsExists,
 	"readDir":    stdFsReadDir,
 	"mkDir":      stdFsMkDir,
+	"stat":       stdFsStat,
+	"copy":       stdFsCopy,
+	"remove":     stdFsRemove,
 }
 
 func init() {
@@ -181,6 +211,109 @@ func stdFsMkDir(vm *VM, args []Value) {
 	err := os.Mkdir(dirName, 0755)
 	if err != nil {
 		vm.runtimeError(ErrorRuntime, "error creating directory: %s", err)
+	}
+
+	vm.push(UndefinedValue{})
+}
+
+func stdFsStat(vm *VM, args []Value) {
+	expectArgs(vm, "fs.stat", args, 1)
+
+	path := argString(vm, "fs.stat", args, 0)
+	fileInfo, err := os.Stat(path)
+	if err != nil {
+		vm.runtimeError(ErrorRuntime, "error checking file stat: %s", err)
+	}
+
+	vm.push(ObjectValue{
+		"name":    fileInfo.Name(),
+		"size":    fileInfo.Size(),
+		"isDir":   fileInfo.IsDir(),
+		"modTime": fileInfo.ModTime(),
+	})
+}
+
+func stdFsCopy(vm *VM, args []Value) {
+	expectArgs(vm, "fs.copy", args, 2)
+
+	src := argString(vm, "fs.copy", args, 0)
+	dst := argString(vm, "fs.copy", args, 1)
+
+	srcAbs, err := filepath.Abs(src)
+	if err != nil {
+		vm.runtimeError(ErrorRuntime, "failed to resolve source path: %v", err)
+		return
+	}
+
+	dstAbs, err := filepath.Abs(dst)
+	if err != nil {
+		vm.runtimeError(ErrorRuntime, "failed to resolve destination path: %v", err)
+		return
+	}
+
+	if srcAbs == dstAbs {
+		vm.runtimeError(ErrorRuntime, "fs.copy source and destination are the same file: %s", src)
+		return
+	}
+
+	srcInfo, err := os.Stat(srcAbs)
+	if err != nil {
+		vm.runtimeError(ErrorRuntime, "failed to stat source file: %v", err)
+		return
+	}
+
+	if srcInfo.IsDir() {
+		vm.runtimeError(ErrorRuntime, "fs.copy source is a directory: %s", src)
+		return
+	}
+
+	if srcInfo.Size() == 0 {
+		vm.runtimeError(ErrorRuntime, "fs.copy source file is empty: %s", src)
+		return
+	}
+
+	err = os.MkdirAll(filepath.Dir(dstAbs), 0755)
+	if err != nil {
+		vm.runtimeError(ErrorRuntime, "failed to create destination directory: %v", err)
+		return
+	}
+
+	source, err := os.Open(srcAbs)
+	if err != nil {
+		vm.runtimeError(ErrorRuntime, "error while opening source file: %v", err)
+		return
+	}
+	defer source.Close()
+
+	destination, err := os.Create(dstAbs)
+	if err != nil {
+		vm.runtimeError(ErrorRuntime, "error while creating destination file: %v", err)
+		return
+	}
+	defer destination.Close()
+
+	n, err := io.Copy(destination, source)
+	if err != nil {
+		vm.runtimeError(ErrorRuntime, "error while copying file: %v", err)
+		return
+	}
+
+	err = destination.Sync()
+	if err != nil {
+		vm.runtimeError(ErrorRuntime, "error while flushing destination file: %v", err)
+		return
+	}
+
+	vm.push(n)
+}
+func stdFsRemove(vm *VM, args []Value) {
+	expectArgs(vm, "fs.copy", args, 1)
+
+	path := argString(vm, "fs.copy", args, 0)
+
+	err := os.Remove(path)
+	if err != nil {
+		vm.runtimeError(ErrorRuntime, "error while removing file: %s", err)
 	}
 
 	vm.push(UndefinedValue{})

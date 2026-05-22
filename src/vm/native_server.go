@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	json "github.com/goccy/go-json"
 	. "language.com/src/tinyerrors"
@@ -152,106 +153,97 @@ func serverStart(vm *VM, server *NativeServerValue, args []Value) {
 	server.mux = mux
 
 	// Collect all unique paths for GET and POST
-	pathMap := make(map[string]struct{})
-	for path := range server.GetRoutes {
-		pathMap[path] = struct{}{}
-	}
-	for path := range server.PostRoutes {
-		pathMap[path] = struct{}{}
-	}
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if server.closed {
+			return
+		}
 
-	for path := range pathMap {
-		getHandler, hasGet := server.GetRoutes[path]
-		postHandler, hasPost := server.PostRoutes[path]
+		var handler Value
+		var params ObjectValue
+		var found bool
 
-		mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
-			if server.closed {
+		switch r.Method {
+		case http.MethodGet:
+			handler, params, found = findRoute(server.GetRoutes, r.URL.Path)
+
+		case http.MethodPost:
+			handler, params, found = findRoute(server.PostRoutes, r.URL.Path)
+
+		default:
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		if !found {
+			http.NotFound(w, r)
+			return
+		}
+
+		switch h := handler.(type) {
+		case string:
+			writeServerResponse(w, h, HttpText)
+
+		case FunctionValue:
+			bodyBytes, err := io.ReadAll(r.Body)
+			if err != nil {
+				vm.runtimeError(ErrorRuntime, "failed to read request body: %v", err)
 				return
 			}
 
-			var handler any
-			switch r.Method {
-			case http.MethodGet:
-				if !hasGet {
-					http.NotFound(w, r)
-					return
-				}
-				handler = getHandler
-			case http.MethodPost:
-				if !hasPost {
-					http.NotFound(w, r)
-					return
-				}
-				handler = postHandler
-			default:
-				// Only support GET and POST
-				http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-				return
+			body := string(bodyBytes)
+
+			obj := ObjectValue{
+				"path":   r.URL.Path,
+				"method": r.Method,
+				"body":   body,
+				"params": params,
 			}
 
-			switch h := handler.(type) {
-			case string:
-				writeServerResponse(w, h, HttpText)
-
-			case FunctionValue:
-				bodyBytes, err := io.ReadAll(r.Body)
-				if err != nil {
-					vm.runtimeError(ErrorRuntime, "failed to read request body: %v", err)
-					return
-				}
-				body := string(bodyBytes)
-
-				var reqObj Value
-				obj := ObjectValue{
-					"path":   r.URL.Path,
-					"method": r.Method,
-					"body":   body,
-				}
-				// Always ObjectValue keys, compact logic.
-				queryMap := make(ObjectValue)
-				for key, values := range r.URL.Query() {
-					if len(values) > 0 {
-						queryMap[key] = values[0]
-					} else {
-						queryMap[key] = ""
-					}
-				}
-				obj["query"] = queryMap
-
-				headers := make(ObjectValue)
-				for k, v := range r.Header {
-					if len(v) > 0 {
-						headers[k] = v[0]
-					} else {
-						headers[k] = ""
-					}
-				}
-				obj["headers"] = headers
-
-				reqObj = obj
-
-				vm.mu.Lock()
-				defer vm.mu.Unlock()
-
-				var result Value
-				if async {
-					requestVM := vm.CloneForTask()
-					result = requestVM.callFunctionValue(h, []Value{reqObj})
+			queryMap := make(ObjectValue)
+			for key, values := range r.URL.Query() {
+				if len(values) > 0 {
+					queryMap[key] = values[0]
 				} else {
-					result = vm.callFunctionValue(h, []Value{reqObj})
+					queryMap[key] = ""
 				}
-
-				httpResponseObject, ok := result.(NativeHttpResponseValue)
-				if !ok {
-					vm.runtimeError(ErrorRuntime, "expected httpResponse, got %s.", TypeName(result))
-				}
-
-				writeServerResponse(w, httpResponseObject.Value, httpResponseObject.Type)
-			default:
-				vm.runtimeError(ErrorType, "invalid route handler: %s", TypeName(handler))
 			}
-		})
-	}
+			obj["query"] = queryMap
+
+			headers := make(ObjectValue)
+			for k, v := range r.Header {
+				if len(v) > 0 {
+					headers[k] = v[0]
+				} else {
+					headers[k] = ""
+				}
+			}
+			obj["headers"] = headers
+
+			reqObj := Value(obj)
+
+			vm.mu.Lock()
+			defer vm.mu.Unlock()
+
+			var result Value
+			if async {
+				requestVM := vm.CloneForTask()
+				result = requestVM.callFunctionValue(h, []Value{reqObj})
+			} else {
+				result = vm.callFunctionValue(h, []Value{reqObj})
+			}
+
+			httpResponseObject, ok := result.(NativeHttpResponseValue)
+			if !ok {
+				vm.runtimeError(ErrorRuntime, "expected httpResponse, got %s.", TypeName(result))
+				return
+			}
+
+			writeServerResponse(w, httpResponseObject.Value, httpResponseObject.Type)
+
+		default:
+			vm.runtimeError(ErrorType, "invalid route handler: %s", TypeName(handler))
+		}
+	})
 
 	addr := ":" + strconv.Itoa(server.Port)
 
@@ -270,4 +262,64 @@ func serverStart(vm *VM, server *NativeServerValue, args []Value) {
 	}
 
 	vm.push(UndefinedValue{})
+}
+
+func matchRoute(pattern string, actualPath string) (bool, ObjectValue) {
+	params := ObjectValue{}
+
+	pattern = strings.Trim(pattern, "/")
+	actualPath = strings.Trim(actualPath, "/")
+
+	patternParts := []string{}
+	actualParts := []string{}
+
+	if pattern != "" {
+		patternParts = strings.Split(pattern, "/")
+	}
+
+	if actualPath != "" {
+		actualParts = strings.Split(actualPath, "/")
+	}
+
+	if len(patternParts) != len(actualParts) {
+		return false, params
+	}
+
+	for i := 0; i < len(patternParts); i++ {
+		patternPart := patternParts[i]
+		actualPart := actualParts[i]
+
+		if strings.HasPrefix(patternPart, ":") {
+			paramName := strings.TrimPrefix(patternPart, ":")
+			if paramName == "" {
+				return false, params
+			}
+
+			params[paramName] = actualPart
+			continue
+		}
+
+		if patternPart != actualPart {
+			return false, params
+		}
+	}
+
+	return true, params
+}
+
+func findRoute(routes map[string]Value, actualPath string) (Value, ObjectValue, bool) {
+	// 1. Exact match first.
+	if handler, ok := routes[actualPath]; ok {
+		return handler, ObjectValue{}, true
+	}
+
+	// 2. Dynamic match.
+	for pattern, handler := range routes {
+		matched, params := matchRoute(pattern, actualPath)
+		if matched {
+			return handler, params, true
+		}
+	}
+
+	return nil, ObjectValue{}, false
 }

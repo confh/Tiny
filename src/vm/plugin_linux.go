@@ -49,6 +49,8 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
+var pluginSearchPaths []string
+
 func defaultPluginPath(path string, ext string) string {
 	if filepath.Ext(path) == "" {
 		return path + ext
@@ -65,7 +67,7 @@ func (vm *VM) callPluginModule(method string, argCount int) {
 
 		name := asString(vm.pop(), vm)
 
-		availablePlugins := []string{"array", "math", "string", "json", "fs", "app", "buffer", "regex", "io", "process", "time", "error", "http", "os", "runtime", "net"}
+		availablePlugins := []string{"array", "math", "string", "json", "fs", "app", "buffer", "regex", "io", "process", "time", "error", "http", "os", "runtime", "net", "oath"}
 
 		if slices.Contains(availablePlugins, name) {
 			vm.push(&StandardModuleValue{Name: name})

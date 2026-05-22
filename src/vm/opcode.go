@@ -79,6 +79,7 @@ const (
 
 	OP_JUMP
 	OP_JUMP_IF_FALSE
+	OP_JUMP_IF_TRUE
 	OP_JUMP_LOCAL_GE_CONST
 	OP_JUMP_LOCAL_GE_LOCAL
 	OP_JUMP_MOD_LOCAL_LOCAL_NOT_ZERO
@@ -204,10 +205,11 @@ type JumpModLocalLocalNotZeroInfo struct {
 }
 
 type Class struct {
-	Name    string
-	Fields  []ClassField
-	Methods map[string]string
-	Embeds  []string
+	Name           string
+	Fields         []ClassField
+	Methods        map[string]string
+	Embeds         []string
+	PrivateMethods map[string]bool
 }
 
 type ClassField struct {

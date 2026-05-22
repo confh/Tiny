@@ -134,6 +134,12 @@ func FloatToString(val float64) string {
 	return sb.String()
 }
 
+func isClass(value ObjectValue) bool {
+	_, exists := value["__class"]
+
+	return exists
+}
+
 func NewVM(mainInstructions []Instruction, functions map[string]Function, classes map[string]Class) *VM {
 	mainInstructions, functions, functionList := normalizeFunctionIDs(mainInstructions, functions)
 
@@ -393,19 +399,38 @@ func (vm *VM) canAccessField(object ObjectValue, field string) bool {
 	return true
 }
 
+func (vm *VM) canAccessMethod(object ObjectValue, method string) bool {
+	className, isClass := object["__class"]
+	if !isClass {
+		return true
+	}
+	privateMethods := object["__privateMethods"].(map[string]bool)
+	if _, methodIsPrivate := privateMethods[method]; methodIsPrivate {
+		return vm.currentMethodClass() == className
+	}
+
+	return true
+}
+
 func (vm *VM) callClassWithArgs(class Class, args []Value) {
 	object := ObjectValue{
-		"__class":         class.Name,
-		"__constFields":   map[string]bool{},
-		"__privateFields": map[string]bool{},
+		"__class":          class.Name,
+		"__constFields":    map[string]bool{},
+		"__privateFields":  map[string]bool{},
+		"__privateMethods": map[string]bool{},
 	}
 
 	constFields, _ := object["__constFields"].(map[string]bool)
 	privateFields, _ := object["__privateFields"].(map[string]bool)
+	privateMethods, _ := object["__privateMethods"].(map[string]bool)
 
 	for methodName, functionName := range class.Methods {
 		object[methodName] = FunctionValue{
 			Name: functionName,
+		}
+
+		if class.PrivateMethods[methodName] {
+			privateMethods[methodName] = true
 		}
 	}
 
@@ -463,10 +488,6 @@ func (vm *VM) callClassWithArgs(class Class, args []Value) {
 		if len(vm.stack) > 0 {
 			vm.pop()
 		}
-	}
-
-	for methodName, functionName := range class.Methods {
-		object[methodName] = FunctionValue{Name: functionName}
 	}
 
 	vm.push(object)
@@ -1677,9 +1698,17 @@ func (vm *VM) step() bool {
 
 	case OP_JUMP_IF_FALSE:
 		target := instr.Value.(int)
-		condition := vm.pop()
+		condition := vm.peekFast()
 
 		if !isTruthy(condition) {
+			vm.setIP(target)
+		}
+
+	case OP_JUMP_IF_TRUE:
+		target := instr.Value.(int)
+		condition := vm.peekFast()
+
+		if isTruthy(condition) {
 			vm.setIP(target)
 		}
 
@@ -2421,6 +2450,10 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 
 	ownerClass := methodOwnerClass(fnValue.Name)
 
+	if isClass(object) && !vm.canAccessMethod(object, method) {
+		vm.runtimeError(ErrorRuntime, "cannot access private method %s in class %s", method, ownerClass)
+	}
+
 	expectedArgs := len(fn.Params)
 
 	if expectedArgs > 0 && fn.Params[0].Name == "this" {
@@ -2669,4 +2702,13 @@ func (vm *VM) popFast() Value {
 	val := vm.stack[vm.top]
 	vm.stack[vm.top] = nil
 	return val
+}
+
+func (vm *VM) peekFast() Value {
+	if len(vm.stack) == 0 {
+		vm.runtimeError(ErrorInternal, "peek from empty stack")
+		return UndefinedValue{}
+	}
+
+	return vm.stack[len(vm.stack)-1]
 }

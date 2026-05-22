@@ -111,9 +111,13 @@ func runSourceCommand(args []string) {
 		return
 	}
 
-	deleteTinyCacheContent(entryFile)
-	saveBytecodeFile(entryFile, cachePath)
-	runBytecodeFile(cachePath)
+	if !disableCache {
+		deleteTinyCacheContent(entryFile)
+		saveBytecodeFile(entryFile, cachePath)
+		runBytecodeFile(cachePath)
+	} else {
+		compileAndRun(entryFile, cliArgs)
+	}
 }
 
 func deleteTinyCacheContent(entryFile string) {

@@ -1085,6 +1085,164 @@ func initLSPLogger() {
 // 	lspLogFile.Sync()
 // }
 
+func makeLSPDiagnostic(line int, column int, severity int, message string) map[string]any {
+	if line < 0 {
+		line = 0
+	}
+
+	if column < 0 {
+		column = 0
+	}
+
+	return map[string]any{
+		"range": map[string]any{
+			"start": map[string]any{
+				"line":      line,
+				"character": column,
+			},
+			"end": map[string]any{
+				"line":      line,
+				"character": column + 1,
+			},
+		},
+		"severity": severity,
+		"message":  message,
+		"source":   "tiny",
+	}
+}
+
+func classBlockAtLine(text string, lineIndex int) *blockInfo {
+	offset := offsetAtLine(text, lineIndex+1)
+
+	for _, block := range findBlocks(text, "class") {
+		if offset >= block.Start && offset < block.End {
+			return &block
+		}
+	}
+
+	return nil
+}
+
+func functionBlockAtLine(text string, lineIndex int) *blockInfo {
+	offset := offsetAtLine(text, lineIndex+1)
+
+	var best *blockInfo
+
+	for _, block := range findBlocks(text, "fn") {
+		if offset >= block.Start && offset < block.End {
+			copy := block
+
+			if best == nil || copy.Start > best.Start {
+				best = &copy
+			}
+		}
+	}
+
+	return best
+}
+
+func semanticScopeAtLine(uri string, text string, lineIndex int) *Scope {
+	baseScope := scopeAtPosition(uri, text, Position{
+		Line:      lineIndex,
+		Character: 999999,
+	})
+
+	scope := NewScope(baseScope)
+
+	currentFunction := functionBlockAtLine(text, lineIndex)
+	if currentFunction != nil {
+		for _, param := range parseFunctionParams(currentFunction.ParamsText) {
+			scope.Define(SymbolInfo{
+				Name:      param.Name,
+				Kind:      SymbolVariable,
+				Type:      param.Type,
+				Detail:    "parameter " + param.Name,
+				Line:      currentFunction.Line,
+				Column:    1,
+				SourceURI: uri,
+			})
+		}
+	}
+
+	currentClass := classBlockAtLine(text, lineIndex)
+	if currentClass != nil {
+		scope.Define(SymbolInfo{
+			Name:      "this",
+			Kind:      SymbolVariable,
+			Type:      "class:" + currentClass.Name,
+			Detail:    "current class instance",
+			Line:      lineIndex + 1,
+			Column:    1,
+			SourceURI: uri,
+		})
+	}
+
+	return scope
+}
+
+func semanticDiagnostics(uri string, text string) []map[string]any {
+	diagnostics := []map[string]any{}
+	lines := strings.Split(text, "\n")
+
+	for lineIndex, rawLine := range lines {
+		line := cleanLine(rawLine)
+
+		if shouldSkipSemanticLine(line) {
+			continue
+		}
+
+		scope := semanticScopeAtLine(uri, text, lineIndex)
+
+		diagnostics = append(
+			diagnostics,
+			checkUndefinedMethodOnLine(scope, rawLine, lineIndex)...,
+		)
+
+		diagnostics = append(
+			diagnostics,
+			checkUndefinedVariablesOnLine(scope, rawLine, lineIndex)...,
+		)
+	}
+
+	return diagnostics
+}
+
+func shouldSkipSemanticLine(line string) bool {
+	if line == "" {
+		return true
+	}
+
+	if strings.HasPrefix(line, "//") {
+		return true
+	}
+
+	if strings.HasPrefix(line, "import ") {
+		return true
+	}
+
+	if strings.HasPrefix(line, "class ") ||
+		strings.HasPrefix(line, "field ") ||
+		strings.HasPrefix(line, "export ") {
+		return true
+	}
+
+	checkLine := strings.TrimSpace(line)
+
+	if strings.HasPrefix(checkLine, "private ") {
+		checkLine = strings.TrimSpace(strings.TrimPrefix(checkLine, "private "))
+	}
+
+	if strings.HasPrefix(checkLine, "public ") {
+		checkLine = strings.TrimSpace(strings.TrimPrefix(checkLine, "public "))
+	}
+
+	if strings.HasPrefix(checkLine, "fn ") {
+		return true
+	}
+
+	return false
+}
+
 func publishDiagnostics(uri string, text string) {
 	_, parseDiagnostics := parseTinyForLSP(uri, text)
 
@@ -1109,6 +1267,10 @@ func publishDiagnostics(uri string, text string) {
 			"message":  diagnostic.Message,
 			"source":   "tiny",
 		})
+	}
+
+	if len(parseDiagnostics) == 0 {
+		diagnostics = append(diagnostics, semanticDiagnostics(uri, text)...)
 	}
 
 	params, _ := json.Marshal(map[string]any{

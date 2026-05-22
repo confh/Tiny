@@ -44,10 +44,11 @@ type SerializableClassField struct {
 }
 
 type SerializableClass struct {
-	Name    string                   `json:"name"`
-	Fields  []SerializableClassField `json:"fields"`
-	Methods map[string]string        `json:"methods"`
-	Embeds  []string                 `json:"embeds"`
+	Name           string                   `json:"name"`
+	Fields         []SerializableClassField `json:"fields"`
+	Methods        map[string]string        `json:"methods"`
+	Embeds         []string                 `json:"embeds"`
+	PrivateMethods map[string]bool          `json:"privateMethods"`
 }
 
 type SerializableNamespaceValue struct {
@@ -230,10 +231,11 @@ func serializeClasses(classes map[string]Class) map[string]SerializableClass {
 		}
 
 		result[name] = SerializableClass{
-			Name:    class.Name,
-			Fields:  fields,
-			Methods: class.Methods,
-			Embeds:  class.Embeds,
+			Name:           class.Name,
+			Fields:         fields,
+			Methods:        class.Methods,
+			Embeds:         class.Embeds,
+			PrivateMethods: class.PrivateMethods,
 		}
 	}
 
@@ -257,10 +259,11 @@ func deserializeClasses(classes map[string]SerializableClass) map[string]Class {
 		}
 
 		result[name] = Class{
-			Name:    class.Name,
-			Fields:  fields,
-			Methods: class.Methods,
-			Embeds:  class.Embeds,
+			Name:           class.Name,
+			Fields:         fields,
+			Methods:        class.Methods,
+			Embeds:         class.Embeds,
+			PrivateMethods: class.PrivateMethods,
 		}
 	}
 

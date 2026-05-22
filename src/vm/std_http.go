@@ -20,7 +20,7 @@ var stdHttpMetadata = StdModuleInfo{
 			Args: []StdArg{
 				{Name: "port", Type: "int", Optional: false},
 			},
-			Returns:     "Server",
+			Returns:     "server",
 			Description: "Creates a new HTTP server object on the given port.",
 		},
 		"get": {
@@ -29,7 +29,7 @@ var stdHttpMetadata = StdModuleInfo{
 				{Name: "url", Type: "string", Optional: false},
 				{Name: "extra", Type: "Object", Optional: false},
 			},
-			Returns:     "Object",
+			Returns:     "object",
 			Description: "Sends an HTTP GET request to the given URL with optional headers.",
 		},
 		"post": {
@@ -39,7 +39,7 @@ var stdHttpMetadata = StdModuleInfo{
 				{Name: "data", Type: "Object", Optional: false},
 				{Name: "extra", Type: "Object", Optional: true},
 			},
-			Returns:     "Object",
+			Returns:     "object",
 			Description: "Sends an HTTP POST request to the given URL with a data object and optional headers.",
 		},
 		"json": {
@@ -47,7 +47,7 @@ var stdHttpMetadata = StdModuleInfo{
 			Args: []StdArg{
 				{Name: "data", Type: "Object", Optional: false},
 			},
-			Returns:     "HttpResponse",
+			Returns:     "httpResponse",
 			Description: "Creates a JSON HTTP response value with the given data.",
 		},
 		"text": {
@@ -55,7 +55,7 @@ var stdHttpMetadata = StdModuleInfo{
 			Args: []StdArg{
 				{Name: "data", Type: "string", Optional: false},
 			},
-			Returns:     "HttpResponse",
+			Returns:     "httpResponse",
 			Description: "Creates a text HTTP response value with the given string.",
 		},
 		"downloadFile": {

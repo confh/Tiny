@@ -1638,11 +1638,16 @@ func (c *Compiler) compileClass(stmt ClassStmt) {
 	}
 
 	methods := map[string]string{}
+	privateMethods := map[string]bool{}
 	fields := []ClassField{}
 
 	for _, method := range stmt.Methods {
 		compiledName := stmt.Name + "." + method.Name
 		methods[method.Name] = compiledName
+
+		if method.Private {
+			privateMethods[method.Name] = true
+		}
 
 		classMethod := FunctionStmt{
 			Name:    method.Name,
@@ -1680,10 +1685,11 @@ func (c *Compiler) compileClass(stmt ClassStmt) {
 	}
 
 	c.classes[stmt.Name] = Class{
-		Name:    stmt.Name,
-		Methods: methods,
-		Embeds:  stmt.Embeds,
-		Fields:  fields,
+		Name:           stmt.Name,
+		Methods:        methods,
+		Embeds:         stmt.Embeds,
+		Fields:         fields,
+		PrivateMethods: privateMethods,
 	}
 }
 
@@ -2212,6 +2218,32 @@ func (c *Compiler) compileExpr(expr Expr) {
 		return
 
 	case BinaryExpr:
+		if e.Op == TOKEN_AND {
+			c.compileExpr(e.Left)
+
+			endJump := c.emitJump(OP_JUMP_IF_FALSE)
+
+			c.emit(OP_POP, nil)
+
+			c.compileExpr(e.Right)
+
+			c.patchJump(endJump)
+			return
+		}
+
+		if e.Op == TOKEN_OR {
+			c.compileExpr(e.Left)
+
+			endJump := c.emitJump(OP_JUMP)
+
+			c.emit(OP_POP, nil)
+
+			c.compileExpr(e.Right)
+
+			c.patchJump(endJump)
+			return
+		}
+
 		if e.Op == TOKEN_PLUS {
 			parts := []Expr{}
 			hasString := flattenStringConcat(e, &parts)

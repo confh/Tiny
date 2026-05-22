@@ -43,6 +43,18 @@ func expectArgsRange(vm *VM, fnName string, args []Value, min int, max int) {
 	}
 }
 
+func expectArgsMin(vm *VM, fnName string, args []Value, min int) {
+	if len(args) < min {
+		vm.runtimeError(
+			ErrorRuntime,
+			"%s expects at least %d argument(s), got %d",
+			fnName,
+			min,
+			len(args),
+		)
+	}
+}
+
 func argString(vm *VM, fnName string, args []Value, index int) string {
 	if index < 0 || index >= len(args) {
 		vm.runtimeError(ErrorRuntime, "%s missing argument %d", fnName, index)
