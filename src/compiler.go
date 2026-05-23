@@ -111,17 +111,16 @@ func optimizeExpr(expr Expr) Expr {
 		if leftIsInt && rightIsInt {
 			switch e.Op {
 			case TOKEN_PLUS:
-				return NumberExpr{Value: leftInt.Value + rightInt.Value}
+				return NumberExpr{Value: leftInt.Value + rightInt.Value, File: leftInt.File, Column: leftInt.Column, Line: leftInt.Line}
 			case TOKEN_MINUS:
-				return NumberExpr{Value: leftInt.Value - rightInt.Value}
+				return NumberExpr{Value: leftInt.Value - rightInt.Value, File: leftInt.File, Column: leftInt.Column, Line: leftInt.Line}
 			case TOKEN_STAR:
-				return NumberExpr{Value: leftInt.Value * rightInt.Value}
+				return NumberExpr{Value: leftInt.Value * rightInt.Value, File: leftInt.File, Column: leftInt.Column, Line: leftInt.Line}
 			case TOKEN_SLASH:
 				if rightInt.Value == 0 {
 					return BinaryExpr{Left: left, Op: e.Op, Right: right}
 				}
-
-				return NumberExpr{Value: leftInt.Value / rightInt.Value}
+				return NumberExpr{Value: leftInt.Value / rightInt.Value, File: leftInt.File, Column: leftInt.Column, Line: leftInt.Line}
 			case TOKEN_EQ:
 				return BoolExpr{Value: leftInt.Value == rightInt.Value}
 			case TOKEN_NEQ:
@@ -278,7 +277,10 @@ func optimizeExpr(expr Expr) Expr {
 		case TOKEN_MINUS:
 			if num, ok := right.(NumberExpr); ok {
 				return NumberExpr{
-					Value: -num.Value,
+					Value:  -num.Value,
+					File:   num.File,
+					Line:   num.Line,
+					Column: num.Column,
 				}
 			}
 		}
@@ -396,7 +398,7 @@ func getParamFlags(params []Param) (bool, bool) {
 	return hasDefaults, hasTypeHints
 }
 
-func (c *Compiler) compileNestedFunction(stmt FunctionStmt) {
+func (c *Compiler) compileFunctionLiteral(stmt FunctionStmt) {
 	compiledName := c.makeAnonymousFunctionName()
 
 	outerBindings := c.collectCapturableBindings()
@@ -431,19 +433,18 @@ func (c *Compiler) compileNestedFunction(stmt FunctionStmt) {
 	c.emit(OP_RETURN, nil)
 
 	captures := []CapturedVar{}
-
 	for _, capture := range c.currentCaptures {
 		captures = append(captures, capture)
 	}
 
 	localCount := c.localCount
-
 	hasDefaults, hasTypeHints := getParamFlags(stmt.Params)
 
 	c.functions[compiledName] = Function{
 		ID:           c.getFunctionID(compiledName),
 		Name:         compiledName,
 		Params:       stmt.Params,
+		ReturnType:   stmt.ReturnType,
 		Instructions: functionInstructions,
 		LocalCount:   localCount,
 		Captures:     captures,
@@ -458,13 +459,20 @@ func (c *Compiler) compileNestedFunction(stmt FunctionStmt) {
 	c.outerBindings = oldOuterBindings
 	c.currentCaptures = oldCurrentCaptures
 
-	// Create closure value.
+	// IMPORTANT: leave closure on stack.
 	c.emit(OP_CLOSURE, ClosureInfo{
 		Name:     compiledName,
 		Captures: captures,
 	})
+}
 
-	// Store it as local const function name.
+func (c *Compiler) compileNestedFunction(stmt FunctionStmt) {
+	c.compileFunctionLiteral(stmt)
+
+	if stmt.Name == "" {
+		return
+	}
+
 	binding := c.declareVariable(stmt.Name, true)
 
 	if binding.Kind == BindingLocal {
@@ -817,6 +825,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 
 		namespacedClass := ClassStmt{
 			Name:    stmt.Name + "." + classStmt.Name,
+			Fields:  classStmt.Fields,
 			Methods: classStmt.Methods,
 			Embeds:  classStmt.Embeds,
 		}
@@ -1693,16 +1702,46 @@ func (c *Compiler) compileClass(stmt ClassStmt) {
 	}
 }
 
+func (c *Compiler) isTrueLiteral(expr Expr) bool {
+	switch e := expr.(type) {
+	case BoolExpr:
+		return e.Value == true
+	}
+
+	return false
+}
+
+func (c *Compiler) isFalseLiteral(expr Expr) bool {
+	switch e := expr.(type) {
+	case BoolExpr:
+		return e.Value == false
+	}
+
+	return false
+}
+
 func (c *Compiler) compileWhileStatement(stmt WhileStmt) {
+	// while false { ... } => compile nothing
+	if c.isFalseLiteral(stmt.Condition) {
+		return
+	}
+
 	loopStart := len(*c.currentInstructions)
+
+	isInfinite := c.isTrueLiteral(stmt.Condition)
 
 	c.loopStack = append(c.loopStack, LoopContext{
 		Start: loopStart,
 	})
 
-	c.compileExpr(stmt.Condition)
+	jumpIfFalseIndex := -1
 
-	jumpIfFalseIndex := c.emitJump(OP_JUMP_IF_FALSE)
+	// Normal while condition.
+	// For while true, don't emit condition/jump at all.
+	if !isInfinite {
+		c.compileExpr(stmt.Condition)
+		jumpIfFalseIndex = c.emitJump(OP_JUMP_IF_FALSE)
+	}
 
 	c.compileScopedBlock(stmt.Body)
 
@@ -1714,7 +1753,9 @@ func (c *Compiler) compileWhileStatement(stmt WhileStmt) {
 
 	c.emit(OP_JUMP, loopStart)
 
-	c.patchJump(jumpIfFalseIndex)
+	if !isInfinite {
+		c.patchJump(jumpIfFalseIndex)
+	}
 
 	currentLoop = c.loopStack[len(c.loopStack)-1]
 	c.loopStack = c.loopStack[:len(c.loopStack)-1]
@@ -2046,13 +2087,18 @@ func (c *Compiler) compileExpr(expr Expr) {
 
 		localCount := c.localCount
 
+		hasDefaults, hasTypeHints := getParamFlags(e.Params)
+
 		c.functions[name] = Function{
 			ID:           c.getFunctionID(name),
 			Name:         name,
 			Params:       e.Params,
+			ReturnType:   e.ReturnType,
 			Instructions: functionInstructions,
 			LocalCount:   localCount,
 			Captures:     captures,
+			HasDefaults:  hasDefaults,
+			HasTypeHints: hasTypeHints,
 		}
 
 		c.currentInstructions = oldInstructions

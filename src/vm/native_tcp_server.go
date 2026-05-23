@@ -1,6 +1,7 @@
 package vm
 
 import (
+	"fmt"
 	"net"
 	"strconv"
 
@@ -40,11 +41,23 @@ func init() {
 }
 
 func handleConn(vm *VM, tcp *NativeTcpServerValue, conn net.Conn) {
-	if tcp.ConnectionHandler != nil {
-		vm.callFunctionValue(*tcp.ConnectionHandler, []Value{&NativeTcpConnectionValue{
-			Connection: conn,
-		}})
+	defer conn.Close()
+
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("[tcp handler panic] %v\n", r)
+		}
+	}()
+
+	if tcp.ConnectionHandler == nil {
+		return
 	}
+
+	vm.callFunctionValue(*tcp.ConnectionHandler, []Value{
+		&NativeTcpConnectionValue{
+			Connection: conn,
+		},
+	})
 }
 
 func (vm *VM) callTcpServerMethod(tcp *NativeTcpServerValue, method string, args []Value) {
@@ -82,21 +95,26 @@ func tcpStart(vm *VM, tcp *NativeTcpServerValue, args []Value) {
 
 	tcp.Listener = &listener
 
-	clonedVm := vm.CloneForTask()
-
-	if async {
-		go func() {
-			for {
-				conn, _ := listener.Accept()
-				go handleConn(clonedVm, tcp, conn)
-			}
-		}()
-	} else {
+	acceptLoop := func() {
 		for {
-			conn, _ := listener.Accept()
-			go handleConn(clonedVm, tcp, conn)
+			conn, err := listener.Accept()
+			if err != nil {
+				continue
+			}
+
+			connVm := vm.CloneForTask()
+
+			go handleConn(connVm, tcp, conn)
 		}
 	}
+
+	if async {
+		go acceptLoop()
+		vm.push(true)
+		return
+	}
+
+	acceptLoop()
 
 	vm.push(UndefinedValue{})
 }

@@ -81,6 +81,7 @@ var returnRegex = regexp.MustCompile(`return\s+(.+?);`)
 var fileImportRegex = regexp.MustCompile(`import\s+"([^"]+)"(?:\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?\s*;?`)
 var exportLineRegex = regexp.MustCompile(`^\s*export\s+`)
 var memberAccessRegex = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\b`)
+var catchVarRegex = regexp.MustCompile(`\bcatch\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{`)
 
 type blockInfo struct {
 	Kind       string
@@ -94,6 +95,36 @@ type blockInfo struct {
 	Line       int
 	Column     int
 	Exported   bool
+}
+
+func scanCatchVariables(scope *Scope, text string, pos Position, uri string) {
+	lines := strings.Split(text, "\n")
+
+	maxLine := pos.Line
+	if maxLine >= len(lines) {
+		maxLine = len(lines) - 1
+	}
+
+	for lineIndex := 0; lineIndex <= maxLine; lineIndex++ {
+		line := cleanLine(lines[lineIndex])
+
+		match := catchVarRegex.FindStringSubmatch(line)
+		if match == nil {
+			continue
+		}
+
+		name := match[1]
+
+		scope.Define(SymbolInfo{
+			Name:      name,
+			Kind:      SymbolVariable,
+			Type:      "error",
+			Detail:    "catch error " + name,
+			Line:      lineIndex + 1,
+			Column:    indexColumn(line, name),
+			SourceURI: uri,
+		})
+	}
 }
 
 func checkUndefinedMethodOnLine(scope *Scope, rawLine string, lineIndex int) []map[string]any {
@@ -137,6 +168,10 @@ func checkUndefinedMethodOnLine(scope *Scope, rawLine string, lineIndex int) []m
 
 		receiverSym, ok := scope.Resolve(receiver)
 		if !ok {
+			continue
+		}
+
+		if !shouldCheckMemberAccess(receiverSym.Type) {
 			continue
 		}
 
@@ -246,8 +281,20 @@ func checkUndefinedVariablesOnLine(scope *Scope, rawLine string, lineIndex int) 
 	return diagnostics
 }
 
+func shouldCheckMemberAccess(receiverType string) bool {
+	if receiverType == "" {
+		return false
+	}
+
+	if receiverType == "any" || receiverType == "unknown" || receiverType == "undefined" || receiverType == "null" {
+		return false
+	}
+
+	return true
+}
+
 func shouldIgnoreIdentifierInSemanticCheck(code string, name string, start int, end int) bool {
-	if tinyKeywords[name] {
+	if tinyKeywords[name] || name == "_" {
 		return true
 	}
 
@@ -485,6 +532,8 @@ func fallbackScopeAtPosition(uri string, text string, pos Position) *Scope {
 	scanFullClasses(scope, text, maxLine, uri)
 	scanFullFunctions(scope, text, maxLine, uri)
 	scanAnonymousFunctions(scope, text, maxLine, uri)
+	scanInlineAnonymousFunctionParams(scope, text, pos, uri)
+	scanCatchVariables(scope, text, pos, uri)
 
 	// Pass 3: variables after functions/classes/imports are known.
 	for lineIndex := 0; lineIndex <= maxLine; lineIndex++ {
@@ -495,6 +544,23 @@ func fallbackScopeAtPosition(uri string, text string, pos Position) *Scope {
 
 		scanVariableLine(scope, line, lineIndex+1, uri)
 		scanFieldLine(scope, line, lineIndex+1, uri)
+	}
+
+	// Add parameters from the function/method/anonymous function that contains the cursor.
+	// This makes params autocomplete inside function bodies.
+	currentFunction := functionBlockAtLine(text, pos.Line)
+	if currentFunction != nil {
+		for _, param := range parseFunctionParams(currentFunction.ParamsText) {
+			scope.Define(SymbolInfo{
+				Name:      param.Name,
+				Kind:      SymbolVariable,
+				Type:      param.Type,
+				Detail:    "parameter " + param.Name,
+				Line:      currentFunction.Line,
+				Column:    1,
+				SourceURI: uri,
+			})
+		}
 	}
 
 	return scope
@@ -739,6 +805,10 @@ func scanClassFields(scope *Scope, classBody string, uri string, baseLine int) m
 	return fields
 }
 
+func isPrivateMethodBlock(header string) bool {
+	return strings.Contains(header, "private fn ")
+}
+
 func scanFullClasses(scope *Scope, text string, maxLine int, uri string) {
 	// Two passes let embed work even if classes appear later.
 	classBlocks := findBlocks(text, "class")
@@ -775,11 +845,17 @@ func scanFullClasses(scope *Scope, text string, maxLine int, uri string) {
 			params := parseFunctionParams(methodBlock.ParamsText)
 			returnType := inferReturnTypeFromBody(scope, methodBlock.Body, methodBlock.ReturnType)
 
+			detail := "method " + block.Name + "." + methodBlock.Name
+
+			if isPrivateFunctionAt(block.Body, methodBlock.Start) {
+				detail = "private " + detail
+			}
+
 			methods[methodBlock.Name] = SymbolInfo{
 				Name:      methodBlock.Name,
 				Kind:      SymbolFunction,
 				Type:      "function",
-				Detail:    "method " + block.Name + "." + methodBlock.Name,
+				Detail:    detail,
 				Line:      block.Line + methodBlock.Line - 1,
 				Column:    methodBlock.Column,
 				SourceURI: uri,
@@ -1447,6 +1523,12 @@ func parseFunctionParams(paramsText string) []StdArg {
 			raw = strings.TrimSpace(strings.SplitN(raw, "=", 2)[0])
 		}
 
+		isVariadic := false
+		if strings.HasPrefix(raw, "...") {
+			isVariadic = true
+			raw = strings.TrimSpace(strings.TrimPrefix(raw, "..."))
+		}
+
 		arg := StdArg{
 			Name: raw,
 			Type: "any",
@@ -1456,6 +1538,10 @@ func parseFunctionParams(paramsText string) []StdArg {
 			parts := strings.SplitN(raw, ":", 2)
 			arg.Name = strings.TrimSpace(parts[0])
 			arg.Type = strings.TrimSpace(parts[1])
+		}
+
+		if isVariadic {
+			arg.Type = "array"
 		}
 
 		params = append(params, arg)
@@ -1918,9 +2004,15 @@ func paramsFromAST(params []Param) []StdArg {
 	args := []StdArg{}
 
 	for _, param := range params {
+		typ := typeHintName(param.TypeHint, "any")
+
+		if param.Variadic {
+			typ = "array"
+		}
+
 		args = append(args, StdArg{
 			Name:     param.Name,
-			Type:     typeHintName(param.TypeHint, "any"),
+			Type:     typ,
 			Optional: param.HasDefault,
 		})
 	}
@@ -2066,6 +2158,77 @@ func inferMemberCallTypeFromParts(scope *Scope, receiverType string, method stri
 	return ""
 }
 
+var inlineAnonFnRegex = regexp.MustCompile(`fn\s*\(([^)]*)\)\s*\{`)
+
+func scanInlineAnonymousFunctionParams(scope *Scope, text string, pos Position, uri string) {
+	lines := strings.Split(text, "\n")
+
+	maxLine := pos.Line
+	if maxLine >= len(lines) {
+		maxLine = len(lines) - 1
+	}
+
+	for lineIndex := 0; lineIndex <= maxLine; lineIndex++ {
+		line := cleanLine(lines[lineIndex])
+
+		matches := inlineAnonFnRegex.FindAllStringSubmatch(line, -1)
+
+		for _, match := range matches {
+			paramsText := match[1]
+			params := parseFunctionParams(paramsText)
+
+			for _, param := range params {
+				scope.Define(SymbolInfo{
+					Name:      param.Name,
+					Kind:      SymbolVariable,
+					Type:      param.Type,
+					Detail:    "anonymous function parameter " + param.Name,
+					Line:      lineIndex + 1,
+					Column:    indexColumn(line, param.Name),
+					SourceURI: uri,
+				})
+			}
+		}
+	}
+}
+
+func formatSymbolFunctionSignature(sym SymbolInfo) string {
+	parts := []string{}
+
+	for _, param := range sym.Params {
+		name := param.Name
+		if param.Optional {
+			name += "?"
+		}
+
+		parts = append(parts, name+": "+param.Type)
+	}
+
+	returns := sym.Returns
+	if returns == "" {
+		returns = "any"
+	}
+
+	return sym.Name + "(" + strings.Join(parts, ", ") + "): " + returns
+}
+
+func isPrivateFunctionAt(text string, fnStart int) bool {
+	lineStart := strings.LastIndex(text[:fnStart], "\n")
+	if lineStart == -1 {
+		lineStart = 0
+	} else {
+		lineStart++
+	}
+
+	beforeFn := strings.TrimSpace(text[lineStart:fnStart])
+	return strings.Contains(beforeFn, "private")
+}
+
+func isPrivateSymbol(sym SymbolInfo) bool {
+	return strings.Contains(sym.Detail, "private method") ||
+		strings.Contains(sym.Detail, "private field")
+}
+
 func getHover(uri string, text string, pos Position) any {
 	word := wordAtPosition(text, pos)
 
@@ -2077,69 +2240,37 @@ func getHover(uri string, text string, pos Position) any {
 
 	receiver, method, ok := memberExprAtPosition(text, pos)
 	if ok {
-		if tinyKeywords[method] {
-			return nil
-		}
-
 		sym, exists := scope.Resolve(receiver)
 		if !exists {
 			return nil
 		}
 
-		if sym.Kind == SymbolNamespace {
-			member, ok := sym.Members[method]
-			if !ok {
-				return nil
-			}
-
-			if member.Kind == SymbolFunction {
-				signature := formatFunctionSignature(receiver+"."+member.Name, member.Params, member.Returns)
-				return HoverResult{
-					Contents: MarkupContent{
-						Kind:  "markdown",
-						Value: "```tiny\n" + signature + "\n```\n" + member.Detail,
-					},
-				}
-			}
-
-			return HoverResult{
-				Contents: MarkupContent{
-					Kind:  "markdown",
-					Value: "**" + receiver + "." + member.Name + "**\n\nType: `" + member.Type + "`\n\n" + member.Detail,
-				},
-			}
-		}
-
-		if sym.Type == "object" && sym.Fields != nil {
-			field, ok := sym.Fields[method]
-			if ok {
-				return HoverResult{
-					Contents: MarkupContent{
-						Kind:  "markdown",
-						Value: "**" + method + "**\n\nType: `" + field.Type + "`\n\n" + field.Detail,
-					},
-				}
-			}
-		}
-
 		if strings.HasPrefix(sym.Type, "class:") {
 			className := strings.TrimPrefix(sym.Type, "class:")
+
 			classSym, ok := scope.Resolve(className)
 			if !ok || classSym.Kind != SymbolClass {
 				return nil
 			}
 
-			methodSym, ok := classSym.Methods[method]
-			if !ok {
-				return nil
+			if methodSym, ok := classSym.Methods[method]; ok {
+				signature := formatFunctionSignature(className+"."+methodSym.Name, methodSym.Params, methodSym.Returns)
+
+				return HoverResult{
+					Contents: MarkupContent{
+						Kind:  "markdown",
+						Value: "```tiny\n" + signature + "\n```\n" + methodSym.Detail,
+					},
+				}
 			}
 
-			signature := formatFunctionSignature(className+"."+methodSym.Name, methodSym.Params, methodSym.Returns)
-			return HoverResult{
-				Contents: MarkupContent{
-					Kind:  "markdown",
-					Value: "```tiny\n" + signature + "\n```\n" + methodSym.Detail,
-				},
+			if fieldSym, ok := classSym.Fields[method]; ok {
+				return HoverResult{
+					Contents: MarkupContent{
+						Kind:  "markdown",
+						Value: "**" + receiver + "." + fieldSym.Name + "**\n\nType: `" + fieldSym.Type + "`\n\n" + fieldSym.Detail,
+					},
+				}
 			}
 		}
 
@@ -2209,4 +2340,574 @@ func getHover(uri string, text string, pos Position) any {
 			Value: "**" + sym.Name + "**\n\nType: `" + sym.Type + "`\n\n" + sym.Detail,
 		},
 	}
+}
+
+// =====================
+// AST-based semantic diagnostics
+// =====================
+
+type astSemanticAnalyzer struct {
+	uri          string
+	root         *Scope
+	scope        *Scope
+	diagnostics  []map[string]any
+	currentClass string
+}
+
+func semanticDiagnosticsFromAST(uri string, text string) []map[string]any {
+	statements, parseDiagnostics := parseTinyForLSP(uri, text)
+	if len(parseDiagnostics) > 0 || statements == nil {
+		return []map[string]any{}
+	}
+
+	root := NewScope(nil)
+
+	for alias, module := range parseStdImports(text) {
+		root.Define(SymbolInfo{
+			Name: alias, Kind: SymbolStd, Type: "std:" + module,
+			Detail: "std module " + module, Line: 1, Column: 1, SourceURI: uri,
+		})
+	}
+
+	scanFileImportsIntoScope(root, uri, text)
+
+	a := &astSemanticAnalyzer{uri: uri, root: root, scope: root}
+	a.predeclareStatements(statements)
+	a.visitStatements(statements)
+
+	return a.diagnostics
+}
+
+func (a *astSemanticAnalyzer) pushScope() *Scope {
+	child := NewScope(a.scope)
+	a.scope = child
+	return child
+}
+
+func (a *astSemanticAnalyzer) popScope() {
+	if a.scope != nil && a.scope.Parent != nil {
+		a.scope = a.scope.Parent
+	}
+}
+
+func (a *astSemanticAnalyzer) define(sym SymbolInfo) {
+	if sym.SourceURI == "" {
+		sym.SourceURI = a.uri
+	}
+	a.scope.Define(sym)
+}
+
+func (a *astSemanticAnalyzer) resolve(name string) (SymbolInfo, bool) {
+	return a.scope.Resolve(name)
+}
+
+func (a *astSemanticAnalyzer) addDiagnostic(line int, column int, message string) {
+	if line <= 0 {
+		line = 1
+	}
+	if column <= 0 {
+		column = 1
+	}
+	a.diagnostics = append(a.diagnostics, makeRangeDiagnostic(line-1, column-1, column, 2, message))
+}
+
+func stdArgsFromParams(params []Param) []StdArg {
+	args := []StdArg{}
+	for _, p := range params {
+		name := p.Name
+		typ := typeHintName(p.TypeHint, "any")
+		if p.Variadic {
+			name = "..." + name
+			if typ == "any" {
+				typ = "array"
+			}
+		}
+		args = append(args, StdArg{Name: name, Type: typ, Optional: p.HasDefault})
+	}
+	return args
+}
+
+func returnTypeName(h TypeHint) string {
+	if h.IsEmpty() {
+		return "any"
+	}
+	return h.Name
+}
+
+func (a *astSemanticAnalyzer) predeclareStatements(stmts []Stmt) {
+	for _, raw := range stmts {
+		stmt, _ := unwrapExport(raw)
+		switch s := stmt.(type) {
+		case ImportStmt:
+			alias := s.Alias
+			if alias == "" {
+				alias = s.Path
+			}
+			typ := "any"
+			kind := SymbolVariable
+			detail := "import " + s.Path
+			if s.Std {
+				typ = "std:" + s.Path
+				kind = SymbolStd
+				detail = "std module " + s.Path
+			}
+			a.root.Define(SymbolInfo{Name: alias, Kind: kind, Type: typ, Detail: detail, Line: s.Line, Column: s.Column, SourceURI: a.uri})
+
+		case FunctionStmt:
+			a.root.Define(SymbolInfo{Name: s.Name, Kind: SymbolFunction, Type: "function", Detail: "fn " + s.Name, Line: s.Line, Column: s.Column, SourceURI: a.uri, Params: stdArgsFromParams(s.Params), Returns: returnTypeName(s.ReturnType)})
+
+		case ClassStmt:
+			a.root.Define(a.classSymbol(s))
+
+		case VariableStmt:
+			// Define early as unknown so forward-ish references don't explode while typing.
+			a.root.Define(SymbolInfo{Name: s.Name, Kind: SymbolVariable, Type: "unknown", Detail: "variable " + s.Name, Line: s.Line, Column: s.Column, SourceURI: a.uri})
+
+		case NamespaceStmt:
+			members := map[string]SymbolInfo{}
+			for _, rawInner := range s.Statements {
+				inner, exported := unwrapExport(rawInner)
+				if !exported {
+					_ = exported
+				}
+				switch m := inner.(type) {
+				case FunctionStmt:
+					members[m.Name] = SymbolInfo{Name: m.Name, Kind: SymbolFunction, Type: "function", Detail: "fn " + m.Name, Line: m.Line, Column: m.Column, SourceURI: a.uri, Params: stdArgsFromParams(m.Params), Returns: returnTypeName(m.ReturnType)}
+				case VariableStmt:
+					members[m.Name] = SymbolInfo{Name: m.Name, Kind: SymbolVariable, Type: "unknown", Detail: "variable " + m.Name, Line: m.Line, Column: m.Column, SourceURI: a.uri}
+				case ClassStmt:
+					members[m.Name] = a.classSymbol(m)
+				}
+			}
+			a.root.Define(SymbolInfo{Name: s.Name, Kind: SymbolNamespace, Type: "namespace", Detail: "namespace " + s.Name, Line: 1, Column: 1, SourceURI: a.uri, Members: members})
+		}
+	}
+}
+
+func (a *astSemanticAnalyzer) classSymbol(cls ClassStmt) SymbolInfo {
+	fields := map[string]SymbolInfo{}
+	for _, f := range cls.Fields {
+		typ := typeHintName(f.TypeHint, "any")
+		if typ == "any" && f.Value != nil {
+			typ = a.inferExprType(f.Value)
+		}
+		detail := "field " + f.Name
+		if f.Private {
+			detail = "private " + detail
+		}
+		if f.Constant {
+			detail = "const " + detail
+		}
+		fields[f.Name] = SymbolInfo{Name: f.Name, Kind: SymbolField, Type: typ, Detail: detail, Line: f.Line, Column: f.Column, SourceURI: a.uri}
+	}
+
+	methods := map[string]SymbolInfo{}
+	for _, m := range cls.Methods {
+		methods[m.Name] = SymbolInfo{Name: m.Name, Kind: SymbolFunction, Type: "function", Detail: "method " + cls.Name + "." + m.Name, Line: m.Line, Column: m.Column, SourceURI: a.uri, Params: stdArgsFromParams(m.Params), Returns: returnTypeName(m.ReturnType)}
+	}
+
+	return SymbolInfo{Name: cls.Name, Kind: SymbolClass, Type: "class:" + cls.Name, Detail: "class " + cls.Name, Line: cls.Line, Column: cls.Column, SourceURI: a.uri, Fields: fields, Methods: methods}
+}
+
+func (a *astSemanticAnalyzer) visitStatements(stmts []Stmt) {
+	for _, raw := range stmts {
+		stmt, _ := unwrapExport(raw)
+		a.visitStmt(stmt)
+	}
+}
+
+func (a *astSemanticAnalyzer) visitStmt(stmt Stmt) {
+	switch s := stmt.(type) {
+	case ImportStmt:
+		// Already declared in prepass.
+
+	case VariableStmt:
+		typ := a.inferExprType(s.Value)
+		fields := map[string]SymbolInfo(nil)
+		if typ == "object" {
+			fields = a.fieldsFromObjectExpr(s.Value, s.Line)
+		}
+		a.define(SymbolInfo{Name: s.Name, Kind: SymbolVariable, Type: typ, Detail: "variable " + s.Name, Line: s.Line, Column: s.Column, SourceURI: a.uri, Fields: fields})
+
+	case FieldStmt:
+		// Class fields are handled by classSymbol. Top-level field is treated like a variable if parser allows it.
+		typ := typeHintName(s.TypeHint, "any")
+		if typ == "any" {
+			typ = a.inferExprType(s.Value)
+		}
+		a.define(SymbolInfo{Name: s.Name, Kind: SymbolVariable, Type: typ, Detail: "field " + s.Name, Line: s.Line, Column: s.Column, SourceURI: a.uri})
+
+	case FunctionStmt:
+		a.visitFunction(s)
+
+	case ClassStmt:
+		a.define(a.classSymbol(s))
+		for _, m := range s.Methods {
+			a.visitMethod(s.Name, m)
+		}
+
+	case NamespaceStmt:
+		a.pushScope()
+		a.visitStatements(s.Statements)
+		a.popScope()
+
+	case EnumStmt:
+		a.define(SymbolInfo{Name: s.Name, Kind: SymbolVariable, Type: "object", Detail: "enum " + s.Name, SourceURI: a.uri})
+
+	case ExprStmt:
+		a.inferExprType(s.Value)
+
+	case AssignStmt:
+		if _, ok := a.resolve(s.Name); !ok {
+			a.addDiagnostic(s.Line, s.Column, "undefined variable: "+s.Name)
+		}
+		a.inferExprType(s.Value)
+
+	case ReturnStmt:
+		if s.HasValue {
+			a.inferExprType(s.Value)
+		}
+
+	case IfStmt:
+		a.inferExprType(s.Condition)
+		a.pushScope()
+		a.visitStatements(s.ThenBody)
+		a.popScope()
+		a.pushScope()
+		a.visitStatements(s.ElseBody)
+		a.popScope()
+
+	case WhileStmt:
+		a.inferExprType(s.Condition)
+		a.pushScope()
+		a.visitStatements(s.Body)
+		a.popScope()
+
+	case ForStmt:
+		a.pushScope()
+		if s.Init != nil {
+			a.visitStmt(s.Init)
+		}
+		a.inferExprType(s.Condition)
+		a.visitStatements(s.Body)
+		if s.Update != nil {
+			a.visitStmt(s.Update)
+		}
+		a.popScope()
+
+	case ForInStmt:
+		a.inferExprType(s.Iterable)
+		a.pushScope()
+		a.define(SymbolInfo{Name: s.ItemName, Kind: SymbolVariable, Type: "any", Detail: "for item " + s.ItemName, SourceURI: a.uri})
+		if s.IndexName != "" {
+			a.define(SymbolInfo{Name: s.IndexName, Kind: SymbolVariable, Type: "number", Detail: "for index " + s.IndexName, SourceURI: a.uri})
+		}
+		a.visitStatements(s.Body)
+		a.popScope()
+
+	case TryCatchStmt:
+		a.pushScope()
+		a.visitStatements(s.TryBody)
+		a.popScope()
+		a.pushScope()
+		a.define(SymbolInfo{Name: s.ErrorName, Kind: SymbolVariable, Type: "error", Detail: "catch error " + s.ErrorName, SourceURI: a.uri})
+		a.visitStatements(s.CatchBody)
+		a.popScope()
+		a.pushScope()
+		a.visitStatements(s.FinallyBody)
+		a.popScope()
+
+	case ThrowStmt:
+		a.inferExprType(s.Value)
+
+	case IndexAssignStmt:
+		a.inferExprType(s.Object)
+		a.inferExprType(s.Index)
+		a.inferExprType(s.Value)
+
+	case PropertyAssignStmt:
+		a.checkMember(s.Object, s.Name, s.Line, s.Column)
+		a.inferExprType(s.Value)
+
+	case MatchStmt:
+		a.inferExprType(s.Value)
+		for _, mc := range s.Cases {
+			a.inferExprType(mc.Value)
+			a.pushScope()
+			a.visitStatements(mc.Body)
+			a.popScope()
+		}
+		if s.Default != nil {
+			a.pushScope()
+			a.visitStatements(s.Default)
+			a.popScope()
+		}
+	}
+}
+
+func (a *astSemanticAnalyzer) visitFunction(fn FunctionStmt) {
+	a.pushScope()
+	for _, p := range fn.Params {
+		a.define(paramSymbol(p, a.uri, fn.Line, fn.Column))
+	}
+	a.visitStatements(fn.Body)
+	a.popScope()
+}
+
+func (a *astSemanticAnalyzer) visitMethod(className string, fn FunctionStmt) {
+	oldClass := a.currentClass
+	a.currentClass = className
+	a.pushScope()
+	a.define(SymbolInfo{Name: "this", Kind: SymbolVariable, Type: "class:" + className, Detail: "current class instance", Line: fn.Line, Column: fn.Column, SourceURI: a.uri})
+	for _, p := range fn.Params {
+		if p.Name != "this" {
+			a.define(paramSymbol(p, a.uri, fn.Line, fn.Column))
+		}
+	}
+	a.visitStatements(fn.Body)
+	a.popScope()
+	a.currentClass = oldClass
+}
+
+func paramSymbol(p Param, uri string, line int, column int) SymbolInfo {
+	typ := typeHintName(p.TypeHint, "any")
+	if p.Variadic {
+		typ = "array"
+	}
+	return SymbolInfo{Name: p.Name, Kind: SymbolVariable, Type: typ, Detail: "parameter " + p.Name, Line: line, Column: column, SourceURI: uri}
+}
+
+func (a *astSemanticAnalyzer) fieldsFromObjectExpr(expr Expr, line int) map[string]SymbolInfo {
+	obj, ok := expr.(ObjectExpr)
+	if !ok {
+		return nil
+	}
+	fields := map[string]SymbolInfo{}
+	for _, f := range obj.Fields {
+		fields[f.Name] = SymbolInfo{Name: f.Name, Kind: SymbolField, Type: a.inferExprType(f.Value), Detail: "field " + f.Name, Line: line, Column: 1, SourceURI: a.uri}
+	}
+	return fields
+}
+
+func (a *astSemanticAnalyzer) inferExprType(expr Expr) string {
+	switch e := expr.(type) {
+	case nil:
+		return "unknown"
+	case StringExpr, InterpolatedStringExpr:
+		return "string"
+	case NumberExpr, FloatExpr:
+		return "number"
+	case BoolExpr:
+		return "bool"
+	case NullExpr:
+		return "null"
+	case UndefinedExpr:
+		return "undefined"
+	case ArrayExpr:
+		for _, el := range e.Elements {
+			a.inferExprType(el)
+		}
+		return "array"
+	case ObjectExpr:
+		for _, f := range e.Fields {
+			a.inferExprType(f.Value)
+		}
+		return "object"
+	case IdentExpr:
+		if sym, ok := a.resolve(e.Name); ok {
+			return sym.Type
+		}
+		if !tinyKeywords[e.Name] && e.Name != "_" {
+			a.addDiagnostic(e.Line, e.Column, "undefined variable: "+e.Name)
+		}
+		return "unknown"
+	case ThisExpr:
+		if sym, ok := a.resolve("this"); ok {
+			return sym.Type
+		}
+		a.addDiagnostic(1, 1, "cannot use this outside of a method")
+		return "unknown"
+	case PropertyExpr:
+		a.checkMember(e.Object, e.Name, 1, 1)
+		objType := a.inferExprType(e.Object)
+		return a.memberType(objType, e.Name)
+	case MemberCallExpr:
+		objType := a.inferExprType(e.Object)
+		for _, arg := range e.Args {
+			a.inferExprType(arg)
+		}
+		if shouldCheckMemberAccess(objType) {
+			if !a.memberExistsByType(objType, e.Method) {
+				a.addDiagnostic(e.Line, e.Column, "undefined method or property: "+e.Method)
+			}
+		}
+		return a.memberType(objType, e.Method)
+	case CallExpr:
+		for _, arg := range e.Args {
+			a.inferExprType(arg)
+		}
+		if sym, ok := a.resolve(e.Name); ok {
+			if sym.Kind == SymbolClass {
+				return "class:" + sym.Name
+			}
+			if sym.Kind == SymbolFunction {
+				if sym.Returns != "" {
+					return sym.Returns
+				}
+				return "any"
+			}
+			return sym.Type
+		}
+		a.addDiagnostic(e.Line, e.Column, "undefined variable: "+e.Name)
+		return "unknown"
+	case CallValueExpr:
+		calleeType := a.inferExprType(e.Callee)
+		for _, arg := range e.Args {
+			a.inferExprType(arg)
+		}
+		return calleeType
+	case FunctionExpr:
+		a.pushScope()
+		for _, p := range e.Params {
+			a.define(paramSymbol(p, a.uri, e.Line, e.Column))
+		}
+		a.visitStatements(e.Body)
+		a.popScope()
+		return "function"
+	case SpawnExpr:
+		t := a.inferExprType(e.Function)
+		if t == "function" {
+			return "task:any"
+		}
+		return "task:" + t
+	case UnaryExpr:
+		a.inferExprType(e.Right)
+		if e.Op == TOKEN_BANG {
+			return "bool"
+		}
+		return "number"
+	case BinaryExpr:
+		lt := a.inferExprType(e.Left)
+		rt := a.inferExprType(e.Right)
+		switch e.Op {
+		case TOKEN_EQ, TOKEN_NEQ, TOKEN_LT, TOKEN_GT, TOKEN_LTE, TOKEN_GTE, TOKEN_AND, TOKEN_OR:
+			return "bool"
+		case TOKEN_PLUS:
+			if lt == "string" || rt == "string" {
+				return "string"
+			}
+			return "number"
+		default:
+			return "number"
+		}
+	case TernaryExpr:
+		a.inferExprType(e.Condition)
+		t := a.inferExprType(e.ThenExpr)
+		f := a.inferExprType(e.ElseExpr)
+		if t == f {
+			return t
+		}
+		if t == "unknown" {
+			return f
+		}
+		if f == "unknown" {
+			return t
+		}
+		return "any"
+	case IndexExpr:
+		a.inferExprType(e.Object)
+		a.inferExprType(e.Index)
+		return "any"
+	case TypeOfExpr:
+		a.inferExprType(e.Value)
+		return "string"
+	case InstanceOfExpr:
+		a.inferExprType(e.Object)
+		a.inferExprType(e.Class)
+		return "bool"
+	case ObjectInExpr:
+		a.inferExprType(e.Object)
+		a.inferExprType(e.Key)
+		return "bool"
+	default:
+		return "unknown"
+	}
+}
+
+func (a *astSemanticAnalyzer) checkMember(object Expr, member string, line int, column int) {
+	objType := a.inferExprType(object)
+	if !shouldCheckMemberAccess(objType) {
+		return
+	}
+	if !a.memberExistsByType(objType, member) {
+		a.addDiagnostic(line, column, "undefined method or property: "+member)
+	}
+}
+
+func (a *astSemanticAnalyzer) memberExistsByType(typeName string, member string) bool {
+	if strings.HasPrefix(typeName, "task:") {
+		return member == "await"
+	}
+	if strings.HasPrefix(typeName, "std:") {
+		info, ok := GetStdModuleInfo(strings.TrimPrefix(typeName, "std:"))
+		if !ok {
+			return false
+		}
+		_, ok = info.Methods[member]
+		return ok
+	}
+	if strings.HasPrefix(typeName, "class:") {
+		className := strings.TrimPrefix(typeName, "class:")
+		classSym, ok := a.root.Resolve(className)
+		if !ok {
+			return false
+		}
+		if _, ok := classSym.Methods[member]; ok {
+			return true
+		}
+		if _, ok := classSym.Fields[member]; ok {
+			return true
+		}
+		return false
+	}
+	if typeName == "object" {
+		return true
+	} // plain/dynamic objects: don't complain.
+	if _, ok := GetNativeMethodInfo(typeName, member); ok {
+		return true
+	}
+	return member == "toString"
+}
+
+func (a *astSemanticAnalyzer) memberType(typeName string, member string) string {
+	if strings.HasPrefix(typeName, "task:") && member == "await" {
+		return strings.TrimPrefix(typeName, "task:")
+	}
+	if strings.HasPrefix(typeName, "std:") {
+		info, ok := GetStdModuleInfo(strings.TrimPrefix(typeName, "std:"))
+		if ok {
+			if m, ok := info.Methods[member]; ok {
+				return m.Returns
+			}
+		}
+	}
+	if strings.HasPrefix(typeName, "class:") {
+		className := strings.TrimPrefix(typeName, "class:")
+		classSym, ok := a.root.Resolve(className)
+		if ok {
+			if m, ok := classSym.Methods[member]; ok {
+				if m.Returns != "" {
+					return m.Returns
+				}
+				return "any"
+			}
+			if f, ok := classSym.Fields[member]; ok {
+				return f.Type
+			}
+		}
+	}
+	if m, ok := GetNativeMethodInfo(typeName, member); ok {
+		return m.Returns
+	}
+	return "unknown"
 }

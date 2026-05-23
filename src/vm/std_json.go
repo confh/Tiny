@@ -13,7 +13,7 @@ var stdJsonMetadata = StdModuleInfo{
 		"stringify": {
 			Name: "stringify",
 			Args: []StdArg{
-				{Name: "value", Type: "Object", Optional: false},
+				{Name: "value", Type: "object", Optional: false},
 			},
 			Returns:     "string",
 			Description: "Serializes an object value as a JSON string.",
@@ -21,7 +21,7 @@ var stdJsonMetadata = StdModuleInfo{
 		"pretty": {
 			Name: "pretty",
 			Args: []StdArg{
-				{Name: "value", Type: "Object", Optional: false},
+				{Name: "value", Type: "object", Optional: false},
 			},
 			Returns:     "string",
 			Description: "Serializes an object value as a pretty-printed JSON string.",
@@ -31,7 +31,7 @@ var stdJsonMetadata = StdModuleInfo{
 			Args: []StdArg{
 				{Name: "stringified", Type: "string", Optional: false},
 			},
-			Returns:     "Object",
+			Returns:     "object",
 			Description: "Parses a JSON string and returns the corresponding object.",
 		},
 		"readFile": {
@@ -39,13 +39,13 @@ var stdJsonMetadata = StdModuleInfo{
 			Args: []StdArg{
 				{Name: "fileName", Type: "string", Optional: false},
 			},
-			Returns:     "Object",
+			Returns:     "object",
 			Description: "Reads and parses a JSON file, returning its contents as an object.",
 		},
 		"writeFile": {
 			Name: "writeFile",
 			Args: []StdArg{
-				{Name: "value", Type: "Object", Optional: false},
+				{Name: "value", Type: "object", Optional: false},
 				{Name: "fileName", Type: "string", Optional: false},
 			},
 			Returns:     "undefined",

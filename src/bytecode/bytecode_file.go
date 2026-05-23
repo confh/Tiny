@@ -23,6 +23,7 @@ type SerializableParam struct {
 	TypeHint     TypeHint     `json:"typeHint"`
 	HasDefault   bool         `json:"hasDefault"`
 	DefaultValue EncodedValue `json:"defaultValue"`
+	Variadic     bool         `json:"variadic"`
 }
 
 type SerializableFunction struct {
@@ -88,6 +89,7 @@ func serializeParams(params []Param) []SerializableParam {
 			TypeHint:     param.TypeHint,
 			HasDefault:   param.HasDefault,
 			DefaultValue: encodedDefault,
+			Variadic:     param.Variadic,
 		}
 	}
 
@@ -109,6 +111,7 @@ func deserializeParams(params []SerializableParam) []Param {
 			TypeHint:     param.TypeHint,
 			HasDefault:   param.HasDefault,
 			DefaultValue: defaultValue,
+			Variadic:     param.Variadic,
 		}
 	}
 

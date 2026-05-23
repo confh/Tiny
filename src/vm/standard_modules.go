@@ -57,6 +57,9 @@ func (vm *VM) callStandardModule(module string, method string, args []Value) {
 	case "path":
 		vm.callStdPath(method, args)
 
+	case "object":
+		vm.callStdObject(method, args)
+
 	default:
 		LangError(ErrorName, "unknown standard module: %s", module)
 	}

@@ -1,6 +1,7 @@
 package vm
 
 import (
+	"bufio"
 	"fmt"
 	"net"
 	"net/http"
@@ -75,6 +76,7 @@ type NativeTcpServerValue struct {
 
 type NativeTcpConnectionValue struct {
 	Connection net.Conn
+	Reader     *bufio.Reader
 }
 
 type NativeHttpResponseValue struct {

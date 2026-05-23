@@ -218,9 +218,14 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 				Object: target.Object,
 				Name:   target.Name,
 				Value: BinaryExpr{
-					Left:  target,
-					Op:    TOKEN_PLUS,
-					Right: NumberExpr{Value: 1},
+					Left: target,
+					Op:   TOKEN_PLUS,
+					Right: NumberExpr{
+						Value:  1,
+						File:   p.current.File,
+						Line:   p.current.Line,
+						Column: p.current.Column,
+					},
 				},
 				Line:   p.current.Line,
 				Column: p.current.Column,
@@ -254,7 +259,7 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 				Value: BinaryExpr{
 					Left:  target,
 					Op:    TOKEN_MINUS,
-					Right: NumberExpr{Value: 1},
+					Right: NumberExpr{Value: 1, File: p.current.File, Line: p.current.Line, Column: p.current.Column},
 				},
 				Line:   p.current.Line,
 				Column: p.current.Column,
@@ -831,7 +836,7 @@ func (p *Parser) parseForUpdateStatement() Stmt {
 				Value: BinaryExpr{
 					Left:  IdentExpr{Name: target.Name},
 					Op:    TOKEN_PLUS,
-					Right: NumberExpr{Value: 1},
+					Right: NumberExpr{Value: 1, File: p.current.File, Line: p.current.Line, Column: p.current.Column},
 				},
 				Line:   p.current.Line,
 				Column: p.current.Column,
@@ -845,7 +850,7 @@ func (p *Parser) parseForUpdateStatement() Stmt {
 				Value: BinaryExpr{
 					Left:  target,
 					Op:    TOKEN_PLUS,
-					Right: NumberExpr{Value: 1},
+					Right: NumberExpr{Value: 1, File: p.current.File, Line: p.current.Line, Column: p.current.Column},
 				},
 				Line:   p.current.Line,
 				Column: p.current.Column,
@@ -871,7 +876,7 @@ func (p *Parser) parseForUpdateStatement() Stmt {
 				Value: BinaryExpr{
 					Left:  IdentExpr{Name: target.Name},
 					Op:    TOKEN_MINUS,
-					Right: NumberExpr{Value: 1},
+					Right: NumberExpr{Value: 1, File: p.current.File, Line: p.current.Line, Column: p.current.Column},
 				},
 				Line:   p.current.Line,
 				Column: p.current.Column,
@@ -885,7 +890,7 @@ func (p *Parser) parseForUpdateStatement() Stmt {
 				Value: BinaryExpr{
 					Left:  target,
 					Op:    TOKEN_MINUS,
-					Right: NumberExpr{Value: 1},
+					Right: NumberExpr{Value: 1, File: p.current.File, Line: p.current.Line, Column: p.current.Column},
 				},
 				Line:   p.current.Line,
 				Column: p.current.Column,
@@ -1345,6 +1350,12 @@ func (p *Parser) parseParameterList() []Param {
 	}
 
 	for {
+		variadic := false
+		if p.current.Type == TOKEN_DOT_DOT_DOT {
+			p.expect(TOKEN_DOT_DOT_DOT)
+			variadic = true
+		}
+
 		if p.current.Type != TOKEN_IDENT {
 			LangErrorAt(
 				ErrorSyntax,
@@ -1361,34 +1372,55 @@ func (p *Parser) parseParameterList() []Param {
 		typeHint := TypeHint{}
 
 		if p.current.Type == TOKEN_COLON {
-			p.advance()
-
-			if p.current.Type != TOKEN_IDENT {
+			if variadic {
 				LangErrorAt(
 					ErrorSyntax,
 					p.current.File,
 					p.current.Line,
 					p.current.Column,
-					"expected type name after :",
+					"variadic params cannot have types",
 				)
-			}
+			} else {
+				p.advance()
 
-			typeHint = TypeHint{Name: p.current.Literal}
-			p.advance()
+				if p.current.Type != TOKEN_IDENT {
+					LangErrorAt(
+						ErrorSyntax,
+						p.current.File,
+						p.current.Line,
+						p.current.Column,
+						"expected type name after :",
+					)
+				}
+
+				typeHint = TypeHint{Name: p.current.Literal}
+				p.advance()
+			}
 		}
 
 		param := Param{
 			Name:     name,
 			TypeHint: typeHint,
+			Variadic: variadic,
 		}
 
 		if p.current.Type == TOKEN_ASSIGN {
-			p.advance()
+			if variadic {
+				LangErrorAt(
+					ErrorSyntax,
+					p.current.File,
+					p.current.Line,
+					p.current.Column,
+					"variadic params cannot default values",
+				)
+			} else {
+				p.advance()
 
-			defaultValue := p.parseDefaultParamValue()
+				defaultValue := p.parseDefaultParamValue()
 
-			param.HasDefault = true
-			param.DefaultValue = defaultValue
+				param.HasDefault = true
+				param.DefaultValue = defaultValue
+			}
 		}
 
 		params = append(params, param)
@@ -1398,6 +1430,32 @@ func (p *Parser) parseParameterList() []Param {
 		}
 
 		p.advance()
+	}
+
+	variadicArgsNumber := 0
+
+	for i, param := range params {
+		if param.Variadic {
+			variadicArgsNumber++
+			if i != len(params)-1 {
+				LangErrorAt(
+					ErrorSyntax,
+					p.current.File,
+					p.current.Line,
+					p.current.Column,
+					"variadic parameter must be the last parameter",
+				)
+			}
+			if variadicArgsNumber > 1 {
+				LangErrorAt(
+					ErrorSyntax,
+					p.current.File,
+					p.current.Line,
+					p.current.Column,
+					"variadic parameter must be declared once at max",
+				)
+			}
+		}
 	}
 
 	seenDefault := false
@@ -1428,6 +1486,9 @@ func (vm *VM) applyDefaultArgs(fn Function, args []Value, paramOffset int, calla
 	minArgs := 0
 
 	for _, param := range params {
+		if param.Variadic {
+			continue
+		}
 		if !param.HasDefault {
 			minArgs++
 		}
@@ -1876,7 +1937,7 @@ func (p *Parser) parsePrimary() Expr {
 
 		p.advance()
 
-		return NumberExpr{Value: value}
+		return NumberExpr{Value: value, File: p.current.File, Line: p.current.Line, Column: p.current.Column}
 
 	case TOKEN_FN:
 		return p.parseFunctionExpr()
@@ -2021,6 +2082,9 @@ func (p *Parser) parseFunctionExpr() Expr {
 		Params:     params,
 		ReturnType: returnType,
 		Body:       body,
+		File:       p.current.File,
+		Line:       p.current.Line,
+		Column:     p.current.Column,
 	}
 }
 
@@ -2125,6 +2189,9 @@ func (p *Parser) parseClassStatement() Stmt {
 		Methods: methods,
 		Embeds:  embeds,
 		Fields:  fields,
+		File:    p.current.File,
+		Line:    p.current.Line,
+		Column:  p.current.Column,
 	}
 }
 

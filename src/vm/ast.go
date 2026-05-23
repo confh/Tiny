@@ -134,6 +134,9 @@ type ClassStmt struct {
 	Embeds  []string
 	Locals  []*Cell
 	Fields  []FieldStmt
+	File    string
+	Line    int
+	Column  int
 }
 
 func (s ClassStmt) stmtNode() {}
@@ -228,6 +231,9 @@ type FunctionExpr struct {
 	Params     []Param
 	ReturnType TypeHint
 	Body       []Stmt
+	File       string
+	Line       int
+	Column     int
 }
 
 func (e FunctionExpr) exprNode() {}
@@ -322,6 +328,7 @@ type Param struct {
 	TypeHint     TypeHint `json:"typeHint"`
 	HasDefault   bool     `json:"hasDefault"`
 	DefaultValue Value    `json:"-"`
+	Variadic     bool     `json:"variadic"`
 }
 
 type FunctionStmt struct {
@@ -360,7 +367,10 @@ type ReturnStmt struct {
 func (s ReturnStmt) stmtNode() {}
 
 type NumberExpr struct {
-	Value int
+	Value  int
+	File   string
+	Line   int
+	Column int
 }
 
 func (e NumberExpr) exprNode() {}

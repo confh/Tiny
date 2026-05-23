@@ -52,6 +52,16 @@ func (l *Lexer) peek() rune {
 	return l.input[l.pos+1]
 }
 
+func (l *Lexer) peekN(n int) rune {
+	index := l.pos + n
+
+	if index >= len(l.input) {
+		return 0
+	}
+
+	return l.input[index]
+}
+
 func (l *Lexer) NextToken() Token {
 	l.skipIgnored()
 
@@ -392,6 +402,13 @@ func (l *Lexer) NextToken() Token {
 		l.advance()
 		return tok
 	case '.':
+		if l.peekN(1) == '.' && l.peekN(2) == '.' {
+			l.advance()
+			l.advance()
+			l.advance()
+
+			return l.tokenAt(start, TOKEN_DOT_DOT_DOT, "...")
+		}
 		tok := Token{
 			Type:    TOKEN_DOT,
 			Literal: ".",

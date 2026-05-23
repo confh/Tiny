@@ -605,20 +605,36 @@ func (vm *VM) objectIsOrEmbedsClass(object ObjectValue, className string) bool {
 }
 
 func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableName string) {
-	// If function has defaults, use the old path because args may need to be filled.
-	if fn.HasDefaults {
+	expected := len(fn.Params)
+	isVariadic := expected > 0 && fn.Params[expected-1].Variadic
+
+	// Defaults are easier through the old path, except variadic should not use defaults.
+	if fn.HasDefaults && !isVariadic {
 		args := vm.popArgs(argCount)
 		args = vm.applyDefaultArgs(fn, args, 0, callableName)
 		vm.callFunctionDirect(fn, args)
 		return
 	}
 
-	if argCount != len(fn.Params) {
+	if isVariadic {
+		minArgs := expected - 1
+
+		if argCount < minArgs {
+			vm.runtimeError(
+				ErrorRuntime,
+				"%s expects at least %d arguments, got %d",
+				callableName,
+				minArgs,
+				argCount,
+			)
+			return
+		}
+	} else if argCount != expected {
 		vm.runtimeError(
 			ErrorRuntime,
 			"%s expects %d arguments, got %d",
 			callableName,
-			len(fn.Params),
+			expected,
 			argCount,
 		)
 		return
@@ -632,6 +648,65 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 	frame := vm.getFrame(fn)
 
 	start := vm.top - argCount
+
+	if isVariadic {
+		fixedCount := expected - 1
+
+		// Fixed params before ...args
+		for i := 0; i < fixedCount; i++ {
+			arg := vm.stack[start+i]
+			param := fn.Params[i]
+
+			if fn.HasTypeHints && !param.TypeHint.IsEmpty() && !CheckTypeHint(arg, param.TypeHint) {
+				LangError(
+					ErrorType,
+					"function %s parameter %s expected %s, got %s",
+					fn.Name,
+					param.Name,
+					param.TypeHint.Name,
+					TypeName(arg),
+				)
+			}
+
+			frame.locals[i].Value = arg
+			frame.constants[i] = false
+			frame.localTypes[i] = param.TypeHint
+
+			vm.stack[start+i] = nil
+		}
+
+		// Rest param gets remaining args as array
+		restParam := fn.Params[fixedCount]
+		rest := &ArrayValue{
+			Elements: []Value{},
+		}
+
+		for i := fixedCount; i < argCount; i++ {
+			arg := vm.stack[start+i]
+
+			if fn.HasTypeHints && !restParam.TypeHint.IsEmpty() && !CheckTypeHint(arg, restParam.TypeHint) {
+				LangError(
+					ErrorType,
+					"function %s rest parameter %s expected %s, got %s",
+					fn.Name,
+					restParam.Name,
+					restParam.TypeHint.Name,
+					TypeName(arg),
+				)
+			}
+
+			rest.Elements = append(rest.Elements, arg)
+			vm.stack[start+i] = nil
+		}
+
+		frame.locals[fixedCount].Value = rest
+		frame.constants[fixedCount] = false
+		frame.localTypes[fixedCount] = TypeHint{Name: "array"}
+
+		vm.top = start
+		vm.frames = append(vm.frames, frame)
+		return
+	}
 
 	if fn.HasTypeHints {
 		for i := 0; i < argCount; i++ {
@@ -1698,7 +1773,7 @@ func (vm *VM) step() bool {
 
 	case OP_JUMP_IF_FALSE:
 		target := instr.Value.(int)
-		condition := vm.peekFast()
+		condition := vm.popFast()
 
 		if !isTruthy(condition) {
 			vm.setIP(target)
@@ -1706,7 +1781,7 @@ func (vm *VM) step() bool {
 
 	case OP_JUMP_IF_TRUE:
 		target := instr.Value.(int)
-		condition := vm.peekFast()
+		condition := vm.popFast()
 
 		if isTruthy(condition) {
 			vm.setIP(target)
@@ -1913,7 +1988,7 @@ func (vm *VM) step() bool {
 
 		frame := vm.frames[len(vm.frames)-1]
 
-		if !CheckTypeHint(returnValue, frame.function.ReturnType) {
+		if !frame.function.ReturnType.IsEmpty() && !CheckTypeHint(returnValue, frame.function.ReturnType) {
 			LangError(
 				ErrorType,
 				"function %s should return %s, got %s",
@@ -2172,18 +2247,59 @@ func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []Value) {
 	}
 
 	expected := len(fn.Params)
+	isVariadic := expected > 0 && fn.Params[expected-1].Variadic
 
-	if fn.HasDefaults {
-		args = vm.applyDefaultArgs(fn, args, 0, fn.Name)
-	} else if len(args) != expected {
-		vm.runtimeError(ErrorRuntime, "function %s expects %d arguments, got %d", fn.Name, expected, len(args))
+	if isVariadic {
+		minArgs := expected - 1
+
+		if len(args) < minArgs {
+			vm.runtimeError(
+				ErrorRuntime,
+				"function %s expects at least %d arguments, got %d",
+				fn.Name,
+				minArgs,
+				len(args),
+			)
+		}
+	} else {
+		if fn.HasDefaults {
+			args = vm.applyDefaultArgs(fn, args, 0, fn.Name)
+		} else if len(args) != expected {
+			vm.runtimeError(
+				ErrorRuntime,
+				"function %s expects %d arguments, gosst %d",
+				fn.Name,
+				expected,
+				len(args),
+			)
+		}
 	}
 
 	frame := vm.getFrame(fn)
 
-	for i, arg := range args {
-		frame.locals[i].Value = arg
-		frame.constants[i] = false
+	if isVariadic {
+		fixedCount := expected - 1
+
+		for i := 0; i < fixedCount; i++ {
+			frame.locals[i].Value = args[i]
+			frame.constants[i] = false
+		}
+
+		rest := &ArrayValue{
+			Elements: []Value{},
+		}
+
+		for i := fixedCount; i < len(args); i++ {
+			rest.Elements = append(rest.Elements, args[i])
+		}
+
+		frame.locals[fixedCount].Value = rest
+		frame.constants[fixedCount] = false
+	} else {
+		for i, arg := range args {
+			frame.locals[i].Value = arg
+			frame.constants[i] = false
+		}
 	}
 
 	vm.frames = append(vm.frames, frame)
@@ -2204,6 +2320,7 @@ func (vm *VM) callFunctionDirect(fn Function, args []Value) {
 
 func (vm *VM) callFunctionValue(fnValue FunctionValue, args []Value) Value {
 	frameDepthBefore := len(vm.frames)
+	stackDepthBefore := len(vm.stack)
 
 	vm.callFunctionValueWithArgs(fnValue, args)
 
@@ -2213,8 +2330,8 @@ func (vm *VM) callFunctionValue(fnValue FunctionValue, args []Value) Value {
 		}
 	}
 
-	if len(vm.stack) == 0 {
-		LangError(ErrorInternal, "function %s returned no value", fnValue.Name)
+	if len(vm.stack) <= stackDepthBefore {
+		return UndefinedValue{}
 	}
 
 	return vm.pop()
@@ -2450,22 +2567,43 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 
 	ownerClass := methodOwnerClass(fnValue.Name)
 
-	if isClass(object) && !vm.canAccessMethod(object, method) {
+	if isClass(receiver) && !vm.canAccessMethod(object, method) {
 		vm.runtimeError(ErrorRuntime, "cannot access private method %s in class %s", method, ownerClass)
 	}
 
-	expectedArgs := len(fn.Params)
-
-	if expectedArgs > 0 && fn.Params[0].Name == "this" {
-		expectedArgs--
+	paramOffset := 0
+	if len(fn.Params) > 0 && fn.Params[0].Name == "this" {
+		paramOffset = 1
 	}
 
-	if fn.HasDefaults {
-		args = vm.applyDefaultArgs(fn, args, 1, "method "+method)
-	} else if len(args) != expectedArgs {
-		vm.runtimeError(ErrorRuntime, "method %s expects %d arguments, got %d", method, expectedArgs, len(args))
+	userParamCount := len(fn.Params) - paramOffset
+	isVariadic := userParamCount > 0 && fn.Params[len(fn.Params)-1].Variadic
+
+	if isVariadic {
+		minArgs := userParamCount - 1
+
+		if len(args) < minArgs {
+			vm.runtimeError(
+				ErrorRuntime,
+				"method %s expects at least %d arguments, got %d",
+				method,
+				minArgs,
+				len(args),
+			)
+		}
+	} else {
+		if fn.HasDefaults {
+			args = vm.applyDefaultArgs(fn, args, paramOffset, "method "+method)
+		} else if len(args) != userParamCount {
+			vm.runtimeError(
+				ErrorRuntime,
+				"method %s expects %d arguments, got %d",
+				method,
+				userParamCount,
+				len(args),
+			)
+		}
 	}
-	// argCount = len(args)
 
 	frame := vm.getFrame(fn)
 	frame.methodClass = ownerClass
@@ -2473,11 +2611,16 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 	frame.locals[0].Value = receiver
 	frame.constants[0] = true
 
-	for i, arg := range args {
-		param := fn.Params[i+1]
+	if isVariadic {
+		fixedCount := userParamCount - 1
 
-		if fn.HasTypeHints {
-			if !param.TypeHint.IsEmpty() && !CheckTypeHint(arg, param.TypeHint) {
+		// normal params before ...args
+		for i := 0; i < fixedCount; i++ {
+			paramIndex := paramOffset + i
+			param := fn.Params[paramIndex]
+			arg := args[i]
+
+			if fn.HasTypeHints && !param.TypeHint.IsEmpty() && !CheckTypeHint(arg, param.TypeHint) {
 				LangError(
 					ErrorType,
 					"method %s parameter %s expected %s, got %s",
@@ -2487,11 +2630,62 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 					TypeName(arg),
 				)
 			}
+
+			frame.locals[paramIndex].Value = arg
+			frame.constants[paramIndex] = false
+			frame.localTypes[paramIndex] = param.TypeHint
 		}
 
-		frame.locals[i+1].Value = arg
-		frame.constants[i+1] = false
-		frame.localTypes[i+1] = param.TypeHint
+		// rest param
+		restSlot := paramOffset + fixedCount
+		restParam := fn.Params[restSlot]
+
+		rest := &ArrayValue{
+			Elements: []Value{},
+		}
+
+		for i := fixedCount; i < len(args); i++ {
+			arg := args[i]
+
+			if fn.HasTypeHints && !restParam.TypeHint.IsEmpty() && !CheckTypeHint(arg, restParam.TypeHint) {
+				LangError(
+					ErrorType,
+					"method %s rest parameter %s expected %s, got %s",
+					method,
+					restParam.Name,
+					restParam.TypeHint.Name,
+					TypeName(arg),
+				)
+			}
+
+			rest.Elements = append(rest.Elements, arg)
+		}
+
+		frame.locals[restSlot].Value = rest
+		frame.constants[restSlot] = false
+		frame.localTypes[restSlot] = TypeHint{
+			Name: "array",
+		}
+	} else {
+		for i, arg := range args {
+			paramIndex := paramOffset + i
+			param := fn.Params[paramIndex]
+
+			if fn.HasTypeHints && !param.TypeHint.IsEmpty() && !CheckTypeHint(arg, param.TypeHint) {
+				LangError(
+					ErrorType,
+					"method %s parameter %s expected %s, got %s",
+					method,
+					param.Name,
+					param.TypeHint.Name,
+					TypeName(arg),
+				)
+			}
+
+			frame.locals[paramIndex].Value = arg
+			frame.constants[paramIndex] = false
+			frame.localTypes[paramIndex] = param.TypeHint
+		}
 	}
 
 	vm.frames = append(vm.frames, frame)

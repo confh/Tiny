@@ -31,14 +31,35 @@ func (vm *VM) callTcpConnMethod(tcp *NativeTcpConnectionValue, method string, ar
 func tcpConnReadLine(vm *VM, tcp *NativeTcpConnectionValue, args []Value) {
 	dontExpectArgs(vm, "tcp.readLine", args)
 
-	reader := bufio.NewReader(tcp.Connection)
+	var reader *bufio.Reader
+
+	if tcp.Reader != nil {
+		reader = tcp.Reader
+	} else {
+		reader = bufio.NewReader(tcp.Connection)
+		tcp.Reader = reader
+	}
+
+	expectArgs(vm, "conn.readLine", args, 0)
 
 	line, err := reader.ReadString('\n')
 	if err != nil {
+		if err == io.EOF {
+			if line == "" {
+				vm.push(UndefinedValue{})
+				return
+			}
+
+			vm.push(line)
+			return
+		}
+
 		vm.runtimeError(ErrorRuntime, "error reading tcp connection: %v", err)
+		return
 	}
 
 	vm.push(line)
+
 }
 
 func tcpConnRead(vm *VM, tcp *NativeTcpConnectionValue, args []Value) {
@@ -64,7 +85,7 @@ func tcpConnRead(vm *VM, tcp *NativeTcpConnectionValue, args []Value) {
 func tcpConnAddress(vm *VM, tcp *NativeTcpConnectionValue, args []Value) {
 	dontExpectArgs(vm, "tcp.write", args)
 
-	vm.push(tcp.Connection.RemoteAddr())
+	vm.push(tcp.Connection.RemoteAddr().String())
 }
 
 func tcpConnWrite(vm *VM, tcp *NativeTcpConnectionValue, args []Value) {
