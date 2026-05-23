@@ -2264,31 +2264,31 @@ func (c *Compiler) compileExpr(expr Expr) {
 		return
 
 	case BinaryExpr:
-		if e.Op == TOKEN_AND {
-			c.compileExpr(e.Left)
+		// if e.Op == TOKEN_AND {
+		// 	c.compileExpr(e.Left)
 
-			endJump := c.emitJump(OP_JUMP_IF_FALSE)
+		// 	endJump := c.emitJump(OP_JUMP_IF_FALSE)
 
-			c.emit(OP_POP, nil)
+		// 	c.emit(OP_POP, nil)
 
-			c.compileExpr(e.Right)
+		// 	c.compileExpr(e.Right)
 
-			c.patchJump(endJump)
-			return
-		}
+		// 	c.patchJump(endJump)
+		// 	return
+		// }
 
-		if e.Op == TOKEN_OR {
-			c.compileExpr(e.Left)
+		// if e.Op == TOKEN_OR {
+		// 	c.compileExpr(e.Left)
 
-			endJump := c.emitJump(OP_JUMP)
+		// 	endJump := c.emitJump(OP_JUMP)
 
-			c.emit(OP_POP, nil)
+		// 	c.emit(OP_POP, nil)
 
-			c.compileExpr(e.Right)
+		// 	c.compileExpr(e.Right)
 
-			c.patchJump(endJump)
-			return
-		}
+		// 	c.patchJump(endJump)
+		// 	return
+		// }
 
 		if e.Op == TOKEN_PLUS {
 			parts := []Expr{}
