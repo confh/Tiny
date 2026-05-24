@@ -135,7 +135,7 @@ func init() {
 func (vm *VM) callArrayMethod(array *ArrayValue, method string, args []Value) {
 	fn, ok := arrayMethods[method]
 	if !ok {
-		vm.runtimeError(ErrorName, "unknown array method: %s", method)
+		vm.fatalError(ErrorName, "unknown array method: %s", method)
 		return
 	}
 	fn(vm, array, args)
@@ -260,7 +260,7 @@ func arrayFilter(vm *VM, array *ArrayValue, args []Value) {
 
 func arrayClear(vm *VM, array *ArrayValue, args []Value) {
 	dontExpectArgs(vm, "array.clear", args)
-	array.Elements = []Value{}
+	array.Elements = array.Elements[:0]
 	vm.push(true)
 }
 
@@ -268,6 +268,17 @@ func arrayRemove(vm *VM, array *ArrayValue, args []Value) {
 	expectArgs(vm, "array.remove", args, 1)
 
 	index := argInt(vm, "array.remove", args, 0)
+
+	if index < 0 || index >= len(array.Elements) {
+		vm.fatalError(ErrorIndex, "array.remove index out of bounds: %d", index)
+		return
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			vm.fatalError(ErrorIndex, "failed to remove element at index %d: %v", index, r)
+		}
+	}()
 
 	array.Elements = slices.Delete(array.Elements, index, index+1)
 

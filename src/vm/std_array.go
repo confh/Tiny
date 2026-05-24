@@ -65,11 +65,11 @@ func stdArrayRange(vm *VM, args []Value) {
 		capacity = max - min + 1
 	}
 	array := &ArrayValue{
-		Elements: make([]Value, 0, capacity),
+		Elements: make([]Value, capacity),
 	}
 
-	for i := min; i <= max; i++ {
-		array.Elements = append(array.Elements, i)
+	for i := 0; i < capacity; i++ {
+		array.Elements[i] = min + i
 	}
 
 	vm.push(array)

@@ -1,0 +1,22 @@
+package vm
+
+var AvailablePlugins = []string{
+	"array",
+	"math",
+	"string",
+	"json",
+	"fs",
+	"app",
+	"buffer",
+	"regex",
+	"io",
+	"process",
+	"time",
+	"error",
+	"http",
+	"os",
+	"runtime",
+	"net",
+	"path",
+	"object",
+}

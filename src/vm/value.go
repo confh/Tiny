@@ -121,6 +121,20 @@ type NamespaceMemberRef struct {
 
 type Value any
 
+func asInt64(value Value) int64 {
+	switch v := value.(type) {
+	case int:
+		return int64(v)
+	case int64:
+		return v
+	case float64:
+		return int64(v)
+	default:
+		LangError(ErrorType, "expected number, got %s", TypeName(value))
+		return 0
+	}
+}
+
 func asInt(value Value) int {
 	switch n := value.(type) {
 	case int:

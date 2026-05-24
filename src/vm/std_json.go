@@ -83,7 +83,7 @@ func stdJsonStringify(vm *VM, args []Value) {
 		jsonValue := valueToJSONCompatible(value)
 		bytes, err := json.Marshal(jsonValue)
 		if err != nil {
-			vm.runtimeError(ErrorRuntime, "failed to convert value to JSON: %v", err)
+			vm.fatalError(ErrorRuntime, "failed to convert value to JSON: %v", err)
 		}
 
 		vm.push(string(bytes))
@@ -101,7 +101,7 @@ func stdJsonPretty(vm *VM, args []Value) {
 		jsonValue := valueToJSONCompatible(value)
 		bytes, err := json.MarshalIndent(jsonValue, "", "  ")
 		if err != nil {
-			vm.runtimeError(ErrorRuntime, "failed to convert value to JSON: %v", err)
+			vm.fatalError(ErrorRuntime, "failed to convert value to JSON: %v", err)
 		}
 
 		vm.push(string(bytes))

@@ -589,13 +589,17 @@ func (l *Lexer) readString() string {
 		l.advance()
 	}
 
-	LangError(ErrorSyntax, "unterminated string")
+	l.fatalError(ErrorSyntax, "unterminated string")
 	return ""
+}
+
+func (l *Lexer) fatalError(kind ErrorKind, format string, args ...any) {
+	LangErrorAt(kind, l.file, l.line, l.column, format, args...)
 }
 
 func (l *Lexer) readEscapedRune() rune {
 	if l.pos >= len(l.input) {
-		LangError(ErrorSyntax, "unterminated escape sequence in string")
+		l.fatalError(ErrorSyntax, "unterminated escape sequence in string")
 	}
 
 	esc := rune(l.input[l.pos])
@@ -618,7 +622,7 @@ func (l *Lexer) readEscapedRune() rune {
 	case '0':
 		return '\x00'
 	default:
-		LangError(ErrorSyntax, "unknown escape sequence: \\%c", esc)
+		l.fatalError(ErrorSyntax, "unknown escape sequence: \\%c", esc)
 		return esc
 	}
 }

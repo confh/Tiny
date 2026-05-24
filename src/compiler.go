@@ -788,7 +788,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 
 		for _, member := range enumStmt.Members {
 			if _, exists := obj[member]; exists {
-				LangError(ErrorName, "duplicate enum member %s.%s", enumStmt.Name, member)
+				c.fatalError(ErrorName, "duplicate enum member %s.%s", enumStmt.Name, member)
 			}
 
 			obj[member] = member
@@ -1327,14 +1327,14 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 
 func (c *Compiler) compileEnum(stmt EnumStmt) {
 	if len(stmt.Members) == 0 {
-		LangError(ErrorSyntax, "enum %s must have at least one member", stmt.Name)
+		c.fatalError(ErrorSyntax, "enum %s must have at least one member", stmt.Name)
 	}
 
 	obj := ObjectValue{}
 
 	for _, member := range stmt.Members {
 		if _, exists := obj[member]; exists {
-			LangError(ErrorName, "duplicate enum member %s.%s", stmt.Name, member)
+			c.fatalError(ErrorName, "duplicate enum member %s.%s", stmt.Name, member)
 		}
 
 		obj[member] = member
@@ -1533,7 +1533,7 @@ func (c *Compiler) compileForStatement(stmt ForStmt) {
 
 func (c *Compiler) compileBreakStatement() {
 	if len(c.loopStack) == 0 {
-		LangError(ErrorSyntax, "break used outside of loop")
+		c.fatalError(ErrorSyntax, "break used outside of loop")
 	}
 
 	jumpIndex := c.emitJump(OP_JUMP)
@@ -1544,7 +1544,7 @@ func (c *Compiler) compileBreakStatement() {
 
 func (c *Compiler) compileContinueStatement() {
 	if len(c.loopStack) == 0 {
-		LangError(ErrorSyntax, "continue used outside of loop")
+		c.fatalError(ErrorSyntax, "continue used outside of loop")
 	}
 
 	jumpIndex := c.emitJump(OP_JUMP)
@@ -1631,7 +1631,7 @@ func (c *Compiler) evalConstantExpr(expr Expr) Value {
 		return obj
 
 	default:
-		LangError(
+		c.fatalError(
 			ErrorType,
 			c.currentFile,
 			c.currentLine,
@@ -1644,7 +1644,7 @@ func (c *Compiler) evalConstantExpr(expr Expr) Value {
 
 func (c *Compiler) compileClass(stmt ClassStmt) {
 	if _, exists := c.classes[stmt.Name]; exists {
-		LangError(ErrorName, "class already defined: %s", stmt.Name)
+		c.fatalError(ErrorName, "class already defined: %s", stmt.Name)
 	}
 
 	methods := map[string]string{}
@@ -1681,7 +1681,7 @@ func (c *Compiler) compileClass(stmt ClassStmt) {
 		fields = append(fields, classField)
 
 		if !CheckTypeHint(field.Value, field.TypeHint) {
-			LangError(
+			c.fatalError(
 				ErrorType,
 				"field %s in class '%s' expected %s, got %s",
 				field.Name,
@@ -1788,7 +1788,7 @@ func (c *Compiler) compileIfStatement(stmt IfStmt) {
 
 func (c *Compiler) compileFunction(stmt FunctionStmt) {
 	if existing, exists := c.functions[stmt.Name]; exists && len(existing.Instructions) > 0 {
-		LangError(ErrorName, "function already defined: %s", stmt.Name)
+		c.fatalError(ErrorName, "function already defined: %s", stmt.Name)
 	}
 
 	hasDefaults, hasTypeHints := getParamFlags(stmt.Params)
@@ -2542,7 +2542,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 			return
 		}
 
-		LangError(ErrorName, "cannot use this outside of a method")
+		c.fatalError(ErrorName, "cannot use this outside of a method")
 
 	default:
 		c.fatalError(ErrorInternal, "unknown expression")

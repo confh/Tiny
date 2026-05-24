@@ -307,9 +307,9 @@ func stdFsCopy(vm *VM, args []Value) {
 	vm.push(n)
 }
 func stdFsRemove(vm *VM, args []Value) {
-	expectArgs(vm, "fs.copy", args, 1)
+	expectArgs(vm, "fs.remove", args, 1)
 
-	path := argString(vm, "fs.copy", args, 0)
+	path := argString(vm, "fs.remove", args, 0)
 
 	err := os.Remove(path)
 	if err != nil {
