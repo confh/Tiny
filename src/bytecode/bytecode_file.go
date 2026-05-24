@@ -470,6 +470,12 @@ func EncodeValue(value any) EncodedValue {
 			Data: v,
 		}
 
+	case *ArrayValue:
+		return EncodedValue{
+			Type: "arrayValue",
+			Data: v,
+		}
+
 	case ObjectValue:
 		members := map[string]EncodedValue{}
 
@@ -580,6 +586,11 @@ func DecodeValue(value EncodedValue) any {
 
 	case "arrayLocalCall":
 		var result ArrayLocalCallInfo
+		decodeInto(value.Data, &result)
+		return result
+
+	case "arrayValue":
+		var result *ArrayValue
 		decodeInto(value.Data, &result)
 		return result
 

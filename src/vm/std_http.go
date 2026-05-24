@@ -27,7 +27,7 @@ var stdHttpMetadata = StdModuleInfo{
 			Name: "get",
 			Args: []StdArg{
 				{Name: "url", Type: "string", Optional: false},
-				{Name: "extra", Type: "Object", Optional: false},
+				{Name: "options", Type: "object", Optional: true},
 			},
 			Returns:     "object",
 			Description: "Sends an HTTP GET request to the given URL with optional headers.",
@@ -36,8 +36,8 @@ var stdHttpMetadata = StdModuleInfo{
 			Name: "post",
 			Args: []StdArg{
 				{Name: "url", Type: "string", Optional: false},
-				{Name: "data", Type: "Object", Optional: false},
-				{Name: "extra", Type: "Object", Optional: true},
+				{Name: "data", Type: "object", Optional: false},
+				{Name: "extra", Type: "object", Optional: true},
 			},
 			Returns:     "object",
 			Description: "Sends an HTTP POST request to the given URL with a data object and optional headers.",
@@ -45,7 +45,7 @@ var stdHttpMetadata = StdModuleInfo{
 		"json": {
 			Name: "json",
 			Args: []StdArg{
-				{Name: "data", Type: "Object", Optional: false},
+				{Name: "data", Type: "object", Optional: false},
 			},
 			Returns:     "httpResponse",
 			Description: "Creates a JSON HTTP response value with the given data.",
@@ -105,14 +105,18 @@ func stdHttpServer(vm *VM, args []Value) {
 }
 
 func stdHttpGet(vm *VM, args []Value) {
-	expectArgs(vm, "http.get", args, 2)
+	expectArgsRange(vm, "http.get", args, 1, 2)
 
 	url := argString(vm, "http.get", args, 0)
-	extra := argObject(vm, "http.get", args, 1)
 
 	var headers ObjectValue
-	if h, hasHeaders := extra["headers"]; hasHeaders {
-		headers, _ = h.(ObjectValue)
+
+	if len(args) > 1 {
+		extra := argObject(vm, "http.get", args, 1)
+
+		if h, hasHeaders := extra["headers"]; hasHeaders {
+			headers, _ = h.(ObjectValue)
+		}
 	}
 
 	req, err := http.NewRequest("GET", url, nil)

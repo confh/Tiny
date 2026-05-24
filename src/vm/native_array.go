@@ -95,6 +95,14 @@ var arrayNativeMetadata = NativeTypeInfo{
 			Returns:     "bool",
 			Description: "Removes all elements from the array.",
 		},
+		"remove": {
+			Name:    "remove",
+			Returns: "bool",
+			Args: []StdArg{
+				{Name: "index", Type: "number"},
+			},
+			Description: "Removes the specificed index of the element from the array.",
+		},
 	},
 }
 
@@ -118,6 +126,7 @@ func init() {
 		"forEach":  arrayForEach,
 		"filter":   arrayFilter,
 		"clear":    arrayClear,
+		"remove":   arrayRemove,
 	}
 
 	registerNativeType(arrayNativeMetadata)
@@ -250,7 +259,17 @@ func arrayFilter(vm *VM, array *ArrayValue, args []Value) {
 }
 
 func arrayClear(vm *VM, array *ArrayValue, args []Value) {
-	expectArgs(vm, "array.clear", args, 0)
+	dontExpectArgs(vm, "array.clear", args)
 	array.Elements = []Value{}
+	vm.push(true)
+}
+
+func arrayRemove(vm *VM, array *ArrayValue, args []Value) {
+	expectArgs(vm, "array.remove", args, 1)
+
+	index := argInt(vm, "array.remove", args, 0)
+
+	array.Elements = slices.Delete(array.Elements, index, index+1)
+
 	vm.push(true)
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -12,6 +13,13 @@ import (
 	json "github.com/goccy/go-json"
 	. "language.com/src/tinyerrors"
 )
+
+type NativeCallFrame struct {
+	Name   string
+	File   string
+	Line   int
+	Column int
+}
 
 type TryHandler struct {
 	CatchIP int
@@ -43,6 +51,9 @@ type VM struct {
 	classes          map[string]Class
 	framePool        []Frame
 	functionList     []Function
+
+	nativeFrames []NativeCallFrame
+	currentInstr Instruction
 
 	top int
 
@@ -459,7 +470,7 @@ func propertyValue(vm *VM, objectValue Value, name string) Value {
 		return resolveNamespaceValue(vm, value)
 	}
 
-	LangError(ErrorType, "expected object, got %s", TypeName(objectValue))
+	vm.fatalError(ErrorType, "expected object, got %s", TypeName(objectValue))
 	return nil
 }
 
@@ -568,6 +579,76 @@ func (vm *VM) canAccessMethod(object ObjectValue, method string) bool {
 	return true
 }
 
+func (vm *VM) getProperty(objectValue Value, name string, safe bool) Value {
+	if safe && isNullish(objectValue) {
+		return UndefinedValue{}
+	}
+
+	if ns, ok := objectValue.(NamespaceValue); ok {
+		value, exists := ns.Members[name]
+		if !exists {
+			if safe {
+				return UndefinedValue{}
+			}
+			vm.nameError("namespace %s has no member: %s", ns.Name, name)
+		}
+
+		if ref, ok := value.(NamespaceMemberRef); ok {
+			actual, exists := vm.globals[ref.GlobalName]
+			if !exists {
+				if safe {
+					return UndefinedValue{}
+				}
+				vm.nameError("undefined namespace global: %s", ref.GlobalName)
+			}
+			return actual
+		}
+
+		return value
+	}
+
+	if ns, ok := objectValue.(*NamespaceValue); ok {
+		value, exists := ns.Members[name]
+		if !exists {
+			if safe {
+				return UndefinedValue{}
+			}
+			vm.nameError("namespace %s has no member: %s", ns.Name, name)
+		}
+
+		if ref, ok := value.(NamespaceMemberRef); ok {
+			actual, exists := vm.globals[ref.GlobalName]
+			if !exists {
+				if safe {
+					return UndefinedValue{}
+				}
+				vm.nameError("undefined namespace global: %s", ref.GlobalName)
+			}
+			return actual
+		}
+
+		return value
+	}
+
+	object, ok := objectValue.(ObjectValue)
+	if !ok {
+		if safe {
+			return UndefinedValue{}
+		}
+		vm.typeError("expected object, got %s", TypeName(objectValue))
+	}
+
+	value, exists := object[name]
+	if !exists {
+		if safe {
+			return UndefinedValue{}
+		}
+		vm.nameError("object has no property: %s", name)
+	}
+
+	return value
+}
+
 func (vm *VM) callClassWithArgs(class Class, args []Value) {
 	object := ObjectValue{
 		"__class":          class.Name,
@@ -659,11 +740,42 @@ func (vm *VM) callClassByName(name string, args []Value) {
 }
 
 func (vm *VM) stackTrace() string {
-	if len(vm.frames) == 0 {
-		return "  at <main>"
+	lines := []string{}
+
+	for i := len(vm.nativeFrames) - 1; i >= 0; i-- {
+		frame := vm.nativeFrames[i]
+
+		location := ""
+		if frame.File != "" && frame.Line > 0 {
+			location = fmt.Sprintf(" (%s:%d", frame.File, frame.Line)
+
+			if frame.Column > 0 {
+				location += fmt.Sprintf(":%d", frame.Column)
+			}
+
+			location += ")"
+		}
+
+		lines = append(lines, "  at "+frame.Name+location)
 	}
 
-	lines := []string{}
+	if len(vm.frames) == 0 {
+		location := ""
+
+		instr := vm.currentInstr
+		if instr.File != "" && instr.Line > 0 {
+			location = fmt.Sprintf(" (%s:%d", instr.File, instr.Line)
+
+			if instr.Column > 0 {
+				location += fmt.Sprintf(":%d", instr.Column)
+			}
+
+			location += ")"
+		}
+
+		lines = append(lines, "  at <main>"+location)
+		return strings.Join(lines, "\n")
+	}
 
 	for i := len(vm.frames) - 1; i >= 0; i-- {
 		frame := vm.frames[i]
@@ -696,14 +808,29 @@ func (vm *VM) stackTrace() string {
 	return strings.Join(lines, "\n")
 }
 
+func (vm *VM) typeError(format string, args ...any) {
+	vm.fatalError(ErrorType, format, args...)
+}
+
+func (vm *VM) nameError(format string, args ...any) {
+	vm.fatalError(ErrorName, format, args...)
+}
+
+func (vm *VM) internalError(format string, args ...any) {
+	vm.fatalError(ErrorInternal, format, args...)
+}
+
 func (vm *VM) fatalError(kind ErrorKind, format string, args ...any) {
 	message := fmt.Sprintf(format, args...)
 
 	trace := vm.stackTrace()
+	if trace != "" {
+		message += "\n\nStack trace:\n" + trace
+	}
 
 	panic(LangErrorType{
 		Kind:    kind,
-		Message: message + "\n\nStack trace:\n" + trace,
+		Message: message,
 	})
 }
 
@@ -909,25 +1036,13 @@ func isNullish(value Value) bool {
 }
 
 func (vm *VM) step() bool {
-	instructions := vm.currentInstructions()
-	ip := vm.currentIP()
-
-	if ip < 0 || ip >= len(instructions) {
-		LangError(ErrorInternal, "instruction pointer out of range")
-	}
-
-	instr := instructions[ip]
-
-	vm.lastInstruction = instr
-	vm.lastInstructionIndex = ip // use whatever variable stores current instruction index
+	instr := vm.fetchInstruction()
 
 	if len(vm.frames) > 0 {
 		vm.lastFunctionName = vm.frames[len(vm.frames)-1].function.Name
 	} else {
 		vm.lastFunctionName = "<main>"
 	}
-
-	vm.incrementIP()
 
 	switch instr.Op {
 	case OP_JUMP_LOCAL_GE_LOCAL:
@@ -1500,7 +1615,7 @@ func (vm *VM) step() bool {
 
 		object, ok := objectValue.(ObjectValue)
 		if !ok {
-			vm.runtimeError(ErrorType, "expected object, got %s", TypeName(objectValue))
+			vm.fatalError(ErrorType, "expected object, got %s", TypeName(objectValue))
 		}
 
 		_, isClass := object["__class"]
@@ -1533,87 +1648,7 @@ func (vm *VM) step() bool {
 	case OP_GET_PROPERTY_SAFE:
 		name := instr.Value.(string)
 		objectValue := vm.pop()
-
-		if isNullish(objectValue) {
-			vm.push(UndefinedValue{})
-			break
-		}
-
-		if ns, ok := objectValue.(NamespaceValue); ok {
-			value, exists := ns.Members[name]
-			if !exists {
-				LangError(ErrorName, "namespace %s has no member: %s", ns.Name, name)
-			}
-
-			if ref, ok := value.(NamespaceMemberRef); ok {
-				actual, exists := vm.globals[ref.GlobalName]
-				if !exists {
-					LangError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
-				}
-
-				vm.push(actual)
-				break
-			}
-
-			if ref, ok := value.(*NamespaceMemberRef); ok {
-				actual, exists := vm.globals[ref.GlobalName]
-				if !exists {
-					LangError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
-				}
-
-				vm.push(actual)
-				break
-			}
-
-			vm.push(value)
-			break
-		}
-
-		if ns, ok := objectValue.(*NamespaceValue); ok {
-			value, exists := ns.Members[name]
-			if !exists {
-				LangError(ErrorName, "namespace %s has no member: %s", ns.Name, name)
-			}
-
-			if ref, ok := value.(NamespaceMemberRef); ok {
-				actual, exists := vm.globals[ref.GlobalName]
-				if !exists {
-					LangError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
-				}
-
-				vm.push(actual)
-				break
-			}
-
-			if ref, ok := value.(*NamespaceMemberRef); ok {
-				actual, exists := vm.globals[ref.GlobalName]
-				if !exists {
-					LangError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
-				}
-
-				vm.push(actual)
-				break
-			}
-
-			vm.push(value)
-			break
-		}
-
-		object, ok := objectValue.(ObjectValue)
-		if !ok {
-			LangError(ErrorType, "expected object, got %s", TypeName(objectValue))
-		}
-
-		if !vm.canAccessField(object, name) {
-			LangError(ErrorRuntime, "cannot access private field: %s", name)
-		}
-
-		value, exists := object[name]
-		if !exists {
-			LangError(ErrorName, "object has no property: %s", name)
-		}
-
-		vm.push(value)
+		vm.push(vm.getProperty(objectValue, name, true))
 
 	case OP_LOAD_GLOBAL:
 		var name string
@@ -2492,17 +2527,17 @@ func (vm *VM) step() bool {
 		objectValue := frameLocalValue(frame, info.ObjectSlot, "OP_ADD_PROPERTY_LOCAL_LOCAL")
 		object, ok := objectValue.(ObjectValue)
 		if !ok {
-			LangError(ErrorType, "expected object, got %s", TypeName(objectValue))
+			vm.fatalError(ErrorType, "expected object, got %s", TypeName(objectValue))
 		}
 
 		_, isClass := object["__class"]
 		if isClass {
 			constFields := object["__constFields"].(map[string]bool)
 			if _, isConstant := constFields[info.Name]; isConstant {
-				vm.runtimeError(ErrorRuntime, "cannot assign to constant field: %s", info.Name)
+				vm.fatalError(ErrorRuntime, "cannot assign to constant field: %s", info.Name)
 			}
 			if !vm.canAccessField(object, info.Name) {
-				vm.runtimeError(ErrorRuntime, "cannot assign private field: %s", info.Name)
+				vm.fatalError(ErrorRuntime, "cannot assign private field: %s", info.Name)
 			}
 		}
 
@@ -2513,7 +2548,7 @@ func (vm *VM) step() bool {
 	case OP_GET_PROPERTY:
 		name := instr.Value.(string)
 		objectValue := vm.pop()
-		vm.push(propertyValue(vm, objectValue, name))
+		vm.push(vm.getProperty(objectValue, name, true))
 
 	case OP_HALT:
 		return true
@@ -2684,8 +2719,22 @@ func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []Value) {
 		frame.constants[fixedCount] = false
 	} else {
 		for i, arg := range args {
+			param := fn.Params[i]
+
+			if fn.HasTypeHints && !param.TypeHint.IsEmpty() && !CheckTypeHint(arg, param.TypeHint) {
+				LangError(
+					ErrorType,
+					"function %s parameter %s expected %s, got %s",
+					fn.Name,
+					param.Name,
+					param.TypeHint.String(),
+					TypeName(arg),
+				)
+			}
+
 			setCellValue(frame.locals[i], arg)
 			frame.constants[i] = false
+			frame.localTypes[i] = param.TypeHint
 		}
 	}
 
@@ -2698,8 +2747,22 @@ func (vm *VM) callFunctionDirect(fn Function, args []Value) {
 	frame := vm.getFrame(fn)
 
 	for i, arg := range args {
-		setCellValue(frame.locals[i], arg)
+		param := fn.Params[i]
+
+		if fn.HasTypeHints && !param.TypeHint.IsEmpty() && !CheckTypeHint(arg, param.TypeHint) {
+			LangError(
+				ErrorType,
+				"function %s parameter %s expected %s, got %s",
+				fn.Name,
+				param.Name,
+				param.TypeHint.String(),
+				TypeName(arg),
+			)
+		}
+
+		frame.locals[i].Value = arg
 		frame.constants[i] = false
+		frame.localTypes[i] = param.TypeHint
 	}
 
 	vm.frames = append(vm.frames, frame)
@@ -2876,6 +2939,13 @@ func (vm *VM) callOneArgNativeMethod(method string, objectValue Value, arg Value
 	switch value := objectValue.(type) {
 	case *ArrayValue:
 		switch method {
+		case "remove":
+			index := asInt(arg)
+
+			value.Elements = slices.Delete(value.Elements, index, index+1)
+
+			vm.push(true)
+			return true
 		case "push":
 			value.Elements = append(value.Elements, arg)
 			vm.push(value)
@@ -3037,7 +3107,7 @@ func (vm *VM) callStdObjectFast1(method string, objectValue Value, arg0 Value) b
 
 	obj, ok := arg0.(ObjectValue)
 	if !ok {
-		vm.runtimeError(ErrorType, "object.length argument 1 expected object, got %s", TypeName(arg0))
+		vm.fatalError(ErrorType, "object.length argument 1 expected object, got %s", TypeName(arg0))
 		return true
 	}
 	vm.push(len(obj))
@@ -3056,12 +3126,12 @@ func (vm *VM) callStdObjectFast2(method string, objectValue Value, arg0 Value, a
 
 	obj, ok := arg0.(ObjectValue)
 	if !ok {
-		vm.runtimeError(ErrorType, "object.get argument 1 expected object, got %s", TypeName(arg0))
+		vm.fatalError(ErrorType, "object.get argument 1 expected object, got %s", TypeName(arg0))
 		return true
 	}
 	key, ok := arg1.(string)
 	if !ok {
-		vm.runtimeError(ErrorType, "object.get argument 2 expected string, got %s", TypeName(arg1))
+		vm.fatalError(ErrorType, "object.get argument 2 expected string, got %s", TypeName(arg1))
 		return true
 	}
 	vm.push(obj[key])
@@ -3080,12 +3150,12 @@ func (vm *VM) callStdObjectFast3(method string, objectValue Value, arg0 Value, a
 
 	obj, ok := arg0.(ObjectValue)
 	if !ok {
-		vm.runtimeError(ErrorType, "object.set argument 1 expected object, got %s", TypeName(arg0))
+		vm.fatalError(ErrorType, "object.set argument 1 expected object, got %s", TypeName(arg0))
 		return true
 	}
 	key, ok := arg1.(string)
 	if !ok {
-		vm.runtimeError(ErrorType, "object.set argument 2 expected string, got %s", TypeName(arg1))
+		vm.fatalError(ErrorType, "object.set argument 2 expected string, got %s", TypeName(arg1))
 		return true
 	}
 	obj[key] = arg2
@@ -3106,12 +3176,12 @@ func (vm *VM) callStdObjectFast(method string, objectValue Value, args ...Value)
 		}
 		obj, ok := args[0].(ObjectValue)
 		if !ok {
-			vm.runtimeError(ErrorType, "object.get argument 1 expected object, got %s", TypeName(args[0]))
+			vm.fatalError(ErrorType, "object.get argument 1 expected object, got %s", TypeName(args[0]))
 			return true
 		}
 		key, ok := args[1].(string)
 		if !ok {
-			vm.runtimeError(ErrorType, "object.get argument 2 expected string, got %s", TypeName(args[1]))
+			vm.fatalError(ErrorType, "object.get argument 2 expected string, got %s", TypeName(args[1]))
 			return true
 		}
 		vm.push(obj[key])
@@ -3123,7 +3193,7 @@ func (vm *VM) callStdObjectFast(method string, objectValue Value, args ...Value)
 		}
 		obj, ok := args[0].(ObjectValue)
 		if !ok {
-			vm.runtimeError(ErrorType, "object.set argument 1 expected object, got %s", TypeName(args[0]))
+			vm.fatalError(ErrorType, "object.set argument 1 expected object, got %s", TypeName(args[0]))
 			return true
 		}
 		key, ok := args[1].(string)
@@ -3141,7 +3211,7 @@ func (vm *VM) callStdObjectFast(method string, objectValue Value, args ...Value)
 		}
 		obj, ok := args[0].(ObjectValue)
 		if !ok {
-			vm.runtimeError(ErrorType, "object.length argument 1 expected object, got %s", TypeName(args[0]))
+			vm.fatalError(ErrorType, "object.length argument 1 expected object, got %s", TypeName(args[0]))
 			return true
 		}
 		vm.push(len(obj))
@@ -3207,10 +3277,8 @@ func (vm *VM) callMethodFast(method string, argCount int) {
 
 func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value) {
 	if method == "toString" {
-		if _, ok := objectValue.(*BufferValue); !ok {
-			vm.push(valueToString(objectValue))
-			return
-		}
+		vm.push(valueToString(objectValue))
+		return
 	}
 
 	switch val := objectValue.(type) {
@@ -3223,6 +3291,9 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 		return
 
 	case *NativePluginValue:
+		popNative := vm.pushNativeFrame("plugin." + method)
+		defer popNative()
+
 		vm.callNativePlugin(val, method, args)
 		return
 
@@ -3231,6 +3302,9 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 		return
 
 	case *StandardModuleValue:
+		popNative := vm.pushNativeFrame(val.Name + "." + method)
+		defer popNative()
+
 		vm.callStandardModule(val.Name, method, args)
 		return
 
@@ -3277,7 +3351,7 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 
 	object, ok := objectValue.(ObjectValue)
 	if !ok {
-		LangError(ErrorType, "expected object, got %s", TypeName(objectValue))
+		vm.fatalError(ErrorType, "expected object, got %s", TypeName(objectValue))
 	}
 
 	receiver := object
@@ -3291,12 +3365,12 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 
 		fnValue, ok = methodValue.(FunctionValue)
 		if !ok {
-			LangError(ErrorType, "property %s is not callable", method)
+			vm.fatalError(ErrorType, "property %s is not callable", method)
 		}
 	} else {
 		embeddedReceiver, embeddedFn, ok := vm.findEmbeddedMethod(object, method)
 		if !ok {
-			LangError(ErrorName, "object has no method: %s", method)
+			vm.fatalError(ErrorName, "object has no method: %s", method)
 		}
 
 		receiver = embeddedReceiver
@@ -3311,7 +3385,7 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 	ownerClass := methodOwnerClass(fnValue.Name)
 
 	if isClass(receiver) && !vm.canAccessMethod(object, method) {
-		vm.runtimeError(ErrorRuntime, "cannot access private method %s in class %s", method, ownerClass)
+		vm.fatalError(ErrorRuntime, "cannot access private method %s in class %s", method, ownerClass)
 	}
 
 	paramOffset := 0
@@ -3326,7 +3400,7 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 		minArgs := userParamCount - 1
 
 		if len(args) < minArgs {
-			vm.runtimeError(
+			vm.fatalError(
 				ErrorRuntime,
 				"method %s expects at least %d arguments, got %d",
 				method,
@@ -3338,7 +3412,7 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 		if fn.HasDefaults {
 			args = vm.applyDefaultArgs(fn, args, paramOffset, "method "+method)
 		} else if len(args) != userParamCount {
-			vm.runtimeError(
+			vm.fatalError(
 				ErrorRuntime,
 				"method %s expects %d arguments, got %d",
 				method,
@@ -3468,36 +3542,6 @@ func (vm *VM) runNativeApp(app *NativeAppValue) {
 	vm.callFunctionValue(fn, []Value{tinyArgs})
 }
 
-func (vm *VM) callNativeAppMethod(app *NativeAppValue, method string, args []Value) {
-	switch method {
-	case "command":
-		if len(args) != 2 {
-			LangError(ErrorRuntime, "app.command expects 2 arguments")
-		}
-
-		name := asString(args[0], vm)
-
-		fn, ok := args[1].(FunctionValue)
-		if !ok {
-			LangError(ErrorType, "app.command expects function callback")
-		}
-
-		app.Commands[name] = fn
-		vm.push(app)
-
-	case "run":
-		if len(args) != 0 {
-			LangError(ErrorRuntime, "app.run expects 0 arguments")
-		}
-
-		vm.runNativeApp(app)
-		vm.push(UndefinedValue{})
-
-	default:
-		LangError(ErrorName, "unknown app method: %s", method)
-	}
-}
-
 func (vm *VM) setIP(value int) {
 	if len(vm.frames) == 0 {
 		vm.ip = value
@@ -3546,6 +3590,23 @@ func (vm *VM) callClass(class Class, argCount int) {
 	vm.callClassWithArgs(class, args)
 }
 
+func (vm *VM) pushNativeFrame(name string) func() {
+	instr := vm.currentInstr
+
+	vm.nativeFrames = append(vm.nativeFrames, NativeCallFrame{
+		Name:   name,
+		File:   instr.File,
+		Line:   instr.Line,
+		Column: instr.Column,
+	})
+
+	return func() {
+		if len(vm.nativeFrames) > 0 {
+			vm.nativeFrames = vm.nativeFrames[:len(vm.nativeFrames)-1]
+		}
+	}
+}
+
 func (vm *VM) currentInstructions() []Instruction {
 	if len(vm.frames) == 0 {
 		return vm.mainInstructions
@@ -3569,6 +3630,24 @@ func (vm *VM) incrementIP() {
 	}
 
 	vm.frames[len(vm.frames)-1].ip++
+}
+
+func (vm *VM) fetchInstruction() Instruction {
+	instructions := vm.currentInstructions()
+	ip := vm.currentIP()
+
+	if ip < 0 || ip >= len(instructions) {
+		vm.fatalError(ErrorInternal, "instruction pointer out of range: ip=%d len=%d", ip, len(instructions))
+	}
+
+	instr := instructions[ip]
+
+	// Important: this lets native std errors know where the Tiny call happened.
+	vm.currentInstr = instr
+
+	vm.incrementIP()
+
+	return instr
 }
 
 func (vm *VM) currentFrame() *Frame {

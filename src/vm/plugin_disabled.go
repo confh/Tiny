@@ -1,6 +1,5 @@
-//go:build !windows && !(linux && cgo)
-// +build !windows
-// +build !linux !cgo
+//go:build !linux && !windows
+// +build !linux,!windows
 
 package vm
 

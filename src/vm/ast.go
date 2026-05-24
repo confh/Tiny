@@ -433,6 +433,9 @@ func (e CallExpr) exprNode() {}
 type CallValueExpr struct {
 	Callee Expr
 	Args   []Expr
+	File   string
+	Line   int
+	Column int
 }
 
 func (e CallValueExpr) exprNode() {}

@@ -214,6 +214,9 @@ func optimizeExpr(expr Expr) Expr {
 		return CallValueExpr{
 			Callee: optimizeExpr(e.Callee),
 			Args:   args,
+			File:   e.File,
+			Line:   e.Line,
+			Column: e.Column,
 		}
 
 	case ObjectExpr:
@@ -360,6 +363,10 @@ func (c *Compiler) setLocation(file string, line int, column int) {
 	c.currentColumn = column
 }
 
+func (c *Compiler) fatalError(kind ErrorKind, format string, args ...any) {
+	LangErrorAt(kind, c.currentFile, c.currentLine, c.currentColumn, format, args...)
+}
+
 func (c *Compiler) newMatchTempName() string {
 	name := "__match_" + strconv.Itoa(c.matchTempID)
 	c.matchTempID++
@@ -372,7 +379,7 @@ func (c *Compiler) beginScope() {
 
 func (c *Compiler) endScope() {
 	if len(c.scopes) == 0 {
-		LangError(ErrorInternal, "scope stack underflow")
+		c.fatalError(ErrorInternal, "scope stack underflow")
 	}
 
 	c.scopes = c.scopes[:len(c.scopes)-1]
@@ -498,7 +505,7 @@ func (c *Compiler) declareVariable(name string, constant bool) Binding {
 	scope := c.currentScope()
 
 	if _, exists := scope[name]; exists {
-		LangError(ErrorName, "variable already declared in this scope: %s", name)
+		LangErrorAt(ErrorName, c.currentFile, c.currentLine, c.currentColumn, "variable already declared in this scope: %s", name)
 	}
 
 	if c.isInsideFunction() {
@@ -1066,28 +1073,6 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 	case NamespaceStmt:
 		c.compileNamespace(s)
 
-	case FieldStmt:
-		c.compileExpr(s.Value)
-
-		binding := c.declareVariable(s.Name, s.Constant)
-
-		c.setLocation(s.File, s.Line, s.Column)
-
-		if binding.Kind == BindingLocal {
-			c.emit(OP_STORE_LOCAL, VariableInfo{
-				Name:     s.Name,
-				Slot:     binding.Slot,
-				Constant: s.Constant,
-				TypeHint: s.TypeHint,
-			})
-		} else {
-			c.emit(OP_STORE_GLOBAL, VariableInfo{
-				Name:     binding.Name,
-				Constant: s.Constant,
-				TypeHint: s.TypeHint,
-			})
-		}
-
 	case VariableStmt:
 		c.compileExpr(s.Value)
 
@@ -1249,7 +1234,7 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 		}
 
 		if c.isCompilingNamespace {
-			LangError(ErrorName, "undefined variable in namespace: %s", s.Name)
+			LangErrorAt(ErrorName, c.currentFile, c.currentLine, c.currentColumn, "undefined variable in namespace: %s", s.Name)
 		}
 
 		c.emit(OP_ASSIGN_GLOBAL, s.Name)
@@ -1307,7 +1292,7 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 			return
 		}
 
-		LangError(ErrorInternal, "imports should be resolved before compiling")
+		c.fatalError(ErrorInternal, "imports should be resolved before compiling")
 
 	case IfStmt:
 		c.setLocation(s.File, s.Line, s.Column)
@@ -1332,8 +1317,11 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 	case EnumStmt:
 		c.compileEnum(s)
 
+	case FieldStmt:
+		return
+
 	default:
-		LangError(ErrorInternal, "unknown statement")
+		c.fatalError(ErrorInternal, c.currentFile, c.currentLine, c.currentColumn, "unknown statement")
 	}
 }
 
@@ -2035,7 +2023,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 			c.emit(OP_NEGATE, nil)
 
 		default:
-			LangError(ErrorInternal, "unknown unary operator: %s", e.Op)
+			c.fatalError(ErrorInternal, "unknown unary operator: %s", e.Op)
 		}
 
 	case InterpolatedStringExpr:
@@ -2248,7 +2236,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 
 		// 6. Namespace files should not see random parent globals.
 		if c.isCompilingNamespace {
-			LangError(ErrorName, "undefined variable in namespace: %s", e.Name)
+			LangErrorAt(ErrorName, c.currentFile, c.currentLine, c.currentColumn, "undefined variable in namespace: %s", e.Name)
 		}
 
 		if c.declaredFunctions[e.Name] {
@@ -2355,7 +2343,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 			c.emit(OP_MOD, nil)
 
 		default:
-			LangError(ErrorInternal, "unknown binary operator")
+			c.fatalError(ErrorInternal, "unknown binary operator")
 		}
 
 	case CallExpr:
@@ -2433,6 +2421,8 @@ func (c *Compiler) compileExpr(expr Expr) {
 						c.compileExpr(arg)
 					}
 
+					c.setLocation(ident.File, ident.Line, ident.Column)
+
 					c.emit(OP_CALL, CallInfo{
 						Name:     fullName,
 						ArgCount: len(e.Args),
@@ -2447,6 +2437,8 @@ func (c *Compiler) compileExpr(expr Expr) {
 					for _, arg := range e.Args {
 						c.compileExpr(arg)
 					}
+
+					c.setLocation(ident.File, ident.Line, ident.Column)
 
 					c.emit(OP_CALL_DIRECT, DirectCallInfo{
 						ID:       c.getFunctionID(fullName),
@@ -2463,6 +2455,8 @@ func (c *Compiler) compileExpr(expr Expr) {
 					c.compileExpr(arg)
 				}
 
+				c.setLocation(ident.File, ident.Line, ident.Column)
+
 				c.emit(OP_CALL_DIRECT, DirectCallInfo{
 					ID:       c.getFunctionID(ident.Name),
 					Name:     ident.Name,
@@ -2476,6 +2470,8 @@ func (c *Compiler) compileExpr(expr Expr) {
 				for _, arg := range e.Args {
 					c.compileExpr(arg)
 				}
+
+				c.setLocation(ident.File, ident.Line, ident.Column)
 
 				c.emit(OP_CALL, CallInfo{
 					Name:     ident.Name,
@@ -2491,6 +2487,8 @@ func (c *Compiler) compileExpr(expr Expr) {
 		for _, arg := range e.Args {
 			c.compileExpr(arg)
 		}
+
+		c.setLocation(e.File, e.Line, e.Column)
 
 		c.emit(OP_CALL_VALUE, CallInfo{
 			ArgCount: len(e.Args),
@@ -2547,7 +2545,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 		LangError(ErrorName, "cannot use this outside of a method")
 
 	default:
-		LangError(ErrorInternal, "unknown expression")
+		c.fatalError(ErrorInternal, "unknown expression")
 	}
 }
 
@@ -2568,13 +2566,22 @@ func (c *Compiler) compileMethod(className string, stmt FunctionStmt) {
 	functionInstructions := []Instruction{}
 
 	c.currentInstructions = &functionInstructions
-	c.scopes = []map[string]Binding{}
+
+	// Keep global/import bindings like:
+	// import "models.tiny" as models;
+	// import "logger.tiny" as Logger;
+	globalScope := map[string]Binding{}
+	if len(oldScopes) > 0 {
+		for key, binding := range oldScopes[0] {
+			globalScope[key] = binding
+		}
+	}
+
+	c.scopes = []map[string]Binding{globalScope}
 	c.localCount = 0
 	c.inMethod = true
 	c.outerBindings = nil
 	c.currentCaptures = nil
-
-	class := c.classes[className]
 
 	c.beginScope()
 
@@ -2590,9 +2597,9 @@ func (c *Compiler) compileMethod(className string, stmt FunctionStmt) {
 		c.declareVariable(param.Name, false)
 	}
 
-	for _, param := range class.Fields {
-		c.declareVariable(param.Name, param.Constant)
-	}
+	// DO NOT declare class fields here.
+	// Fields are accessed through this.name, not as local variables.
+	// This also avoids conflicts like field author + param author.
 
 	for _, bodyStmt := range stmt.Body {
 		c.compileStatement(bodyStmt)
@@ -2608,16 +2615,6 @@ func (c *Compiler) compileMethod(className string, stmt FunctionStmt) {
 	})
 
 	params = append(params, stmt.Params...)
-
-	// for _, param := range stmt.Params {
-	// 	if param.Name == "this" {
-	// 		continue
-	// 	}
-
-	// 	params = append(params, Param{
-	// 		Name: param.Name,
-	// 	})
-	// }
 
 	hasDefaults, hasTypeHints := getParamFlags(stmt.Params)
 

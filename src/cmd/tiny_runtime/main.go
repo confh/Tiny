@@ -9,8 +9,6 @@ import (
 	. "language.com/src/vm"
 )
 
-var magic = []byte("TINYAPP1")
-
 func main() {
 	defer HandleLangError()
 

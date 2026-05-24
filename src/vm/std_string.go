@@ -15,7 +15,7 @@ var stdStringMetadata = StdModuleInfo{
 		"newBuilder": {
 			Name:        "newBuilder",
 			Args:        []StdArg{},
-			Returns:     "StringBuilder",
+			Returns:     "stringBuilder",
 			Description: "Returns a new string builder object.",
 		},
 		"isDigit": {

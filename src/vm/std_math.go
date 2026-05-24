@@ -5,10 +5,7 @@ import (
 	"math"
 	"unsafe"
 
-	"gonum.org/v1/gonum/blas/blas64"
 	"gonum.org/v1/gonum/mat"
-	"gonum.org/v1/netlib/blas/netlib"
-	_ "gonum.org/v1/netlib/blas/netlib"
 	. "language.com/src/tinyerrors"
 )
 
@@ -150,27 +147,27 @@ var stdMathMetadata = StdModuleInfo{
 		"matMul": {
 			Name: "matMul",
 			Args: []StdArg{
-				{Name: "a", Type: "Object", Optional: false},
-				{Name: "b", Type: "Object", Optional: false},
+				{Name: "a", Type: "object", Optional: false},
+				{Name: "b", Type: "object", Optional: false},
 			},
-			Returns:     "Object",
+			Returns:     "object",
 			Description: "Performs matrix multiplication (returns a new matrix object).",
 		},
 		"matTranspose": {
 			Name: "matTranspose",
 			Args: []StdArg{
-				{Name: "matrix", Type: "Object", Optional: false},
+				{Name: "matrix", Type: "object", Optional: false},
 			},
-			Returns:     "Object",
+			Returns:     "object",
 			Description: "Returns the transpose of a matrix object.",
 		},
 		"matScale": {
 			Name: "matScale",
 			Args: []StdArg{
-				{Name: "matrix", Type: "Object", Optional: false},
+				{Name: "matrix", Type: "object", Optional: false},
 				{Name: "scalar", Type: "float", Optional: false},
 			},
-			Returns:     "Object",
+			Returns:     "object",
 			Description: "Scales a matrix by a scalar (returns a new matrix object).",
 		},
 	},
@@ -203,10 +200,10 @@ func init() {
 }
 
 func (vm *VM) callStdMath(method string, args []Value) {
-	blas64.Use(netlib.Implementation{})
+	// blas64.Use(netlib.Implementation{})
 	fn, ok := stdMathMethods[method]
 	if !ok {
-		vm.runtimeError(ErrorName, "unknown math function: %s", method)
+		vm.fatalError(ErrorName, "unknown math function: %s", method)
 		return
 	}
 	fn(vm, args)
@@ -233,15 +230,15 @@ func DegToRad(deg float64) float64 {
 func getMatrixFields(v ObjectValue, matName string, vm *VM) (int, int, []float64) {
 	rows, ok := v["rows"].(int)
 	if !ok {
-		vm.runtimeError(ErrorType, "%s matrix missing or invalid 'rows' field", matName)
+		vm.fatalError(ErrorType, "%s matrix missing or invalid 'rows' field", matName)
 	}
 	cols, ok := v["cols"].(int)
 	if !ok {
-		vm.runtimeError(ErrorType, "%s matrix missing or invalid 'cols' field", matName)
+		vm.fatalError(ErrorType, "%s matrix missing or invalid 'cols' field", matName)
 	}
 	rawData, ok := v["data"].(*BufferValue)
 	if !ok {
-		vm.runtimeError(ErrorType, "%s matrix missing or invalid 'data' field", matName)
+		vm.fatalError(ErrorType, "%s matrix missing or invalid 'data' field", matName)
 	}
 
 	if len(rawData.Bytes) == 0 {

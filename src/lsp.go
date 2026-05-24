@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -33,6 +34,10 @@ type TextDocumentItem struct {
 type TextEdit struct {
 	Range   LSPRange `json:"range"`
 	NewText string   `json:"newText"`
+}
+
+type WorkspaceEdit struct {
+	Changes map[string][]TextEdit `json:"changes"`
 }
 
 type FormattingParams struct {
@@ -93,10 +98,27 @@ type CompletionParams struct {
 	Position     Position               `json:"position"`
 }
 
+type ReferenceParams struct {
+	TextDocument TextDocumentIdentifier `json:"textDocument"`
+	Position     Position               `json:"position"`
+	Context      struct {
+		IncludeDeclaration bool `json:"includeDeclaration"`
+	} `json:"context"`
+}
+
+type RenameParams struct {
+	TextDocument TextDocumentIdentifier `json:"textDocument"`
+	Position     Position               `json:"position"`
+	NewName      string                 `json:"newName"`
+}
+
 type CompletionItem struct {
-	Label  string `json:"label"`
-	Kind   int    `json:"kind,omitempty"`
-	Detail string `json:"detail,omitempty"`
+	Label               string     `json:"label"`
+	Kind                int        `json:"kind,omitempty"`
+	Detail              string     `json:"detail,omitempty"`
+	InsertText          string     `json:"insertText,omitempty"`
+	InsertTextFormat    int        `json:"insertTextFormat,omitempty"`
+	AdditionalTextEdits []TextEdit `json:"additionalTextEdits,omitempty"`
 }
 
 type MarkupContent struct {
@@ -142,6 +164,7 @@ var tinyKeywords = map[string]bool{
 	"field":   true,
 	"private": true,
 	"public":  true,
+	"enum":    true,
 
 	"if":    true,
 	"else":  true,
@@ -499,9 +522,11 @@ func getStdCompletions(module string) []CompletionItem {
 	for _, name := range names {
 		method := info.Methods[name]
 		items = append(items, CompletionItem{
-			Label:  method.Name,
-			Kind:   2,
-			Detail: formatStdSignature(module, method),
+			Label:            method.Name,
+			Kind:             2,
+			Detail:           formatStdSignature(module, method),
+			InsertText:       callableInsertText(method.Name),
+			InsertTextFormat: 2,
 		})
 	}
 
@@ -719,7 +744,7 @@ func getSignatureHelp(uri string, text string, pos Position) any {
 	scope := scopeAtPosition(uri, text, pos)
 
 	if ctx.IsMember {
-		sym, exists := scope.Resolve(ctx.Receiver)
+		sym, receiverType, exists := resolveReceiverPath(scope, text, pos, ctx.Receiver)
 		if !exists {
 			return nil
 		}
@@ -737,8 +762,8 @@ func getSignatureHelp(uri string, text string, pos Position) any {
 			return nil
 		}
 
-		if strings.HasPrefix(sym.Type, "class:") {
-			className := strings.TrimPrefix(sym.Type, "class:")
+		if strings.HasPrefix(receiverType, "class:") {
+			className := strings.TrimPrefix(receiverType, "class:")
 
 			classSym, ok := resolveClassSymbol(scope, className)
 			if !ok || classSym.Kind != SymbolClass {
@@ -753,8 +778,8 @@ func getSignatureHelp(uri string, text string, pos Position) any {
 			return signatureHelpFromFunction(methodSym, ctx.ArgIndex)
 		}
 
-		if strings.HasPrefix(sym.Type, "std:") {
-			module := strings.TrimPrefix(sym.Type, "std:")
+		if strings.HasPrefix(receiverType, "std:") {
+			module := strings.TrimPrefix(receiverType, "std:")
 
 			info, ok := GetStdModuleInfo(module)
 			if !ok {
@@ -769,9 +794,9 @@ func getSignatureHelp(uri string, text string, pos Position) any {
 			return signatureHelpFromMethod(module+"."+ctx.Method, method, ctx.ArgIndex)
 		}
 
-		method, ok := GetNativeMethodInfo(sym.Type, ctx.Method)
+		method, ok := GetNativeMethodInfo(receiverType, ctx.Method)
 		if ok {
-			return signatureHelpFromMethod(sym.Type+"."+ctx.Method, method, ctx.ArgIndex)
+			return signatureHelpFromMethod(receiverType+"."+ctx.Method, method, ctx.ArgIndex)
 		}
 
 		return nil
@@ -843,20 +868,20 @@ func getDefinition(uri string, text string, pos Position) any {
 	scope := scopeAtPosition(uri, text, pos)
 
 	if receiver, member, ok := memberExprAtPosition(text, pos); ok {
-		receiverSym, exists := scope.Resolve(receiver)
+		receiverSym, receiverType, exists := resolveReceiverPath(scope, text, pos, receiver)
 		if !exists {
 			return nil
 		}
 
-		if receiverSym.Kind == SymbolNamespace {
+		if receiverSym.Kind == SymbolNamespace || receiverSym.Kind == SymbolEnum {
 			if memberSym, ok := receiverSym.Members[member]; ok {
 				return locationFromSymbol(uri, text, memberSym)
 			}
 			return nil
 		}
 
-		if strings.HasPrefix(receiverSym.Type, "class:") {
-			className := strings.TrimPrefix(receiverSym.Type, "class:")
+		if strings.HasPrefix(receiverType, "class:") {
+			className := strings.TrimPrefix(receiverType, "class:")
 			classSym, ok := resolveClassSymbol(scope, className)
 			if !ok {
 				return nil
@@ -868,7 +893,7 @@ func getDefinition(uri string, text string, pos Position) any {
 			return nil
 		}
 
-		if receiverSym.Type == "object" && receiverSym.Fields != nil {
+		if receiverType == "object" && receiverSym.Fields != nil {
 			if fieldSym, ok := receiverSym.Fields[member]; ok {
 				return locationFromSymbol(uri, text, fieldSym)
 			}
@@ -928,6 +953,245 @@ func locationFromSymbol(defaultURI string, text string, sym SymbolInfo) any {
 	}
 }
 
+func getReferences(uri string, text string, pos Position, includeDeclaration bool) []Location {
+	name := wordAtPosition(text, pos)
+	if name == "" || tinyKeywords[name] {
+		return []Location{}
+	}
+
+	docs := collectReferenceDocuments(uri, text)
+	locations := []Location{}
+
+	for docURI, docText := range docs {
+		for _, rng := range identifierRangesInText(docText, name) {
+			if !includeDeclaration && docURI == uri && positionInByteRange(pos, rng) {
+				continue
+			}
+			locations = append(locations, Location{
+				URI:   docURI,
+				Range: lspRangeFromByteColumns(docText, rng.Line, rng.Start, rng.End),
+			})
+		}
+	}
+
+	sort.SliceStable(locations, func(i, j int) bool {
+		if locations[i].URI != locations[j].URI {
+			return locations[i].URI < locations[j].URI
+		}
+		if locations[i].Range.Start.Line != locations[j].Range.Start.Line {
+			return locations[i].Range.Start.Line < locations[j].Range.Start.Line
+		}
+		return locations[i].Range.Start.Character < locations[j].Range.Start.Character
+	})
+
+	return locations
+}
+
+func getRenameEdit(uri string, text string, pos Position, newName string) WorkspaceEdit {
+	name := wordAtPosition(text, pos)
+	if name == "" || tinyKeywords[name] || !validTinyIdentifier(newName) {
+		return WorkspaceEdit{Changes: map[string][]TextEdit{}}
+	}
+
+	changes := map[string][]TextEdit{}
+	for _, loc := range getReferences(uri, text, pos, true) {
+		changes[loc.URI] = append(changes[loc.URI], TextEdit{
+			Range:   loc.Range,
+			NewText: newName,
+		})
+	}
+
+	return WorkspaceEdit{Changes: changes}
+}
+
+type byteIdentifierRange struct {
+	Line  int
+	Start int
+	End   int
+}
+
+func identifierRangesInText(text string, name string) []byteIdentifierRange {
+	if name == "" {
+		return nil
+	}
+
+	ranges := []byteIdentifierRange{}
+	lines := strings.Split(text, "\n")
+
+	for lineIndex, line := range lines {
+		code := stripLineComment(line)
+		for start := 0; start < len(code); {
+			index := strings.Index(code[start:], name)
+			if index < 0 {
+				break
+			}
+			index += start
+			end := index + len(name)
+			if isIdentifierBoundary(code, index-1) && isIdentifierBoundary(code, end) {
+				ranges = append(ranges, byteIdentifierRange{Line: lineIndex, Start: index, End: end})
+			}
+			start = end
+		}
+	}
+
+	return ranges
+}
+
+func stripLineComment(line string) string {
+	inString := byte(0)
+	escaped := false
+	templateDepth := 0
+	templateString := byte(0)
+	templateEscaped := false
+	out := []byte(line)
+	for i := 0; i < len(line); i++ {
+		ch := line[i]
+		if templateDepth > 0 {
+			if templateEscaped {
+				out[i] = ' '
+				templateEscaped = false
+				continue
+			}
+			if templateString != 0 {
+				if ch == '\\' {
+					out[i] = ' '
+					templateEscaped = true
+					continue
+				}
+				if ch == templateString {
+					templateString = 0
+				}
+				out[i] = ' '
+				continue
+			}
+			if ch == '"' || ch == '\'' || ch == '`' {
+				templateString = ch
+				out[i] = ' '
+				continue
+			}
+			if ch == '/' && i+1 < len(line) && line[i+1] == '/' {
+				for j := i; j < len(out); j++ {
+					out[j] = ' '
+				}
+				return string(out)
+			}
+			if ch == '{' {
+				templateDepth++
+				continue
+			}
+			if ch == '}' {
+				templateDepth--
+				if templateDepth == 0 {
+					out[i] = ' '
+					inString = '`'
+				}
+				continue
+			}
+			continue
+		}
+		if escaped {
+			out[i] = ' '
+			escaped = false
+			continue
+		}
+		if inString != 0 {
+			if inString == '`' && ch == '$' && i+1 < len(line) && line[i+1] == '{' {
+				out[i] = ' '
+				out[i+1] = ' '
+				i++
+				inString = 0
+				templateDepth = 1
+				continue
+			}
+			if ch == '\\' {
+				out[i] = ' '
+				escaped = true
+				continue
+			}
+			if ch == inString {
+				inString = 0
+			}
+			out[i] = ' '
+			continue
+		}
+		if ch == '"' || ch == '\'' || ch == '`' {
+			inString = ch
+			out[i] = ' '
+			continue
+		}
+		if ch == '/' && i+1 < len(line) && line[i+1] == '/' {
+			return string(out[:i])
+		}
+	}
+	if len(line) > 0 && inString != 0 {
+		out[len(line)-1] = ' '
+	}
+	return string(out)
+}
+
+func isIdentifierBoundary(text string, index int) bool {
+	if index < 0 || index >= len(text) {
+		return true
+	}
+	return !isIdentChar(text[index])
+}
+
+func positionInByteRange(pos Position, rng byteIdentifierRange) bool {
+	return pos.Line == rng.Line && pos.Character >= rng.Start && pos.Character <= rng.End
+}
+
+func validTinyIdentifier(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		ch := name[i]
+		if i == 0 {
+			if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_') {
+				return false
+			}
+			continue
+		}
+		if !isIdentChar(ch) {
+			return false
+		}
+	}
+	return !tinyKeywords[name]
+}
+
+func collectReferenceDocuments(uri string, text string) map[string]string {
+	docs := map[string]string{uri: text}
+	for openURI, openText := range lspDocs {
+		docs[openURI] = openText
+	}
+	collectImportedReferenceDocuments(uri, text, docs, map[string]bool{})
+	return docs
+}
+
+func collectImportedReferenceDocuments(uri string, text string, docs map[string]string, visited map[string]bool) {
+	if visited[uri] {
+		return
+	}
+	visited[uri] = true
+
+	matches := fileImportRegex.FindAllStringSubmatch(text, -1)
+	for _, match := range matches {
+		resolved := resolveImportPath(uri, match[1])
+		importURI := pathToFileURI(resolved)
+		if _, exists := docs[importURI]; exists {
+			continue
+		}
+
+		importText, ok := tinyFileTextForLSP(resolved, importURI)
+		if !ok {
+			continue
+		}
+
+		docs[importURI] = importText
+		collectImportedReferenceDocuments(importURI, importText, docs, visited)
+	}
+}
+
 func getDocumentSymbols(uri string, text string) []DocumentSymbol {
 	lines := strings.Split(text, "\n")
 	if len(lines) > 0 {
@@ -980,7 +1244,7 @@ func documentSymbolsFromScope(uri string, text string, scope *Scope) []DocumentS
 		if sym.SourceURI != "" && sym.SourceURI != uri {
 			continue
 		}
-		if sym.Line <= 0 || sym.Kind == SymbolStd {
+		if sym.Line <= 0 || sym.Kind == SymbolStd || strings.TrimSpace(sym.Name) == "" {
 			continue
 		}
 
@@ -1081,6 +1345,9 @@ func documentSymbolFromSymbol(sym SymbolInfo, text string) DocumentSymbol {
 
 		for _, fieldName := range fieldNames {
 			field := sym.Fields[fieldName]
+			if strings.TrimSpace(field.Name) == "" {
+				continue
+			}
 			children = append(children, documentSymbolFromSymbol(field, text))
 		}
 	}
@@ -1094,6 +1361,9 @@ func documentSymbolFromSymbol(sym SymbolInfo, text string) DocumentSymbol {
 
 		for _, methodName := range methodNames {
 			method := sym.Methods[methodName]
+			if strings.TrimSpace(method.Name) == "" {
+				continue
+			}
 			children = append(children, documentSymbolFromSymbol(method, text))
 		}
 	}
@@ -1107,6 +1377,9 @@ func documentSymbolFromSymbol(sym SymbolInfo, text string) DocumentSymbol {
 
 		for _, memberName := range memberNames {
 			member := sym.Members[memberName]
+			if strings.TrimSpace(member.Name) == "" {
+				continue
+			}
 			children = append(children, documentSymbolFromSymbol(member, text))
 		}
 	}
@@ -1133,6 +1406,8 @@ func symbolKindToDocumentKind(kind SymbolKind) int {
 		return 2
 	case SymbolField:
 		return 8
+	case SymbolEnum:
+		return 13
 	default:
 		return 13
 	}
@@ -1147,13 +1422,18 @@ func handleLSPMessage(msg LSPMessage) {
 				"capabilities": map[string]any{
 					"textDocumentSync": 1,
 					"completionProvider": map[string]any{
-						"triggerCharacters": []string{".", `"`},
+						"triggerCharacters":   []string{".", `"`},
+						"resolveProvider":     false,
+						"completionItem":      map[string]any{"snippetSupport": true},
+						"allCommitCharacters": []string{},
 					},
 					"signatureHelpProvider": map[string]any{
 						"triggerCharacters": []string{"(", ","},
 					},
 					"documentFormattingProvider": true,
 					"definitionProvider":         true,
+					"referencesProvider":         true,
+					"renameProvider":             true,
 					"documentSymbolProvider":     true,
 					"hoverProvider":              true,
 				},
@@ -1177,7 +1457,9 @@ func handleLSPMessage(msg LSPMessage) {
 		json.Unmarshal(msg.Params, &params)
 
 		lspDocs[params.TextDocument.URI] = params.TextDocument.Text
+		invalidateLSPImportCacheForURI(params.TextDocument.URI)
 		publishDiagnostics(params.TextDocument.URI, params.TextDocument.Text)
+		publishDiagnosticsForImportDependents(params.TextDocument.URI)
 
 	case "textDocument/didChange":
 		var params DidChangeParams
@@ -1186,7 +1468,9 @@ func handleLSPMessage(msg LSPMessage) {
 		if len(params.ContentChanges) > 0 {
 			text := params.ContentChanges[0].Text
 			lspDocs[params.TextDocument.URI] = text
+			invalidateLSPImportCacheForURI(params.TextDocument.URI)
 			publishDiagnostics(params.TextDocument.URI, text)
+			publishDiagnosticsForImportDependents(params.TextDocument.URI)
 		}
 
 	case "textDocument/didClose":
@@ -1194,7 +1478,9 @@ func handleLSPMessage(msg LSPMessage) {
 		json.Unmarshal(msg.Params, &params)
 
 		delete(lspDocs, params.TextDocument.URI)
+		invalidateLSPImportCacheForURI(params.TextDocument.URI)
 		publishDiagnostics(params.TextDocument.URI, "")
+		publishDiagnosticsForImportDependents(params.TextDocument.URI)
 
 	case "textDocument/completion":
 		var params CompletionParams
@@ -1255,6 +1541,52 @@ func handleLSPMessage(msg LSPMessage) {
 		writeLSPMessage(LSPMessage{
 			ID:     msg.ID,
 			Result: nullLSPResult(result),
+		})
+
+	case "textDocument/references":
+		var params ReferenceParams
+		json.Unmarshal(msg.Params, &params)
+
+		text := lspDocs[params.TextDocument.URI]
+		params.Position = lspPositionToBytePosition(text, params.Position)
+
+		var result any
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					result = []Location{}
+				}
+			}()
+
+			result = getReferences(params.TextDocument.URI, text, params.Position, params.Context.IncludeDeclaration)
+		}()
+
+		writeLSPMessage(LSPMessage{
+			ID:     msg.ID,
+			Result: result,
+		})
+
+	case "textDocument/rename":
+		var params RenameParams
+		json.Unmarshal(msg.Params, &params)
+
+		text := lspDocs[params.TextDocument.URI]
+		params.Position = lspPositionToBytePosition(text, params.Position)
+
+		var result any
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					result = WorkspaceEdit{Changes: map[string][]TextEdit{}}
+				}
+			}()
+
+			result = getRenameEdit(params.TextDocument.URI, text, params.Position, params.NewName)
+		}()
+
+		writeLSPMessage(LSPMessage{
+			ID:     msg.ID,
+			Result: result,
 		})
 
 	case "textDocument/documentSymbol":
@@ -1530,6 +1862,56 @@ func publishDiagnostics(uri string, text string) {
 	})
 }
 
+func publishDiagnosticsForImportDependents(changedURI string) {
+	for _, uri := range dependentDocumentURIs(changedURI) {
+		if text, ok := lspDocs[uri]; ok {
+			publishDiagnostics(uri, text)
+		}
+	}
+}
+
+func dependentDocumentURIs(changedURI string) []string {
+	changedPath := filepath.Clean(uriToPath(changedURI))
+	if changedPath == "." || changedPath == "" {
+		return nil
+	}
+
+	dependents := []string{}
+	for uri, text := range lspDocs {
+		if uri == changedURI {
+			continue
+		}
+		if documentImportsPath(uri, text, changedPath, map[string]bool{}) {
+			dependents = append(dependents, uri)
+		}
+	}
+
+	sort.Strings(dependents)
+	return dependents
+}
+
+func documentImportsPath(uri string, text string, targetPath string, visited map[string]bool) bool {
+	if visited[uri] {
+		return false
+	}
+	visited[uri] = true
+
+	for _, match := range fileImportRegex.FindAllStringSubmatch(text, -1) {
+		importPath := filepath.Clean(resolveImportPath(uri, match[1]))
+		if importPath == targetPath {
+			return true
+		}
+
+		importURI := pathToFileURI(importPath)
+		importText, ok := tinyFileTextForLSP(importPath, importURI)
+		if ok && documentImportsPath(importURI, importText, targetPath, visited) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func isInsideStdImportString(line string, character int) bool {
 	if character > len(line) {
 		character = len(line)
@@ -1565,9 +1947,11 @@ func getNativeTypeCompletions(typeName string) []CompletionItem {
 	if strings.HasPrefix(typeName, "task:") {
 		return []CompletionItem{
 			{
-				Label:  "await",
-				Kind:   2,
-				Detail: "task.await(): " + strings.TrimPrefix(typeName, "task:"),
+				Label:            "await",
+				Kind:             2,
+				Detail:           "task.await(): " + strings.TrimPrefix(typeName, "task:"),
+				InsertText:       callableInsertText("await"),
+				InsertTextFormat: 2,
 			},
 		}
 	}
@@ -1589,15 +1973,19 @@ func getNativeTypeCompletions(typeName string) []CompletionItem {
 	for _, name := range names {
 		method := info.Methods[name]
 		items = append(items, CompletionItem{
-			Label:  method.Name,
-			Kind:   2,
-			Detail: formatNativeSignature(typeName, method),
+			Label:            method.Name,
+			Kind:             2,
+			Detail:           formatNativeSignature(typeName, method),
+			InsertText:       callableInsertText(method.Name),
+			InsertTextFormat: 2,
 		})
 	}
 
 	items = append(items, CompletionItem{
-		Label: "toString",
-		Kind:  2,
+		Label:            "toString",
+		Kind:             2,
+		InsertText:       callableInsertText("toString"),
+		InsertTextFormat: 2,
 		Detail: formatNativeSignature(typeName, StdMethodInfo{
 			Name:        "toString",
 			Args:        []StdArg{},
@@ -1624,33 +2012,34 @@ func formatNativeSignature(typeName string, method StdMethodInfo) string {
 	return typeName + "." + method.Name + "(" + strings.Join(parts, ", ") + "): " + method.Returns
 }
 
-func scopeCompletions(scope *Scope) []CompletionItem {
+func scopeCompletions(scope *Scope, uri string, text string) []CompletionItem {
 	items := []CompletionItem{
-		{Label: "import", Kind: 14, Detail: "import statement"},
-		{Label: "export", Kind: 14, Detail: "export statement"},
+		snippetCompletion("import", "import statement", "import \"$1\";$0"),
+		snippetCompletion("import std", "standard library import", "import std \"$1\";$0"),
+		{Label: "export", Kind: 14, Detail: "export statement", InsertText: "export $0", InsertTextFormat: 2},
 		{Label: "std", Kind: 14, Detail: "standard library import"},
-		{Label: "fn", Kind: 14, Detail: "function"},
-		{Label: "let", Kind: 14, Detail: "variable"},
-		{Label: "const", Kind: 14, Detail: "constant"},
-		{Label: "class", Kind: 7, Detail: "class"},
+		snippetCompletion("fn", "function", "fn ${1:name}(${2}) {\n    $0\n}"),
+		snippetCompletion("let", "variable", "let ${1:name} = ${2:value};$0"),
+		snippetCompletion("const", "constant", "const ${1:name} = ${2:value};$0"),
+		{Label: "class", Kind: 7, Detail: "class", InsertText: "class ${1:Name} {\n    $0\n}", InsertTextFormat: 2},
 		{Label: "embed", Kind: 14, Detail: "embed class methods"},
-		{Label: "field", Kind: 14, Detail: "class field"},
+		snippetCompletion("field", "class field", "field ${1:name} = ${2:value};$0"),
 		{Label: "private", Kind: 14, Detail: "private field"},
 		{Label: "public", Kind: 14, Detail: "public field"},
-		{Label: "if", Kind: 14, Detail: "if statement"},
+		snippetCompletion("if", "if statement", "if ${1:condition} {\n    $0\n}"),
 		{Label: "else", Kind: 14, Detail: "else"},
-		{Label: "while", Kind: 14, Detail: "while loop"},
-		{Label: "for", Kind: 14, Detail: "for loop"},
-		{Label: "in", Kind: 14, Detail: "for-in loop"},
-		{Label: "match", Kind: 14, Detail: "match expression"},
-		{Label: "return", Kind: 14, Detail: "return"},
+		snippetCompletion("while", "while loop", "while ${1:condition} {\n    $0\n}"),
+		snippetCompletion("for", "for loop", "for let ${1:i} = 0; ${1:i} < ${2:count}; ${1:i}++ {\n    $0\n}"),
+		snippetCompletion("for in", "for-in loop", "for ${1:item} in ${2:items} {\n    $0\n}"),
+		snippetCompletion("match", "match expression", "match ${1:value} {\n    ${2:case} {\n        $0\n    }\n    _ {\n    }\n}"),
+		snippetCompletion("return", "return", "return ${1:value};$0"),
 		{Label: "break", Kind: 14, Detail: "break"},
 		{Label: "continue", Kind: 14, Detail: "continue"},
-		{Label: "try", Kind: 14, Detail: "try statement"},
+		snippetCompletion("try", "try statement", "try {\n    $0\n} catch ${1:err} {\n    \n}"),
 		{Label: "catch", Kind: 14, Detail: "catch block"},
 		{Label: "finally", Kind: 14, Detail: "finally block"},
-		{Label: "throw", Kind: 14, Detail: "throw error"},
-		{Label: "spawn", Kind: 14, Detail: "spawn task"},
+		snippetCompletion("throw", "throw error", "throw ${1:error};$0"),
+		snippetCompletion("spawn", "spawn task", "spawn fn() {\n    $0\n}"),
 		{Label: "typeof", Kind: 14, Detail: "type operator"},
 		{Label: "instanceof", Kind: 14, Detail: "instance check"},
 		{Label: "true", Kind: 14, Detail: "boolean literal"},
@@ -1678,14 +2067,184 @@ func scopeCompletions(scope *Scope) []CompletionItem {
 			seen[sym.Name] = true
 
 			items = append(items, CompletionItem{
-				Label:  sym.Name,
-				Kind:   symbolKindToCompletionKind(sym.Kind),
-				Detail: symbolDetail(sym),
+				Label:            sym.Name,
+				Kind:             symbolKindToCompletionKind(sym.Kind),
+				Detail:           symbolDetail(sym),
+				InsertText:       completionInsertText(sym),
+				InsertTextFormat: completionInsertTextFormat(sym),
+			})
+		}
+	}
+
+	items = append(items, stdAutoImportCompletions(scope, text)...)
+	items = append(items, fileAutoImportCompletions(scope, uri, text)...)
+
+	return dedupeCompletionItems(items)
+}
+
+func snippetCompletion(label string, detail string, insertText string) CompletionItem {
+	return CompletionItem{
+		Label:            label,
+		Kind:             14,
+		Detail:           detail,
+		InsertText:       insertText,
+		InsertTextFormat: 2,
+	}
+}
+
+func stdAutoImportCompletions(scope *Scope, text string) []CompletionItem {
+	items := []CompletionItem{}
+	imports := parseStdImports(text)
+	names := make([]string, 0, len(StdMetadata))
+	for name := range StdMetadata {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		if _, ok := imports[name]; ok {
+			continue
+		}
+		if _, ok := scope.Resolve(name); ok {
+			continue
+		}
+
+		items = append(items, CompletionItem{
+			Label:  name,
+			Kind:   9,
+			Detail: "auto import std module " + name,
+			AdditionalTextEdits: []TextEdit{
+				importTextEdit(text, `import std "`+name+`";`),
+			},
+		})
+	}
+
+	return items
+}
+
+func fileAutoImportCompletions(scope *Scope, uri string, text string) []CompletionItem {
+	currentPath := uriToPath(uri)
+	if currentPath == "" {
+		return nil
+	}
+
+	root := filepath.Dir(currentPath)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+
+	items := []CompletionItem{}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".tiny" {
+			continue
+		}
+
+		path := filepath.Join(root, entry.Name())
+		if filepath.Clean(path) == filepath.Clean(currentPath) {
+			continue
+		}
+
+		relImport := filepath.ToSlash(entry.Name())
+		if fileImportAlreadyPresent(text, relImport) {
+			continue
+		}
+
+		exports := loadTinyFileExports(path, map[string]bool{})
+		if len(exports) == 0 {
+			continue
+		}
+
+		alias := importAliasForPath(path)
+		importEdit := importTextEdit(text, `import "`+relImport+`" as `+alias+`;`)
+		names := make([]string, 0, len(exports))
+		for name := range exports {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+
+		for _, name := range names {
+			sym := exports[name]
+			if _, exists := scope.Resolve(name); exists {
+				continue
+			}
+
+			insert := alias + "." + sym.Name
+			format := 0
+			if sym.Kind == SymbolClass || sym.Kind == SymbolFunction {
+				insert = alias + "." + callableInsertText(sym.Name)
+				format = 2
+			}
+
+			items = append(items, CompletionItem{
+				Label:               sym.Name,
+				Kind:                symbolKindToCompletionKind(sym.Kind),
+				Detail:              "auto import from " + relImport,
+				InsertText:          insert,
+				InsertTextFormat:    format,
+				AdditionalTextEdits: []TextEdit{importEdit},
 			})
 		}
 	}
 
 	return items
+}
+
+func importTextEdit(text string, importLine string) TextEdit {
+	line := importInsertLine(text)
+	return TextEdit{
+		Range: LSPRange{
+			Start: Position{Line: line, Character: 0},
+			End:   Position{Line: line, Character: 0},
+		},
+		NewText: importLine + "\n",
+	}
+}
+
+func importInsertLine(text string) int {
+	lines := strings.Split(text, "\n")
+	lastImport := -1
+	for i, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if strings.HasPrefix(line, "import ") {
+			lastImport = i
+			continue
+		}
+		if line == "" {
+			continue
+		}
+		if lastImport >= 0 {
+			break
+		}
+	}
+	return lastImport + 1
+}
+
+func fileImportAlreadyPresent(text string, importPath string) bool {
+	for _, match := range fileImportRegex.FindAllStringSubmatch(text, -1) {
+		if filepath.ToSlash(match[1]) == filepath.ToSlash(importPath) {
+			return true
+		}
+	}
+	return false
+}
+
+func importAliasForPath(path string) string {
+	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	parts := strings.FieldsFunc(base, func(r rune) bool {
+		return r == '-' || r == '_' || r == ' ' || r == '.'
+	})
+	alias := ""
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		alias += strings.ToUpper(part[:1]) + part[1:]
+	}
+	if alias == "" {
+		return "Module"
+	}
+	return alias
 }
 
 func dedupeCompletionItems(items []CompletionItem) []CompletionItem {
@@ -1705,8 +2264,12 @@ func dedupeCompletionItems(items []CompletionItem) []CompletionItem {
 }
 
 func classNameAtPosition(text string, pos Position) string {
-	lines := strings.Split(text, "\n")
+	block := classBlockAtLine(text, pos.Line)
+	if block != nil && block.Name != "" {
+		return block.Name
+	}
 
+	lines := strings.Split(text, "\n")
 	currentLine := pos.Line
 	if currentLine >= len(lines) {
 		currentLine = len(lines) - 1
@@ -1714,16 +2277,414 @@ func classNameAtPosition(text string, pos Position) string {
 
 	for i := currentLine; i >= 0; i-- {
 		line := cleanLine(lines[i])
-
-		if strings.HasPrefix(line, "class ") {
-			match := classLineRegex.FindStringSubmatch(line)
-			if match != nil {
-				return match[1]
-			}
+		match := classLineRegex.FindStringSubmatch(line)
+		if match != nil {
+			return match[1]
 		}
 	}
 
 	return ""
+}
+
+func completionItemsForClass(scope *Scope, classSym SymbolInfo, receiver string) []CompletionItem {
+	items := []CompletionItem{}
+
+	for _, field := range classSym.Fields {
+		if isPrivateSymbol(field) && receiver != "this" && !strings.HasPrefix(receiver, "this.") {
+			continue
+		}
+
+		items = append(items, CompletionItem{
+			Label:  field.Name,
+			Kind:   symbolKindToCompletionKind(field.Kind),
+			Detail: field.Detail + " : " + field.Type,
+		})
+	}
+
+	for _, method := range classSym.Methods {
+		if isPrivateSymbol(method) && receiver != "this" && !strings.HasPrefix(receiver, "this.") {
+			continue
+		}
+
+		items = append(items, CompletionItem{
+			Label:            method.Name,
+			Kind:             2,
+			Detail:           formatFunctionSignature(method.Name, method.Params, method.Returns),
+			InsertText:       callableInsertText(method.Name),
+			InsertTextFormat: 2,
+		})
+	}
+
+	return dedupeCompletionItems(items)
+}
+
+func staticTypeOfSymbol(receiver string, sym SymbolInfo) string {
+	switch sym.Kind {
+	case SymbolClass:
+		return "class:" + sym.Name
+	case SymbolEnum:
+		if strings.Contains(receiver, ".") {
+			return "enum:" + receiver
+		}
+		return "enum:" + sym.Name
+	case SymbolFunction:
+		return "function"
+	case SymbolNamespace:
+		return "namespace:" + sym.Name
+	default:
+		return sym.Type
+	}
+}
+
+func splitReceiverPath(receiver string) []string {
+	receiver = strings.TrimSpace(receiver)
+	receiver = strings.ReplaceAll(receiver, "?.", ".")
+	receiver = strings.TrimSuffix(receiver, "?")
+	parts := strings.Split(receiver, ".")
+	out := []string{}
+	for _, part := range parts {
+		part = strings.TrimSpace(strings.TrimSuffix(part, "?"))
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func resolveMemberFromStaticType(scope *Scope, typ string, member string) (SymbolInfo, string, bool) {
+	typ = strings.TrimSpace(typ)
+
+	if strings.Contains(typ, "|") {
+		for _, part := range splitUnionType(typ) {
+			if isNullishLSPType(part) {
+				continue
+			}
+			if sym, memberType, ok := resolveMemberFromStaticType(scope, part, member); ok {
+				return sym, memberType, true
+			}
+		}
+		return SymbolInfo{}, "unknown", false
+	}
+
+	if strings.HasPrefix(typ, "class:") {
+		className := strings.TrimPrefix(typ, "class:")
+		classSym, ok := resolveClassSymbol(scope, className)
+		if !ok || classSym.Kind != SymbolClass {
+			return SymbolInfo{}, "unknown", false
+		}
+
+		if fieldSym, ok := classSym.Fields[member]; ok {
+			return fieldSym, fieldSym.Type, true
+		}
+
+		if methodSym, ok := classSym.Methods[member]; ok {
+			return methodSym, firstNonEmpty(methodSym.Returns, "function"), true
+		}
+
+		return SymbolInfo{}, "unknown", false
+	}
+
+	if strings.HasPrefix(typ, "enum:") {
+		enumName := strings.TrimPrefix(typ, "enum:")
+		enumSym, ok := resolveEnumSymbol(scope, enumName)
+		if !ok || enumSym.Kind != SymbolEnum {
+			return SymbolInfo{}, "unknown", false
+		}
+		if memberSym, ok := enumSym.Members[member]; ok {
+			return memberSym, "number", true
+		}
+		return SymbolInfo{}, "unknown", false
+	}
+
+	if strings.HasPrefix(typ, "std:") {
+		module := strings.TrimPrefix(typ, "std:")
+		info, ok := GetStdModuleInfo(module)
+		if !ok {
+			return SymbolInfo{}, "unknown", false
+		}
+		if methodInfo, ok := info.Methods[member]; ok {
+			return SymbolInfo{Name: methodInfo.Name, Kind: SymbolFunction, Type: "function", Detail: methodInfo.Description, Params: methodInfo.Args, Returns: methodInfo.Returns}, methodInfo.Returns, true
+		}
+		return SymbolInfo{}, "unknown", false
+	}
+
+	if methodInfo, ok := GetNativeMethodInfo(typ, member); ok {
+		return SymbolInfo{Name: methodInfo.Name, Kind: SymbolFunction, Type: "function", Detail: methodInfo.Description, Params: methodInfo.Args, Returns: methodInfo.Returns}, methodInfo.Returns, true
+	}
+
+	return SymbolInfo{}, "unknown", false
+}
+
+func resolveReceiverPath(scope *Scope, text string, pos Position, receiver string) (SymbolInfo, string, bool) {
+	parts := splitReceiverPath(receiver)
+	if len(parts) == 0 {
+		return SymbolInfo{}, "", false
+	}
+
+	var sym SymbolInfo
+	var typ string
+	ok := false
+	qualified := parts[0]
+
+	if parts[0] == "this" {
+		className := classNameAtPosition(text, pos)
+		if className == "" {
+			return SymbolInfo{}, "", false
+		}
+		classSym, exists := currentClassSymbolAtPosition(scope, text, pos, className)
+		if !exists {
+			return SymbolInfo{}, "", false
+		}
+		sym = SymbolInfo{Name: "this", Kind: SymbolVariable, Type: "class:" + className, Detail: "current class instance", Fields: classSym.Fields, Methods: classSym.Methods}
+		typ = "class:" + className
+		ok = true
+	} else {
+		sym, ok = scope.Resolve(parts[0])
+		if !ok {
+			return SymbolInfo{}, "", false
+		}
+		typ = staticTypeOfSymbol(parts[0], sym)
+	}
+
+	if len(parts) == 1 {
+		return sym, typ, true
+	}
+
+	for _, member := range parts[1:] {
+		qualified += "." + member
+
+		if sym.Kind == SymbolNamespace {
+			memberSym, exists := sym.Members[member]
+			if !exists {
+				return SymbolInfo{}, "unknown", false
+			}
+			sym = memberSym
+			typ = staticTypeOfSymbol(qualified, memberSym)
+			continue
+		}
+
+		if fieldSym, exists := sym.Fields[member]; exists {
+			sym = fieldSym
+			typ = fieldSym.Type
+			continue
+		}
+
+		if methodSym, exists := sym.Methods[member]; exists {
+			sym = methodSym
+			typ = firstNonEmpty(methodSym.Returns, "function")
+			continue
+		}
+
+		if nextSym, nextType, exists := resolveMemberFromStaticType(scope, typ, member); exists {
+			sym = nextSym
+			typ = nextType
+			continue
+		}
+
+		if sym.Type == "object" && sym.Fields != nil {
+			if fieldSym, exists := sym.Fields[member]; exists {
+				sym = fieldSym
+				typ = fieldSym.Type
+				continue
+			}
+		}
+
+		return SymbolInfo{}, "unknown", false
+	}
+
+	return sym, typ, true
+}
+
+func currentClassSymbolAtPosition(scope *Scope, text string, pos Position, className string) (SymbolInfo, bool) {
+	lines := strings.Split(text, "\n")
+	classLine := -1
+	body := ""
+	bodyBaseLine := 1
+
+	if block := classBlockAtLine(text, pos.Line); block != nil && block.Name == className {
+		classLine = block.Line - 1
+		body = block.Body
+		bodyBaseLine = block.Line
+	} else {
+		for i := pos.Line; i >= 0 && i < len(lines); i-- {
+			if classLineRegex.FindStringSubmatch(cleanLine(lines[i])) != nil {
+				classLine = i
+				break
+			}
+		}
+
+		if classLine < 0 {
+			return resolveClassSymbol(scope, className)
+		}
+
+		endLine := pos.Line
+		if endLine >= len(lines) {
+			endLine = len(lines) - 1
+		}
+		if endLine < classLine {
+			endLine = classLine
+		}
+
+		bodyStartLine := classLine + 1
+		if bodyStartLine > endLine {
+			bodyStartLine = endLine
+		}
+
+		body = strings.Join(lines[bodyStartLine:endLine+1], "\n")
+		bodyBaseLine = bodyStartLine + 1
+	}
+
+	fields := scanClassFields(scope, body, "", bodyBaseLine)
+	methods := map[string]SymbolInfo{}
+	collectEmbeddedSymbolsFromBody(scope, body, fields, methods, "", bodyBaseLine)
+	for name, method := range scanClassMethodHeaders(scope, className, body, bodyBaseLine) {
+		methods[name] = method
+	}
+
+	for _, methodBlock := range findBlocks(body, "fn") {
+		params := normalizeStdArgs(scope, parseFunctionParams(methodBlock.ParamsText))
+		returnType := inferReturnTypeFromBody(scope, methodBlock.Body, methodBlock.ReturnType)
+		detail := "method " + className + "." + methodBlock.Name
+		if isPrivateFunctionAt(body, methodBlock.Start) {
+			detail = "private " + detail
+		}
+		methods[methodBlock.Name] = SymbolInfo{
+			Name:    methodBlock.Name,
+			Kind:    SymbolFunction,
+			Type:    "function",
+			Detail:  detail,
+			Line:    bodyBaseLine + methodBlock.Line,
+			Column:  methodBlock.Column,
+			Params:  params,
+			Returns: returnType,
+		}
+	}
+
+	classSym, ok := resolveClassSymbol(scope, className)
+	if !ok {
+		classSym = SymbolInfo{
+			Name:    className,
+			Kind:    SymbolClass,
+			Type:    "class:" + className,
+			Detail:  "class " + className,
+			Line:    classLine + 1,
+			Column:  1,
+			Fields:  map[string]SymbolInfo{},
+			Methods: map[string]SymbolInfo{},
+		}
+	}
+
+	if classSym.Fields == nil {
+		classSym.Fields = map[string]SymbolInfo{}
+	}
+	for name, field := range fields {
+		classSym.Fields[name] = field
+	}
+
+	if classSym.Methods == nil {
+		classSym.Methods = map[string]SymbolInfo{}
+	}
+	for name, method := range methods {
+		classSym.Methods[name] = method
+	}
+
+	return classSym, true
+}
+
+func scanClassMethodHeaders(scope *Scope, className string, body string, bodyBaseLine int) map[string]SymbolInfo {
+	methods := map[string]SymbolInfo{}
+	lines := strings.Split(body, "\n")
+
+	for i, raw := range lines {
+		line := cleanLine(raw)
+		match := functionLineRegex.FindStringSubmatch(line)
+		if match == nil {
+			continue
+		}
+
+		name := match[1]
+		if name == "" {
+			continue
+		}
+
+		detail := "method " + className + "." + name
+		fnIndex := strings.Index(line, "fn")
+		if fnIndex > 0 && strings.Contains(line[:fnIndex], "private") {
+			detail = "private " + detail
+		}
+
+		returnType := "undefined"
+		if len(match) > 3 && strings.TrimSpace(match[3]) != "" {
+			returnType = normalizeLSPType(scope, match[3])
+		}
+
+		methods[name] = SymbolInfo{
+			Name:    name,
+			Kind:    SymbolFunction,
+			Type:    "function",
+			Detail:  detail,
+			Line:    bodyBaseLine + i,
+			Column:  indexColumn(raw, name),
+			Params:  normalizeStdArgs(scope, parseFunctionParams(match[2])),
+			Returns: returnType,
+		}
+	}
+
+	return methods
+}
+
+func completionItemsForReceiver(scope *Scope, text string, pos Position, receiver string) []CompletionItem {
+	sym, typ, ok := resolveReceiverPath(scope, text, pos, receiver)
+	if !ok {
+		return []CompletionItem{}
+	}
+
+	if strings.Contains(typ, "|") {
+		return getUnionTypeCompletions(scope, typ, receiver)
+	}
+
+	if sym.Kind == SymbolNamespace || sym.Kind == SymbolEnum {
+		return completionItemsFromMembers(sym.Members)
+	}
+
+	if strings.HasPrefix(typ, "std:") {
+		module := strings.TrimPrefix(typ, "std:")
+		return getStdCompletions(module)
+	}
+
+	if strings.HasPrefix(typ, "class:") {
+		className := strings.TrimPrefix(typ, "class:")
+		classSym, ok := resolveClassSymbol(scope, className)
+		if !ok || classSym.Kind != SymbolClass {
+			classSym = SymbolInfo{Kind: SymbolClass}
+		}
+		if len(sym.Fields) > 0 || len(sym.Methods) > 0 {
+			if classSym.Fields == nil {
+				classSym.Fields = map[string]SymbolInfo{}
+			}
+			for name, field := range sym.Fields {
+				classSym.Fields[name] = field
+			}
+			if classSym.Methods == nil {
+				classSym.Methods = map[string]SymbolInfo{}
+			}
+			for name, method := range sym.Methods {
+				classSym.Methods[name] = method
+			}
+		}
+		return completionItemsForClass(scope, classSym, receiver)
+	}
+
+	if typ == "object" {
+		items := []CompletionItem{}
+		for _, field := range sym.Fields {
+			items = append(items, CompletionItem{Label: field.Name, Kind: symbolKindToCompletionKind(field.Kind), Detail: field.Detail + " : " + field.Type})
+		}
+		items = append(items, getNativeTypeCompletions("object")...)
+		return dedupeCompletionItems(items)
+	}
+
+	return getNativeTypeCompletions(typ)
 }
 
 func getUnionTypeCompletions(scope *Scope, typ string, receiver string) []CompletionItem {
@@ -1803,113 +2764,10 @@ func getCompletions(uri string, text string, pos Position) []CompletionItem {
 	scope := scopeAtPosition(uri, text, pos)
 
 	if receiver == "" {
-		return scopeCompletions(scope)
+		return scopeCompletions(scope, uri, text)
 	}
 
-	if receiver == "this" {
-		className := classNameAtPosition(text, pos)
-		if className != "" {
-			classSym, ok := scope.Resolve(className)
-			if ok && classSym.Kind == SymbolClass {
-				items := []CompletionItem{}
-
-				for _, field := range classSym.Fields {
-					items = append(items, CompletionItem{
-						Label:  field.Name,
-						Kind:   symbolKindToCompletionKind(field.Kind),
-						Detail: field.Detail + " : " + field.Type,
-					})
-				}
-
-				for _, method := range classSym.Methods {
-					items = append(items, CompletionItem{
-						Label:  method.Name,
-						Kind:   2,
-						Detail: formatFunctionSignature(method.Name, method.Params, method.Returns),
-					})
-				}
-
-				return dedupeCompletionItems(items)
-			}
-		}
-	}
-
-	sym, ok := scope.Resolve(receiver)
-	if !ok {
-		return []CompletionItem{}
-	}
-
-	if strings.Contains(sym.Type, "|") {
-		return getUnionTypeCompletions(scope, sym.Type, receiver)
-	}
-
-	if sym.Kind == SymbolNamespace {
-		return completionItemsFromMembers(sym.Members)
-	}
-
-	// if sym.Type == "object" && sym.Fields != nil {
-	// 	return completionItemsFromMembers(sym.Fields)
-	// }
-
-	if strings.HasPrefix(sym.Type, "std:") {
-		module := strings.TrimPrefix(sym.Type, "std:")
-		return getStdCompletions(module)
-	}
-
-	if strings.HasPrefix(sym.Type, "class:") {
-		className := strings.TrimPrefix(sym.Type, "class:")
-
-		classSym, ok := resolveClassSymbol(scope, className)
-		if !ok || classSym.Kind != SymbolClass {
-			return []CompletionItem{}
-		}
-
-		items := []CompletionItem{}
-
-		for _, field := range classSym.Fields {
-			if strings.Contains(field.Detail, "private field") {
-				continue
-			}
-
-			items = append(items, CompletionItem{
-				Label:  field.Name,
-				Kind:   symbolKindToCompletionKind(field.Kind),
-				Detail: field.Detail + " : " + field.Type,
-			})
-		}
-
-		for _, method := range classSym.Methods {
-			if isPrivateSymbol(method) && receiver != "this" {
-				continue
-			}
-
-			items = append(items, CompletionItem{
-				Label:  method.Name,
-				Kind:   2,
-				Detail: formatFunctionSignature(method.Name, method.Params, method.Returns),
-			})
-		}
-
-		return dedupeCompletionItems(items)
-	}
-
-	if sym.Type == "object" {
-		items := []CompletionItem{}
-
-		for _, field := range sym.Fields {
-			items = append(items, CompletionItem{
-				Label:  field.Name,
-				Kind:   symbolKindToCompletionKind(field.Kind),
-				Detail: field.Detail + " : " + field.Type,
-			})
-		}
-
-		items = append(items, getNativeTypeCompletions("object")...)
-
-		return dedupeCompletionItems(items)
-	}
-
-	return getNativeTypeCompletions(sym.Type)
+	return completionItemsForReceiver(scope, text, pos, receiver)
 }
 
 func completionItemsFromMembers(members map[string]SymbolInfo) []CompletionItem {
@@ -1930,13 +2788,35 @@ func completionItemsFromMembers(members map[string]SymbolInfo) []CompletionItem 
 		}
 
 		items = append(items, CompletionItem{
-			Label:  member.Name,
-			Kind:   symbolKindToCompletionKind(member.Kind),
-			Detail: detail,
+			Label:            member.Name,
+			Kind:             symbolKindToCompletionKind(member.Kind),
+			Detail:           detail,
+			InsertText:       completionInsertText(member),
+			InsertTextFormat: completionInsertTextFormat(member),
 		})
 	}
 
 	return items
+}
+
+func callableInsertText(name string) string {
+	return name + "($0);"
+}
+
+func completionInsertText(sym SymbolInfo) string {
+	switch sym.Kind {
+	case SymbolFunction, SymbolClass:
+		return callableInsertText(sym.Name)
+	default:
+		return ""
+	}
+}
+
+func completionInsertTextFormat(sym SymbolInfo) int {
+	if completionInsertText(sym) == "" {
+		return 0
+	}
+	return 2
 }
 
 func symbolDetail(sym SymbolInfo) string {
@@ -1946,6 +2826,8 @@ func symbolDetail(sym SymbolInfo) string {
 	case SymbolClass:
 		return sym.Detail
 	case SymbolNamespace:
+		return sym.Detail
+	case SymbolEnum:
 		return sym.Detail
 	case SymbolField:
 		return "field " + sym.Name + " : " + sym.Type
@@ -1970,34 +2852,31 @@ func getLine(text string, lineNumber int) string {
 func receiverBeforeDot(text string) string {
 	text = strings.TrimRight(text, " \t")
 
-	if !strings.HasSuffix(text, ".") {
+	if !strings.HasSuffix(text, ".") && !strings.HasSuffix(text, "?.") {
 		return ""
 	}
 
-	if before, ok := strings.CutSuffix(text, "?."); ok {
-		text = before
+	if strings.HasSuffix(text, "?.") {
+		text = strings.TrimSuffix(text, "?.")
+	} else {
+		text = strings.TrimSuffix(text, ".")
 	}
 
-	text = strings.TrimSuffix(text, ".")
 	text = strings.TrimRight(text, " \t")
 
 	i := len(text) - 1
-
 	for i >= 0 {
 		ch := text[i]
-
-		if (ch >= 'a' && ch <= 'z') ||
-			(ch >= 'A' && ch <= 'Z') ||
-			(ch >= '0' && ch <= '9') ||
-			ch == '_' {
+		if isIdentChar(ch) || ch == '.' || ch == '?' {
 			i--
 			continue
 		}
-
 		break
 	}
 
-	return text[i+1:]
+	receiver := strings.TrimSpace(text[i+1:])
+	receiver = strings.TrimSuffix(receiver, "?")
+	return receiver
 }
 
 func parseStdImports(text string) map[string]string {
@@ -2037,6 +2916,8 @@ func symbolKindToCompletionKind(kind SymbolKind) int {
 		return 9
 	case SymbolField:
 		return 5
+	case SymbolEnum:
+		return 13
 	default:
 		return 6
 	}

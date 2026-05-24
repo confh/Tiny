@@ -1,49 +1,16 @@
-//go:build linux && cgo
-// +build linux,cgo
+//go:build linux
+// +build linux
 
 package vm
-
-/*
-#cgo LDFLAGS: -ldl
-#include <dlfcn.h>
-#include <stdlib.h>
-
-typedef char* (*tiny_call_fn)(const char*, const char*);
-typedef void (*tiny_free_fn)(char*);
-
-static void* tiny_open(const char* path) {
-	return dlopen(path, RTLD_NOW);
-}
-
-static void* tiny_sym(void* handle, const char* name) {
-	return dlsym(handle, name);
-}
-
-static const char* tiny_err() {
-	const char* err = dlerror();
-	return err;
-}
-
-static char* tiny_call(void* fn, const char* method, const char* args) {
-	return ((tiny_call_fn)fn)(method, args);
-}
-
-static void tiny_call_free(void* fn, char* ptr) {
-	((tiny_free_fn)fn)(ptr);
-}
-
-static int tiny_close(void* handle) {
-	return dlclose(handle);
-}
-*/
-import "C"
 
 import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"unsafe"
 
+	"github.com/ebitengine/purego"
 	json "github.com/goccy/go-json"
 
 	. "language.com/src/tinyerrors"
@@ -51,10 +18,23 @@ import (
 
 var pluginSearchPaths []string
 
+type loadedNativePluginFuncs struct {
+	call func(method string, argsJSON string) *byte
+	free func(ptr *byte)
+}
+
+var nativePluginFuncs = struct {
+	sync.RWMutex
+	byCallPtr map[uintptr]loadedNativePluginFuncs
+}{
+	byCallPtr: map[uintptr]loadedNativePluginFuncs{},
+}
+
 func defaultPluginPath(path string, ext string) string {
 	if filepath.Ext(path) == "" {
 		return path + ext
 	}
+
 	return path
 }
 
@@ -62,60 +42,77 @@ func (vm *VM) callPluginModule(method string, argCount int) {
 	switch method {
 	case "std":
 		if argCount != 1 {
-			LangError(ErrorRuntime, "Plugin.std expects 1 argument")
+			vm.fatalError(ErrorRuntime, "Plugin.std expects 1 argument")
 		}
 
 		name := asString(vm.pop(), vm)
 
-		availablePlugins := []string{"array", "math", "string", "json", "fs", "app", "buffer", "regex", "io", "process", "time", "error", "http", "os", "runtime", "net", "path", "object"}
+		availablePlugins := []string{
+			"array", "math", "string", "json", "fs", "app", "buffer",
+			"regex", "io", "process", "time", "error", "http", "os",
+			"runtime", "net", "path", "object",
+		}
 
 		if slices.Contains(availablePlugins, name) {
 			vm.push(&StandardModuleValue{Name: name})
-		} else {
-			LangError(ErrorName, "unknown standard module: %s", name)
+			return
 		}
+
+		vm.fatalError(ErrorName, "unknown standard module: %s", name)
+
 	case "load":
 		if argCount != 1 {
-			LangError(ErrorRuntime, "Plugin.load expects 1 argument")
+			vm.fatalError(ErrorRuntime, "Plugin.load expects 1 argument")
 		}
 
 		path := asString(vm.pop(), vm)
 		path = resolvePluginPath(path, ".so")
 
-		cpath := C.CString(path)
-		defer C.free(unsafe.Pointer(cpath))
-
-		handle := C.tiny_open(cpath)
-		if handle == nil {
-			errText := C.GoString(C.tiny_err())
-			LangError(ErrorRuntime, "failed to load plugin %s: %s", path, errText)
+		handle, err := purego.Dlopen(path, purego.RTLD_NOW)
+		if err != nil {
+			vm.fatalError(ErrorRuntime, "failed to load plugin %s: %v", path, err)
 		}
 
-		callName := C.CString("TinyPluginCall")
-		defer C.free(unsafe.Pointer(callName))
-
-		freeName := C.CString("TinyPluginFree")
-		defer C.free(unsafe.Pointer(freeName))
-
-		callPtr := C.tiny_sym(handle, callName)
-		if callPtr == nil {
-			LangError(ErrorRuntime, "plugin missing TinyPluginCall")
+		callPtr, err := purego.Dlsym(handle, "TinyPluginCall")
+		if err != nil || callPtr == 0 {
+			_ = purego.Dlclose(handle)
+			if err != nil {
+				vm.fatalError(ErrorRuntime, "plugin missing TinyPluginCall: %v", err)
+			}
+			vm.fatalError(ErrorRuntime, "plugin missing TinyPluginCall")
 		}
 
-		freePtr := C.tiny_sym(handle, freeName)
-		if freePtr == nil {
-			LangError(ErrorRuntime, "plugin missing TinyPluginFree")
+		freePtr, err := purego.Dlsym(handle, "TinyPluginFree")
+		if err != nil || freePtr == 0 {
+			_ = purego.Dlclose(handle)
+			if err != nil {
+				vm.fatalError(ErrorRuntime, "plugin missing TinyPluginFree: %v", err)
+			}
+			vm.fatalError(ErrorRuntime, "plugin missing TinyPluginFree")
 		}
+
+		var callFn func(method string, argsJSON string) *byte
+		var freeFn func(ptr *byte)
+
+		purego.RegisterFunc(&callFn, callPtr)
+		purego.RegisterFunc(&freeFn, freePtr)
+
+		nativePluginFuncs.Lock()
+		nativePluginFuncs.byCallPtr[callPtr] = loadedNativePluginFuncs{
+			call: callFn,
+			free: freeFn,
+		}
+		nativePluginFuncs.Unlock()
 
 		vm.push(&NativePluginValue{
 			Path:   path,
-			Handle: handle,
-			Call:   uintptr(callPtr),
-			Free:   uintptr(freePtr),
+			Handle: unsafe.Pointer(handle),
+			Call:   callPtr,
+			Free:   freePtr,
 		})
 
 	default:
-		LangError(ErrorName, "unknown Plugin function: %s", method)
+		vm.fatalError(ErrorName, "unknown Plugin function: %s", method)
 	}
 }
 
@@ -128,20 +125,17 @@ func resolvePluginPath(path string, ext string) string {
 
 	candidates := []string{}
 
-	// 1. Try relative to current working directory.
 	cwd, err := os.Getwd()
 	if err == nil {
 		candidates = append(candidates, filepath.Join(cwd, path))
 	}
 
-	// 2. Try relative to executable folder.
 	exePath, err := os.Executable()
 	if err == nil {
 		exeDir := filepath.Dir(exePath)
 		candidates = append(candidates, filepath.Join(exeDir, path))
 	}
 
-	// 3. Try registered source/import folders.
 	for _, base := range pluginSearchPaths {
 		candidates = append(candidates, filepath.Join(base, path))
 	}
@@ -161,6 +155,14 @@ func fileExists(path string) bool {
 }
 
 func (vm *VM) callNativePlugin(plugin *NativePluginValue, method string, args []Value) {
+	nativePluginFuncs.RLock()
+	fns, ok := nativePluginFuncs.byCallPtr[plugin.Call]
+	nativePluginFuncs.RUnlock()
+
+	if !ok || fns.call == nil || fns.free == nil {
+		vm.fatalError(ErrorRuntime, "plugin %s is not loaded correctly", plugin.Path)
+	}
+
 	jsonArgs := make([]any, len(args))
 	for i, arg := range args {
 		jsonArgs[i] = valueToJSONCompatible(arg)
@@ -173,28 +175,21 @@ func (vm *VM) callNativePlugin(plugin *NativePluginValue, method string, args []
 
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		LangError(ErrorRuntime, "failed to encode plugin call: %v", err)
+		vm.fatalError(ErrorRuntime, "failed to encode plugin call: %v", err)
 	}
 
-	cmethod := C.CString(method)
-	defer C.free(unsafe.Pointer(cmethod))
-
-	cargs := C.CString(string(payloadBytes))
-	defer C.free(unsafe.Pointer(cargs))
-
-	resultPtr := C.tiny_call(unsafe.Pointer(plugin.Call), cmethod, cargs)
+	resultPtr := fns.call(method, string(payloadBytes))
 	if resultPtr == nil {
-		LangError(ErrorRuntime, "plugin returned null")
+		vm.fatalError(ErrorRuntime, "plugin returned null")
 	}
 
-	resultText := C.GoString(resultPtr)
-
-	C.tiny_call_free(unsafe.Pointer(plugin.Free), resultPtr)
+	resultText := cStringToGo(resultPtr)
+	fns.free(resultPtr)
 
 	var result any
 	err = json.Unmarshal([]byte(resultText), &result)
 	if err != nil {
-		LangError(ErrorRuntime, "plugin returned invalid JSON: %v", err)
+		vm.fatalError(ErrorRuntime, "plugin returned invalid JSON: %v", err)
 	}
 
 	if obj, ok := result.(map[string]any); ok {
@@ -204,13 +199,36 @@ func (vm *VM) callNativePlugin(plugin *NativePluginValue, method string, args []
 				message, _ := errObj["message"].(string)
 
 				if kind == "" {
-					kind = "PluginError"
+					kind = string(ErrorRuntime)
 				}
 
-				LangError(ErrorKind(kind), "%s", message)
+				if message == "" {
+					message = "plugin returned an error"
+				}
+
+				vm.fatalError(ErrorKind(kind), "%s", message)
 			}
 		}
 	}
 
 	vm.push(jsonToTinyValue(result))
+}
+
+func cStringToGo(ptr *byte) string {
+	if ptr == nil {
+		return ""
+	}
+
+	n := 0
+	base := uintptr(unsafe.Pointer(ptr))
+
+	for {
+		b := *(*byte)(unsafe.Pointer(base + uintptr(n)))
+		if b == 0 {
+			break
+		}
+		n++
+	}
+
+	return string(unsafe.Slice(ptr, n))
 }

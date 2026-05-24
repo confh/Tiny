@@ -75,7 +75,7 @@ var stdFsMetadata = StdModuleInfo{
 			Args: []StdArg{
 				{Name: "path", Type: "string", Optional: false},
 			},
-			Returns:     "Object",
+			Returns:     "object",
 			Description: "Returns file statistics (name, size, isDir, modTime) for the given path.",
 		},
 		"copy": {

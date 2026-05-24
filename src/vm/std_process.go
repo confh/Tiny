@@ -69,18 +69,18 @@ var stdProcessMetadata = StdModuleInfo{
 			Args: []StdArg{
 				{Name: "command", Type: "string", Optional: false},
 				{Name: "args", Type: "array", Optional: true},
-				{Name: "options", Type: "Object", Optional: true},
+				{Name: "options", Type: "object", Optional: true},
 			},
-			Returns:     "Object",
+			Returns:     "object",
 			Description: "Runs a command synchronously, optionally in a different directory and with stdio capture.",
 		},
 		"shell": {
 			Name: "shell",
 			Args: []StdArg{
 				{Name: "command", Type: "string", Optional: false},
-				{Name: "options", Type: "Object", Optional: true},
+				{Name: "options", Type: "object", Optional: true},
 			},
-			Returns:     "Object",
+			Returns:     "object",
 			Description: "Runs a shell command (platform-dependent).",
 		},
 		"start": {
@@ -88,7 +88,7 @@ var stdProcessMetadata = StdModuleInfo{
 			Args: []StdArg{
 				{Name: "command", Type: "string", Optional: false},
 				{Name: "args", Type: "array", Optional: true},
-				{Name: "options", Type: "Object", Optional: true},
+				{Name: "options", Type: "object", Optional: true},
 			},
 			Returns:     "Process",
 			Description: "Spawns a new process asynchronously.",

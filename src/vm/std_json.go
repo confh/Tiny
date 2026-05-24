@@ -13,7 +13,7 @@ var stdJsonMetadata = StdModuleInfo{
 		"stringify": {
 			Name: "stringify",
 			Args: []StdArg{
-				{Name: "value", Type: "object", Optional: false},
+				{Name: "value", Type: "object | array", Optional: false},
 			},
 			Returns:     "string",
 			Description: "Serializes an object value as a JSON string.",
@@ -21,7 +21,7 @@ var stdJsonMetadata = StdModuleInfo{
 		"pretty": {
 			Name: "pretty",
 			Args: []StdArg{
-				{Name: "value", Type: "object", Optional: false},
+				{Name: "value", Type: "object | array", Optional: false},
 			},
 			Returns:     "string",
 			Description: "Serializes an object value as a pretty-printed JSON string.",
@@ -78,25 +78,37 @@ func (vm *VM) callStdJson(method string, args []Value) {
 func stdJsonStringify(vm *VM, args []Value) {
 	expectArgs(vm, "json.stringify", args, 1)
 
-	value := argObject(vm, "json.stringify", args, 0)
-	jsonValue := valueToJSONCompatible(value)
-	bytes, err := json.Marshal(jsonValue)
-	if err != nil {
-		vm.runtimeError(ErrorRuntime, "failed to convert value to JSON: %v", err)
+	switch value := args[0].(type) {
+	case ObjectValue, ArrayValue, *ArrayValue:
+		jsonValue := valueToJSONCompatible(value)
+		bytes, err := json.Marshal(jsonValue)
+		if err != nil {
+			vm.runtimeError(ErrorRuntime, "failed to convert value to JSON: %v", err)
+		}
+
+		vm.push(string(bytes))
+
+	default:
+		vm.fatalError(ErrorType, "json.stringify expected an array or an object, got %s", TypeName(value))
 	}
-	vm.push(string(bytes))
 }
 
 func stdJsonPretty(vm *VM, args []Value) {
 	expectArgs(vm, "json.pretty", args, 1)
 
-	value := argObject(vm, "json.pretty", args, 0)
-	jsonValue := valueToJSONCompatible(value)
-	bytes, err := json.MarshalIndent(jsonValue, "", "  ")
-	if err != nil {
-		vm.runtimeError(ErrorRuntime, "failed to convert value to JSON: %v", err)
+	switch value := args[0].(type) {
+	case ObjectValue, ArrayValue, *ArrayValue:
+		jsonValue := valueToJSONCompatible(value)
+		bytes, err := json.MarshalIndent(jsonValue, "", "  ")
+		if err != nil {
+			vm.runtimeError(ErrorRuntime, "failed to convert value to JSON: %v", err)
+		}
+
+		vm.push(string(bytes))
+
+	default:
+		vm.fatalError(ErrorType, "json.pretty expected an array or an object, got %s", TypeName(value))
 	}
-	vm.push(string(bytes))
 }
 
 func stdJsonParse(vm *VM, args []Value) {

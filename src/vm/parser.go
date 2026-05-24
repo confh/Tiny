@@ -999,9 +999,14 @@ func (p *Parser) parseIfStatement() Stmt {
 	var elseBody []Stmt
 
 	if p.current.Type == TOKEN_ELSE {
-		p.expect(TOKEN_ELSE)
+		p.advance()
 
-		elseBody = p.parseBlock()
+		if p.current.Type == TOKEN_IF {
+			elseIfStmt := p.parseIfStatement()
+			elseBody = []Stmt{elseIfStmt}
+		} else {
+			elseBody = p.parseBlock()
+		}
 	}
 
 	return IfStmt{
@@ -1388,6 +1393,16 @@ func (p *Parser) parseFunctionStatement() Stmt {
 	}
 }
 
+func containsString(items []string, target string) bool {
+	for _, item := range items {
+		if item == target {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (p *Parser) parseParameterList() []Param {
 	params := []Param{}
 
@@ -1415,6 +1430,13 @@ func (p *Parser) parseParameterList() []Param {
 		name := p.current.Literal
 		p.advance()
 
+		nullable := false
+
+		if p.current.Type == TOKEN_QUESTION {
+			p.advance()
+			nullable = true
+		}
+
 		typeHint := TypeHint{}
 
 		if p.current.Type == TOKEN_COLON {
@@ -1438,10 +1460,39 @@ func (p *Parser) parseParameterList() []Param {
 			}
 		}
 
+		if nullable {
+			if typeHint.IsEmpty() {
+				typeHint = TypeHint{
+					Name:  "any|undefined|null",
+					Types: []string{"any", "undefined", "null"},
+				}
+			} else {
+				types := typeHint.AllTypes()
+
+				if !containsString(types, "undefined") {
+					types = append(types, "undefined")
+				}
+
+				if !containsString(types, "null") {
+					types = append(types, "null")
+				}
+
+				typeHint = TypeHint{
+					Name:  strings.Join(types, "|"),
+					Types: types,
+				}
+			}
+		}
+
 		param := Param{
 			Name:     name,
 			TypeHint: typeHint,
 			Variadic: variadic,
+		}
+
+		if nullable {
+			param.HasDefault = true
+			param.DefaultValue = UndefinedValue{}
 		}
 
 		if p.current.Type == TOKEN_ASSIGN {
@@ -1782,6 +1833,9 @@ func (p *Parser) parsePostfix() Expr {
 			expr = CallValueExpr{
 				Callee: expr,
 				Args:   args,
+				File:   p.current.File,
+				Line:   p.current.Line,
+				Column: p.current.Column,
 			}
 
 		case TOKEN_DOT, TOKEN_QUESTION_DOT:
