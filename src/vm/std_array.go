@@ -13,7 +13,7 @@ var stdArrayMetadata = StdModuleInfo{
 				{Name: "min", Type: "int", Optional: false},
 				{Name: "max", Type: "int", Optional: false},
 			},
-			Returns:     "Array",
+			Returns:     "array",
 			Description: "Creates an array containing all integers from min to max (inclusive).",
 		},
 		"isArray": {
@@ -29,7 +29,7 @@ var stdArrayMetadata = StdModuleInfo{
 			Args: []StdArg{
 				{Name: "value", Type: "any", Optional: false},
 			},
-			Returns:     "Array",
+			Returns:     "array",
 			Description: "Converts a string or array-like value into an Array.",
 		},
 	},

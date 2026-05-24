@@ -49,7 +49,7 @@ var stdObjectMetadata = StdModuleInfo{
 			Args: []StdArg{
 				{Name: "object", Type: "object"},
 			},
-			Returns:     "Array",
+			Returns:     "array",
 			Description: "Returns an array of keys in the object.",
 		},
 		"values": {
@@ -57,7 +57,7 @@ var stdObjectMetadata = StdModuleInfo{
 			Args: []StdArg{
 				{Name: "object", Type: "object"},
 			},
-			Returns:     "Array",
+			Returns:     "array",
 			Description: "Returns an array of values in the object.",
 		},
 		"enteries": {
@@ -65,7 +65,7 @@ var stdObjectMetadata = StdModuleInfo{
 			Args: []StdArg{
 				{Name: "object", Type: "object"},
 			},
-			Returns:     "Array",
+			Returns:     "array",
 			Description: "Returns an array of [key, value] pairs for each entry in the object.",
 		},
 		"length": {

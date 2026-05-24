@@ -285,6 +285,10 @@ func (e ObjectExpr) exprNode() {}
 type PropertyExpr struct {
 	Object Expr
 	Name   string
+	Safe   bool
+	File   string
+	Line   int
+	Column int
 }
 
 func (e PropertyExpr) exprNode() {}
@@ -437,6 +441,7 @@ type MemberCallExpr struct {
 	Object Expr
 	Method string
 	Args   []Expr
+	Safe   bool
 	File   string
 	Line   int
 	Column int

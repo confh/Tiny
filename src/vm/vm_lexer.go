@@ -178,7 +178,23 @@ func (l *Lexer) NextToken() Token {
 	}
 
 	switch ch {
+	case '|':
+		tok := Token{
+			Type:    TOKEN_PIPE,
+			Literal: "|",
+			File:    l.file,
+			Line:    l.line,
+			Column:  l.column,
+		}
+		l.advance()
+		return tok
 	case '?':
+		if l.peek() == '.' {
+			l.pos += 2
+			l.column += 2
+			return l.tokenAt(start, TOKEN_QUESTION_DOT, "?.")
+		}
+
 		tok := Token{
 			Type:    TOKEN_QUESTION,
 			Literal: "?",

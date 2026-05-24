@@ -29,7 +29,7 @@ var stdBufferMetadata = StdModuleInfo{
 		"fromArray": {
 			Name: "fromArray",
 			Args: []StdArg{
-				{Name: "array", Type: "Array", Optional: false},
+				{Name: "array", Type: "array", Optional: false},
 			},
 			Returns:     "buffer",
 			Description: "Creates a buffer from an array of numbers, as a float64 buffer.",

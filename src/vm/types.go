@@ -1,19 +1,53 @@
 package vm
 
+import "strings"
+
 type TypeHint struct {
-	Name string
+	Name  string   `json:"name"`
+	Types []string `json:"types,omitempty"`
 }
 
 func (t TypeHint) IsEmpty() bool {
-	return t.Name == ""
+	return t.Name == "" && len(t.Types) == 0
+}
+
+func (t TypeHint) AllTypes() []string {
+	if len(t.Types) > 0 {
+		return t.Types
+	}
+
+	if t.Name != "" {
+		return []string{t.Name}
+	}
+
+	return []string{}
+}
+
+func (t TypeHint) String() string {
+	types := t.AllTypes()
+	if len(types) == 0 {
+		return "any"
+	}
+
+	return strings.Join(types, " | ")
 }
 
 func CheckTypeHint(value Value, hint TypeHint) bool {
-	if hint.IsEmpty() {
+	if hint.IsEmpty() || hint.Name == "any" {
 		return true
 	}
 
-	switch hint.Name {
+	for _, typ := range hint.AllTypes() {
+		if checkSingleTypeHint(value, typ) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func checkSingleTypeHint(value Value, hint string) bool {
+	switch hint {
 	case "any":
 		return true
 
@@ -72,7 +106,15 @@ func CheckTypeHint(value Value, hint TypeHint) bool {
 		return TypeName(value) == "undefined"
 
 	default:
-		// Later: class names.
-		return TypeName(value) == hint.Name
+		if obj, ok := value.(ObjectValue); ok {
+			classValue, exists := obj["__class"]
+			if exists {
+				className, ok := classValue.(string)
+				if ok && className == hint {
+					return true
+				}
+			}
+		}
+		return TypeName(value) == hint
 	}
 }

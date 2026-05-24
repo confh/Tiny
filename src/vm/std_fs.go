@@ -59,7 +59,7 @@ var stdFsMetadata = StdModuleInfo{
 			Args: []StdArg{
 				{Name: "dirName", Type: "string", Optional: false},
 			},
-			Returns:     "Array",
+			Returns:     "array",
 			Description: "Returns an array of filenames in the given directory.",
 		},
 		"mkDir": {

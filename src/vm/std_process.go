@@ -16,7 +16,7 @@ var stdProcessMetadata = StdModuleInfo{
 		"args": {
 			Name:        "args",
 			Args:        []StdArg{},
-			Returns:     "Array",
+			Returns:     "array",
 			Description: "Returns an array of command-line arguments with which the process was started.",
 		},
 		"exit": {
@@ -68,7 +68,7 @@ var stdProcessMetadata = StdModuleInfo{
 			Name: "run",
 			Args: []StdArg{
 				{Name: "command", Type: "string", Optional: false},
-				{Name: "args", Type: "Array", Optional: true},
+				{Name: "args", Type: "array", Optional: true},
 				{Name: "options", Type: "Object", Optional: true},
 			},
 			Returns:     "Object",
@@ -87,7 +87,7 @@ var stdProcessMetadata = StdModuleInfo{
 			Name: "start",
 			Args: []StdArg{
 				{Name: "command", Type: "string", Optional: false},
-				{Name: "args", Type: "Array", Optional: true},
+				{Name: "args", Type: "array", Optional: true},
 				{Name: "options", Type: "Object", Optional: true},
 			},
 			Returns:     "Process",

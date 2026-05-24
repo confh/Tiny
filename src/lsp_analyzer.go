@@ -70,11 +70,20 @@ type AnalysisResult struct {
 	Imports     map[string]string
 }
 
-var variableLineRegex = regexp.MustCompile(`^(?:let|const)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*([A-Za-z_][A-Za-z0-9_]*))?\s*=\s*(.+?);?$`)
-var fieldLineRegex = regexp.MustCompile(`^(?:field)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*([A-Za-z_][A-Za-z0-9_]*))?\s*=\s*(.+?);?$`)
-var functionLineRegex = regexp.MustCompile(`^(?:(?:public|private)\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*(?::\s*([A-Za-z_][A-Za-z0-9_]*))?`)
+var typeNamePattern = `[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*`
+var unionTypePattern = typeNamePattern + `(?:\s*\|\s*` + typeNamePattern + `)*`
+
+var variableLineRegex = regexp.MustCompile(
+	`^(?:let|const)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*(` + unionTypePattern + `))?\s*=\s*(.+?);?$`,
+)
+var fieldLineRegex = regexp.MustCompile(
+	`^field\s+(?:(?:public|private|const)\s+)*([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*(` + unionTypePattern + `))?\s*(?:=\s*(.+?))?;?$`,
+)
+var functionLineRegex = regexp.MustCompile(
+	`^(?:(?:public|private)\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*(?::\s*(` + unionTypePattern + `))?`,
+)
 var classLineRegex = regexp.MustCompile(`^class\s+([A-Za-z_][A-Za-z0-9_]*)`)
-var memberCallRegex = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
+var memberCallRegex = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\.([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
 var normalCallRegex = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
 var classEmbedRegex = regexp.MustCompile(`\bembed\s+([A-Za-z_][A-Za-z0-9_]*)\s*;?`)
 var returnRegex = regexp.MustCompile(`return\s+(.+?);`)
@@ -95,6 +104,37 @@ type blockInfo struct {
 	Line       int
 	Column     int
 	Exported   bool
+}
+
+func splitUnionType(typ string) []string {
+	typ = strings.TrimSpace(typ)
+
+	if typ == "" {
+		return []string{}
+	}
+
+	if !strings.Contains(typ, "|") {
+		return []string{typ}
+	}
+
+	parts := strings.Split(typ, "|")
+	result := []string{}
+
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+
+		result = append(result, part)
+	}
+
+	return result
+}
+
+func isNullishLSPType(typ string) bool {
+	typ = strings.TrimSpace(typ)
+	return typ == "null" || typ == "undefined"
 }
 
 func scanCatchVariables(scope *Scope, text string, pos Position, uri string) {
@@ -191,6 +231,28 @@ func checkUndefinedMethodOnLine(scope *Scope, rawLine string, lineIndex int) []m
 	return diagnostics
 }
 
+func resolveClassSymbol(scope *Scope, className string) (SymbolInfo, bool) {
+	if sym, ok := scope.Resolve(className); ok && sym.Kind == SymbolClass {
+		return sym, true
+	}
+
+	if strings.Contains(className, ".") {
+		parts := strings.SplitN(className, ".", 2)
+		nsName := parts[0]
+		memberName := parts[1]
+
+		ns, ok := scope.Resolve(nsName)
+		if ok && ns.Kind == SymbolNamespace {
+			member, ok := ns.Members[memberName]
+			if ok && member.Kind == SymbolClass {
+				return member, true
+			}
+		}
+	}
+
+	return SymbolInfo{}, false
+}
+
 func memberExistsOnSymbol(scope *Scope, sym SymbolInfo, member string) bool {
 	if strings.HasPrefix(sym.Type, "task:") {
 		return member == "await"
@@ -216,7 +278,7 @@ func memberExistsOnSymbol(scope *Scope, sym SymbolInfo, member string) bool {
 	if strings.HasPrefix(sym.Type, "class:") {
 		className := strings.TrimPrefix(sym.Type, "class:")
 
-		classSym, ok := scope.Resolve(className)
+		classSym, ok := resolveClassSymbol(scope, className)
 		if !ok || classSym.Kind != SymbolClass {
 			return false
 		}
@@ -288,6 +350,17 @@ func shouldCheckMemberAccess(receiverType string) bool {
 
 	if receiverType == "any" || receiverType == "unknown" || receiverType == "undefined" || receiverType == "null" {
 		return false
+	}
+
+	if strings.Contains(receiverType, "|") {
+		parts := strings.Split(receiverType, "|")
+
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			if part == "any" || part == "unknown" || part == "null" || part == "undefined" {
+				return false
+			}
+		}
 	}
 
 	return true
@@ -554,7 +627,7 @@ func fallbackScopeAtPosition(uri string, text string, pos Position) *Scope {
 			scope.Define(SymbolInfo{
 				Name:      param.Name,
 				Kind:      SymbolVariable,
-				Type:      param.Type,
+				Type:      normalizeLSPType(scope, param.Type),
 				Detail:    "parameter " + param.Name,
 				Line:      currentFunction.Line,
 				Column:    1,
@@ -582,7 +655,7 @@ func scanFunctionLine(scope *Scope, line string, lineNumber int, uri string) {
 	returnType := "any"
 
 	if len(match) > 3 && match[3] != "" {
-		returnType = match[3]
+		returnType = normalizeLSPType(scope, match[3])
 	}
 
 	scope.Define(SymbolInfo{
@@ -593,7 +666,7 @@ func scanFunctionLine(scope *Scope, line string, lineNumber int, uri string) {
 		Line:      lineNumber,
 		Column:    indexColumn(line, name),
 		SourceURI: uri,
-		Params:    parseFunctionParams(paramsText),
+		Params:    normalizeStdArgs(scope, parseFunctionParams(paramsText)),
 		Returns:   returnType,
 	})
 }
@@ -634,7 +707,7 @@ func scanFieldLine(scope *Scope, line string, lineNumber int, uri string) {
 	fields := map[string]SymbolInfo(nil)
 
 	if typeHint != "" {
-		typ = typeHint
+		typ = normalizeLSPType(scope, typeHint)
 	} else {
 		typ = inferExprTypeFromText(scope, exprText)
 		if typ == "object" {
@@ -669,7 +742,7 @@ func scanVariableLine(scope *Scope, line string, lineNumber int, uri string) {
 	fields := map[string]SymbolInfo(nil)
 
 	if typeHint != "" {
-		typ = typeHint
+		typ = normalizeLSPType(scope, typeHint)
 	} else {
 		typ = inferExprTypeFromText(scope, exprText)
 		if typ == "object" {
@@ -701,7 +774,7 @@ func scanFullFunctions(scope *Scope, text string, maxLine int, uri string) {
 			continue
 		}
 
-		params := parseFunctionParams(block.ParamsText)
+		params := normalizeStdArgs(scope, parseFunctionParams(block.ParamsText))
 		returnType := inferReturnTypeFromBody(scope, block.Body, block.ReturnType)
 
 		scope.Define(SymbolInfo{
@@ -778,7 +851,7 @@ func scanClassFields(scope *Scope, classBody string, uri string, baseLine int) m
 
 		typ := "unknown"
 		if typeHint != "" {
-			typ = typeHint
+			typ = normalizeLSPType(scope, typeHint)
 		} else {
 			typ = inferExprTypeFromText(scope, expr)
 		}
@@ -842,7 +915,7 @@ func scanFullClasses(scope *Scope, text string, maxLine int, uri string) {
 		collectEmbeddedMethods(scope, block.Body, methods)
 
 		for _, methodBlock := range findBlocks(block.Body, "fn") {
-			params := parseFunctionParams(methodBlock.ParamsText)
+			params := normalizeStdArgs(scope, parseFunctionParams(methodBlock.ParamsText))
 			returnType := inferReturnTypeFromBody(scope, methodBlock.Body, methodBlock.ReturnType)
 
 			detail := "method " + block.Name + "." + methodBlock.Name
@@ -937,7 +1010,7 @@ func scanAnonymousFunctions(scope *Scope, text string, maxLine int, uri string) 
 		}
 
 		returnType := inferReturnTypeFromBody(scope, block.Body, block.ReturnType)
-		params := parseFunctionParams(block.ParamsText)
+		params := normalizeStdArgs(scope, parseFunctionParams(block.ParamsText))
 
 		if strings.Contains(line, "= spawn fn") {
 			scope.Define(SymbolInfo{
@@ -1059,8 +1132,13 @@ func parseFunctionLikeBlockAt(text string, start int, kind string) (blockInfo, b
 			i = skipSpaces(text, i)
 
 			retStart := i
-			for i < len(text) && isIdentByte(text[i]) {
-				i++
+			for i < len(text) {
+				ch := text[i]
+				if isIdentByte(ch) || ch == '.' || ch == '|' || ch == ' ' || ch == '\t' {
+					i++
+					continue
+				}
+				break
 			}
 
 			returnType = strings.TrimSpace(text[retStart:i])
@@ -1175,7 +1253,7 @@ func findMatching(text string, openIndex int, open byte, close byte) int {
 
 func inferReturnTypeFromBody(scope *Scope, body string, explicitReturn string) string {
 	if explicitReturn != "" {
-		return explicitReturn
+		return normalizeLSPType(scope, explicitReturn)
 	}
 
 	matches := returnRegex.FindAllStringSubmatch(body, -1)
@@ -1323,7 +1401,7 @@ func inferMemberCallTypeFromText(scope *Scope, expr string) string {
 		}
 
 		if member.Kind == SymbolClass {
-			return "class:" + member.Name
+			return "class:" + receiver + "." + member.Name
 		}
 
 		return member.Type
@@ -1332,7 +1410,7 @@ func inferMemberCallTypeFromText(scope *Scope, expr string) string {
 	if strings.HasPrefix(sym.Type, "class:") {
 		className := strings.TrimPrefix(sym.Type, "class:")
 
-		classSym, ok := scope.Resolve(className)
+		classSym, ok := resolveClassSymbol(scope, className)
 		if !ok || classSym.Kind != SymbolClass {
 			return ""
 		}
@@ -1529,25 +1607,36 @@ func parseFunctionParams(paramsText string) []StdArg {
 			raw = strings.TrimSpace(strings.TrimPrefix(raw, "..."))
 		}
 
-		arg := StdArg{
-			Name: raw,
-			Type: "any",
-		}
+		name := raw
+		typ := "any"
 
 		if strings.Contains(raw, ":") {
 			parts := strings.SplitN(raw, ":", 2)
-			arg.Name = strings.TrimSpace(parts[0])
-			arg.Type = strings.TrimSpace(parts[1])
+			name = strings.TrimSpace(parts[0])
+			typ = strings.TrimSpace(parts[1])
 		}
 
 		if isVariadic {
-			arg.Type = "array"
+			typ = "array"
 		}
 
-		params = append(params, arg)
+		params = append(params, StdArg{
+			Name:     name,
+			Type:     typ,
+			Optional: false,
+		})
 	}
 
 	return params
+}
+
+func normalizeStdArgs(scope *Scope, params []StdArg) []StdArg {
+	out := make([]StdArg, len(params))
+	for i, p := range params {
+		out[i] = p
+		out[i].Type = normalizeLSPType(scope, p.Type)
+	}
+	return out
 }
 
 func loadTinyFileExports(path string, visited map[string]bool) map[string]SymbolInfo {
@@ -1641,7 +1730,7 @@ func scanExportedFunctions(scope *Scope, text string, exports map[string]SymbolI
 			continue
 		}
 
-		params := parseFunctionParams(block.ParamsText)
+		params := normalizeStdArgs(scope, parseFunctionParams(block.ParamsText))
 		returnType := inferReturnTypeFromBody(scope, block.Body, block.ReturnType)
 
 		sym := SymbolInfo{
@@ -1671,7 +1760,7 @@ func scanExportedClasses(scope *Scope, text string, exports map[string]SymbolInf
 		collectEmbeddedMethods(scope, block.Body, methods)
 
 		for _, methodBlock := range findBlocks(block.Body, "fn") {
-			params := parseFunctionParams(methodBlock.ParamsText)
+			params := normalizeStdArgs(scope, parseFunctionParams(methodBlock.ParamsText))
 			returnType := inferReturnTypeFromBody(scope, methodBlock.Body, methodBlock.ReturnType)
 
 			methods[methodBlock.Name] = SymbolInfo{
@@ -1726,7 +1815,7 @@ func scanExportedVariables(scope *Scope, text string, exports map[string]SymbolI
 		fields := map[string]SymbolInfo(nil)
 
 		if typeHint != "" {
-			typ = typeHint
+			typ = normalizeLSPType(scope, typeHint)
 		} else {
 			typ = inferExprTypeFromText(scope, expr)
 			if typ == "object" {
@@ -1969,8 +2058,8 @@ func analyzeTopLevelStmt(result AnalysisResult, scope *Scope, stmt Stmt) {
 			Kind:    SymbolFunction,
 			Type:    "function",
 			Detail:  "fn " + s.Name,
-			Params:  paramsFromAST(s.Params),
-			Returns: typeHintName(s.ReturnType, "any"),
+			Params:  paramsFromAST(scope, s.Params),
+			Returns: normalizeLSPType(scope, typeHintName(s.ReturnType, "any")),
 		})
 
 	case ClassStmt:
@@ -2000,7 +2089,7 @@ func analyzeTopLevelStmt(result AnalysisResult, scope *Scope, stmt Stmt) {
 	}
 }
 
-func paramsFromAST(params []Param) []StdArg {
+func paramsFromAST(scope *Scope, params []Param) []StdArg {
 	args := []StdArg{}
 
 	for _, param := range params {
@@ -2008,6 +2097,8 @@ func paramsFromAST(params []Param) []StdArg {
 
 		if param.Variadic {
 			typ = "array"
+		} else {
+			typ = normalizeLSPType(scope, typ)
 		}
 
 		args = append(args, StdArg{
@@ -2144,7 +2235,7 @@ func inferMemberCallTypeFromParts(scope *Scope, receiverType string, method stri
 
 	if strings.HasPrefix(receiverType, "class:") {
 		className := strings.TrimPrefix(receiverType, "class:")
-		if classSym, ok := scope.Resolve(className); ok {
+		if classSym, ok := resolveClassSymbol(scope, className); ok {
 			if methodSym, ok := classSym.Methods[method]; ok {
 				return firstNonEmpty(methodSym.Returns, "any")
 			}
@@ -2181,7 +2272,7 @@ func scanInlineAnonymousFunctionParams(scope *Scope, text string, pos Position, 
 				scope.Define(SymbolInfo{
 					Name:      param.Name,
 					Kind:      SymbolVariable,
-					Type:      param.Type,
+					Type:      normalizeLSPType(scope, param.Type),
 					Detail:    "anonymous function parameter " + param.Name,
 					Line:      lineIndex + 1,
 					Column:    indexColumn(line, param.Name),
@@ -2248,7 +2339,7 @@ func getHover(uri string, text string, pos Position) any {
 		if strings.HasPrefix(sym.Type, "class:") {
 			className := strings.TrimPrefix(sym.Type, "class:")
 
-			classSym, ok := scope.Resolve(className)
+			classSym, ok := resolveClassSymbol(scope, className)
 			if !ok || classSym.Kind != SymbolClass {
 				return nil
 			}
@@ -2411,19 +2502,26 @@ func (a *astSemanticAnalyzer) addDiagnostic(line int, column int, message string
 	a.diagnostics = append(a.diagnostics, makeRangeDiagnostic(line-1, column-1, column, 2, message))
 }
 
-func stdArgsFromParams(params []Param) []StdArg {
+func stdArgsFromParams(scope *Scope, params []Param) []StdArg {
 	args := []StdArg{}
+
 	for _, p := range params {
 		name := p.Name
 		typ := typeHintName(p.TypeHint, "any")
+
 		if p.Variadic {
-			name = "..." + name
-			if typ == "any" {
-				typ = "array"
-			}
+			typ = "array"
+		} else {
+			typ = normalizeLSPType(scope, typ)
 		}
-		args = append(args, StdArg{Name: name, Type: typ, Optional: p.HasDefault})
+
+		args = append(args, StdArg{
+			Name:     name,
+			Type:     typ,
+			Optional: p.HasDefault,
+		})
 	}
+
 	return args
 }
 
@@ -2432,6 +2530,13 @@ func returnTypeName(h TypeHint) string {
 		return "any"
 	}
 	return h.Name
+}
+
+func returnTypeNameScoped(scope *Scope, h TypeHint) string {
+	if h.IsEmpty() {
+		return "any"
+	}
+	return normalizeLSPType(scope, h.Name)
 }
 
 func (a *astSemanticAnalyzer) predeclareStatements(stmts []Stmt) {
@@ -2443,18 +2548,33 @@ func (a *astSemanticAnalyzer) predeclareStatements(stmts []Stmt) {
 			if alias == "" {
 				alias = s.Path
 			}
-			typ := "any"
-			kind := SymbolVariable
-			detail := "import " + s.Path
+
 			if s.Std {
-				typ = "std:" + s.Path
-				kind = SymbolStd
-				detail = "std module " + s.Path
+				a.root.Define(SymbolInfo{
+					Name: alias, Kind: SymbolStd, Type: "std:" + s.Path,
+					Detail: "std module " + s.Path, Line: s.Line, Column: s.Column, SourceURI: a.uri,
+				})
+				break
 			}
-			a.root.Define(SymbolInfo{Name: alias, Kind: kind, Type: typ, Detail: detail, Line: s.Line, Column: s.Column, SourceURI: a.uri})
+
+			// Non-std imports are already loaded by scanFileImportsIntoScope(root, ...).
+			// Do NOT overwrite namespace imports like:
+			// import "user.tiny" as models;
+			// because that destroys models.User for diagnostics.
+			if existing, ok := a.root.Resolve(alias); ok {
+				existing.Line = s.Line
+				existing.Column = s.Column
+				a.root.Define(existing)
+				break
+			}
+
+			a.root.Define(SymbolInfo{
+				Name: alias, Kind: SymbolVariable, Type: "any",
+				Detail: "import " + s.Path, Line: s.Line, Column: s.Column, SourceURI: a.uri,
+			})
 
 		case FunctionStmt:
-			a.root.Define(SymbolInfo{Name: s.Name, Kind: SymbolFunction, Type: "function", Detail: "fn " + s.Name, Line: s.Line, Column: s.Column, SourceURI: a.uri, Params: stdArgsFromParams(s.Params), Returns: returnTypeName(s.ReturnType)})
+			a.root.Define(SymbolInfo{Name: s.Name, Kind: SymbolFunction, Type: "function", Detail: "fn " + s.Name, Line: s.Line, Column: s.Column, SourceURI: a.uri, Params: stdArgsFromParams(a.scope, s.Params), Returns: returnTypeNameScoped(a.root, s.ReturnType)})
 
 		case ClassStmt:
 			a.root.Define(a.classSymbol(s))
@@ -2472,7 +2592,7 @@ func (a *astSemanticAnalyzer) predeclareStatements(stmts []Stmt) {
 				}
 				switch m := inner.(type) {
 				case FunctionStmt:
-					members[m.Name] = SymbolInfo{Name: m.Name, Kind: SymbolFunction, Type: "function", Detail: "fn " + m.Name, Line: m.Line, Column: m.Column, SourceURI: a.uri, Params: stdArgsFromParams(m.Params), Returns: returnTypeName(m.ReturnType)}
+					members[m.Name] = SymbolInfo{Name: m.Name, Kind: SymbolFunction, Type: "function", Detail: "fn " + m.Name, Line: m.Line, Column: m.Column, SourceURI: a.uri, Params: stdArgsFromParams(a.scope, m.Params), Returns: returnTypeNameScoped(a.root, m.ReturnType)}
 				case VariableStmt:
 					members[m.Name] = SymbolInfo{Name: m.Name, Kind: SymbolVariable, Type: "unknown", Detail: "variable " + m.Name, Line: m.Line, Column: m.Column, SourceURI: a.uri}
 				case ClassStmt:
@@ -2490,6 +2610,8 @@ func (a *astSemanticAnalyzer) classSymbol(cls ClassStmt) SymbolInfo {
 		typ := typeHintName(f.TypeHint, "any")
 		if typ == "any" && f.Value != nil {
 			typ = a.inferExprType(f.Value)
+		} else {
+			typ = normalizeLSPType(a.root, typ)
 		}
 		detail := "field " + f.Name
 		if f.Private {
@@ -2503,7 +2625,7 @@ func (a *astSemanticAnalyzer) classSymbol(cls ClassStmt) SymbolInfo {
 
 	methods := map[string]SymbolInfo{}
 	for _, m := range cls.Methods {
-		methods[m.Name] = SymbolInfo{Name: m.Name, Kind: SymbolFunction, Type: "function", Detail: "method " + cls.Name + "." + m.Name, Line: m.Line, Column: m.Column, SourceURI: a.uri, Params: stdArgsFromParams(m.Params), Returns: returnTypeName(m.ReturnType)}
+		methods[m.Name] = SymbolInfo{Name: m.Name, Kind: SymbolFunction, Type: "function", Detail: "method " + cls.Name + "." + m.Name, Line: m.Line, Column: m.Column, SourceURI: a.uri, Params: stdArgsFromParams(a.scope, m.Params), Returns: returnTypeNameScoped(a.root, m.ReturnType)}
 	}
 
 	return SymbolInfo{Name: cls.Name, Kind: SymbolClass, Type: "class:" + cls.Name, Detail: "class " + cls.Name, Line: cls.Line, Column: cls.Column, SourceURI: a.uri, Fields: fields, Methods: methods}
@@ -2648,7 +2770,7 @@ func (a *astSemanticAnalyzer) visitStmt(stmt Stmt) {
 func (a *astSemanticAnalyzer) visitFunction(fn FunctionStmt) {
 	a.pushScope()
 	for _, p := range fn.Params {
-		a.define(paramSymbol(p, a.uri, fn.Line, fn.Column))
+		a.define(paramSymbol(a.scope, p, a.uri, fn.Line, fn.Column))
 	}
 	a.visitStatements(fn.Body)
 	a.popScope()
@@ -2661,7 +2783,7 @@ func (a *astSemanticAnalyzer) visitMethod(className string, fn FunctionStmt) {
 	a.define(SymbolInfo{Name: "this", Kind: SymbolVariable, Type: "class:" + className, Detail: "current class instance", Line: fn.Line, Column: fn.Column, SourceURI: a.uri})
 	for _, p := range fn.Params {
 		if p.Name != "this" {
-			a.define(paramSymbol(p, a.uri, fn.Line, fn.Column))
+			a.define(paramSymbol(a.scope, p, a.uri, fn.Line, fn.Column))
 		}
 	}
 	a.visitStatements(fn.Body)
@@ -2669,14 +2791,25 @@ func (a *astSemanticAnalyzer) visitMethod(className string, fn FunctionStmt) {
 	a.currentClass = oldClass
 }
 
-func paramSymbol(p Param, uri string, line int, column int) SymbolInfo {
-	typ := typeHintName(p.TypeHint, "any")
-	if p.Variadic {
-		typ = "array"
-	}
-	return SymbolInfo{Name: p.Name, Kind: SymbolVariable, Type: typ, Detail: "parameter " + p.Name, Line: line, Column: column, SourceURI: uri}
-}
+func paramSymbol(scope *Scope, param Param, uri string, line int, column int) SymbolInfo {
+	typ := typeHintName(param.TypeHint, "any")
 
+	if param.Variadic {
+		typ = "array"
+	} else {
+		typ = normalizeLSPType(scope, typ)
+	}
+
+	return SymbolInfo{
+		Name:      param.Name,
+		Kind:      SymbolVariable,
+		Type:      typ,
+		Detail:    "parameter " + param.Name,
+		Line:      line,
+		Column:    column,
+		SourceURI: uri,
+	}
+}
 func (a *astSemanticAnalyzer) fieldsFromObjectExpr(expr Expr, line int) map[string]SymbolInfo {
 	obj, ok := expr.(ObjectExpr)
 	if !ok {
@@ -2687,6 +2820,50 @@ func (a *astSemanticAnalyzer) fieldsFromObjectExpr(expr Expr, line int) map[stri
 		fields[f.Name] = SymbolInfo{Name: f.Name, Kind: SymbolField, Type: a.inferExprType(f.Value), Detail: "field " + f.Name, Line: line, Column: 1, SourceURI: a.uri}
 	}
 	return fields
+}
+
+func normalizeLSPType(scope *Scope, typ string) string {
+	typ = strings.TrimSpace(typ)
+
+	if typ == "" {
+		return "any"
+	}
+
+	if strings.Contains(typ, "|") {
+		parts := strings.Split(typ, "|")
+		out := []string{}
+
+		for _, part := range parts {
+			out = append(out, normalizeLSPType(scope, strings.TrimSpace(part)))
+		}
+
+		return strings.Join(out, " | ")
+	}
+
+	switch typ {
+	case "string", "number", "bool", "object", "array", "any", "null", "undefined", "function", "error":
+		return typ
+	}
+
+	if sym, ok := scope.Resolve(typ); ok && sym.Kind == SymbolClass {
+		return "class:" + typ
+	}
+
+	if strings.Contains(typ, ".") {
+		parts := strings.SplitN(typ, ".", 2)
+		nsName := parts[0]
+		memberName := parts[1]
+
+		ns, ok := scope.Resolve(nsName)
+		if ok && ns.Kind == SymbolNamespace {
+			member, ok := ns.Members[memberName]
+			if ok && member.Kind == SymbolClass {
+				return "class:" + typ
+			}
+		}
+	}
+
+	return typ
 }
 
 func (a *astSemanticAnalyzer) inferExprType(expr Expr) string {
@@ -2728,19 +2905,67 @@ func (a *astSemanticAnalyzer) inferExprType(expr Expr) string {
 		a.addDiagnostic(1, 1, "cannot use this outside of a method")
 		return "unknown"
 	case PropertyExpr:
-		a.checkMember(e.Object, e.Name, 1, 1)
+		// Special case: namespace property access like models.User
+		if ident, ok := e.Object.(IdentExpr); ok {
+			if sym, exists := a.resolve(ident.Name); exists && sym.Kind == SymbolNamespace {
+				memberSym, ok := sym.Members[e.Name]
+				if !ok {
+					a.addDiagnostic(e.Line, e.Column, "undefined method or property: "+e.Name)
+					return "unknown"
+				}
+
+				if memberSym.Kind == SymbolClass {
+					return "class:" + ident.Name + "." + memberSym.Name
+				}
+
+				return memberSym.Type
+			}
+		}
+
+		a.checkMember(e.Object, e.Name, e.Line, e.Column)
 		objType := a.inferExprType(e.Object)
 		return a.memberType(objType, e.Name)
 	case MemberCallExpr:
+		// Special case: namespace member call like models.User()
+		if ident, ok := e.Object.(IdentExpr); ok {
+			if sym, exists := a.resolve(ident.Name); exists && sym.Kind == SymbolNamespace {
+				memberSym, ok := sym.Members[e.Method]
+				if !ok {
+					a.addDiagnostic(e.Line, e.Column, "undefined method or property: "+e.Method)
+					return "unknown"
+				}
+
+				for _, arg := range e.Args {
+					a.inferExprType(arg)
+				}
+
+				if memberSym.Kind == SymbolClass {
+					return "class:" + ident.Name + "." + memberSym.Name
+				}
+
+				if memberSym.Kind == SymbolFunction {
+					if memberSym.Returns != "" {
+						return memberSym.Returns
+					}
+					return "any"
+				}
+
+				return memberSym.Type
+			}
+		}
+
 		objType := a.inferExprType(e.Object)
+
 		for _, arg := range e.Args {
 			a.inferExprType(arg)
 		}
+
 		if shouldCheckMemberAccess(objType) {
 			if !a.memberExistsByType(objType, e.Method) {
 				a.addDiagnostic(e.Line, e.Column, "undefined method or property: "+e.Method)
 			}
 		}
+
 		return a.memberType(objType, e.Method)
 	case CallExpr:
 		for _, arg := range e.Args {
@@ -2769,7 +2994,7 @@ func (a *astSemanticAnalyzer) inferExprType(expr Expr) string {
 	case FunctionExpr:
 		a.pushScope()
 		for _, p := range e.Params {
-			a.define(paramSymbol(p, a.uri, e.Line, e.Column))
+			a.define(paramSymbol(a.scope, p, a.uri, e.Line, e.Column))
 		}
 		a.visitStatements(e.Body)
 		a.popScope()
@@ -2844,42 +3069,137 @@ func (a *astSemanticAnalyzer) checkMember(object Expr, member string, line int, 
 	}
 }
 
-func (a *astSemanticAnalyzer) memberExistsByType(typeName string, member string) bool {
-	if strings.HasPrefix(typeName, "task:") {
-		return member == "await"
+func (a *astSemanticAnalyzer) memberExistsByType(typ string, member string) bool {
+	typ = strings.TrimSpace(typ)
+
+	if strings.Contains(typ, "|") {
+		for _, part := range splitUnionType(typ) {
+			if isNullishLSPType(part) {
+				continue
+			}
+
+			if a.memberExistsByType(part, member) {
+				return true
+			}
+		}
+
+		return false
 	}
-	if strings.HasPrefix(typeName, "std:") {
-		info, ok := GetStdModuleInfo(strings.TrimPrefix(typeName, "std:"))
-		if !ok {
+
+	// Raw class name: User
+	if sym, ok := resolveClassSymbol(a.root, typ); ok && sym.Kind == SymbolClass {
+		typ = "class:" + typ
+	}
+
+	if strings.HasPrefix(typ, "class:") {
+		className := strings.TrimPrefix(typ, "class:")
+
+		classSym, ok := resolveClassSymbol(a.root, className)
+		if !ok || classSym.Kind != SymbolClass {
 			return false
 		}
-		_, ok = info.Methods[member]
-		return ok
-	}
-	if strings.HasPrefix(typeName, "class:") {
-		className := strings.TrimPrefix(typeName, "class:")
-		classSym, ok := a.root.Resolve(className)
-		if !ok {
-			return false
-		}
+
 		if _, ok := classSym.Methods[member]; ok {
 			return true
 		}
+
 		if _, ok := classSym.Fields[member]; ok {
 			return true
 		}
+
 		return false
 	}
-	if typeName == "object" {
-		return true
-	} // plain/dynamic objects: don't complain.
-	if _, ok := GetNativeMethodInfo(typeName, member); ok {
+
+	if strings.HasPrefix(typ, "std:") {
+		module := strings.TrimPrefix(typ, "std:")
+		info, ok := GetStdModuleInfo(module)
+		if !ok {
+			return false
+		}
+
+		_, ok = info.Methods[member]
+		return ok
+	}
+
+	if strings.HasPrefix(typ, "task:") {
+		return member == "await"
+	}
+
+	if _, ok := GetNativeMethodInfo(typ, member); ok {
 		return true
 	}
-	return member == "toString"
+
+	if member == "toString" {
+		return true
+	}
+
+	return false
 }
 
 func (a *astSemanticAnalyzer) memberType(typeName string, member string) string {
+	typeName = strings.TrimSpace(typeName)
+
+	if strings.Contains(typeName, "|") {
+		for _, part := range splitUnionType(typeName) {
+			if isNullishLSPType(part) {
+				continue
+			}
+
+			result := a.memberType(part, member)
+			if result != "" && result != "unknown" {
+				return result
+			}
+		}
+
+		return "unknown"
+	}
+
+	// Raw class name: User
+	if sym, ok := resolveClassSymbol(a.root, typeName); ok && sym.Kind == SymbolClass {
+		typeName = "class:" + typeName
+	}
+
+	if strings.HasPrefix(typeName, "class:") {
+		className := strings.TrimPrefix(typeName, "class:")
+
+		classSym, ok := resolveClassSymbol(a.root, className)
+		if !ok || classSym.Kind != SymbolClass {
+			return "unknown"
+		}
+
+		if methodSym, ok := classSym.Methods[member]; ok {
+			return firstNonEmpty(methodSym.Returns, "any")
+		}
+
+		if fieldSym, ok := classSym.Fields[member]; ok {
+			return firstNonEmpty(fieldSym.Type, "any")
+		}
+
+		return "unknown"
+	}
+	if sym, ok := a.root.Resolve(typeName); ok && sym.Kind == SymbolClass {
+		typeName = "class:" + typeName
+	}
+
+	if strings.Contains(typeName, "|") {
+		parts := strings.Split(typeName, "|")
+
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+
+			if part == "null" || part == "undefined" {
+				continue
+			}
+
+			memberTyp := a.memberType(part, member)
+			if memberTyp != "" && memberTyp != "unknown" {
+				return memberTyp
+			}
+		}
+
+		return "unknown"
+	}
+
 	if strings.HasPrefix(typeName, "task:") && member == "await" {
 		return strings.TrimPrefix(typeName, "task:")
 	}

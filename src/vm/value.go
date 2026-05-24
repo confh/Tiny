@@ -253,6 +253,10 @@ func TypeName(value Value) string {
 	case UndefinedValue:
 		return "undefined"
 	case ObjectValue:
+		if className, ok := v["__class"].(string); ok {
+			return className
+		}
+
 		return "object"
 	case nil:
 		return "nil"

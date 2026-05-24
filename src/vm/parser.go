@@ -130,27 +130,70 @@ func (p *Parser) ParseProgram() Program {
 	return Program{Statements: statements}
 }
 
-func (p *Parser) parseOptionalTypeHint() TypeHint {
-	if p.current.Type != TOKEN_COLON {
-		return TypeHint{}
-	}
-
-	p.advance()
-
-	if p.current.Type != TOKEN_IDENT {
+func (p *Parser) parseTypeName() string {
+	if !p.isValidType(p.current.Type) {
 		LangErrorAt(
 			ErrorSyntax,
 			p.current.File,
 			p.current.Line,
 			p.current.Column,
-			"expected type name after :",
+			"expected type name",
 		)
 	}
 
 	name := p.current.Literal
 	p.advance()
 
-	return TypeHint{Name: name}
+	for p.current.Type == TOKEN_DOT {
+		p.advance()
+
+		if !p.isValidType(p.current.Type) {
+			LangErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"expected type name after .",
+			)
+		}
+
+		name += "." + p.current.Literal
+		p.advance()
+	}
+
+	return name
+}
+
+func (p *Parser) parseOptionalTypeHint() TypeHint {
+	if p.current.Type != TOKEN_COLON {
+		return TypeHint{}
+	}
+	types := []string{}
+
+	for {
+		types = append(types, p.parseTypeName())
+
+		if p.current.Type != TOKEN_PIPE {
+			break
+		}
+
+		p.advance()
+	}
+
+	if len(types) == 1 {
+		return TypeHint{Name: types[0]}
+	}
+
+	return TypeHint{
+		Name:  strings.Join(types, " | "),
+		Types: types,
+	}
+}
+
+func (p *Parser) isValidType(token TokenType) bool {
+	return token == TOKEN_IDENT ||
+		token == TOKEN_NULL ||
+		token == TOKEN_UNDEFINED
 }
 
 func (p *Parser) parsePossibleAssignmentStatement() Stmt {
@@ -1372,29 +1415,23 @@ func (p *Parser) parseParameterList() []Param {
 		typeHint := TypeHint{}
 
 		if p.current.Type == TOKEN_COLON {
-			if variadic {
-				LangErrorAt(
-					ErrorSyntax,
-					p.current.File,
-					p.current.Line,
-					p.current.Column,
-					"variadic params cannot have types",
-				)
-			} else {
-				p.advance()
+			p.advance()
 
-				if p.current.Type != TOKEN_IDENT {
-					LangErrorAt(
-						ErrorSyntax,
-						p.current.File,
-						p.current.Line,
-						p.current.Column,
-						"expected type name after :",
-					)
+			types := []string{}
+
+			for {
+				types = append(types, p.parseTypeName())
+
+				if p.current.Type != TOKEN_PIPE {
+					break
 				}
 
-				typeHint = TypeHint{Name: p.current.Literal}
 				p.advance()
+			}
+
+			typeHint = TypeHint{
+				Name:  strings.Join(types, "|"),
+				Types: types,
 			}
 		}
 
@@ -1744,7 +1781,8 @@ func (p *Parser) parsePostfix() Expr {
 				Args:   args,
 			}
 
-		case TOKEN_DOT:
+		case TOKEN_DOT, TOKEN_QUESTION_DOT:
+			safe := p.current.Type == TOKEN_QUESTION_DOT
 			p.advance()
 
 			if p.current.Type != TOKEN_IDENT {
@@ -1778,6 +1816,7 @@ func (p *Parser) parsePostfix() Expr {
 					Line:   line,
 					Column: column,
 					File:   file,
+					Safe:   safe,
 				}
 
 				continue
@@ -1786,6 +1825,10 @@ func (p *Parser) parsePostfix() Expr {
 			expr = PropertyExpr{
 				Object: expr,
 				Name:   name,
+				File:   file,
+				Line:   line,
+				Column: column,
+				Safe:   safe,
 			}
 
 		case TOKEN_LBRACKET:

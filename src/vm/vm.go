@@ -663,7 +663,7 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 					"function %s parameter %s expected %s, got %s",
 					fn.Name,
 					param.Name,
-					param.TypeHint.Name,
+					param.TypeHint.String(),
 					TypeName(arg),
 				)
 			}
@@ -690,7 +690,7 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 					"function %s rest parameter %s expected %s, got %s",
 					fn.Name,
 					restParam.Name,
-					restParam.TypeHint.Name,
+					restParam.TypeHint.String(),
 					TypeName(arg),
 				)
 			}
@@ -719,7 +719,7 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 					"function %s parameter %s expected %s, got %s",
 					fn.Name,
 					param.Name,
-					param.TypeHint.Name,
+					param.TypeHint.String(),
 					TypeName(arg),
 				)
 			}
@@ -741,6 +741,15 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 
 	vm.top = start
 	vm.frames = append(vm.frames, frame)
+}
+
+func isNullish(value Value) bool {
+	switch value.(type) {
+	case NullValue, UndefinedValue:
+		return true
+	default:
+		return false
+	}
 }
 
 func (vm *VM) step() bool {
@@ -1253,7 +1262,7 @@ func (vm *VM) step() bool {
 
 		object, ok := objectValue.(ObjectValue)
 		if !ok {
-			LangError(ErrorType, "expected object, got %s", TypeName(objectValue))
+			vm.runtimeError(ErrorType, "expected object, got %s", TypeName(objectValue))
 		}
 
 		_, isClass := object["__class"]
@@ -1264,11 +1273,109 @@ func (vm *VM) step() bool {
 			}
 
 			if !vm.canAccessField(object, name) {
-				LangError(ErrorRuntime, "cannot assign private field: %s", name)
+				vm.runtimeError(ErrorRuntime, "cannot assign private field: %s", name)
 			}
 		}
 
 		object[name] = value
+
+	case OP_METHOD_CALL_SAFE:
+		info := instr.Value.(MethodCallInfo)
+
+		args := vm.popArgs(info.ArgCount)
+		objectValue := vm.pop()
+
+		if isNullish(objectValue) {
+			vm.push(UndefinedValue{})
+			break
+		}
+
+		vm.callMethodResolved(info.Method, objectValue, args)
+
+	case OP_GET_PROPERTY_SAFE:
+		name := instr.Value.(string)
+		objectValue := vm.pop()
+
+		if isNullish(objectValue) {
+			vm.push(UndefinedValue{})
+			break
+		}
+
+		if ns, ok := objectValue.(NamespaceValue); ok {
+			value, exists := ns.Members[name]
+			if !exists {
+				LangError(ErrorName, "namespace %s has no member: %s", ns.Name, name)
+			}
+
+			if ref, ok := value.(NamespaceMemberRef); ok {
+				actual, exists := vm.globals[ref.GlobalName]
+				if !exists {
+					LangError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
+				}
+
+				vm.push(actual)
+				break
+			}
+
+			if ref, ok := value.(*NamespaceMemberRef); ok {
+				actual, exists := vm.globals[ref.GlobalName]
+				if !exists {
+					LangError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
+				}
+
+				vm.push(actual)
+				break
+			}
+
+			vm.push(value)
+			break
+		}
+
+		if ns, ok := objectValue.(*NamespaceValue); ok {
+			value, exists := ns.Members[name]
+			if !exists {
+				LangError(ErrorName, "namespace %s has no member: %s", ns.Name, name)
+			}
+
+			if ref, ok := value.(NamespaceMemberRef); ok {
+				actual, exists := vm.globals[ref.GlobalName]
+				if !exists {
+					LangError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
+				}
+
+				vm.push(actual)
+				break
+			}
+
+			if ref, ok := value.(*NamespaceMemberRef); ok {
+				actual, exists := vm.globals[ref.GlobalName]
+				if !exists {
+					LangError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
+				}
+
+				vm.push(actual)
+				break
+			}
+
+			vm.push(value)
+			break
+		}
+
+		object, ok := objectValue.(ObjectValue)
+		if !ok {
+			LangError(ErrorType, "expected object, got %s", TypeName(objectValue))
+		}
+
+		if !vm.canAccessField(object, name) {
+			LangError(ErrorRuntime, "cannot access private field: %s", name)
+		}
+
+		value, exists := object[name]
+		if !exists {
+			LangError(ErrorName, "object has no property: %s", name)
+		}
+
+		vm.push(value)
 
 	case OP_LOAD_GLOBAL:
 		var name string
@@ -2626,7 +2733,7 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 					"method %s parameter %s expected %s, got %s",
 					method,
 					param.Name,
-					param.TypeHint.Name,
+					param.TypeHint.String(),
 					TypeName(arg),
 				)
 			}
@@ -2653,7 +2760,7 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 					"method %s rest parameter %s expected %s, got %s",
 					method,
 					restParam.Name,
-					restParam.TypeHint.Name,
+					restParam.TypeHint.String(),
 					TypeName(arg),
 				)
 			}
@@ -2677,7 +2784,7 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 					"method %s parameter %s expected %s, got %s",
 					method,
 					param.Name,
-					param.TypeHint.Name,
+					param.TypeHint.String(),
 					TypeName(arg),
 				)
 			}
@@ -2787,7 +2894,7 @@ func (vm *VM) callFunction(name string, argCount int) {
 				"function %s parameter %s expected %s, got %s",
 				fn.Name,
 				param.Name,
-				param.TypeHint.Name,
+				param.TypeHint.String(),
 				TypeName(arg),
 			)
 		}

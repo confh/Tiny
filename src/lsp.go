@@ -492,7 +492,7 @@ func getSignatureHelp(uri string, text string, pos Position) any {
 		if strings.HasPrefix(sym.Type, "class:") {
 			className := strings.TrimPrefix(sym.Type, "class:")
 
-			classSym, ok := scope.Resolve(className)
+			classSym, ok := resolveClassSymbol(scope, className)
 			if !ok || classSym.Kind != SymbolClass {
 				return nil
 			}
@@ -609,7 +609,7 @@ func getDefinition(uri string, text string, pos Position) any {
 
 		if strings.HasPrefix(receiverSym.Type, "class:") {
 			className := strings.TrimPrefix(receiverSym.Type, "class:")
-			classSym, ok := scope.Resolve(className)
+			classSym, ok := resolveClassSymbol(scope, className)
 			if !ok {
 				return nil
 			}
@@ -1368,6 +1368,66 @@ func classNameAtPosition(text string, pos Position) string {
 	return ""
 }
 
+func getUnionTypeCompletions(scope *Scope, typ string, receiver string) []CompletionItem {
+	items := []CompletionItem{}
+
+	for _, part := range splitUnionType(typ) {
+		if isNullishLSPType(part) {
+			continue
+		}
+
+		if strings.HasPrefix(part, "class:") {
+			className := strings.TrimPrefix(part, "class:")
+
+			classSym, ok := resolveClassSymbol(scope, className)
+			if !ok || classSym.Kind != SymbolClass {
+				continue
+			}
+
+			for _, field := range classSym.Fields {
+				if isPrivateSymbol(field) && receiver != "this" {
+					continue
+				}
+
+				items = append(items, CompletionItem{
+					Label:  field.Name,
+					Kind:   symbolKindToCompletionKind(field.Kind),
+					Detail: field.Detail + " : " + field.Type,
+				})
+			}
+
+			for _, method := range classSym.Methods {
+				if isPrivateSymbol(method) && receiver != "this" {
+					continue
+				}
+
+				items = append(items, CompletionItem{
+					Label:  method.Name,
+					Kind:   2,
+					Detail: formatFunctionSignature(method.Name, method.Params, method.Returns),
+				})
+			}
+
+			continue
+		}
+
+		if strings.HasPrefix(part, "std:") {
+			module := strings.TrimPrefix(part, "std:")
+			items = append(items, getStdCompletions(module)...)
+			continue
+		}
+
+		if part == "object" {
+			items = append(items, getNativeTypeCompletions("object")...)
+			continue
+		}
+
+		items = append(items, getNativeTypeCompletions(part)...)
+	}
+
+	return dedupeCompletionItems(items)
+}
+
 func getCompletions(uri string, text string, pos Position) []CompletionItem {
 	line := getLine(text, pos.Line)
 
@@ -1421,6 +1481,10 @@ func getCompletions(uri string, text string, pos Position) []CompletionItem {
 		return []CompletionItem{}
 	}
 
+	if strings.Contains(sym.Type, "|") {
+		return getUnionTypeCompletions(scope, sym.Type, receiver)
+	}
+
 	if sym.Kind == SymbolNamespace {
 		return completionItemsFromMembers(sym.Members)
 	}
@@ -1437,7 +1501,7 @@ func getCompletions(uri string, text string, pos Position) []CompletionItem {
 	if strings.HasPrefix(sym.Type, "class:") {
 		className := strings.TrimPrefix(sym.Type, "class:")
 
-		classSym, ok := scope.Resolve(className)
+		classSym, ok := resolveClassSymbol(scope, className)
 		if !ok || classSym.Kind != SymbolClass {
 			return []CompletionItem{}
 		}
@@ -1550,6 +1614,10 @@ func receiverBeforeDot(text string) string {
 
 	if !strings.HasSuffix(text, ".") {
 		return ""
+	}
+
+	if before, ok := strings.CutSuffix(text, "?."); ok {
+		text = before
 	}
 
 	text = strings.TrimSuffix(text, ".")

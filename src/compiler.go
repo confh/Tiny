@@ -257,12 +257,17 @@ func optimizeExpr(expr Expr) Expr {
 			Line:   e.Line,
 			Column: e.Column,
 			File:   e.File,
+			Safe:   e.Safe,
 		}
 
 	case PropertyExpr:
 		return PropertyExpr{
 			Object: optimizeExpr(e.Object),
 			Name:   e.Name,
+			File:   e.File,
+			Line:   e.Line,
+			Column: e.Column,
+			Safe:   e.Safe,
 		}
 
 	case UnaryExpr:
@@ -2136,7 +2141,12 @@ func (c *Compiler) compileExpr(expr Expr) {
 
 	case PropertyExpr:
 		c.compileExpr(e.Object)
-		c.emit(OP_GET_PROPERTY, e.Name)
+
+		if e.Safe {
+			c.emit(OP_GET_PROPERTY_SAFE, e.Name)
+		} else {
+			c.emit(OP_GET_PROPERTY, e.Name)
+		}
 
 	case TypeOfExpr:
 		c.compileExpr(e.Value)
@@ -2484,7 +2494,6 @@ func (c *Compiler) compileExpr(expr Expr) {
 				c.compileExpr(arg)
 			}
 
-			// IMPORTANT: set location right before emit
 			c.setLocation(e.File, e.Line, e.Column)
 
 			c.emit(OP_BUILTIN_CALL, BuiltinCallInfo{
@@ -2502,13 +2511,19 @@ func (c *Compiler) compileExpr(expr Expr) {
 			c.compileExpr(arg)
 		}
 
-		// IMPORTANT: set location right before emit
 		c.setLocation(e.File, e.Line, e.Column)
 
-		c.emit(OP_METHOD_CALL, MethodCallInfo{
-			Method:   e.Method,
-			ArgCount: len(e.Args),
-		})
+		if e.Safe {
+			c.emit(OP_METHOD_CALL_SAFE, MethodCallInfo{
+				Method:   e.Method,
+				ArgCount: len(e.Args),
+			})
+		} else {
+			c.emit(OP_METHOD_CALL, MethodCallInfo{
+				Method:   e.Method,
+				ArgCount: len(e.Args),
+			})
+		}
 
 	case ThisExpr:
 		if binding, exists := c.resolveVariable("this"); exists {
