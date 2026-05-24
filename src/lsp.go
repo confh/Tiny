@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf16"
 
 	. "language.com/src/vm"
 )
@@ -21,7 +22,7 @@ type LSPMessage struct {
 	ID      any             `json:"id,omitempty"`
 	Method  string          `json:"method,omitempty"`
 	Params  json.RawMessage `json:"params,omitempty"`
-	Result  any             `json:"result"`
+	Result  any             `json:"result,omitempty"`
 	Error   any             `json:"error,omitempty"`
 }
 type TextDocumentItem struct {
@@ -76,6 +77,10 @@ type TextDocumentContentChangeEvent struct {
 type DidChangeParams struct {
 	TextDocument   VersionedTextDocumentIdentifier  `json:"textDocument"`
 	ContentChanges []TextDocumentContentChangeEvent `json:"contentChanges"`
+}
+
+type DidCloseParams struct {
+	TextDocument TextDocumentIdentifier `json:"textDocument"`
 }
 
 type Position struct {
@@ -247,36 +252,31 @@ func formatSignatureName(fullName string, method StdMethodInfo) string {
 }
 
 func callContextAtPosition(text string, pos Position) (CallContext, bool) {
-	line := getLine(text, pos.Line)
-
-	if pos.Character > len(line) {
-		pos.Character = len(line)
+	cursor := offsetAtLine(text, pos.Line+1) + pos.Character
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > len(text) {
+		cursor = len(text)
 	}
 
-	before := line[:pos.Character]
-
-	open := strings.LastIndex(before, "(")
+	open := findUnclosedCallParen(text[:cursor])
 	if open == -1 {
 		return CallContext{}, false
 	}
 
-	prefix := strings.TrimSpace(before[:open])
-	if prefix == "" {
+	callee := extractCalleeBefore(text, open)
+	if callee == "" {
 		return CallContext{}, false
 	}
 
-	argText := before[open+1:]
-	argIndex := 0
-	for _, ch := range argText {
-		if ch == ',' {
-			argIndex++
-		}
-	}
+	argIndex := countTopLevelCommas(text[open+1 : cursor])
 
 	// member call: io.println(
-	if dot := strings.LastIndex(prefix, "."); dot != -1 {
-		receiver := strings.TrimSpace(prefix[:dot])
-		method := strings.TrimSpace(prefix[dot+1:])
+	if dot := strings.LastIndex(callee, "."); dot != -1 {
+		receiver := strings.TrimSpace(callee[:dot])
+		receiver = strings.TrimSuffix(receiver, "?")
+		method := strings.TrimSpace(callee[dot+1:])
 
 		return CallContext{
 			Receiver: receiver,
@@ -287,13 +287,7 @@ func callContextAtPosition(text string, pos Position) (CallContext, bool) {
 	}
 
 	// normal call: fib(
-	name := ""
-
-	i := len(prefix) - 1
-	for i >= 0 && isIdentChar(prefix[i]) {
-		i--
-	}
-	name = prefix[i+1:]
+	name := callee
 
 	if name == "" {
 		return CallContext{}, false
@@ -304,6 +298,144 @@ func callContextAtPosition(text string, pos Position) (CallContext, bool) {
 		ArgIndex: argIndex,
 		IsMember: false,
 	}, true
+}
+
+func findUnclosedCallParen(text string) int {
+	stack := []int{}
+	inString := byte(0)
+	escaped := false
+	inLineComment := false
+
+	for i := 0; i < len(text); i++ {
+		ch := text[i]
+
+		if inLineComment {
+			if ch == '\n' {
+				inLineComment = false
+			}
+			continue
+		}
+
+		if inString != 0 {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == inString {
+				inString = 0
+			}
+			continue
+		}
+
+		if i+1 < len(text) && ch == '/' && text[i+1] == '/' {
+			inLineComment = true
+			i++
+			continue
+		}
+
+		if ch == '"' || ch == '\'' || ch == '`' {
+			inString = ch
+			continue
+		}
+
+		switch ch {
+		case '(':
+			stack = append(stack, i)
+		case ')':
+			if len(stack) > 0 {
+				stack = stack[:len(stack)-1]
+			}
+		}
+	}
+
+	if len(stack) == 0 {
+		return -1
+	}
+
+	return stack[len(stack)-1]
+}
+
+func extractCalleeBefore(text string, open int) string {
+	i := open - 1
+	for i >= 0 && (text[i] == ' ' || text[i] == '\t' || text[i] == '\r' || text[i] == '\n') {
+		i--
+	}
+
+	end := i + 1
+	for i >= 0 {
+		ch := text[i]
+		if isIdentChar(ch) || ch == '.' || ch == '?' {
+			i--
+			continue
+		}
+		break
+	}
+
+	return strings.TrimSpace(text[i+1 : end])
+}
+
+func countTopLevelCommas(text string) int {
+	count := 0
+	depth := 0
+	inString := byte(0)
+	escaped := false
+	inLineComment := false
+
+	for i := 0; i < len(text); i++ {
+		ch := text[i]
+
+		if inLineComment {
+			if ch == '\n' {
+				inLineComment = false
+			}
+			continue
+		}
+
+		if inString != 0 {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == inString {
+				inString = 0
+			}
+			continue
+		}
+
+		if i+1 < len(text) && ch == '/' && text[i+1] == '/' {
+			inLineComment = true
+			i++
+			continue
+		}
+
+		if ch == '"' || ch == '\'' || ch == '`' {
+			inString = ch
+			continue
+		}
+
+		switch ch {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			if depth > 0 {
+				depth--
+			}
+		case ',':
+			if depth == 0 {
+				count++
+			}
+		}
+	}
+
+	return count
 }
 
 func patchTextForCompletion(text string, pos Position) string {
@@ -462,6 +594,122 @@ func writeLSPMessage(msg LSPMessage) {
 	os.Stdout.Sync()
 }
 
+func nullLSPResult(value any) any {
+	if value == nil {
+		return json.RawMessage("null")
+	}
+	return value
+}
+
+func lspPositionToBytePosition(text string, pos Position) Position {
+	line := getLine(text, pos.Line)
+	return Position{
+		Line:      pos.Line,
+		Character: utf16ColumnToByteColumn(line, pos.Character),
+	}
+}
+
+func utf16ColumnToByteColumn(line string, column int) int {
+	if column <= 0 {
+		return 0
+	}
+
+	units := 0
+	for byteIndex, r := range line {
+		if units >= column {
+			return byteIndex
+		}
+
+		units += utf16.RuneLen(r)
+		if units > column {
+			return byteIndex
+		}
+	}
+
+	return len(line)
+}
+
+func byteColumnToUTF16Column(line string, column int) int {
+	if column <= 0 {
+		return 0
+	}
+	if column > len(line) {
+		column = len(line)
+	}
+
+	units := 0
+	for byteIndex, r := range line {
+		if byteIndex >= column {
+			break
+		}
+
+		units += utf16.RuneLen(r)
+	}
+
+	return units
+}
+
+func lspRangeFromByteColumns(text string, line int, start int, end int) LSPRange {
+	rawLine := getLine(text, line)
+
+	return LSPRange{
+		Start: Position{
+			Line:      line,
+			Character: byteColumnToUTF16Column(rawLine, start),
+		},
+		End: Position{
+			Line:      line,
+			Character: byteColumnToUTF16Column(rawLine, end),
+		},
+	}
+}
+
+func normalizeDiagnosticRangesForLSP(text string, diagnostics []map[string]any) []map[string]any {
+	for _, diagnostic := range diagnostics {
+		rangeValue, ok := diagnostic["range"].(map[string]any)
+		if !ok {
+			continue
+		}
+
+		startValue, ok := rangeValue["start"].(map[string]any)
+		if !ok {
+			continue
+		}
+
+		endValue, ok := rangeValue["end"].(map[string]any)
+		if !ok {
+			continue
+		}
+
+		line := intFromAny(startValue["line"])
+		start := intFromAny(startValue["character"])
+		end := intFromAny(endValue["character"])
+		converted := lspRangeFromByteColumns(text, line, start, end)
+
+		rangeValue["start"] = map[string]any{
+			"line":      converted.Start.Line,
+			"character": converted.Start.Character,
+		}
+		rangeValue["end"] = map[string]any{
+			"line":      converted.End.Line,
+			"character": converted.End.Character,
+		}
+	}
+
+	return diagnostics
+}
+
+func intFromAny(value any) int {
+	switch v := value.(type) {
+	case int:
+		return v
+	case float64:
+		return int(v)
+	default:
+		return 0
+	}
+}
+
 func getSignatureHelp(uri string, text string, pos Position) any {
 	ctx, ok := callContextAtPosition(text, pos)
 	if !ok {
@@ -602,7 +850,7 @@ func getDefinition(uri string, text string, pos Position) any {
 
 		if receiverSym.Kind == SymbolNamespace {
 			if memberSym, ok := receiverSym.Members[member]; ok {
-				return locationFromSymbol(uri, memberSym)
+				return locationFromSymbol(uri, text, memberSym)
 			}
 			return nil
 		}
@@ -615,14 +863,14 @@ func getDefinition(uri string, text string, pos Position) any {
 			}
 
 			if methodSym, ok := classSym.Methods[member]; ok {
-				return locationFromSymbol(uri, methodSym)
+				return locationFromSymbol(uri, text, methodSym)
 			}
 			return nil
 		}
 
 		if receiverSym.Type == "object" && receiverSym.Fields != nil {
 			if fieldSym, ok := receiverSym.Fields[member]; ok {
-				return locationFromSymbol(uri, fieldSym)
+				return locationFromSymbol(uri, text, fieldSym)
 			}
 		}
 
@@ -634,10 +882,10 @@ func getDefinition(uri string, text string, pos Position) any {
 		return nil
 	}
 
-	return locationFromSymbol(uri, sym)
+	return locationFromSymbol(uri, text, sym)
 }
 
-func locationFromSymbol(defaultURI string, sym SymbolInfo) any {
+func locationFromSymbol(defaultURI string, text string, sym SymbolInfo) any {
 	if sym.Line <= 0 {
 		return nil
 	}
@@ -654,16 +902,27 @@ func locationFromSymbol(defaultURI string, sym SymbolInfo) any {
 		column = 0
 	}
 
+	targetText := text
+	if targetURI != defaultURI {
+		if openText, ok := lspDocs[targetURI]; ok {
+			targetText = openText
+		}
+	}
+
+	lineText := getLine(targetText, line)
+	startColumn := byteColumnToUTF16Column(lineText, column)
+	endColumn := byteColumnToUTF16Column(lineText, column+len(sym.Name))
+
 	return Location{
 		URI: targetURI,
 		Range: LSPRange{
 			Start: Position{
 				Line:      line,
-				Character: column,
+				Character: startColumn,
 			},
 			End: Position{
 				Line:      line,
-				Character: column + len(sym.Name),
+				Character: endColumn,
 			},
 		},
 	}
@@ -671,8 +930,21 @@ func locationFromSymbol(defaultURI string, sym SymbolInfo) any {
 
 func getDocumentSymbols(uri string, text string) []DocumentSymbol {
 	lines := strings.Split(text, "\n")
-	symbols := []DocumentSymbol{}
+	if len(lines) > 0 {
+		lastLine := len(lines) - 1
+		lastText := strings.TrimSuffix(lines[lastLine], "\r")
+		scope := scopeAtPosition(uri, text, Position{
+			Line:      lastLine,
+			Character: len(lastText),
+		})
 
+		symbols := documentSymbolsFromScope(uri, text, scope)
+		if len(symbols) > 0 {
+			return symbols
+		}
+	}
+
+	symbols := []DocumentSymbol{}
 	for i, rawLine := range lines {
 		line := strings.TrimSpace(strings.TrimSuffix(rawLine, "\r"))
 		if line == "" {
@@ -682,6 +954,37 @@ func getDocumentSymbols(uri string, text string) []DocumentSymbol {
 		if sym, ok := documentSymbolFromLine(rawLine, line, i); ok {
 			symbols = append(symbols, sym)
 		}
+	}
+
+	return symbols
+}
+
+func documentSymbolsFromScope(uri string, text string, scope *Scope) []DocumentSymbol {
+	if scope == nil {
+		return []DocumentSymbol{}
+	}
+
+	candidates := make([]SymbolInfo, 0, len(scope.Symbols))
+	for _, sym := range scope.Symbols {
+		candidates = append(candidates, sym)
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].Line == candidates[j].Line {
+			return candidates[i].Column < candidates[j].Column
+		}
+		return candidates[i].Line < candidates[j].Line
+	})
+
+	symbols := []DocumentSymbol{}
+	for _, sym := range candidates {
+		if sym.SourceURI != "" && sym.SourceURI != uri {
+			continue
+		}
+		if sym.Line <= 0 || sym.Kind == SymbolStd {
+			continue
+		}
+
+		symbols = append(symbols, documentSymbolFromSymbol(sym, text))
 	}
 
 	return symbols
@@ -730,11 +1033,11 @@ func makeDocumentSymbol(rawLine string, lineIndex int, name string, detail strin
 	rng := LSPRange{
 		Start: Position{
 			Line:      lineIndex,
-			Character: column,
+			Character: byteColumnToUTF16Column(rawLine, column),
 		},
 		End: Position{
 			Line:      lineIndex,
-			Character: column + len(name),
+			Character: byteColumnToUTF16Column(rawLine, column+len(name)),
 		},
 	}
 
@@ -747,25 +1050,40 @@ func makeDocumentSymbol(rawLine string, lineIndex int, name string, detail strin
 	}
 }
 
-func documentSymbolFromSymbol(sym SymbolInfo) DocumentSymbol {
+func documentSymbolFromSymbol(sym SymbolInfo, text string) DocumentSymbol {
 	line := sym.Line - 1
 	column := sym.Column - 1
 	if column < 0 {
 		column = 0
 	}
 
+	lineText := getLine(text, line)
+
 	rng := LSPRange{
 		Start: Position{
 			Line:      line,
-			Character: column,
+			Character: byteColumnToUTF16Column(lineText, column),
 		},
 		End: Position{
 			Line:      line,
-			Character: column + len(sym.Name),
+			Character: byteColumnToUTF16Column(lineText, column+len(sym.Name)),
 		},
 	}
 
 	children := []DocumentSymbol{}
+
+	if sym.Kind == SymbolClass && len(sym.Fields) > 0 {
+		fieldNames := make([]string, 0, len(sym.Fields))
+		for fieldName := range sym.Fields {
+			fieldNames = append(fieldNames, fieldName)
+		}
+		sort.Strings(fieldNames)
+
+		for _, fieldName := range fieldNames {
+			field := sym.Fields[fieldName]
+			children = append(children, documentSymbolFromSymbol(field, text))
+		}
+	}
 
 	if sym.Kind == SymbolClass && len(sym.Methods) > 0 {
 		methodNames := make([]string, 0, len(sym.Methods))
@@ -776,7 +1094,7 @@ func documentSymbolFromSymbol(sym SymbolInfo) DocumentSymbol {
 
 		for _, methodName := range methodNames {
 			method := sym.Methods[methodName]
-			children = append(children, documentSymbolFromSymbol(method))
+			children = append(children, documentSymbolFromSymbol(method, text))
 		}
 	}
 
@@ -789,7 +1107,7 @@ func documentSymbolFromSymbol(sym SymbolInfo) DocumentSymbol {
 
 		for _, memberName := range memberNames {
 			member := sym.Members[memberName]
-			children = append(children, documentSymbolFromSymbol(member))
+			children = append(children, documentSymbolFromSymbol(member, text))
 		}
 	}
 
@@ -829,7 +1147,7 @@ func handleLSPMessage(msg LSPMessage) {
 				"capabilities": map[string]any{
 					"textDocumentSync": 1,
 					"completionProvider": map[string]any{
-						"triggerCharacters": []string{"."},
+						"triggerCharacters": []string{".", `"`},
 					},
 					"signatureHelpProvider": map[string]any{
 						"triggerCharacters": []string{"(", ","},
@@ -848,7 +1166,7 @@ func handleLSPMessage(msg LSPMessage) {
 	case "shutdown":
 		writeLSPMessage(LSPMessage{
 			ID:     msg.ID,
-			Result: nil,
+			Result: nullLSPResult(nil),
 		})
 
 	case "exit":
@@ -871,11 +1189,19 @@ func handleLSPMessage(msg LSPMessage) {
 			publishDiagnostics(params.TextDocument.URI, text)
 		}
 
+	case "textDocument/didClose":
+		var params DidCloseParams
+		json.Unmarshal(msg.Params, &params)
+
+		delete(lspDocs, params.TextDocument.URI)
+		publishDiagnostics(params.TextDocument.URI, "")
+
 	case "textDocument/completion":
 		var params CompletionParams
 		json.Unmarshal(msg.Params, &params)
 
 		text := lspDocs[params.TextDocument.URI]
+		params.Position = lspPositionToBytePosition(text, params.Position)
 		items := getCompletions(params.TextDocument.URI, text, params.Position)
 
 		writeLSPMessage(LSPMessage{
@@ -888,6 +1214,7 @@ func handleLSPMessage(msg LSPMessage) {
 		json.Unmarshal(msg.Params, &params)
 
 		text := lspDocs[params.TextDocument.URI]
+		params.Position = lspPositionToBytePosition(text, params.Position)
 
 		var result any
 
@@ -903,7 +1230,7 @@ func handleLSPMessage(msg LSPMessage) {
 
 		writeLSPMessage(LSPMessage{
 			ID:     msg.ID,
-			Result: result,
+			Result: nullLSPResult(result),
 		})
 
 	case "textDocument/definition":
@@ -911,6 +1238,7 @@ func handleLSPMessage(msg LSPMessage) {
 		json.Unmarshal(msg.Params, &params)
 
 		text := lspDocs[params.TextDocument.URI]
+		params.Position = lspPositionToBytePosition(text, params.Position)
 
 		var result any
 
@@ -926,7 +1254,7 @@ func handleLSPMessage(msg LSPMessage) {
 
 		writeLSPMessage(LSPMessage{
 			ID:     msg.ID,
-			Result: result,
+			Result: nullLSPResult(result),
 		})
 
 	case "textDocument/documentSymbol":
@@ -990,6 +1318,7 @@ func handleLSPMessage(msg LSPMessage) {
 		json.Unmarshal(msg.Params, &params)
 
 		text := lspDocs[params.TextDocument.URI]
+		params.Position = lspPositionToBytePosition(text, params.Position)
 
 		var result any
 
@@ -1005,14 +1334,14 @@ func handleLSPMessage(msg LSPMessage) {
 
 		writeLSPMessage(LSPMessage{
 			ID:     msg.ID,
-			Result: result,
+			Result: nullLSPResult(result),
 		})
 
 	default:
 		if msg.ID != nil {
 			writeLSPMessage(LSPMessage{
 				ID:     msg.ID,
-				Result: nil,
+				Result: nullLSPResult(nil),
 			})
 		}
 	}
@@ -1069,12 +1398,12 @@ func collectSymbolFromStmt(symbols *TinySymbols, stmt Stmt) {
 
 var lspLogFile *os.File
 
-func initLSPLogger() {
-	file, err := os.OpenFile("tiny-lsp.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err == nil {
-		lspLogFile = file
-	}
-}
+// func initLSPLogger() {
+// 	file, err := os.OpenFile("tiny-lsp.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+// 	if err == nil {
+// 		lspLogFile = file
+// 	}
+// }
 
 // func lspDebug(format string, args ...any) {
 // 	if lspLogFile == nil {
@@ -1146,6 +1475,19 @@ func semanticDiagnostics(uri string, text string) []map[string]any {
 }
 
 func publishDiagnostics(uri string, text string) {
+	if text == "" {
+		params, _ := json.Marshal(map[string]any{
+			"uri":         uri,
+			"diagnostics": []map[string]any{},
+		})
+
+		writeLSPMessage(LSPMessage{
+			Method: "textDocument/publishDiagnostics",
+			Params: params,
+		})
+		return
+	}
+
 	_, parseDiagnostics := parseTinyForLSP(uri, text)
 
 	diagnostics := []map[string]any{}
@@ -1174,6 +1516,8 @@ func publishDiagnostics(uri string, text string) {
 	if len(parseDiagnostics) == 0 {
 		diagnostics = append(diagnostics, semanticDiagnostics(uri, text)...)
 	}
+
+	diagnostics = normalizeDiagnosticRangesForLSP(text, diagnostics)
 
 	params, _ := json.Marshal(map[string]any{
 		"uri":         uri,
@@ -1297,8 +1641,22 @@ func scopeCompletions(scope *Scope) []CompletionItem {
 		{Label: "else", Kind: 14, Detail: "else"},
 		{Label: "while", Kind: 14, Detail: "while loop"},
 		{Label: "for", Kind: 14, Detail: "for loop"},
+		{Label: "in", Kind: 14, Detail: "for-in loop"},
+		{Label: "match", Kind: 14, Detail: "match expression"},
 		{Label: "return", Kind: 14, Detail: "return"},
+		{Label: "break", Kind: 14, Detail: "break"},
+		{Label: "continue", Kind: 14, Detail: "continue"},
+		{Label: "try", Kind: 14, Detail: "try statement"},
+		{Label: "catch", Kind: 14, Detail: "catch block"},
+		{Label: "finally", Kind: 14, Detail: "finally block"},
+		{Label: "throw", Kind: 14, Detail: "throw error"},
 		{Label: "spawn", Kind: 14, Detail: "spawn task"},
+		{Label: "typeof", Kind: 14, Detail: "type operator"},
+		{Label: "instanceof", Kind: 14, Detail: "instance check"},
+		{Label: "true", Kind: 14, Detail: "boolean literal"},
+		{Label: "false", Kind: 14, Detail: "boolean literal"},
+		{Label: "null", Kind: 14, Detail: "null literal"},
+		{Label: "undefined", Kind: 14, Detail: "undefined literal"},
 	}
 
 	seen := map[string]bool{}

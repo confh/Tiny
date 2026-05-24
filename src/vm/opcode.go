@@ -86,6 +86,21 @@ const (
 	OP_JUMP_LOCAL_GE_CONST
 	OP_JUMP_LOCAL_GE_LOCAL
 	OP_JUMP_MOD_LOCAL_LOCAL_NOT_ZERO
+
+	OP_LOAD_LOCAL_0
+	OP_LOAD_LOCAL_1
+	OP_LOAD_LOCAL_2
+	OP_LOAD_LOCAL_3
+	OP_METHOD_CALL_LOCAL_0
+	OP_METHOD_CALL_LOCAL_1
+	OP_JUMP_MOD_LOCAL_CONST_NOT_ZERO
+	OP_ARRAY_LEN_LOCAL
+	OP_ARRAY_GET_LOCAL
+	OP_ARRAY_PUSH_LOCAL
+	OP_ARRAY_PUSH_LOCAL_MUL_CONST
+	OP_GET_PROPERTY_LOCAL
+	OP_MUL_LOCAL_CONST
+	OP_ADD_PROPERTY_LOCAL_LOCAL
 )
 
 type Instruction struct {
@@ -180,6 +195,39 @@ type MethodCallInfo struct {
 	ArgCount int
 }
 
+type MethodLocalCallInfo struct {
+	Method       string
+	ReceiverSlot int
+	ArgSlot      int
+}
+
+type ArrayLocalCallInfo struct {
+	ArraySlot int
+	ArgSlot   int
+}
+
+type ArrayLocalMulConstInfo struct {
+	ArraySlot int
+	ArgSlot   int
+	Factor    int
+}
+
+type PropertyLocalInfo struct {
+	Slot int
+	Name string
+}
+
+type PropertyLocalAssignInfo struct {
+	ObjectSlot int
+	SourceSlot int
+	Name       string
+}
+
+type LocalConstInfo struct {
+	Slot  int
+	Value int
+}
+
 type IncrementInfo struct {
 	Slot        int
 	Name        string
@@ -205,6 +253,12 @@ type JumpModLocalLocalNotZeroInfo struct {
 	LeftSlot  int
 	RightSlot int
 	Target    int
+}
+
+type JumpModLocalConstNotZeroInfo struct {
+	LeftSlot int
+	Right    int
+	Target   int
 }
 
 type Class struct {

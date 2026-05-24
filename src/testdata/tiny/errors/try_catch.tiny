@@ -1,0 +1,11 @@
+import std "error";
+import std "io";
+
+try {
+    throw error.new("ValidationError", "name required");
+} catch err {
+    io.println(err.kind);
+    io.println(err.message);
+} finally {
+    io.println("finally");
+}

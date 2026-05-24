@@ -12,7 +12,8 @@ func fullDocumentRange(text string) LSPRange {
 	lastChar := 0
 
 	if lastLine >= 0 {
-		lastChar = len(strings.TrimSuffix(lines[lastLine], "\r"))
+		lastLineText := strings.TrimSuffix(lines[lastLine], "\r")
+		lastChar = byteColumnToUTF16Column(lastLineText, len(lastLineText))
 	}
 
 	return LSPRange{

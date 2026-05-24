@@ -168,6 +168,9 @@ func (p *Parser) parseOptionalTypeHint() TypeHint {
 	if p.current.Type != TOKEN_COLON {
 		return TypeHint{}
 	}
+
+	p.advance()
+
 	types := []string{}
 
 	for {

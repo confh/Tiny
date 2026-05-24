@@ -133,13 +133,31 @@ func stringLower(vm *VM, value string, args []Value) {
 
 func stringSplit(vm *VM, value string, args []Value) {
 	expectArgs(vm, "string.split", args, 1)
-
 	separator := argString(vm, "string.split", args, 0)
-	splitStrings := strings.Split(value, separator)
-	elements := make([]Value, len(splitStrings))
-	for i, s := range splitStrings {
-		elements[i] = s
+
+	if separator == "" {
+		runes := []rune(value)
+		elements := make([]Value, len(runes))
+		for i, r := range runes {
+			elements[i] = string(r)
+		}
+		vm.push(&ArrayValue{Elements: elements})
+		return
 	}
+
+	count := strings.Count(value, separator) + 1
+	elements := make([]Value, 0, count)
+
+	for {
+		idx := strings.Index(value, separator)
+		if idx == -1 {
+			elements = append(elements, value)
+			break
+		}
+		elements = append(elements, value[:idx])
+		value = value[idx+len(separator):]
+	}
+
 	vm.push(&ArrayValue{Elements: elements})
 }
 

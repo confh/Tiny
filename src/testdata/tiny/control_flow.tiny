@@ -1,0 +1,26 @@
+import std "io";
+
+for let i = 0; i < 3; i = i + 1 {
+    io.println(i);
+}
+
+let total = 0;
+let values = [1, 2, 3];
+
+for value in values {
+    total = total + value;
+}
+
+io.println(total);
+
+match 1 {
+    1 {
+        io.println("one");
+    }
+    _ {
+        io.println("other");
+    }
+}
+
+let label = false ? "bad" : "fallback";
+io.println(label);

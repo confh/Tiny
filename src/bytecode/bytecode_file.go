@@ -34,6 +34,8 @@ type SerializableFunction struct {
 	LocalCount   int                       `json:"localCount"`
 	Captures     []CapturedVar             `json:"captures"`
 	Instructions []SerializableInstruction `json:"instructions"`
+	HasDefaults  bool                      `json:"hasDefaults"`
+	HasTypeHints bool                      `json:"hasTypeHints"`
 }
 
 type SerializableClassField struct {
@@ -127,6 +129,7 @@ func SaveBytecode(path string, main []Instruction, functions map[string]Function
 	}
 
 	for name, fn := range functions {
+
 		file.Functions[name] = SerializableFunction{
 			ID:           fn.ID,
 			Name:         fn.Name,
@@ -135,6 +138,8 @@ func SaveBytecode(path string, main []Instruction, functions map[string]Function
 			LocalCount:   fn.LocalCount,
 			Captures:     fn.Captures,
 			Instructions: serializeInstructions(fn.Instructions),
+			HasDefaults:  fn.HasDefaults,
+			HasTypeHints: fn.HasTypeHints,
 		}
 	}
 
@@ -166,6 +171,8 @@ func SaveBytecodeToBytes(main []Instruction, functions map[string]Function, clas
 			LocalCount:   fn.LocalCount,
 			Captures:     fn.Captures,
 			Instructions: serializeInstructions(fn.Instructions),
+			HasDefaults:  fn.HasDefaults,
+			HasTypeHints: fn.HasTypeHints,
 		}
 	}
 
@@ -211,6 +218,8 @@ func LoadBytecodeFromBytes(data []byte) ([]Instruction, map[string]Function, map
 			LocalCount:   fn.LocalCount,
 			Captures:     fn.Captures,
 			Instructions: deserializeInstructions(fn.Instructions),
+			HasDefaults:  fn.HasDefaults,
+			HasTypeHints: fn.HasTypeHints,
 		}
 	}
 
@@ -340,6 +349,24 @@ func EncodeValue(value any) EncodedValue {
 	case MethodCallInfo:
 		return EncodedValue{Type: "methodCall", Data: v}
 
+	case MethodLocalCallInfo:
+		return EncodedValue{Type: "methodLocalCall", Data: v}
+
+	case ArrayLocalCallInfo:
+		return EncodedValue{Type: "arrayLocalCall", Data: v}
+
+	case ArrayLocalMulConstInfo:
+		return EncodedValue{Type: "arrayLocalMulConst", Data: v}
+
+	case PropertyLocalInfo:
+		return EncodedValue{Type: "propertyLocal", Data: v}
+
+	case PropertyLocalAssignInfo:
+		return EncodedValue{Type: "propertyLocalAssign", Data: v}
+
+	case LocalConstInfo:
+		return EncodedValue{Type: "localConst", Data: v}
+
 	case JumpLocalGELocalInfo:
 		return EncodedValue{Type: "jumpLocalGELocal", Data: v}
 
@@ -375,6 +402,9 @@ func EncodeValue(value any) EncodedValue {
 
 	case JumpModLocalLocalNotZeroInfo:
 		return EncodedValue{Type: "jumpModLocalLocalNotZero", Data: v}
+
+	case JumpModLocalConstNotZeroInfo:
+		return EncodedValue{Type: "jumpModLocalConstNotZero", Data: v}
 
 	case NamespaceValue:
 		members := map[string]EncodedValue{}
@@ -513,6 +543,11 @@ func DecodeValue(value EncodedValue) any {
 		decodeInto(value.Data, &result)
 		return result
 
+	case "jumpModLocalConstNotZero":
+		var result JumpModLocalConstNotZeroInfo
+		decodeInto(value.Data, &result)
+		return result
+
 	case "call":
 		var result CallInfo
 		decodeInto(value.Data, &result)
@@ -535,6 +570,36 @@ func DecodeValue(value EncodedValue) any {
 
 	case "methodCall":
 		var result MethodCallInfo
+		decodeInto(value.Data, &result)
+		return result
+
+	case "methodLocalCall":
+		var result MethodLocalCallInfo
+		decodeInto(value.Data, &result)
+		return result
+
+	case "arrayLocalCall":
+		var result ArrayLocalCallInfo
+		decodeInto(value.Data, &result)
+		return result
+
+	case "arrayLocalMulConst":
+		var result ArrayLocalMulConstInfo
+		decodeInto(value.Data, &result)
+		return result
+
+	case "propertyLocal":
+		var result PropertyLocalInfo
+		decodeInto(value.Data, &result)
+		return result
+
+	case "propertyLocalAssign":
+		var result PropertyLocalAssignInfo
+		decodeInto(value.Data, &result)
+		return result
+
+	case "localConst":
+		var result LocalConstInfo
 		decodeInto(value.Data, &result)
 		return result
 

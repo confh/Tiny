@@ -1,0 +1,9 @@
+export const status = "ready";
+
+export fn render(color) {
+    return `report: ${color}`;
+}
+
+fn hidden() {
+    return "hidden";
+}

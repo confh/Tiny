@@ -1,0 +1,25 @@
+import std "io";
+
+let items = [1, 2, 3];
+items.push(4);
+
+io.println(items.length());
+io.println(items.get(0));
+io.println(items.join("-"));
+
+let user = {
+    name: "Tiny",
+    score: 10
+};
+
+user.score += 5;
+
+io.println(user.name);
+io.println(user.score);
+io.println(user["missing"]);
+
+let doubled = items.map(fn(index, value) {
+    return value * 2;
+});
+
+io.println(doubled.join(","));

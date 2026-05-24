@@ -1,0 +1,32 @@
+import std "io";
+
+fn greet(name, prefix = "Hello") {
+    return `${prefix}, ${name}`;
+}
+
+fn sum(...values) {
+    let total = 0;
+
+    for value in values {
+        total = total + value;
+    }
+
+    return total;
+}
+
+fn makeCounter() {
+    let value = 0;
+
+    return fn() {
+        value = value + 1;
+        return value;
+    };
+}
+
+io.println(greet("Tiny"));
+io.println(greet("Tiny", "Welcome"));
+io.println(sum(1, 2, 3));
+
+let next = makeCounter();
+io.println(next());
+io.println(next());

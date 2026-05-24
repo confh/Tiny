@@ -258,6 +258,14 @@ func memberExistsOnSymbol(scope *Scope, sym SymbolInfo, member string) bool {
 		return member == "await"
 	}
 
+	if sym.Type == "error" {
+		return member == "kind" || member == "message" || member == "toString"
+	}
+
+	if sym.Type == "object" {
+		return true
+	}
+
 	if sym.Kind == SymbolNamespace {
 		_, ok := sym.Members[member]
 		return ok
@@ -344,20 +352,29 @@ func checkUndefinedVariablesOnLine(scope *Scope, rawLine string, lineIndex int) 
 }
 
 func shouldCheckMemberAccess(receiverType string) bool {
+	receiverType = strings.TrimSpace(receiverType)
+
 	if receiverType == "" {
 		return false
 	}
 
-	if receiverType == "any" || receiverType == "unknown" || receiverType == "undefined" || receiverType == "null" {
+	// Dynamic/loose values should not create fake property warnings.
+	// Classes/std/native/error are still checked by memberExistsByType.
+	if receiverType == "any" ||
+		receiverType == "unknown" ||
+		receiverType == "object" ||
+		receiverType == "undefined" ||
+		receiverType == "null" {
 		return false
 	}
 
 	if strings.Contains(receiverType, "|") {
-		parts := strings.Split(receiverType, "|")
-
-		for _, part := range parts {
-			part = strings.TrimSpace(part)
-			if part == "any" || part == "unknown" || part == "null" || part == "undefined" {
+		for _, part := range splitUnionType(receiverType) {
+			if part == "any" ||
+				part == "unknown" ||
+				part == "object" ||
+				part == "null" ||
+				part == "undefined" {
 				return false
 			}
 		}
@@ -616,7 +633,10 @@ func fallbackScopeAtPosition(uri string, text string, pos Position) *Scope {
 		}
 
 		scanVariableLine(scope, line, lineIndex+1, uri)
-		scanFieldLine(scope, line, lineIndex+1, uri)
+		lineOffset := offsetAtLine(text, lineIndex+1)
+		if !blockInsideAny(lineOffset, classBlocks) {
+			scanFieldLine(scope, line, lineIndex+1, uri)
+		}
 	}
 
 	// Add parameters from the function/method/anonymous function that contains the cursor.
@@ -2202,16 +2222,53 @@ func inferExprType(scope *Scope, expr Expr) string {
 			return sym.Type
 		}
 		return "unknown"
-	case CallExpr:
-		if sym, ok := scope.Resolve(e.Name); ok {
-			if sym.Kind == SymbolClass {
-				return "class:" + e.Name
-			}
-			if sym.Kind == SymbolFunction && sym.Returns != "" {
-				return sym.Returns
-			}
+	case CallValueExpr:
+		for _, arg := range e.Args {
+			inferExprType(scope, arg)
 		}
-		return "unknown"
+
+		switch callee := e.Callee.(type) {
+		case IdentExpr:
+			if sym, ok := scope.Resolve(callee.Name); ok {
+				if sym.Kind == SymbolClass {
+					return "class:" + sym.Name
+				}
+
+				if sym.Kind == SymbolFunction {
+					return firstNonEmpty(sym.Returns, "any")
+				}
+
+				return sym.Type
+			}
+
+		case PropertyExpr:
+			objType := inferExprType(scope, callee.Object)
+
+			// namespace call: models.User()
+			if ident, ok := callee.Object.(IdentExpr); ok {
+				if ns, exists := scope.Resolve(ident.Name); exists && ns.Kind == SymbolNamespace {
+					memberSym, ok := ns.Members[callee.Name]
+					if !ok {
+						return "unknown"
+					}
+
+					if memberSym.Kind == SymbolClass {
+						return "class:" + ident.Name + "." + memberSym.Name
+					}
+
+					if memberSym.Kind == SymbolFunction {
+						return firstNonEmpty(memberSym.Returns, "any")
+					}
+
+					return memberSym.Type
+				}
+			}
+
+			return inferMemberCallTypeFromParts(scope, objType, callee.Name)
+		}
+
+		calleeType := inferExprType(scope, e.Callee)
+		return calleeType
 	case MemberCallExpr:
 		return inferMemberCallTypeFromParts(scope, inferExprType(scope, e.Object), e.Method)
 	default:
@@ -2925,6 +2982,53 @@ func (a *astSemanticAnalyzer) inferExprType(expr Expr) string {
 		a.checkMember(e.Object, e.Name, e.Line, e.Column)
 		objType := a.inferExprType(e.Object)
 		return a.memberType(objType, e.Name)
+	case CallValueExpr:
+		for _, arg := range e.Args {
+			a.inferExprType(arg)
+		}
+
+		switch callee := e.Callee.(type) {
+		case IdentExpr:
+			if sym, ok := a.resolve(callee.Name); ok {
+				if sym.Kind == SymbolClass {
+					return "class:" + sym.Name
+				}
+
+				if sym.Kind == SymbolFunction {
+					return firstNonEmpty(sym.Returns, "any")
+				}
+
+				return sym.Type
+			}
+
+		case PropertyExpr:
+			objType := a.inferExprType(callee.Object)
+
+			// Namespace call: models.User()
+			if ident, ok := callee.Object.(IdentExpr); ok {
+				if ns, exists := a.resolve(ident.Name); exists && ns.Kind == SymbolNamespace {
+					memberSym, ok := ns.Members[callee.Name]
+					if !ok {
+						return "unknown"
+					}
+
+					if memberSym.Kind == SymbolClass {
+						return "class:" + ident.Name + "." + memberSym.Name
+					}
+
+					if memberSym.Kind == SymbolFunction {
+						return firstNonEmpty(memberSym.Returns, "any")
+					}
+
+					return memberSym.Type
+				}
+			}
+
+			return a.memberType(objType, callee.Name)
+		}
+
+		return a.inferExprType(e.Callee)
+
 	case MemberCallExpr:
 		// Special case: namespace member call like models.User()
 		if ident, ok := e.Object.(IdentExpr); ok {
@@ -2985,12 +3089,6 @@ func (a *astSemanticAnalyzer) inferExprType(expr Expr) string {
 		}
 		a.addDiagnostic(e.Line, e.Column, "undefined variable: "+e.Name)
 		return "unknown"
-	case CallValueExpr:
-		calleeType := a.inferExprType(e.Callee)
-		for _, arg := range e.Args {
-			a.inferExprType(arg)
-		}
-		return calleeType
 	case FunctionExpr:
 		a.pushScope()
 		for _, p := range e.Params {
@@ -3060,6 +3158,31 @@ func (a *astSemanticAnalyzer) inferExprType(expr Expr) string {
 }
 
 func (a *astSemanticAnalyzer) checkMember(object Expr, member string, line int, column int) {
+	// If this is a named variable, use the full symbol, not just its type.
+	// That lets object literals keep known fields like:
+	// let user = { name: "Tiny", score: 10 };
+	// user.score
+	if ident, ok := object.(IdentExpr); ok {
+		if sym, exists := a.resolve(ident.Name); exists {
+			if sym.Type == "object" {
+				// Dynamic objects are allowed. If fields are known, accept them.
+				// If fields are not known or member is missing, don't warn because Tiny objects are dynamic.
+				return
+			}
+
+			if memberExistsOnSymbol(a.root, sym, member) {
+				return
+			}
+
+			if !shouldCheckMemberAccess(sym.Type) {
+				return
+			}
+
+			a.addDiagnostic(line, column, "undefined method or property: "+member)
+			return
+		}
+	}
+
 	objType := a.inferExprType(object)
 	if !shouldCheckMemberAccess(objType) {
 		return
@@ -3071,6 +3194,10 @@ func (a *astSemanticAnalyzer) checkMember(object Expr, member string, line int, 
 
 func (a *astSemanticAnalyzer) memberExistsByType(typ string, member string) bool {
 	typ = strings.TrimSpace(typ)
+
+	if typ == "" || typ == "any" || typ == "unknown" || typ == "null" || typ == "undefined" {
+		return true
+	}
 
 	if strings.Contains(typ, "|") {
 		for _, part := range splitUnionType(typ) {
@@ -3086,7 +3213,30 @@ func (a *astSemanticAnalyzer) memberExistsByType(typ string, member string) bool
 		return false
 	}
 
-	// Raw class name: User
+	if typ == "object" {
+		return true
+	}
+
+	if typ == "error" {
+		return member == "kind" || member == "message" || member == "toString"
+	}
+
+	if strings.HasPrefix(typ, "task:") {
+		return member == "await"
+	}
+
+	if strings.HasPrefix(typ, "std:") {
+		module := strings.TrimPrefix(typ, "std:")
+
+		info, ok := GetStdModuleInfo(module)
+		if !ok {
+			return false
+		}
+
+		_, ok = info.Methods[member]
+		return ok
+	}
+
 	if sym, ok := resolveClassSymbol(a.root, typ); ok && sym.Kind == SymbolClass {
 		typ = "class:" + typ
 	}
@@ -3110,21 +3260,6 @@ func (a *astSemanticAnalyzer) memberExistsByType(typ string, member string) bool
 		return false
 	}
 
-	if strings.HasPrefix(typ, "std:") {
-		module := strings.TrimPrefix(typ, "std:")
-		info, ok := GetStdModuleInfo(module)
-		if !ok {
-			return false
-		}
-
-		_, ok = info.Methods[member]
-		return ok
-	}
-
-	if strings.HasPrefix(typ, "task:") {
-		return member == "await"
-	}
-
 	if _, ok := GetNativeMethodInfo(typ, member); ok {
 		return true
 	}
@@ -3136,11 +3271,15 @@ func (a *astSemanticAnalyzer) memberExistsByType(typ string, member string) bool
 	return false
 }
 
-func (a *astSemanticAnalyzer) memberType(typeName string, member string) string {
-	typeName = strings.TrimSpace(typeName)
+func (a *astSemanticAnalyzer) memberType(typ string, member string) string {
+	typ = strings.TrimSpace(typ)
 
-	if strings.Contains(typeName, "|") {
-		for _, part := range splitUnionType(typeName) {
+	if typ == "" || typ == "any" || typ == "unknown" {
+		return "any"
+	}
+
+	if strings.Contains(typ, "|") {
+		for _, part := range splitUnionType(typ) {
 			if isNullishLSPType(part) {
 				continue
 			}
@@ -3154,13 +3293,51 @@ func (a *astSemanticAnalyzer) memberType(typeName string, member string) string 
 		return "unknown"
 	}
 
-	// Raw class name: User
-	if sym, ok := resolveClassSymbol(a.root, typeName); ok && sym.Kind == SymbolClass {
-		typeName = "class:" + typeName
+	if typ == "object" {
+		return "any"
 	}
 
-	if strings.HasPrefix(typeName, "class:") {
-		className := strings.TrimPrefix(typeName, "class:")
+	if typ == "error" {
+		switch member {
+		case "kind", "message":
+			return "string"
+		case "toString":
+			return "function"
+		default:
+			return "unknown"
+		}
+	}
+
+	if strings.HasPrefix(typ, "task:") {
+		if member == "await" {
+			return strings.TrimPrefix(typ, "task:")
+		}
+
+		return "unknown"
+	}
+
+	if strings.HasPrefix(typ, "std:") {
+		module := strings.TrimPrefix(typ, "std:")
+
+		info, ok := GetStdModuleInfo(module)
+		if !ok {
+			return "unknown"
+		}
+
+		method, ok := info.Methods[member]
+		if !ok {
+			return "unknown"
+		}
+
+		return method.Returns
+	}
+
+	if sym, ok := resolveClassSymbol(a.root, typ); ok && sym.Kind == SymbolClass {
+		typ = "class:" + typ
+	}
+
+	if strings.HasPrefix(typ, "class:") {
+		className := strings.TrimPrefix(typ, "class:")
 
 		classSym, ok := resolveClassSymbol(a.root, className)
 		if !ok || classSym.Kind != SymbolClass {
@@ -3177,57 +3354,14 @@ func (a *astSemanticAnalyzer) memberType(typeName string, member string) string 
 
 		return "unknown"
 	}
-	if sym, ok := a.root.Resolve(typeName); ok && sym.Kind == SymbolClass {
-		typeName = "class:" + typeName
+
+	if methodInfo, ok := GetNativeMethodInfo(typ, member); ok {
+		return methodInfo.Returns
 	}
 
-	if strings.Contains(typeName, "|") {
-		parts := strings.Split(typeName, "|")
-
-		for _, part := range parts {
-			part = strings.TrimSpace(part)
-
-			if part == "null" || part == "undefined" {
-				continue
-			}
-
-			memberTyp := a.memberType(part, member)
-			if memberTyp != "" && memberTyp != "unknown" {
-				return memberTyp
-			}
-		}
-
-		return "unknown"
+	if member == "toString" {
+		return "string"
 	}
 
-	if strings.HasPrefix(typeName, "task:") && member == "await" {
-		return strings.TrimPrefix(typeName, "task:")
-	}
-	if strings.HasPrefix(typeName, "std:") {
-		info, ok := GetStdModuleInfo(strings.TrimPrefix(typeName, "std:"))
-		if ok {
-			if m, ok := info.Methods[member]; ok {
-				return m.Returns
-			}
-		}
-	}
-	if strings.HasPrefix(typeName, "class:") {
-		className := strings.TrimPrefix(typeName, "class:")
-		classSym, ok := a.root.Resolve(className)
-		if ok {
-			if m, ok := classSym.Methods[member]; ok {
-				if m.Returns != "" {
-					return m.Returns
-				}
-				return "any"
-			}
-			if f, ok := classSym.Fields[member]; ok {
-				return f.Type
-			}
-		}
-	}
-	if m, ok := GetNativeMethodInfo(typeName, member); ok {
-		return m.Returns
-	}
 	return "unknown"
 }

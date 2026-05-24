@@ -1,0 +1,5 @@
+import std "io";
+import "lib.tiny" as Report;
+
+io.println(Report.render("green"));
+io.println(Report.status);

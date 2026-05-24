@@ -33,6 +33,7 @@ type Frame struct {
 
 	returnOverride    Value
 	hasReturnOverride bool
+	hasEscapedLocals  bool
 }
 
 type VM struct {
@@ -272,7 +273,7 @@ func (vm *VM) getFrame(fn Function) Frame {
 			frame.locals[i] = &Cell{}
 		}
 
-		frame.locals[i].Value = UndefinedValue{}
+		setCellValue(frame.locals[i], UndefinedValue{})
 		frame.constants[i] = false
 		frame.localTypes[i] = TypeHint{}
 	}
@@ -280,11 +281,19 @@ func (vm *VM) getFrame(fn Function) Frame {
 	frame.function = fn
 	frame.ip = 0
 	frame.instructions = fn.Instructions
+	frame.methodClass = ""
+	frame.returnOverride = nil
+	frame.hasReturnOverride = false
+	frame.hasEscapedLocals = false
 
 	return frame
 }
 
 func (vm *VM) releaseFrame(frame Frame) {
+	if frame.hasEscapedLocals {
+		return
+	}
+
 	// Keep pool from growing forever.
 	if len(vm.framePool) >= 1024 {
 		return
@@ -293,7 +302,7 @@ func (vm *VM) releaseFrame(frame Frame) {
 	// Clear references so big objects can be GC'd.
 	for i := range frame.locals {
 		if frame.locals[i] != nil {
-			frame.locals[i].Value = nil
+			setCellValue(frame.locals[i], nil)
 		}
 	}
 
@@ -386,6 +395,153 @@ func cloneValue(value Value) Value {
 	}
 }
 
+func cellValue(cell *Cell) Value {
+	if cell.IsInt {
+		return cell.Int
+	}
+
+	return cell.Value
+}
+
+func setCellValue(cell *Cell, value Value) {
+	if intValue, ok := value.(int); ok {
+		cell.Int = intValue
+		cell.Value = nil
+		cell.IsInt = true
+		return
+	}
+
+	cell.Value = value
+	cell.Int = 0
+	cell.IsInt = false
+}
+
+func frameLocalValue(frame *Frame, slot int, op string) Value {
+	if slot < 0 || slot >= len(frame.locals) {
+		LangError(ErrorInternal, "local slot out of range in %s", op)
+	}
+
+	cell := frame.locals[slot]
+	if cell == nil {
+		LangError(ErrorInternal, "local cell is nil in %s", op)
+	}
+
+	return cellValue(cell)
+}
+
+func propertyValue(vm *VM, objectValue Value, name string) Value {
+	if object, ok := objectValue.(ObjectValue); ok {
+		if !vm.canAccessField(object, name) {
+			LangError(ErrorRuntime, "cannot access private field: %s", name)
+		}
+
+		value, exists := object[name]
+		if !exists {
+			LangError(ErrorName, "object has no property: %s", name)
+		}
+
+		return value
+	}
+
+	if ns, ok := objectValue.(NamespaceValue); ok {
+		value, exists := ns.Members[name]
+		if !exists {
+			LangError(ErrorName, "namespace %s has no member: %s", ns.Name, name)
+		}
+		return resolveNamespaceValue(vm, value)
+	}
+
+	if ns, ok := objectValue.(*NamespaceValue); ok {
+		value, exists := ns.Members[name]
+		if !exists {
+			LangError(ErrorName, "namespace %s has no member: %s", ns.Name, name)
+		}
+		return resolveNamespaceValue(vm, value)
+	}
+
+	LangError(ErrorType, "expected object, got %s", TypeName(objectValue))
+	return nil
+}
+
+func resolveNamespaceValue(vm *VM, value Value) Value {
+	if ref, ok := value.(NamespaceMemberRef); ok {
+		actual, exists := vm.globals[ref.GlobalName]
+		if !exists {
+			LangError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
+		}
+		return actual
+	}
+
+	if ref, ok := value.(*NamespaceMemberRef); ok {
+		actual, exists := vm.globals[ref.GlobalName]
+		if !exists {
+			LangError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
+		}
+		return actual
+	}
+
+	return value
+}
+
+func multiplyByInt(value Value, factor int) Value {
+	switch v := value.(type) {
+	case int:
+		return v * factor
+	case int64:
+		return v * int64(factor)
+	case float64:
+		return v * float64(factor)
+	case float32:
+		return v * float32(factor)
+	default:
+		LangError(ErrorType, "cannot multiply %s and number", TypeName(value))
+		return nil
+	}
+}
+
+func addValues(left Value, right Value) Value {
+	switch l := left.(type) {
+	case int:
+		switch r := right.(type) {
+		case int:
+			return l + r
+		case float64:
+			return float64(l) + r
+		default:
+			LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
+		}
+
+	case float64:
+		switch r := right.(type) {
+		case int:
+			return l + float64(r)
+		case float64:
+			return l + r
+		default:
+			LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
+		}
+
+	case string:
+		switch r := right.(type) {
+		case string:
+			return l + r
+		case float64:
+			return l + FloatToString(r)
+		case int:
+			return l + intToString(r)
+		case int64:
+			return l + bigIntToString(r)
+		default:
+			LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
+		}
+
+	default:
+		LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
+	}
+
+	return nil
+}
+
 func (vm *VM) canAccessField(object ObjectValue, field string) bool {
 	className, isClass := object["__class"]
 	if !isClass {
@@ -469,11 +625,11 @@ func (vm *VM) callClassWithArgs(class Class, args []Value) {
 
 		frame := vm.getFrame(fn)
 
-		frame.locals[0].Value = object
+		setCellValue(frame.locals[0], object)
 		frame.constants[0] = true
 
 		for i, arg := range args {
-			frame.locals[i+1].Value = arg
+			setCellValue(frame.locals[i+1], arg)
 			frame.constants[i+1] = false
 		}
 
@@ -668,7 +824,7 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 				)
 			}
 
-			frame.locals[i].Value = arg
+			setCellValue(frame.locals[i], arg)
 			frame.constants[i] = false
 			frame.localTypes[i] = param.TypeHint
 
@@ -699,7 +855,7 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 			vm.stack[start+i] = nil
 		}
 
-		frame.locals[fixedCount].Value = rest
+		setCellValue(frame.locals[fixedCount], rest)
 		frame.constants[fixedCount] = false
 		frame.localTypes[fixedCount] = TypeHint{Name: "array"}
 
@@ -724,7 +880,7 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 				)
 			}
 
-			frame.locals[i].Value = arg
+			setCellValue(frame.locals[i], arg)
 			frame.constants[i] = false
 			frame.localTypes[i] = param.TypeHint
 
@@ -732,7 +888,7 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 		}
 	} else {
 		for i := 0; i < argCount; i++ {
-			frame.locals[i].Value = vm.stack[start+i]
+			setCellValue(frame.locals[i], vm.stack[start+i])
 			frame.constants[i] = false
 
 			vm.stack[start+i] = nil
@@ -786,8 +942,15 @@ func (vm *VM) step() bool {
 			LangError(ErrorInternal, "nil local in OP_JUMP_LOCAL_GE_LOCAL")
 		}
 
-		left := leftCell.Value
-		right := rightCell.Value
+		if leftCell.IsInt && rightCell.IsInt {
+			if leftCell.Int >= rightCell.Int {
+				frame.ip = info.Target
+			}
+			break
+		}
+
+		left := cellValue(leftCell)
+		right := cellValue(rightCell)
 
 		shouldJump := false
 
@@ -839,8 +1002,18 @@ func (vm *VM) step() bool {
 			LangError(ErrorInternal, "nil local in OP_JUMP_MOD_LOCAL_LOCAL_NOT_ZERO")
 		}
 
-		left := leftCell.Value
-		right := rightCell.Value
+		if leftCell.IsInt && rightCell.IsInt {
+			if rightCell.Int == 0 {
+				LangError(ErrorRuntime, "cannot modulo by zero")
+			}
+			if leftCell.Int%rightCell.Int != 0 {
+				frame.ip = info.Target
+			}
+			break
+		}
+
+		left := cellValue(leftCell)
+		right := cellValue(rightCell)
 
 		shouldJump := false
 
@@ -874,6 +1047,47 @@ func (vm *VM) step() bool {
 			frame.ip = info.Target
 		}
 
+	case OP_JUMP_MOD_LOCAL_CONST_NOT_ZERO:
+		info := instr.Value.(JumpModLocalConstNotZeroInfo)
+
+		frame := &vm.frames[len(vm.frames)-1]
+
+		if info.LeftSlot < 0 || info.LeftSlot >= len(frame.locals) {
+			LangError(ErrorInternal, "local slot out of range in OP_JUMP_MOD_LOCAL_CONST_NOT_ZERO")
+		}
+		if info.Right == 0 {
+			LangError(ErrorRuntime, "cannot modulo by zero")
+		}
+
+		leftCell := frame.locals[info.LeftSlot]
+		if leftCell == nil {
+			LangError(ErrorInternal, "nil local in OP_JUMP_MOD_LOCAL_CONST_NOT_ZERO")
+		}
+
+		shouldJump := false
+
+		if leftCell.IsInt {
+			shouldJump = leftCell.Int%info.Right != 0
+		} else {
+			left := cellValue(leftCell)
+			switch l := left.(type) {
+			case int:
+				shouldJump = l%info.Right != 0
+			case int64:
+				shouldJump = l%int64(info.Right) != 0
+			case float64:
+				shouldJump = math.Mod(l, float64(info.Right)) != 0
+			case float32:
+				shouldJump = math.Mod(float64(l), float64(info.Right)) != 0
+			default:
+				LangError(ErrorType, "cannot modulo %s and number", TypeName(left))
+			}
+		}
+
+		if shouldJump {
+			frame.ip = info.Target
+		}
+
 	case OP_ADD_ASSIGN_LOCAL:
 		info := instr.Value.(AssignLocalInfo)
 
@@ -898,68 +1112,74 @@ func (vm *VM) step() bool {
 			LangError(ErrorConst, "cannot assign to constant local")
 		}
 
-		switch target := targetCell.Value.(type) {
+		if targetCell.IsInt && sourceCell.IsInt {
+			targetCell.Int += sourceCell.Int
+			break
+		}
+
+		switch target := cellValue(targetCell).(type) {
 		case int:
-			switch source := sourceCell.Value.(type) {
+			switch source := cellValue(sourceCell).(type) {
 			case int:
-				targetCell.Value = target + source
+				targetCell.Int = target + source
+				targetCell.IsInt = true
 			case int64:
-				targetCell.Value = int64(target) + source
+				setCellValue(targetCell, int64(target)+source)
 			case float64:
-				targetCell.Value = float64(target) + source
+				setCellValue(targetCell, float64(target)+source)
 			case float32:
-				targetCell.Value = float32(target) + source
+				setCellValue(targetCell, float32(target)+source)
 			default:
-				LangError(ErrorType, "cannot add %s and %s", TypeName(targetCell.Value), TypeName(sourceCell.Value))
+				LangError(ErrorType, "cannot add %s and %s", TypeName(cellValue(targetCell)), TypeName(cellValue(sourceCell)))
 			}
 
 		case int64:
-			switch source := sourceCell.Value.(type) {
+			switch source := cellValue(sourceCell).(type) {
 			case int:
-				targetCell.Value = target + int64(source)
+				setCellValue(targetCell, target+int64(source))
 			case int64:
-				targetCell.Value = target + source
+				setCellValue(targetCell, target+source)
 			case float64:
-				targetCell.Value = float64(target) + source
+				setCellValue(targetCell, float64(target)+source)
 			case float32:
-				targetCell.Value = float32(target) + source
+				setCellValue(targetCell, float32(target)+source)
 			default:
-				LangError(ErrorType, "cannot add %s and %s", TypeName(targetCell.Value), TypeName(sourceCell.Value))
+				LangError(ErrorType, "cannot add %s and %s", TypeName(cellValue(targetCell)), TypeName(cellValue(sourceCell)))
 			}
 
 		case float64:
-			switch source := sourceCell.Value.(type) {
+			switch source := cellValue(sourceCell).(type) {
 			case int:
-				targetCell.Value = target + float64(source)
+				setCellValue(targetCell, target+float64(source))
 			case int64:
-				targetCell.Value = target + float64(source)
+				setCellValue(targetCell, target+float64(source))
 			case float64:
-				targetCell.Value = target + source
+				setCellValue(targetCell, target+source)
 			case float32:
-				targetCell.Value = target + float64(source)
+				setCellValue(targetCell, target+float64(source))
 			default:
-				LangError(ErrorType, "cannot add %s and %s", TypeName(targetCell.Value), TypeName(sourceCell.Value))
+				LangError(ErrorType, "cannot add %s and %s", TypeName(cellValue(targetCell)), TypeName(cellValue(sourceCell)))
 			}
 
 		case float32:
-			switch source := sourceCell.Value.(type) {
+			switch source := cellValue(sourceCell).(type) {
 			case int:
-				targetCell.Value = target + float32(source)
+				setCellValue(targetCell, target+float32(source))
 			case int64:
-				targetCell.Value = target + float32(source)
+				setCellValue(targetCell, target+float32(source))
 			case float64:
-				targetCell.Value = float64(target) + source
+				setCellValue(targetCell, float64(target)+source)
 			case float32:
-				targetCell.Value = target + source
+				setCellValue(targetCell, target+source)
 			default:
-				LangError(ErrorType, "cannot add %s and %s", TypeName(targetCell.Value), TypeName(sourceCell.Value))
+				LangError(ErrorType, "cannot add %s and %s", TypeName(cellValue(targetCell)), TypeName(cellValue(sourceCell)))
 			}
 
 		case string:
-			targetCell.Value = target + valueToString(sourceCell.Value)
+			setCellValue(targetCell, target+valueToString(cellValue(sourceCell)))
 
 		default:
-			LangError(ErrorType, "cannot add to %s", TypeName(targetCell.Value))
+			LangError(ErrorType, "cannot add to %s", TypeName(cellValue(targetCell)))
 		}
 
 	case OP_SUB_ASSIGN_LOCAL:
@@ -986,65 +1206,71 @@ func (vm *VM) step() bool {
 			LangError(ErrorConst, "cannot assign to constant local")
 		}
 
-		switch target := targetCell.Value.(type) {
+		if targetCell.IsInt && sourceCell.IsInt {
+			targetCell.Int -= sourceCell.Int
+			break
+		}
+
+		switch target := cellValue(targetCell).(type) {
 		case int:
-			switch source := sourceCell.Value.(type) {
+			switch source := cellValue(sourceCell).(type) {
 			case int:
-				targetCell.Value = target - source
+				targetCell.Int = target - source
+				targetCell.IsInt = true
 			case int64:
-				targetCell.Value = int64(target) - source
+				setCellValue(targetCell, int64(target)-source)
 			case float64:
-				targetCell.Value = float64(target) - source
+				setCellValue(targetCell, float64(target)-source)
 			case float32:
-				targetCell.Value = float32(target) - source
+				setCellValue(targetCell, float32(target)-source)
 			default:
-				LangError(ErrorType, "cannot subtract %s and %s", TypeName(targetCell.Value), TypeName(sourceCell.Value))
+				LangError(ErrorType, "cannot subtract %s and %s", TypeName(cellValue(targetCell)), TypeName(cellValue(sourceCell)))
 			}
 
 		case int64:
-			switch source := sourceCell.Value.(type) {
+			switch source := cellValue(sourceCell).(type) {
 			case int:
-				targetCell.Value = target - int64(source)
+				setCellValue(targetCell, target-int64(source))
 			case int64:
-				targetCell.Value = target - source
+				setCellValue(targetCell, target-source)
 			case float64:
-				targetCell.Value = float64(target) - source
+				setCellValue(targetCell, float64(target)-source)
 			case float32:
-				targetCell.Value = float32(target) - source
+				setCellValue(targetCell, float32(target)-source)
 			default:
-				LangError(ErrorType, "cannot subtract %s and %s", TypeName(targetCell.Value), TypeName(sourceCell.Value))
+				LangError(ErrorType, "cannot subtract %s and %s", TypeName(cellValue(targetCell)), TypeName(cellValue(sourceCell)))
 			}
 
 		case float64:
-			switch source := sourceCell.Value.(type) {
+			switch source := cellValue(sourceCell).(type) {
 			case int:
-				targetCell.Value = target - float64(source)
+				setCellValue(targetCell, target-float64(source))
 			case int64:
-				targetCell.Value = target - float64(source)
+				setCellValue(targetCell, target-float64(source))
 			case float64:
-				targetCell.Value = target - source
+				setCellValue(targetCell, target-source)
 			case float32:
-				targetCell.Value = target - float64(source)
+				setCellValue(targetCell, target-float64(source))
 			default:
-				LangError(ErrorType, "cannot subtract %s and %s", TypeName(targetCell.Value), TypeName(sourceCell.Value))
+				LangError(ErrorType, "cannot subtract %s and %s", TypeName(cellValue(targetCell)), TypeName(cellValue(sourceCell)))
 			}
 
 		case float32:
-			switch source := sourceCell.Value.(type) {
+			switch source := cellValue(sourceCell).(type) {
 			case int:
-				targetCell.Value = target - float32(source)
+				setCellValue(targetCell, target-float32(source))
 			case int64:
-				targetCell.Value = target - float32(source)
+				setCellValue(targetCell, target-float32(source))
 			case float64:
-				targetCell.Value = float64(target) - source
+				setCellValue(targetCell, float64(target)-source)
 			case float32:
-				targetCell.Value = target - source
+				setCellValue(targetCell, target-source)
 			default:
-				LangError(ErrorType, "cannot subtract %s and %s", TypeName(targetCell.Value), TypeName(sourceCell.Value))
+				LangError(ErrorType, "cannot subtract %s and %s", TypeName(cellValue(targetCell)), TypeName(cellValue(sourceCell)))
 			}
 
 		default:
-			LangError(ErrorType, "cannot subtract to %s", TypeName(targetCell.Value))
+			LangError(ErrorType, "cannot subtract to %s", TypeName(cellValue(targetCell)))
 		}
 
 	case OP_JUMP_LOCAL_GE_CONST:
@@ -1061,9 +1287,20 @@ func (vm *VM) step() bool {
 			LangError(ErrorInternal, "local cell is nil in OP_JUMP_LOCAL_GE_CONST")
 		}
 
+		if cell.IsInt {
+			if cell.Int >= info.Value {
+				if len(vm.frames) == 0 {
+					vm.ip = info.Target
+				} else {
+					vm.frames[len(vm.frames)-1].ip = info.Target
+				}
+			}
+			break
+		}
+
 		shouldJump := false
 
-		switch v := cell.Value.(type) {
+		switch v := cellValue(cell).(type) {
 		case int:
 			shouldJump = v >= info.Value
 
@@ -1077,7 +1314,7 @@ func (vm *VM) step() bool {
 			shouldJump = v >= float32(info.Value)
 
 		default:
-			LangError(ErrorType, "cannot compare %s and number", TypeName(cell.Value))
+			LangError(ErrorType, "cannot compare %s and number", TypeName(cellValue(cell)))
 		}
 
 		if shouldJump {
@@ -1221,6 +1458,7 @@ func (vm *VM) step() bool {
 			}
 
 			frame := vm.currentFrame()
+			frame.hasEscapedLocals = true
 
 			for _, capture := range info.Captures {
 				if capture.OuterSlot < 0 || capture.OuterSlot >= len(frame.locals) {
@@ -1458,7 +1696,39 @@ func (vm *VM) step() bool {
 			)
 		}
 
-		vm.push(frame.locals[slot].Value)
+		vm.push(cellValue(frame.locals[slot]))
+
+	case OP_LOAD_LOCAL_0:
+		frame := &vm.frames[len(vm.frames)-1]
+		cell := frame.locals[0]
+		if cell == nil {
+			LangError(ErrorInternal, "local slot is nil: function=%s slot=0 locals=%d", frame.function.Name, len(frame.locals))
+		}
+		vm.push(cellValue(cell))
+
+	case OP_LOAD_LOCAL_1:
+		frame := &vm.frames[len(vm.frames)-1]
+		cell := frame.locals[1]
+		if cell == nil {
+			LangError(ErrorInternal, "local slot is nil: function=%s slot=1 locals=%d", frame.function.Name, len(frame.locals))
+		}
+		vm.push(cellValue(cell))
+
+	case OP_LOAD_LOCAL_2:
+		frame := &vm.frames[len(vm.frames)-1]
+		cell := frame.locals[2]
+		if cell == nil {
+			LangError(ErrorInternal, "local slot is nil: function=%s slot=2 locals=%d", frame.function.Name, len(frame.locals))
+		}
+		vm.push(cellValue(cell))
+
+	case OP_LOAD_LOCAL_3:
+		frame := &vm.frames[len(vm.frames)-1]
+		cell := frame.locals[3]
+		if cell == nil {
+			LangError(ErrorInternal, "local slot is nil: function=%s slot=3 locals=%d", frame.function.Name, len(frame.locals))
+		}
+		vm.push(cellValue(cell))
 
 	case OP_STORE_LOCAL:
 		info := instr.Value.(VariableInfo)
@@ -1480,7 +1750,8 @@ func (vm *VM) step() bool {
 			)
 		}
 
-		frame.locals[info.Slot] = &Cell{Value: value}
+		frame.locals[info.Slot] = &Cell{}
+		setCellValue(frame.locals[info.Slot], value)
 		frame.constants[info.Slot] = info.Constant
 		frame.localTypes[info.Slot] = info.TypeHint
 
@@ -1536,21 +1807,22 @@ func (vm *VM) step() bool {
 			LangError(ErrorConst, "cannot increment constant local")
 		}
 
-		value := frame.locals[slot].Value
+		value := cellValue(frame.locals[slot])
 
 		switch v := value.(type) {
 		case int:
 			if info.IsFloat {
-				frame.locals[slot].Value = float64(v) - info.FloatAmount
+				setCellValue(frame.locals[slot], float64(v)-info.FloatAmount)
 			} else {
-				frame.locals[slot].Value = v - info.IntAmount
+				frame.locals[slot].Int = v - info.IntAmount
+				frame.locals[slot].IsInt = true
 			}
 
 		case float64:
 			if info.IsFloat {
-				frame.locals[slot].Value = v - info.FloatAmount
+				setCellValue(frame.locals[slot], v-info.FloatAmount)
 			} else {
-				frame.locals[slot].Value = v - float64(info.IntAmount)
+				setCellValue(frame.locals[slot], v-float64(info.IntAmount))
 			}
 
 		default:
@@ -1604,21 +1876,27 @@ func (vm *VM) step() bool {
 			LangError(ErrorConst, "cannot assign to constant local")
 		}
 
-		switch v := cell.Value.(type) {
+		if cell.IsInt && !info.IsFloat {
+			cell.Int += info.IntAmount
+			break
+		}
+
+		switch v := cellValue(cell).(type) {
 		case int:
-			cell.Value = v + info.IntAmount
+			cell.Int = v + info.IntAmount
+			cell.IsInt = true
 
 		case int64:
-			cell.Value = v + int64(info.IntAmount)
+			setCellValue(cell, v+int64(info.IntAmount))
 
 		case float64:
-			cell.Value = v + info.FloatAmount
+			setCellValue(cell, v+info.FloatAmount)
 
 		case float32:
-			cell.Value = v + float32(info.FloatAmount)
+			setCellValue(cell, v+float32(info.FloatAmount))
 
 		default:
-			vm.runtimeError(ErrorType, "cannot increment %s", TypeName(cell.Value))
+			vm.runtimeError(ErrorType, "cannot increment %s", TypeName(cellValue(cell)))
 		}
 
 	case OP_INC_GLOBAL:
@@ -1694,58 +1972,17 @@ func (vm *VM) step() bool {
 			)
 		}
 
-		frame.locals[slot].Value = value
+		setCellValue(frame.locals[slot], value)
+
+	case OP_MUL_LOCAL_CONST:
+		info := instr.Value.(LocalConstInfo)
+		frame := &vm.frames[len(vm.frames)-1]
+		vm.push(multiplyByInt(frameLocalValue(frame, info.Slot, "OP_MUL_LOCAL_CONST"), info.Value))
 
 	case OP_ADD:
 		right := vm.popFast()
 		left := vm.popFast()
-
-		switch l := left.(type) {
-		case int:
-			switch r := right.(type) {
-			case int:
-				vm.push(l + r)
-
-			case float64:
-				vm.push(float64(l) + r)
-
-			default:
-				LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
-			}
-
-		case float64:
-			switch r := right.(type) {
-			case int:
-				vm.push(l + float64(r))
-
-			case float64:
-				vm.push(l + r)
-
-			default:
-				LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
-			}
-
-		case string:
-			switch r := right.(type) {
-			case string:
-				vm.push(l + r)
-
-			case float64:
-				vm.push(l + FloatToString(r))
-
-			case int:
-				vm.push(l + intToString(r))
-
-			case int64:
-				vm.push(l + bigIntToString(r))
-
-			default:
-				LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
-			}
-
-		default:
-			LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
-		}
+		vm.push(addValues(left, right))
 
 	case OP_SUB:
 		right := vm.popFast()
@@ -1898,6 +2135,83 @@ func (vm *VM) step() bool {
 		info := instr.Value.(MethodCallInfo)
 
 		vm.callMethod(info.Method, info.ArgCount)
+
+	case OP_METHOD_CALL_LOCAL_0:
+		info := instr.Value.(MethodLocalCallInfo)
+		frame := &vm.frames[len(vm.frames)-1]
+		objectValue := frameLocalValue(frame, info.ReceiverSlot, "OP_METHOD_CALL_LOCAL_0")
+
+		if vm.callZeroArgNativeMethod(info.Method, objectValue) {
+			break
+		}
+		vm.callMethodResolved(info.Method, objectValue, nil)
+
+	case OP_METHOD_CALL_LOCAL_1:
+		info := instr.Value.(MethodLocalCallInfo)
+		frame := &vm.frames[len(vm.frames)-1]
+		objectValue := frameLocalValue(frame, info.ReceiverSlot, "OP_METHOD_CALL_LOCAL_1")
+		arg := frameLocalValue(frame, info.ArgSlot, "OP_METHOD_CALL_LOCAL_1")
+
+		if vm.callOneArgNativeMethod(info.Method, objectValue, arg) {
+			break
+		}
+		vm.callMethodResolved(info.Method, objectValue, []Value{arg})
+
+	case OP_ARRAY_LEN_LOCAL:
+		info := instr.Value.(ArrayLocalCallInfo)
+		frame := &vm.frames[len(vm.frames)-1]
+		arrayValue := frameLocalValue(frame, info.ArraySlot, "OP_ARRAY_LEN_LOCAL")
+
+		if array, ok := arrayValue.(*ArrayValue); ok {
+			vm.push(len(array.Elements))
+			break
+		}
+		vm.callMethodResolved("length", arrayValue, nil)
+
+	case OP_ARRAY_GET_LOCAL:
+		info := instr.Value.(ArrayLocalCallInfo)
+		frame := &vm.frames[len(vm.frames)-1]
+		arrayValue := frameLocalValue(frame, info.ArraySlot, "OP_ARRAY_GET_LOCAL")
+		indexValue := frameLocalValue(frame, info.ArgSlot, "OP_ARRAY_GET_LOCAL")
+
+		if array, ok := arrayValue.(*ArrayValue); ok {
+			index, ok := indexValue.(int)
+			if !ok {
+				vm.runtimeError(ErrorType, "array.get argument 1 expected number, got %s", TypeName(indexValue))
+			}
+			if index < 0 || index >= len(array.Elements) {
+				vm.runtimeError(ErrorRuntime, "array index out of range: %d", index)
+			}
+			vm.push(array.Elements[index])
+			break
+		}
+		vm.callMethodResolved("get", arrayValue, []Value{indexValue})
+
+	case OP_ARRAY_PUSH_LOCAL:
+		info := instr.Value.(ArrayLocalCallInfo)
+		frame := &vm.frames[len(vm.frames)-1]
+		arrayValue := frameLocalValue(frame, info.ArraySlot, "OP_ARRAY_PUSH_LOCAL")
+		value := frameLocalValue(frame, info.ArgSlot, "OP_ARRAY_PUSH_LOCAL")
+
+		if array, ok := arrayValue.(*ArrayValue); ok {
+			array.Elements = append(array.Elements, value)
+			vm.push(array)
+			break
+		}
+		vm.callMethodResolved("push", arrayValue, []Value{value})
+
+	case OP_ARRAY_PUSH_LOCAL_MUL_CONST:
+		info := instr.Value.(ArrayLocalMulConstInfo)
+		frame := &vm.frames[len(vm.frames)-1]
+		arrayValue := frameLocalValue(frame, info.ArraySlot, "OP_ARRAY_PUSH_LOCAL_MUL_CONST")
+		arg := multiplyByInt(frameLocalValue(frame, info.ArgSlot, "OP_ARRAY_PUSH_LOCAL_MUL_CONST"), info.Factor)
+
+		if array, ok := arrayValue.(*ArrayValue); ok {
+			array.Elements = append(array.Elements, arg)
+			vm.push(array)
+			break
+		}
+		vm.callMethodResolved("push", arrayValue, []Value{arg})
 
 	case OP_LEN:
 		value := vm.pop()
@@ -2129,36 +2443,36 @@ func (vm *VM) step() bool {
 	case OP_INTERPOLATE:
 		info := instr.Value.(InterpolateInfo)
 
+		if info.ExprCount == 1 {
+			value := vm.pop()
+			vm.push(info.Parts[0] + valueToString(value) + info.Parts[1])
+			break
+		}
+
 		values := make([]Value, info.ExprCount)
 
 		for i := info.ExprCount - 1; i >= 0; i-- {
 			values[i] = vm.pop()
 		}
 
-		result := ""
+		var builder strings.Builder
 
 		for i := 0; i < info.ExprCount; i++ {
-			result += info.Parts[i]
-			result += valueToString(values[i])
+			builder.WriteString(info.Parts[i])
+			builder.WriteString(valueToString(values[i]))
 		}
 
-		result += info.Parts[len(info.Parts)-1]
+		builder.WriteString(info.Parts[len(info.Parts)-1])
 
-		vm.push(result)
+		vm.push(builder.String())
 
 	case OP_OBJECT:
 		info := instr.Value.(ObjectInfo)
 
-		values := make([]Value, len(info.Names))
+		object := make(ObjectValue, len(info.Names))
 
 		for i := len(info.Names) - 1; i >= 0; i-- {
-			values[i] = vm.pop()
-		}
-
-		object := ObjectValue{}
-
-		for i, name := range info.Names {
-			object[name] = values[i]
+			object[info.Names[i]] = vm.pop()
 		}
 
 		vm.push(object)
@@ -2167,85 +2481,39 @@ func (vm *VM) step() bool {
 		value := vm.pop()
 		vm.push(!isTruthy(value))
 
-	case OP_GET_PROPERTY:
-		name := instr.Value.(string)
-		objectValue := vm.pop()
+	case OP_GET_PROPERTY_LOCAL:
+		info := instr.Value.(PropertyLocalInfo)
+		frame := &vm.frames[len(vm.frames)-1]
+		vm.push(propertyValue(vm, frameLocalValue(frame, info.Slot, "OP_GET_PROPERTY_LOCAL"), info.Name))
 
-		if ns, ok := objectValue.(NamespaceValue); ok {
-			value, exists := ns.Members[name]
-			if !exists {
-				LangError(ErrorName, "namespace %s has no member: %s", ns.Name, name)
-			}
-
-			if ref, ok := value.(NamespaceMemberRef); ok {
-				actual, exists := vm.globals[ref.GlobalName]
-				if !exists {
-					LangError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
-				}
-
-				vm.push(actual)
-				break
-			}
-
-			if ref, ok := value.(*NamespaceMemberRef); ok {
-				actual, exists := vm.globals[ref.GlobalName]
-				if !exists {
-					LangError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
-				}
-
-				vm.push(actual)
-				break
-			}
-
-			vm.push(value)
-			break
-		}
-
-		if ns, ok := objectValue.(*NamespaceValue); ok {
-			value, exists := ns.Members[name]
-			if !exists {
-				LangError(ErrorName, "namespace %s has no member: %s", ns.Name, name)
-			}
-
-			if ref, ok := value.(NamespaceMemberRef); ok {
-				actual, exists := vm.globals[ref.GlobalName]
-				if !exists {
-					LangError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
-				}
-
-				vm.push(actual)
-				break
-			}
-
-			if ref, ok := value.(*NamespaceMemberRef); ok {
-				actual, exists := vm.globals[ref.GlobalName]
-				if !exists {
-					LangError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
-				}
-
-				vm.push(actual)
-				break
-			}
-
-			vm.push(value)
-			break
-		}
-
+	case OP_ADD_PROPERTY_LOCAL_LOCAL:
+		info := instr.Value.(PropertyLocalAssignInfo)
+		frame := &vm.frames[len(vm.frames)-1]
+		objectValue := frameLocalValue(frame, info.ObjectSlot, "OP_ADD_PROPERTY_LOCAL_LOCAL")
 		object, ok := objectValue.(ObjectValue)
 		if !ok {
 			LangError(ErrorType, "expected object, got %s", TypeName(objectValue))
 		}
 
-		if !vm.canAccessField(object, name) {
-			LangError(ErrorRuntime, "cannot access private field: %s", name)
+		_, isClass := object["__class"]
+		if isClass {
+			constFields := object["__constFields"].(map[string]bool)
+			if _, isConstant := constFields[info.Name]; isConstant {
+				vm.runtimeError(ErrorRuntime, "cannot assign to constant field: %s", info.Name)
+			}
+			if !vm.canAccessField(object, info.Name) {
+				vm.runtimeError(ErrorRuntime, "cannot assign private field: %s", info.Name)
+			}
 		}
 
-		value, exists := object[name]
-		if !exists {
-			LangError(ErrorName, "object has no property: %s", name)
-		}
+		current := propertyValue(vm, object, info.Name)
+		source := frameLocalValue(frame, info.SourceSlot, "OP_ADD_PROPERTY_LOCAL_LOCAL")
+		object[info.Name] = addValues(current, source)
 
-		vm.push(value)
+	case OP_GET_PROPERTY:
+		name := instr.Value.(string)
+		objectValue := vm.pop()
+		vm.push(propertyValue(vm, objectValue, name))
 
 	case OP_HALT:
 		return true
@@ -2302,7 +2570,7 @@ func (vm *VM) throwValue(value Value) {
 			LangError(ErrorInternal, "catch local slot out of range")
 		}
 
-		frame.locals[handler.Slot].Value = errorObject
+		setCellValue(frame.locals[handler.Slot], errorObject)
 		frame.constants[handler.Slot] = false
 	} else {
 		vm.globals[handler.Name] = errorObject
@@ -2384,11 +2652,23 @@ func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []Value) {
 
 	frame := vm.getFrame(fn)
 
+	if len(fnValue.Captures) > 0 {
+		frame.hasEscapedLocals = true
+	}
+
+	for slot, cell := range fnValue.Captures {
+		if slot < 0 || slot >= len(frame.locals) {
+			LangError(ErrorInternal, "capture slot out of range in function value: %d", slot)
+		}
+
+		frame.locals[slot] = cell
+	}
+
 	if isVariadic {
 		fixedCount := expected - 1
 
 		for i := 0; i < fixedCount; i++ {
-			frame.locals[i].Value = args[i]
+			setCellValue(frame.locals[i], args[i])
 			frame.constants[i] = false
 		}
 
@@ -2400,11 +2680,11 @@ func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []Value) {
 			rest.Elements = append(rest.Elements, args[i])
 		}
 
-		frame.locals[fixedCount].Value = rest
+		setCellValue(frame.locals[fixedCount], rest)
 		frame.constants[fixedCount] = false
 	} else {
 		for i, arg := range args {
-			frame.locals[i].Value = arg
+			setCellValue(frame.locals[i], arg)
 			frame.constants[i] = false
 		}
 	}
@@ -2418,7 +2698,7 @@ func (vm *VM) callFunctionDirect(fn Function, args []Value) {
 	frame := vm.getFrame(fn)
 
 	for i, arg := range args {
-		frame.locals[i].Value = arg
+		setCellValue(frame.locals[i], arg)
 		frame.constants[i] = false
 	}
 
@@ -2427,7 +2707,7 @@ func (vm *VM) callFunctionDirect(fn Function, args []Value) {
 
 func (vm *VM) callFunctionValue(fnValue FunctionValue, args []Value) Value {
 	frameDepthBefore := len(vm.frames)
-	stackDepthBefore := len(vm.stack)
+	stackDepthBefore := vm.top
 
 	vm.callFunctionValueWithArgs(fnValue, args)
 
@@ -2541,16 +2821,355 @@ func (vm *VM) findEmbeddedMethod(object ObjectValue, method string) (ObjectValue
 	return nil, FunctionValue{}, false
 }
 
+func (vm *VM) callZeroArgNativeMethod(method string, objectValue Value) bool {
+	switch value := objectValue.(type) {
+	case *ArrayValue:
+		switch method {
+		case "length":
+			vm.push(len(value.Elements))
+			return true
+		case "pop":
+			if len(value.Elements) == 0 {
+				vm.push(UndefinedValue{})
+				return true
+			}
+
+			last := value.Elements[len(value.Elements)-1]
+			value.Elements = value.Elements[:len(value.Elements)-1]
+			vm.push(last)
+			return true
+		case "clear":
+			value.Elements = []Value{}
+			vm.push(true)
+			return true
+		}
+
+	case string:
+		switch method {
+		case "length":
+			vm.push(len(value))
+			return true
+		case "toUpperCase", "upper":
+			if method == "upper" {
+				vm.push(strings.ToUpper(value[:1]) + value[1:])
+			} else {
+				vm.push(strings.ToUpper(value))
+			}
+			return true
+		case "toLowerCase", "lower":
+			if method == "lower" {
+				vm.push(strings.ToLower(value[:1]) + value[1:])
+			} else {
+				vm.push(strings.ToLower(value))
+			}
+			return true
+		case "trim":
+			vm.push(strings.TrimSpace(value))
+			return true
+		}
+	}
+
+	return false
+}
+
+func (vm *VM) callOneArgNativeMethod(method string, objectValue Value, arg Value) bool {
+	switch value := objectValue.(type) {
+	case *ArrayValue:
+		switch method {
+		case "push":
+			value.Elements = append(value.Elements, arg)
+			vm.push(value)
+			return true
+		case "get":
+			index, ok := arg.(int)
+			if !ok {
+				vm.runtimeError(ErrorType, "array.get argument 1 expected number, got %s", TypeName(arg))
+				return true
+			}
+			if index < 0 || index >= len(value.Elements) {
+				vm.runtimeError(ErrorRuntime, "array index out of range: %d", index)
+				return true
+			}
+			vm.push(value.Elements[index])
+			return true
+		case "join":
+			separator, ok := arg.(string)
+			if !ok {
+				vm.runtimeError(ErrorType, "array.join argument 1 expected string, got %s", TypeName(arg))
+				return true
+			}
+
+			var sb strings.Builder
+			for i, item := range value.Elements {
+				sb.WriteString(valueToString(item))
+				if i != len(value.Elements)-1 {
+					sb.WriteString(separator)
+				}
+			}
+			vm.push(sb.String())
+			return true
+		}
+
+	case string:
+		switch method {
+		case "charAt":
+			idx, ok := arg.(int)
+			if !ok {
+				vm.runtimeError(ErrorType, "string.chatrAt argument 1 expected number, got %s", TypeName(arg))
+				return true
+			}
+			runes := []rune(value)
+			if idx < 0 || idx >= len(runes) {
+				vm.push(NullValue{})
+				return true
+			}
+			vm.push(string(runes[idx]))
+			return true
+		case "split":
+			separator, ok := arg.(string)
+			if !ok {
+				vm.runtimeError(ErrorType, "string.split argument 1 expected string, got %s", TypeName(arg))
+				return true
+			}
+
+			if separator == "" {
+				runes := []rune(value)
+				elements := make([]Value, len(runes))
+				for i, r := range runes {
+					elements[i] = string(r)
+				}
+				vm.push(&ArrayValue{Elements: elements})
+				return true
+			}
+
+			count := strings.Count(value, separator) + 1
+			elements := make([]Value, 0, count)
+
+			for {
+				idx := strings.Index(value, separator)
+				if idx == -1 {
+					elements = append(elements, value)
+					break
+				}
+				elements = append(elements, value[:idx])
+				value = value[idx+len(separator):]
+			}
+
+			vm.push(&ArrayValue{Elements: elements})
+			return true
+		case "includes":
+			search, ok := arg.(string)
+			if !ok {
+				vm.runtimeError(ErrorType, "string.includes argument 1 expected string, got %s", TypeName(arg))
+				return true
+			}
+			vm.push(strings.Contains(value, search))
+			return true
+		}
+	}
+
+	return false
+}
+
+func (vm *VM) callTwoArgNativeMethod(method string, objectValue Value, arg0 Value, arg1 Value) bool {
+	switch value := objectValue.(type) {
+	case *ArrayValue:
+		if method != "set" {
+			return false
+		}
+
+		index, ok := arg0.(int)
+		if !ok {
+			vm.runtimeError(ErrorType, "array.set argument 1 expected number, got %s", TypeName(arg0))
+			return true
+		}
+		if index < 0 || index >= len(value.Elements) {
+			vm.runtimeError(ErrorRuntime, "array index out of range: %d", index)
+			return true
+		}
+
+		value.Elements[index] = arg1
+		vm.push(value)
+		return true
+
+	case string:
+		oldText, oldOK := arg0.(string)
+		newText, newOK := arg1.(string)
+
+		switch method {
+		case "replace":
+			if !oldOK {
+				vm.runtimeError(ErrorType, "string.replace argument 1 expected string, got %s", TypeName(arg0))
+				return true
+			}
+			if !newOK {
+				vm.runtimeError(ErrorType, "string.replace argument 2 expected string, got %s", TypeName(arg1))
+				return true
+			}
+			vm.push(strings.Replace(value, oldText, newText, 1))
+			return true
+		case "replaceAll":
+			if !oldOK {
+				vm.runtimeError(ErrorType, "string.replaceAll argument 1 expected string, got %s", TypeName(arg0))
+				return true
+			}
+			if !newOK {
+				vm.runtimeError(ErrorType, "string.replaceAll argument 2 expected string, got %s", TypeName(arg1))
+				return true
+			}
+			vm.push(strings.ReplaceAll(value, oldText, newText))
+			return true
+		}
+	}
+
+	return false
+}
+
+func (vm *VM) callStdObjectFast1(method string, objectValue Value, arg0 Value) bool {
+	module, ok := objectValue.(*StandardModuleValue)
+	if !ok || module.Name != "object" {
+		return false
+	}
+
+	if method != "length" {
+		return false
+	}
+
+	obj, ok := arg0.(ObjectValue)
+	if !ok {
+		vm.runtimeError(ErrorType, "object.length argument 1 expected object, got %s", TypeName(arg0))
+		return true
+	}
+	vm.push(len(obj))
+	return true
+}
+
+func (vm *VM) callStdObjectFast2(method string, objectValue Value, arg0 Value, arg1 Value) bool {
+	module, ok := objectValue.(*StandardModuleValue)
+	if !ok || module.Name != "object" {
+		return false
+	}
+
+	if method != "get" {
+		return false
+	}
+
+	obj, ok := arg0.(ObjectValue)
+	if !ok {
+		vm.runtimeError(ErrorType, "object.get argument 1 expected object, got %s", TypeName(arg0))
+		return true
+	}
+	key, ok := arg1.(string)
+	if !ok {
+		vm.runtimeError(ErrorType, "object.get argument 2 expected string, got %s", TypeName(arg1))
+		return true
+	}
+	vm.push(obj[key])
+	return true
+}
+
+func (vm *VM) callStdObjectFast3(method string, objectValue Value, arg0 Value, arg1 Value, arg2 Value) bool {
+	module, ok := objectValue.(*StandardModuleValue)
+	if !ok || module.Name != "object" {
+		return false
+	}
+
+	if method != "set" {
+		return false
+	}
+
+	obj, ok := arg0.(ObjectValue)
+	if !ok {
+		vm.runtimeError(ErrorType, "object.set argument 1 expected object, got %s", TypeName(arg0))
+		return true
+	}
+	key, ok := arg1.(string)
+	if !ok {
+		vm.runtimeError(ErrorType, "object.set argument 2 expected string, got %s", TypeName(arg1))
+		return true
+	}
+	obj[key] = arg2
+	vm.push(UndefinedValue{})
+	return true
+}
+
+func (vm *VM) callStdObjectFast(method string, objectValue Value, args ...Value) bool {
+	module, ok := objectValue.(*StandardModuleValue)
+	if !ok || module.Name != "object" {
+		return false
+	}
+
+	switch method {
+	case "get":
+		if len(args) != 2 {
+			return false
+		}
+		obj, ok := args[0].(ObjectValue)
+		if !ok {
+			vm.runtimeError(ErrorType, "object.get argument 1 expected object, got %s", TypeName(args[0]))
+			return true
+		}
+		key, ok := args[1].(string)
+		if !ok {
+			vm.runtimeError(ErrorType, "object.get argument 2 expected string, got %s", TypeName(args[1]))
+			return true
+		}
+		vm.push(obj[key])
+		return true
+
+	case "set":
+		if len(args) != 3 {
+			return false
+		}
+		obj, ok := args[0].(ObjectValue)
+		if !ok {
+			vm.runtimeError(ErrorType, "object.set argument 1 expected object, got %s", TypeName(args[0]))
+			return true
+		}
+		key, ok := args[1].(string)
+		if !ok {
+			vm.runtimeError(ErrorType, "object.set argument 2 expected string, got %s", TypeName(args[1]))
+			return true
+		}
+		obj[key] = args[2]
+		vm.push(UndefinedValue{})
+		return true
+
+	case "length":
+		if len(args) != 1 {
+			return false
+		}
+		obj, ok := args[0].(ObjectValue)
+		if !ok {
+			vm.runtimeError(ErrorType, "object.length argument 1 expected object, got %s", TypeName(args[0]))
+			return true
+		}
+		vm.push(len(obj))
+		return true
+	}
+
+	return false
+}
+
 func (vm *VM) callMethodFast(method string, argCount int) {
 	switch argCount {
 	case 0:
 		objectValue := vm.pop()
+		if vm.callZeroArgNativeMethod(method, objectValue) {
+			return
+		}
 		vm.callMethodResolved(method, objectValue, nil)
 		return
 
 	case 1:
 		arg0 := vm.pop()
 		objectValue := vm.pop()
+		if vm.callStdObjectFast1(method, objectValue, arg0) {
+			return
+		}
+		if vm.callOneArgNativeMethod(method, objectValue, arg0) {
+			return
+		}
 		vm.callMethodResolved(method, objectValue, []Value{arg0})
 		return
 
@@ -2558,7 +3177,24 @@ func (vm *VM) callMethodFast(method string, argCount int) {
 		arg1 := vm.pop()
 		arg0 := vm.pop()
 		objectValue := vm.pop()
+		if vm.callStdObjectFast2(method, objectValue, arg0, arg1) {
+			return
+		}
+		if vm.callTwoArgNativeMethod(method, objectValue, arg0, arg1) {
+			return
+		}
 		vm.callMethodResolved(method, objectValue, []Value{arg0, arg1})
+		return
+
+	case 3:
+		arg2 := vm.pop()
+		arg1 := vm.pop()
+		arg0 := vm.pop()
+		objectValue := vm.pop()
+		if vm.callStdObjectFast3(method, objectValue, arg0, arg1, arg2) {
+			return
+		}
+		vm.callMethodResolved(method, objectValue, []Value{arg0, arg1, arg2})
 		return
 
 	default:
@@ -2715,7 +3351,7 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 	frame := vm.getFrame(fn)
 	frame.methodClass = ownerClass
 
-	frame.locals[0].Value = receiver
+	setCellValue(frame.locals[0], receiver)
 	frame.constants[0] = true
 
 	if isVariadic {
@@ -2738,7 +3374,7 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 				)
 			}
 
-			frame.locals[paramIndex].Value = arg
+			setCellValue(frame.locals[paramIndex], arg)
 			frame.constants[paramIndex] = false
 			frame.localTypes[paramIndex] = param.TypeHint
 		}
@@ -2768,7 +3404,7 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 			rest.Elements = append(rest.Elements, arg)
 		}
 
-		frame.locals[restSlot].Value = rest
+		setCellValue(frame.locals[restSlot], rest)
 		frame.constants[restSlot] = false
 		frame.localTypes[restSlot] = TypeHint{
 			Name: "array",
@@ -2789,7 +3425,7 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 				)
 			}
 
-			frame.locals[paramIndex].Value = arg
+			setCellValue(frame.locals[paramIndex], arg)
 			frame.constants[paramIndex] = false
 			frame.localTypes[paramIndex] = param.TypeHint
 		}
@@ -2881,8 +3517,6 @@ func (vm *VM) callFunction(name string, argCount int) {
 
 	args = vm.applyDefaultArgs(fn, args, 0, "function "+fn.Name)
 
-	args = vm.applyDefaultArgs(fn, args, 0, "function "+fn.Name)
-
 	frame := vm.getFrame(fn)
 
 	for i, arg := range args {
@@ -2899,7 +3533,7 @@ func (vm *VM) callFunction(name string, argCount int) {
 			)
 		}
 
-		frame.locals[i].Value = arg
+		setCellValue(frame.locals[i], arg)
 		frame.constants[i] = false
 		frame.localTypes[i] = param.TypeHint
 	}

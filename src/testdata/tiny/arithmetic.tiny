@@ -1,0 +1,8 @@
+import std "io";
+
+let name = "Tiny";
+let version = 1;
+
+io.println(1 + 2 * 3);
+io.println(`hello ${name} v${version}`);
+io.println(typeof "value");

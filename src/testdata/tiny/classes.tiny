@@ -1,0 +1,42 @@
+import std "io";
+
+class User {
+    field name: string = "anonymous";
+    field score: number = 0;
+
+    fn init(name, score) {
+        this.name = name;
+        this.score = score;
+    }
+
+    fn rename(name) {
+        this.name = name;
+        return this;
+    }
+
+    fn label() {
+        return `${this.name}: ${this.score}`;
+    }
+}
+
+class Logger {
+    fn log(message) {
+        io.println(message);
+    }
+}
+
+class Service {
+    embed logger;
+
+    fn init() {
+        this.logger = Logger();
+    }
+}
+
+let user = User("confis", 42);
+user.rename("Tiny user");
+io.println(user.label());
+io.println(user instanceof User);
+
+let service = Service();
+service.log("called through embedded logger");

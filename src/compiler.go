@@ -1187,8 +1187,16 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 		c.emit(OP_DEC_GLOBAL, s.Name)
 
 	case AssignStmt:
-		if c.tryCompileFastIncrement(s.Name, s.Value) {
-			return
+		if c.outerBindings == nil {
+			if c.tryCompileFastIncrement(s.Name, s.Value) {
+				return
+			}
+		} else {
+			if _, isOuter := c.outerBindings[s.Name]; !isOuter {
+				if c.tryCompileFastIncrement(s.Name, s.Value) {
+					return
+				}
+			}
 		}
 
 		c.compileExpr(s.Value)

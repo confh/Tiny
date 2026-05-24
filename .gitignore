@@ -2,6 +2,9 @@
 !counter.tiny
 !main.tiny
 !new_std_module.tiny
+!src/testdata/tiny/*.tiny
+!src/testdata/tiny/errors/*.tiny
+!src/testdata/tiny/imports/*.tiny
 *.exe
 tiny_runtime_linux_amd64
 *.syso

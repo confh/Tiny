@@ -46,6 +46,8 @@ type BufferValue struct {
 
 type Cell struct {
 	Value Value
+	Int   int
+	IsInt bool
 }
 
 type ErrorValue struct {
