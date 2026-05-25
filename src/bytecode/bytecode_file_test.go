@@ -1,14 +1,17 @@
 package bytecode
 
 import (
+	"bytes"
 	"testing"
+
+	json "github.com/goccy/go-json"
 
 	"language.com/src/vm"
 )
 
 func TestBytecodeRoundTripPreservesFunctionMetadata(t *testing.T) {
 	main := []vm.Instruction{
-		{Op: vm.OP_CALL_DIRECT, Value: vm.DirectCallInfo{ID: 99, Name: "answer", ArgCount: 0}, File: "main.tiny", Line: 1, Column: 1},
+		{Op: vm.OP_CALL_DIRECT, Value: vm.DirectCallInfo{ID: 99, Name: "answer", ArgCount: 0}, File: `C:\Users\confis\Desktop\project\main.tiny`, Line: 1, Column: 1},
 		{Op: vm.OP_HALT},
 	}
 
@@ -45,7 +48,7 @@ func TestBytecodeRoundTripPreservesFunctionMetadata(t *testing.T) {
 
 	loadedMain, loadedFunctions, loadedClasses := LoadBytecodeFromBytes(SaveBytecodeToBytes(main, functions, classes))
 
-	if len(loadedMain) != len(main) || loadedMain[0].File != "main.tiny" || loadedMain[0].Line != 1 {
+	if len(loadedMain) != len(main) || loadedMain[0].File != bytecodeSourceLabel || loadedMain[0].Line != 1 {
 		t.Fatalf("main instructions did not round trip: %#v", loadedMain)
 	}
 
@@ -61,6 +64,60 @@ func TestBytecodeRoundTripPreservesFunctionMetadata(t *testing.T) {
 	class := loadedClasses["User"]
 	if class.Name != "User" || !class.Fields[0].Constant || !class.Fields[0].Private {
 		t.Fatalf("class metadata did not round trip: %#v", class)
+	}
+}
+
+func TestSaveBytecodeToBytesUsesBinaryFormat(t *testing.T) {
+	data := SaveBytecodeToBytes([]vm.Instruction{{Op: vm.OP_HALT}}, nil, nil)
+
+	if !bytes.HasPrefix(data, bytecodeMagic) {
+		t.Fatalf("bytecode missing binary magic header: %q", data[:min(len(data), len(bytecodeMagic))])
+	}
+
+	if json.Valid(data) {
+		t.Fatal("bytecode should be binary, got valid JSON")
+	}
+}
+
+func TestSaveBytecodeToBytesHidesSourcePaths(t *testing.T) {
+	sourcePath := `C:\Users\confis\Desktop\Programming\Go\compiler\core.tiny`
+	data := SaveBytecodeToBytes([]vm.Instruction{
+		{Op: vm.OP_HALT, File: sourcePath, Line: 12, Column: 3},
+	}, nil, nil)
+
+	if bytes.Contains(data, []byte(sourcePath)) {
+		t.Fatal("bytecode leaked absolute source path")
+	}
+
+	if bytes.Contains(data, []byte("core.tiny")) {
+		t.Fatal("bytecode leaked source filename")
+	}
+
+	main, _, _ := LoadBytecodeFromBytes(data)
+	if len(main) != 1 || main[0].File != bytecodeSourceLabel || main[0].Line != 12 || main[0].Column != 3 {
+		t.Fatalf("sanitized source location did not round trip: %#v", main)
+	}
+}
+
+func TestLoadBytecodeFromBytesSupportsLegacyJSON(t *testing.T) {
+	file := BytecodeFile{
+		Version:   BytecodeVersion,
+		Main:      serializeInstructions([]vm.Instruction{{Op: vm.OP_HALT}}),
+		Functions: map[string]SerializableFunction{},
+		Classes:   map[string]SerializableClass{},
+	}
+
+	data, err := json.Marshal(file)
+	if err != nil {
+		t.Fatalf("marshal legacy bytecode: %v", err)
+	}
+
+	main, functions, classes := LoadBytecodeFromBytes(data)
+	if len(main) != 1 || main[0].Op != vm.OP_HALT {
+		t.Fatalf("legacy main did not load: %#v", main)
+	}
+	if len(functions) != 0 || len(classes) != 0 {
+		t.Fatalf("legacy maps did not load: functions=%#v classes=%#v", functions, classes)
 	}
 }
 

@@ -72,7 +72,9 @@ func DistCommand(args []string) {
 		pluginPaths = append(pluginPaths, normalizePluginPathForTarget(plugin, target))
 	}
 
-	packToOutput(entryFile, outFile, target)
+	program = rewritePluginPathsForDist(program, target)
+
+	packProgramToOutput(program, outFile, target)
 
 	for _, pluginPath := range pluginPaths {
 		err := copyPluginToDist(pluginPath, distDir)
@@ -112,6 +114,11 @@ func packToOutput(entryFile string, outFile string, target string) {
 	target = normalizeTarget(target)
 
 	program := LoadProgram(entryFile)
+	packProgramToOutput(program, outFile, target)
+}
+
+func packProgramToOutput(program Program, outFile string, target string) {
+	target = normalizeTarget(target)
 
 	compiler := NewCompiler()
 	mainInstructions, functions, classes := compiler.CompileProgram(program)
@@ -146,16 +153,21 @@ func copyPluginToDist(pluginPath string, distDir string) error {
 		return fmt.Errorf("plugin file does not exist")
 	}
 
-	target := filepath.Join(distDir, source)
+	target := filepath.Join(distDir, pluginDistFileName(source))
 
-	return cpFile(source, target)
+	return copyFile(source, target)
+}
+
+func pluginDistFileName(pluginPath string) string {
+	return filepath.Base(filepath.Clean(pluginPath))
 }
 
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
 }
-func cpFile(src string, dst string) error {
+
+func copyFile(src string, dst string) error {
 	err := os.MkdirAll(filepath.Dir(dst), 0755)
 	if err != nil {
 		return err

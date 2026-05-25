@@ -1,15 +1,21 @@
 package bytecode
 
 import (
+	"bytes"
 	"os"
 
 	json "github.com/goccy/go-json"
+	"github.com/vmihailenco/msgpack/v5"
 
 	. "language.com/src/tinyerrors"
 	. "language.com/src/vm"
 )
 
 const BytecodeVersion = 1
+
+var bytecodeMagic = []byte{'T', 'B', 'C', 2}
+
+const bytecodeSourceLabel = "<tiny>"
 
 type BytecodeFile struct {
 	Version   int                             `json:"version"`
@@ -143,12 +149,7 @@ func SaveBytecode(path string, main []Instruction, functions map[string]Function
 		}
 	}
 
-	data, err := json.MarshalIndent(file, "", "  ")
-	if err != nil {
-		LangError(ErrorRuntime, "failed to encode bytecode: %v", err)
-	}
-
-	err = os.WriteFile(path, data, 0644)
+	err := os.WriteFile(path, encodeBytecodeFile(file), 0644)
 	if err != nil {
 		LangError(ErrorRuntime, "failed to write bytecode file: %v", err)
 	}
@@ -176,12 +177,7 @@ func SaveBytecodeToBytes(main []Instruction, functions map[string]Function, clas
 		}
 	}
 
-	bytes, err := json.Marshal(file)
-	if err != nil {
-		LangError(ErrorRuntime, "failed to encode bytecode: %v", err)
-	}
-
-	return bytes
+	return encodeBytecodeFile(file)
 }
 
 func LoadBytecode(path string) ([]Instruction, map[string]Function, map[string]Class) {
@@ -196,10 +192,7 @@ func LoadBytecode(path string) ([]Instruction, map[string]Function, map[string]C
 func LoadBytecodeFromBytes(data []byte) ([]Instruction, map[string]Function, map[string]Class) {
 	var file BytecodeFile
 
-	err := json.Unmarshal(data, &file)
-	if err != nil {
-		LangError(ErrorRuntime, "failed to decode bytecode file: %v", err)
-	}
+	decodeBytecodeFile(data, &file)
 
 	if file.Version != BytecodeVersion {
 		LangError(ErrorRuntime, "unsupported bytecode version: %d", file.Version)
@@ -224,6 +217,33 @@ func LoadBytecodeFromBytes(data []byte) ([]Instruction, map[string]Function, map
 	}
 
 	return main, functions, deserializeClasses(file.Classes)
+}
+
+func encodeBytecodeFile(file BytecodeFile) []byte {
+	data, err := msgpack.Marshal(file)
+	if err != nil {
+		LangError(ErrorRuntime, "failed to encode bytecode: %v", err)
+	}
+
+	result := make([]byte, 0, len(bytecodeMagic)+len(data))
+	result = append(result, bytecodeMagic...)
+	result = append(result, data...)
+	return result
+}
+
+func decodeBytecodeFile(data []byte, file *BytecodeFile) {
+	if bytes.HasPrefix(data, bytecodeMagic) {
+		err := msgpack.Unmarshal(data[len(bytecodeMagic):], file)
+		if err != nil {
+			LangError(ErrorRuntime, "failed to decode bytecode file: %v", err)
+		}
+		return
+	}
+
+	err := json.Unmarshal(data, file)
+	if err != nil {
+		LangError(ErrorRuntime, "failed to decode bytecode file: %v", err)
+	}
 }
 
 func serializeClasses(classes map[string]Class) map[string]SerializableClass {
@@ -289,13 +309,21 @@ func serializeInstructions(instructions []Instruction) []SerializableInstruction
 		result[i] = SerializableInstruction{
 			Op:     instr.Op,
 			Value:  EncodeValue(instr.Value),
-			File:   instr.File,
+			File:   sanitizeBytecodeFilePath(instr.File),
 			Line:   instr.Line,
 			Column: instr.Column,
 		}
 	}
 
 	return result
+}
+
+func sanitizeBytecodeFilePath(file string) string {
+	if file == "" {
+		return ""
+	}
+
+	return bytecodeSourceLabel
 }
 
 func deserializeInstructions(instructions []SerializableInstruction) []Instruction {
@@ -699,10 +727,33 @@ func decodeInto(data any, target any) {
 }
 
 func toFloat64(value any) float64 {
-	number, ok := value.(float64)
-	if !ok {
-		LangError(ErrorRuntime, "expected JSON number, got %T", value)
+	switch number := value.(type) {
+	case int:
+		return float64(number)
+	case int8:
+		return float64(number)
+	case int16:
+		return float64(number)
+	case int32:
+		return float64(number)
+	case int64:
+		return float64(number)
+	case uint:
+		return float64(number)
+	case uint8:
+		return float64(number)
+	case uint16:
+		return float64(number)
+	case uint32:
+		return float64(number)
+	case uint64:
+		return float64(number)
+	case float32:
+		return float64(number)
+	case float64:
+		return number
 	}
 
-	return number
+	LangError(ErrorRuntime, "expected bytecode number, got %T", value)
+	return 0
 }
