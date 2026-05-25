@@ -1,5 +1,3 @@
-// lsp_analyzer.go
-
 package main
 
 import (

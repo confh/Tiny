@@ -1633,9 +1633,6 @@ func (c *Compiler) evalConstantExpr(expr Expr) Value {
 	default:
 		c.fatalError(
 			ErrorType,
-			c.currentFile,
-			c.currentLine,
-			c.currentColumn,
 			"class field default must be constant",
 		)
 		return UndefinedValue{}
@@ -1680,7 +1677,7 @@ func (c *Compiler) compileClass(stmt ClassStmt) {
 
 		fields = append(fields, classField)
 
-		if !CheckTypeHint(field.Value, field.TypeHint) {
+		if !CheckTypeHint(c.evalConstantExpr(field.Value), field.TypeHint) {
 			c.fatalError(
 				ErrorType,
 				"field %s in class '%s' expected %s, got %s",

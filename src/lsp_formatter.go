@@ -30,6 +30,7 @@ func fullDocumentRange(text string) LSPRange {
 
 func formatTinyDocument(text string) string {
 	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
 
 	lines := strings.Split(text, "\n")
 
@@ -57,8 +58,7 @@ func formatTinyDocument(text string) string {
 
 		opens, closes := countBracesOutsideStrings(line)
 
-		// We already handled leading closing braces before printing,
-		// so do NOT subtract them again.
+		// Leading closing braces were already handled before writing the line.
 		closes -= leadingClosings
 		if closes < 0 {
 			closes = 0
@@ -249,36 +249,13 @@ func spaceOperatorsOutsideStrings(code string) string {
 			continue
 		}
 
-		// Multi-char operators.
-		if i+1 < len(runes) {
-			two := string([]rune{ch, runes[i+1]})
-
-			switch two {
-			case "==", "!=", "<=", ">=", "+=", "-=", "*=", "/=", "%=", "&&", "||":
-				writeSpaceBefore(&out)
-				out.WriteString(two)
-				writeSpaceAfter(&out, runes, i+2)
-				i++
-				continue
-			}
+		if matched, size := writeMultiCharOperator(&out, runes, i); matched {
+			i += size - 1
+			continue
 		}
 
-		// Single-char operators.
 		if isTinyOperator(ch) {
-			// Don't space dot access.
-			if ch == '.' {
-				out.WriteRune(ch)
-				continue
-			}
-
-			// Don't space unary !.
-			if ch == '!' {
-				out.WriteRune(ch)
-				continue
-			}
-
-			// Don't space negative number: -1
-			if ch == '-' && isUnaryMinus(runes, i) {
+			if shouldKeepOperatorTight(runes, i) {
 				out.WriteRune(ch)
 				continue
 			}
@@ -295,22 +272,112 @@ func spaceOperatorsOutsideStrings(code string) string {
 	return out.String()
 }
 
+func writeMultiCharOperator(out *strings.Builder, runes []rune, index int) (bool, int) {
+	remaining := string(runes[index:])
+
+	tightOperators := []string{
+		"...",
+		"?.",
+		"++",
+		"--",
+	}
+
+	for _, op := range tightOperators {
+		if strings.HasPrefix(remaining, op) {
+			out.WriteString(op)
+			return true, len([]rune(op))
+		}
+	}
+
+	spacedOperators := []string{
+		"==",
+		"!=",
+		"<=",
+		">=",
+		"+=",
+		"-=",
+		"*=",
+		"/=",
+		"%=",
+		"&&",
+		"||",
+		"=>",
+	}
+
+	for _, op := range spacedOperators {
+		if strings.HasPrefix(remaining, op) {
+			writeSpaceBefore(out)
+			out.WriteString(op)
+			writeSpaceAfter(out, runes, index+len([]rune(op)))
+			return true, len([]rune(op))
+		}
+	}
+
+	return false, 0
+}
+
 func isTinyOperator(ch rune) bool {
 	switch ch {
-	case '=', '+', '-', '*', '/', '%', '<', '>', '!', '.':
+	case '=', '+', '-', '*', '/', '%', '<', '>', '!', '.', '?', '|':
 		return true
 	default:
 		return false
 	}
 }
 
-func isUnaryMinus(runes []rune, index int) bool {
+func shouldKeepOperatorTight(runes []rune, index int) bool {
+	ch := runes[index]
+
+	switch ch {
+	case '.':
+		return true
+
+	case '!':
+		return isUnaryBang(runes, index)
+
+	case '-':
+		return isUnarySign(runes, index)
+
+	case '+':
+		return isUnarySign(runes, index)
+
+	case '?':
+		// Optional parameter: name?: string
+		if index+1 < len(runes) && runes[index+1] == ':' {
+			return true
+		}
+	}
+
+	return false
+}
+
+func isUnaryBang(runes []rune, index int) bool {
+	j := index - 1
+	for j >= 0 && unicode.IsSpace(runes[j]) {
+		j--
+	}
+
+	if j < 0 {
+		return true
+	}
+
+	prev := runes[j]
+
+	switch prev {
+	case '(', '[', '{', '=', '+', '-', '*', '/', '%', ',', ':', '?':
+		return true
+	default:
+		return false
+	}
+}
+
+func isUnarySign(runes []rune, index int) bool {
 	if index+1 >= len(runes) {
 		return false
 	}
 
 	next := runes[index+1]
-	if next < '0' || next > '9' {
+	if !isIdentifierStart(next) && (next < '0' || next > '9') {
 		return false
 	}
 
@@ -326,11 +393,15 @@ func isUnaryMinus(runes []rune, index int) bool {
 	prev := runes[j]
 
 	switch prev {
-	case '(', '[', '{', '=', '+', '-', '*', '/', '%', ',', ':':
+	case '(', '[', '{', '=', '+', '-', '*', '/', '%', ',', ':', '?':
 		return true
 	default:
 		return false
 	}
+}
+
+func isIdentifierStart(ch rune) bool {
+	return ch == '_' || unicode.IsLetter(ch)
 }
 
 func writeSpaceBefore(out *strings.Builder) {
@@ -339,7 +410,7 @@ func writeSpaceBefore(out *strings.Builder) {
 		return
 	}
 
-	last := rune(s[len(s)-1])
+	last := lastRune(s)
 	if unicode.IsSpace(last) {
 		return
 	}
@@ -360,35 +431,185 @@ func writeSpaceAfter(out *strings.Builder, runes []rune, nextIndex int) {
 	out.WriteRune(' ')
 }
 
+func lastRune(s string) rune {
+	var last rune
+	for _, ch := range s {
+		last = ch
+	}
+	return last
+}
+
 func cleanupTinySpaces(code string) string {
 	code = collapseSpacesOutsideStrings(code)
-
-	replacements := []struct {
-		old string
-		new string
-	}{
-		{"( ", "("},
-		{" )", ")"},
-		{"[ ", "["},
-		{" ]", "]"},
-		{"{ ", "{ "},
-		{" }", " }"},
-		{",", ", "},
-		{"; ", ";"},
-		{". ", "."},
-		{" .", "."},
-	}
-
-	for _, r := range replacements {
-		code = strings.ReplaceAll(code, r.old, r.new)
-	}
-
-	// Fix comma double spaces.
-	for strings.Contains(code, ",  ") {
-		code = strings.ReplaceAll(code, ",  ", ", ")
-	}
+	code = normalizePunctuationOutsideStrings(code)
 
 	return strings.TrimSpace(code)
+}
+
+func normalizePunctuationOutsideStrings(code string) string {
+	var out strings.Builder
+
+	runes := []rune(code)
+
+	inString := false
+	stringQuote := rune(0)
+	escaped := false
+
+	for i := 0; i < len(runes); i++ {
+		ch := runes[i]
+
+		if inString {
+			out.WriteRune(ch)
+
+			if escaped {
+				escaped = false
+				continue
+			}
+
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+
+			if ch == stringQuote {
+				inString = false
+			}
+
+			continue
+		}
+
+		if ch == '"' || ch == '\'' || ch == '`' {
+			inString = true
+			stringQuote = ch
+			out.WriteRune(ch)
+			continue
+		}
+
+		switch ch {
+		case '(':
+			trimTrailingSpaces(&out)
+			out.WriteRune(ch)
+			i = skipSpacesAfter(runes, i)
+			continue
+
+		case '[':
+			trimTrailingSpaces(&out)
+			out.WriteRune(ch)
+			i = skipSpacesAfter(runes, i)
+			continue
+
+		case ')', ']':
+			trimTrailingSpaces(&out)
+			out.WriteRune(ch)
+			continue
+
+		case '{':
+			trimTrailingSpaces(&out)
+			out.WriteRune(ch)
+
+			if i+1 < len(runes) && !unicode.IsSpace(runes[i+1]) && runes[i+1] != '}' {
+				out.WriteRune(' ')
+			}
+
+			i = skipExtraSpacesAfterOne(&out, runes, i)
+			continue
+
+		case '}':
+			trimTrailingSpaces(&out)
+
+			if out.Len() > 0 {
+				last := lastRune(out.String())
+				if last != '{' && !unicode.IsSpace(last) {
+					out.WriteRune(' ')
+				}
+			}
+
+			out.WriteRune(ch)
+			continue
+
+		case ',':
+			trimTrailingSpaces(&out)
+			out.WriteRune(ch)
+
+			if shouldWriteSpaceAfterPunctuation(runes, i+1) {
+				out.WriteRune(' ')
+			}
+
+			i = skipSpacesAfter(runes, i)
+			continue
+
+		case ';':
+			trimTrailingSpaces(&out)
+			out.WriteRune(ch)
+
+			if shouldWriteSpaceAfterPunctuation(runes, i+1) {
+				out.WriteRune(' ')
+			}
+
+			i = skipSpacesAfter(runes, i)
+			continue
+
+		case '.':
+			trimTrailingSpaces(&out)
+			out.WriteRune(ch)
+			i = skipSpacesAfter(runes, i)
+			continue
+		}
+
+		out.WriteRune(ch)
+	}
+
+	return out.String()
+}
+
+func skipSpacesAfter(runes []rune, index int) int {
+	for index+1 < len(runes) && unicode.IsSpace(runes[index+1]) {
+		index++
+	}
+
+	return index
+}
+
+func skipExtraSpacesAfterOne(out *strings.Builder, runes []rune, index int) int {
+	if index+1 >= len(runes) || !unicode.IsSpace(runes[index+1]) {
+		return index
+	}
+
+	index++
+
+	for index+1 < len(runes) && unicode.IsSpace(runes[index+1]) {
+		index++
+	}
+
+	return index
+}
+
+func shouldWriteSpaceAfterPunctuation(runes []rune, nextIndex int) bool {
+	if nextIndex >= len(runes) {
+		return false
+	}
+
+	nextIndex = skipSpacesAfter(runes, nextIndex-1)
+
+	if nextIndex >= len(runes) {
+		return false
+	}
+
+	next := runes[nextIndex]
+
+	return next != ')' && next != ']' && next != '}' && next != ';' && next != ','
+}
+
+func trimTrailingSpaces(out *strings.Builder) {
+	s := out.String()
+	trimmed := strings.TrimRightFunc(s, unicode.IsSpace)
+
+	if len(trimmed) == len(s) {
+		return
+	}
+
+	out.Reset()
+	out.WriteString(trimmed)
 }
 
 func collapseSpacesOutsideStrings(code string) string {

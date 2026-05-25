@@ -12,12 +12,6 @@ import (
 	_ "embed"
 )
 
-//go:embed embedded/tiny_runtime_windows_amd64.exe
-var embeddedRuntimeWindowsAMD64 []byte
-
-//go:embed embedded/tiny_runtime_linux_amd64
-var embeddedRuntimeLinuxAMD64 []byte
-
 func normalizePluginPathForTarget(path string, target string) string {
 	ext := filepath.Ext(path)
 
@@ -34,36 +28,6 @@ func normalizePluginPathForTarget(path string, target string) string {
 
 	default:
 		return path
-	}
-}
-
-func getEmbeddedRuntimeForTarget(target string) []byte {
-	switch target {
-	case "windows-amd64":
-		return embeddedRuntimeWindowsAMD64
-
-	case "linux-amd64":
-		return embeddedRuntimeLinuxAMD64
-
-	default:
-		LangError(ErrorRuntime, "unsupported target: %s", target)
-		return nil
-	}
-}
-
-func writePackedGoMod(tempDir string, projectRoot string) {
-	code := fmt.Sprintf(`module tiny_packed_app
-
-go 1.22
-
-require language.com v0.0.0
-
-replace language.com => %s
-`, filepath.ToSlash(projectRoot))
-
-	err := os.WriteFile(filepath.Join(tempDir, "go.mod"), []byte(code), 0644)
-	if err != nil {
-		LangError(ErrorRuntime, "failed to write packed go.mod: %v", err)
 	}
 }
 
@@ -188,42 +152,4 @@ func writePackedExecutable(outFile string, runtimeBytes []byte, bytecodeBytes []
 	}
 
 	return nil
-}
-
-func copyFile(src string, dst string) {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		LangError(ErrorRuntime, "failed to read %s: %v", src, err)
-	}
-
-	err = os.WriteFile(dst, data, 0644)
-	if err != nil {
-		LangError(ErrorRuntime, "failed to write %s: %v", dst, err)
-	}
-}
-
-func copyGoModFiles(tempDir string, sourceDir string) {
-	dir := sourceDir
-
-	for {
-		goModPath := filepath.Join(dir, "go.mod")
-
-		if _, err := os.Stat(goModPath); err == nil {
-			copyFile(goModPath, filepath.Join(tempDir, "go.mod"))
-
-			goSumPath := filepath.Join(dir, "go.sum")
-			if _, err := os.Stat(goSumPath); err == nil {
-				copyFile(goSumPath, filepath.Join(tempDir, "go.sum"))
-			}
-
-			return
-		}
-
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-
-		dir = parent
-	}
 }

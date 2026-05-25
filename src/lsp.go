@@ -1,5 +1,3 @@
-// lsp.go
-
 package main
 
 import (

@@ -1,5 +1,3 @@
-//lsp_parse.go
-
 package main
 
 import (

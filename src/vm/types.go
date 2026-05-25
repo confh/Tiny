@@ -61,7 +61,7 @@ func checkSingleTypeHint(value Value, hint string) bool {
 
 	case "string":
 		switch value.(type) {
-		case string, StringExpr:
+		case string:
 			return true
 		default:
 			return false
@@ -69,7 +69,7 @@ func checkSingleTypeHint(value Value, hint string) bool {
 
 	case "bool":
 		switch value.(type) {
-		case bool, BoolExpr:
+		case bool:
 			return true
 		default:
 			return false
@@ -77,7 +77,7 @@ func checkSingleTypeHint(value Value, hint string) bool {
 
 	case "array":
 		switch value.(type) {
-		case ArrayValue, *ArrayValue, ArrayExpr:
+		case ArrayValue, *ArrayValue:
 			return true
 		default:
 			return false
@@ -85,7 +85,7 @@ func checkSingleTypeHint(value Value, hint string) bool {
 
 	case "object":
 		switch value.(type) {
-		case ObjectValue, ObjectExpr:
+		case ObjectValue:
 			return true
 		default:
 			return false
@@ -93,7 +93,7 @@ func checkSingleTypeHint(value Value, hint string) bool {
 
 	case "function":
 		switch value.(type) {
-		case FunctionValue, *FunctionValue, FunctionExpr:
+		case FunctionValue, *FunctionValue:
 			return true
 		default:
 			return false
