@@ -1,4 +1,4 @@
 package main
 
-const TinyVersion = "0.1.0"
-const BytecodeCacheVersion = 2
+const TinyVersion = "0.1.1"
+const BytecodeCacheVersion = 3
