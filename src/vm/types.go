@@ -53,7 +53,7 @@ func checkSingleTypeHint(value Value, hint string) bool {
 
 	case "number":
 		switch value.(type) {
-		case int, int64, float64, float32, NumberExpr:
+		case int, int64, float64, float32, uint64:
 			return true
 		default:
 			return false

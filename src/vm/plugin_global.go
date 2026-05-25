@@ -19,4 +19,5 @@ var AvailablePlugins = []string{
 	"net",
 	"path",
 	"object",
+	"desktop",
 }

@@ -129,6 +129,8 @@ func asInt64(value Value) int64 {
 		return v
 	case float64:
 		return int64(v)
+	case uint64:
+		return int64(v)
 	default:
 		LangError(ErrorType, "expected number, got %s", TypeName(value))
 		return 0
@@ -201,6 +203,9 @@ func asFloat64(value Value) float64 {
 	case float64:
 		return v
 
+	case uint64:
+		return float64(v)
+
 	case string:
 		f, err := strconv.ParseFloat(v, 64)
 		if err != nil {
@@ -217,7 +222,7 @@ func asFloat64(value Value) float64 {
 
 func isNumber(value Value) bool {
 	switch value.(type) {
-	case int, int64, float64:
+	case int, int64, float64, uint64:
 		return true
 	default:
 		return false
@@ -241,6 +246,29 @@ func asFloat(value Value) float64 {
 		return v
 	case string:
 		f, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			LangError(ErrorType, "cannot parse string '%s' as float: %v", v, err)
+			return 0
+		}
+		return f
+	case uint64:
+		return float64(v)
+	default:
+		LangError(ErrorType, "expected number, got %s", TypeName(value))
+		return 0
+	}
+}
+
+func asUint(value Value) uint64 {
+	switch v := value.(type) {
+	case int:
+		return uint64(v)
+	case float64:
+		return uint64(v)
+	case uint64:
+		return uint64(v)
+	case string:
+		f, err := strconv.ParseUint(v, 10, 64)
 		if err != nil {
 			LangError(ErrorType, "cannot parse string '%s' as float: %v", v, err)
 			return 0

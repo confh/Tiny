@@ -203,7 +203,7 @@ func (vm *VM) callStdMath(method string, args []Value) {
 	// blas64.Use(netlib.Implementation{})
 	fn, ok := stdMathMethods[method]
 	if !ok {
-		vm.fatalError(ErrorName, "unknown math function: %s", method)
+		vm.runtimeError(ErrorName, "unknown math function: %s", method)
 		return
 	}
 	fn(vm, args)
@@ -230,15 +230,15 @@ func DegToRad(deg float64) float64 {
 func getMatrixFields(v ObjectValue, matName string, vm *VM) (int, int, []float64) {
 	rows, ok := v["rows"].(int)
 	if !ok {
-		vm.fatalError(ErrorType, "%s matrix missing or invalid 'rows' field", matName)
+		vm.runtimeError(ErrorType, "%s matrix missing or invalid 'rows' field", matName)
 	}
 	cols, ok := v["cols"].(int)
 	if !ok {
-		vm.fatalError(ErrorType, "%s matrix missing or invalid 'cols' field", matName)
+		vm.runtimeError(ErrorType, "%s matrix missing or invalid 'cols' field", matName)
 	}
 	rawData, ok := v["data"].(*BufferValue)
 	if !ok {
-		vm.fatalError(ErrorType, "%s matrix missing or invalid 'data' field", matName)
+		vm.runtimeError(ErrorType, "%s matrix missing or invalid 'data' field", matName)
 	}
 
 	if len(rawData.Bytes) == 0 {

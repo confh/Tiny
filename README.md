@@ -1,10 +1,14 @@
-# Tiny
-
-Tiny is a small, expressive scripting language and bytecode VM written in Go.
-
-It is designed for the sweet spot between "quick script" and "real little
+<div align="center">
+  <img src="tiny.png" alt="Tiny Logo" width="256" height="256">
+  <h1>Tiny</h1>
+  <p>Tiny is a small, expressive scripting language and bytecode VM written in Go.</p>
+  <p>It is designed for the sweet spot between "quick script" and "real little
 program": command-line tools, file processors, JSON automation, HTTP services,
-small app launchers, native-plugin experiments, and portable packed executables.
+small app launchers, native-plugin experiments, and portable packed executables.</p>
+  
+  </div>
+
+
 
 ```tiny
 import std "io";
@@ -55,7 +59,7 @@ io.println(`Saved ${store.tasks.length()} task(s).`);
 | Runtime          | stack-based VM, bytecode compiler, call frames, local slots, class/method dispatch, task objects                                             |
 | Data             | strings, numbers, booleans, arrays, objects, buffers, null, undefined                                                                        |
 | Tooling          | run source, build bytecode, run bytecode, initialize projects, run project tasks, pack executables, create dist folders                      |
-| Standard library | IO, files, JSON, HTTP, TCP, process control, strings, arrays, buffers, regex, path helpers, math, time, OS/runtime info, app command helpers |
+| Standard library | IO, files, JSON, HTTP, TCP, process control, strings, arrays, buffers, regex, path helpers, math, desktop, time, OS/runtime info, app command helpers |
 | Distribution     | JSON bytecode files and standalone packed executables for `windows-amd64` and `linux-amd64`                                                  |
 
 
@@ -687,26 +691,27 @@ Tiny's standard library is intentionally compact, but it covers the things
 scripts usually need.
 
 
-| Module    | Purpose                                                                           |
-| --------- | --------------------------------------------------------------------------------- |
-| `io`      | print, println, input, readLine                                                   |
-| `fs`      | open, readFile, writeFile, writeBytes, exists, readDir, mkDir, stat, copy, remove |
-| `json`    | stringify, pretty, parse, readFile, writeFile                                     |
-| `http`    | HTTP client helpers and an HTTP server object                                     |
-| `net`     | TCP server creation                                                               |
-| `process` | args, cwd, env, run, shell, start, exit, process handles                          |
-| `path`    | join, baseName, dirName, extName, cwd                                             |
-| `array`   | range, isArray, from                                                              |
-| `string`  | random, isDigit, newBuilder                                                       |
-| `object`  | get, set, has, delete, keys, values, entries, length                              |
-| `buffer`  | alloc, fromString, fromArray                                                      |
-| `regex`   | matchString, findString                                                           |
-| `math`    | numeric conversion, scalar math, trig, matrices, buffer sums                      |
-| `time`    | sleep, nowMs, nowSec, clock                                                       |
-| `os`      | name, arch                                                                        |
-| `runtime` | lockThread, unlockThread                                                          |
-| `error`   | create structured error values                                                    |
-| `app`     | command-style app helper                                                          |
+| Module       | Purpose                                                                                                   |
+| ---------    | ---------------------------------------------------------------------------------                         |      
+| `io`         | print, println, input, readLine                                                                           |
+| `fs`         | open, readFile, writeFile, writeBytes, exists, readDir, mkDir, stat, copy, remove                         |
+| `json`       | stringify, pretty, parse, readFile, writeFile                                                             |
+| `http`       | HTTP client helpers and an HTTP server object                                                             |
+| `net`        | TCP server creation                                                                                       |
+| `process`    | args, cwd, env, run, shell, start, exit, process handles                                                  |
+| `path`       | join, baseName, dirName, extName, cwd                                                                     |
+| `array`      | range, isArray, from                                                                                      |
+| `string`     | random, isDigit, newBuilder                                                                               |
+| `object`     | get, set, has, delete, keys, values, entries, length                                                      |
+| `buffer`     | alloc, fromString, fromArray                                                                              |
+| `regex`      | matchString, findString                                                                                   |
+| `math`       | numeric conversion, scalar math, trig, matrices, buffer sums                                              |
+| `desktop`    | controlling the mouse, controllin the keyboard, taking a screenshot, controlling clipboard                |
+| `time`       | sleep, nowMs, nowSec, clock                                                                               |
+| `os`         | name, arch                                                                                                |
+| `runtime`    | lockThread, unlockThread                                                                                  |
+| `error`      | create structured error values                                                                            |
+| `app`        | command-style app helper                                                                                  |
 
 
 ### IO
@@ -850,6 +855,16 @@ let a = {
 };
 
 let scaled = math.matScale(a, 10);
+```
+
+
+### Desktop
+
+```tiny
+import std "desktop";
+
+io.println(desktop.mousePosition());
+desktop.screenshot("screenshot.png");
 ```
 
 ### Regex

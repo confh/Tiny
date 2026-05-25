@@ -35,6 +35,12 @@ var stdRuntimeMetadata = StdModuleInfo{
 			Returns:     "undefined",
 			Description: "Clears any previously registered fatal error callback.",
 		},
+		"memoryStats": {
+			Name:        "memoryStats",
+			Args:        []StdArg{},
+			Returns:     "object",
+			Description: "Returns current memory usage statistics for the Go runtime including alloc, totalAlloc, sys, and numGC.",
+		},
 	},
 }
 
@@ -46,6 +52,7 @@ func init() {
 		"unlockThread":      stdRuntimeUnlockThread,
 		"onFatal":           stdRuntimeOnFatal,
 		"clearFatalHandler": stdRuntimeClearOnFatal,
+		"memoryStats":       stdRuntimeMemoryStats,
 	}
 	registerStdModule(stdRuntimeMetadata)
 }
@@ -71,6 +78,20 @@ func stdRuntimeUnlockThread(vm *VM, args []Value) {
 
 	runtime.UnlockOSThread()
 	vm.push(UndefinedValue{})
+}
+
+func stdRuntimeMemoryStats(vm *VM, args []Value) {
+	dontExpectArgs(vm, "runtime.memoryStats", args)
+
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+
+	vm.push(ObjectValue{
+		"alloc":      m.Alloc,
+		"totalAlloc": m.TotalAlloc,
+		"sys":        m.Sys,
+		"numGC":      m.NumGC,
+	})
 }
 
 func stdRuntimeOnFatal(vm *VM, args []Value) {

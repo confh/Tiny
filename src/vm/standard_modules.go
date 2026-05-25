@@ -60,7 +60,10 @@ func (vm *VM) callStandardModule(module string, method string, args []Value) {
 	case "object":
 		vm.callStdObject(method, args)
 
+	case "desktop":
+		vm.callStdDesktop(method, args)
+
 	default:
-		LangError(ErrorName, "unknown standard module: %s", module)
+		vm.fatalError(ErrorName, "unknown standard module: %s", module)
 	}
 }

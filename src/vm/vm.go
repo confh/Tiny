@@ -2092,7 +2092,37 @@ func (vm *VM) step() bool {
 			vm.fatalError(ErrorType, "cannot divide %s and %s", TypeName(left), TypeName(right))
 		}
 
-		vm.push(asFloat(left) / asFloat(right))
+		if _, ok := left.(uint64); ok {
+			vm.push(asUint(left) / asUint(right))
+			break
+		}
+
+		if _, ok := right.(uint64); ok {
+			vm.push(asUint(left) / asUint(right))
+			break
+		}
+
+		if _, ok := left.(float64); ok {
+			vm.push(asFloat(left) / asFloat(right))
+			break
+		}
+
+		if _, ok := right.(float64); ok {
+			vm.push(asFloat(left) / asFloat(right))
+			break
+		}
+
+		if _, ok := left.(int64); ok {
+			vm.push(asInt64(left) / asInt64(right))
+			break
+		}
+
+		if _, ok := right.(int64); ok {
+			vm.push(asInt64(left) / asInt64(right))
+			break
+		}
+
+		vm.push(left.(int) * right.(int))
 
 	case OP_EQ:
 		right := vm.popFast()

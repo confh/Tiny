@@ -8,7 +8,7 @@ type NativeModuleFunc[T any] func(vm *VM, value T, args []Value)
 
 func dontExpectArgs(vm *VM, fnName string, args []Value) {
 	if len(args) != 0 {
-		vm.fatalError(
+		vm.runtimeError(
 			ErrorRuntime,
 			"%s expects %d argument(s), got %d",
 			fnName,
@@ -20,7 +20,7 @@ func dontExpectArgs(vm *VM, fnName string, args []Value) {
 
 func expectArgs(vm *VM, fnName string, args []Value, count int) {
 	if len(args) != count {
-		vm.fatalError(
+		vm.runtimeError(
 			ErrorRuntime,
 			"%s expects %d argument(s), got %d",
 			fnName,
@@ -32,7 +32,7 @@ func expectArgs(vm *VM, fnName string, args []Value, count int) {
 
 func expectArgsRange(vm *VM, fnName string, args []Value, min int, max int) {
 	if len(args) < min || len(args) > max {
-		vm.fatalError(
+		vm.runtimeError(
 			ErrorRuntime,
 			"%s expects %d to %d argument(s), got %d",
 			fnName,
@@ -45,7 +45,7 @@ func expectArgsRange(vm *VM, fnName string, args []Value, min int, max int) {
 
 func expectArgsMin(vm *VM, fnName string, args []Value, min int) {
 	if len(args) < min {
-		vm.fatalError(
+		vm.runtimeError(
 			ErrorRuntime,
 			"%s expects at least %d argument(s), got %d",
 			fnName,
@@ -57,12 +57,12 @@ func expectArgsMin(vm *VM, fnName string, args []Value, min int) {
 
 func argString(vm *VM, fnName string, args []Value, index int) string {
 	if index < 0 || index >= len(args) {
-		vm.fatalError(ErrorRuntime, "%s missing argument %d", fnName, index)
+		vm.runtimeError(ErrorRuntime, "%s missing argument %d", fnName, index)
 	}
 
 	str, ok := args[index].(string)
 	if !ok {
-		vm.fatalError(
+		vm.runtimeError(
 			ErrorType,
 			"%s argument %d expected string, got %s",
 			fnName,
@@ -76,12 +76,12 @@ func argString(vm *VM, fnName string, args []Value, index int) string {
 
 func argFn(vm *VM, fnName string, args []Value, index int) FunctionValue {
 	if index < 0 || index >= len(args) {
-		vm.fatalError(ErrorRuntime, "%s missing argument %d", fnName, index)
+		vm.runtimeError(ErrorRuntime, "%s missing argument %d", fnName, index)
 	}
 
 	fn, ok := args[index].(FunctionValue)
 	if !ok {
-		vm.fatalError(
+		vm.runtimeError(
 			ErrorType,
 			"%s argument %d expected function, got %s",
 			fnName,
@@ -95,12 +95,12 @@ func argFn(vm *VM, fnName string, args []Value, index int) FunctionValue {
 
 func argBool(vm *VM, fnName string, args []Value, index int) bool {
 	if index < 0 || index >= len(args) {
-		vm.fatalError(ErrorRuntime, "%s missing argument %d", fnName, index)
+		vm.runtimeError(ErrorRuntime, "%s missing argument %d", fnName, index)
 	}
 
 	str, ok := args[index].(bool)
 	if !ok {
-		vm.fatalError(
+		vm.runtimeError(
 			ErrorType,
 			"%s argument %d expected bool, got %s",
 			fnName,
@@ -114,7 +114,7 @@ func argBool(vm *VM, fnName string, args []Value, index int) bool {
 
 func argArray(vm *VM, fnName string, args []Value, index int) *ArrayValue {
 	if index < 0 || index >= len(args) {
-		vm.fatalError(
+		vm.runtimeError(
 			ErrorRuntime,
 			"%s missing argument %d",
 			fnName,
@@ -124,7 +124,7 @@ func argArray(vm *VM, fnName string, args []Value, index int) *ArrayValue {
 
 	array, ok := args[index].(*ArrayValue)
 	if !ok {
-		vm.fatalError(
+		vm.runtimeError(
 			ErrorType,
 			"%s argument %d expected array, got %s",
 			fnName,
@@ -138,7 +138,7 @@ func argArray(vm *VM, fnName string, args []Value, index int) *ArrayValue {
 
 func argObject(vm *VM, fnName string, args []Value, index int) ObjectValue {
 	if index < 0 || index >= len(args) {
-		vm.fatalError(
+		vm.runtimeError(
 			ErrorRuntime,
 			"%s missing argument %d",
 			fnName,
@@ -148,7 +148,7 @@ func argObject(vm *VM, fnName string, args []Value, index int) ObjectValue {
 
 	object, ok := args[index].(ObjectValue)
 	if !ok {
-		vm.fatalError(
+		vm.runtimeError(
 			ErrorType,
 			"%s argument %d expected object, got %s",
 			fnName,
@@ -162,12 +162,12 @@ func argObject(vm *VM, fnName string, args []Value, index int) ObjectValue {
 
 func argInt(vm *VM, fnName string, args []Value, index int) int {
 	if index < 0 || index >= len(args) {
-		vm.fatalError(ErrorRuntime, "%s missing argument %d", fnName, index)
+		vm.runtimeError(ErrorRuntime, "%s missing argument %d", fnName, index)
 	}
 
 	value, ok := args[index].(int)
 	if !ok {
-		vm.fatalError(
+		vm.runtimeError(
 			ErrorType,
 			"%s argument %d expected number, got %s",
 			fnName,
@@ -181,12 +181,12 @@ func argInt(vm *VM, fnName string, args []Value, index int) int {
 
 func argFloat64(vm *VM, fnName string, args []Value, index int) float64 {
 	if index < 0 || index >= len(args) {
-		vm.fatalError(ErrorRuntime, "%s missing argument %d", fnName, index)
+		vm.runtimeError(ErrorRuntime, "%s missing argument %d", fnName, index)
 	}
 
 	value, ok := args[index].(float64)
 	if !ok {
-		vm.fatalError(
+		vm.runtimeError(
 			ErrorType,
 			"%s argument %d expected number, got %s",
 			fnName,
