@@ -66,13 +66,13 @@ io.println(`Saved ${store.tasks.length()} task(s).`);
 ## Build Tiny
 
 ```bash
-go build -ldflags "-w -s" -o tiny ./src
+./build.sh
 ```
 
 On Windows:
 
 ```bash
-go build -ldflags "-w -s" -o tiny.exe ./src
+.\build.bat
 ```
 
 Run a file:
@@ -1081,16 +1081,16 @@ Run all tests:
 go test ./src/...
 ```
 
-Build Tiny:
+Build Tiny (linux):
 
 ```bash
-go build -o tiny ./src
+./build.sh
 ```
 
-Build optimized Tiny:
+Build Tiny (windows):
 
 ```bash
-go build -ldflags "-w -s" -o tiny ./src
+.\build.bat
 ```
 
 ## Notes
