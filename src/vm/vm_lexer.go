@@ -565,7 +565,17 @@ func (l *Lexer) readNumber() string {
 }
 
 func (l *Lexer) readString() string {
-	// skip opening "
+	// Remember which quote opened the string
+	if l.pos >= len(l.input) {
+		l.fatalError(ErrorSyntax, "unexpected end of input while reading string")
+		return ""
+	}
+	openQuote := l.input[l.pos]
+	if openQuote != '"' && openQuote != '\'' {
+		l.fatalError(ErrorSyntax, "readString called but string does not start with quote")
+		return ""
+	}
+	// skip opening quote
 	l.advance()
 
 	var result []rune
@@ -573,16 +583,14 @@ func (l *Lexer) readString() string {
 	for l.pos < len(l.input) {
 		ch := rune(l.input[l.pos])
 
-		if ch == '"' || ch == '\'' {
+		if ch == rune(openQuote) {
 			l.advance()
 			return string(result)
 		}
 
 		if ch == '\\' {
 			l.advance()
-
 			result = append(result, l.readEscapedRune())
-
 			l.advance()
 			continue
 		}
