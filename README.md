@@ -31,9 +31,23 @@ Tiny sits in the "sweet spot" between a quick bash script and a complex Go progr
 
 ---
 
-## 🛠️ Installation & Building
+## 🛠️ Installation
 
-Build the `tiny` compiler/runtime directly from source:
+### Quick Install (Pre-built)
+If you don't want to build from source, you can download the pre-compiled binaries for your OS.
+
+1.  **Download**: Get the latest binary from the [Releases Page](https://github.com/confh/Tiny/releases/latest).
+    - Windows: `tiny_windows_amd64.exe`
+    - Linux: `tiny_linux_amd64`
+2.  **Setup Folder**: Create a `.tiny` folder in your user home directory and move the binary there.
+    - Windows: `C:\Users\YourName\.tiny\tiny.exe` (Rename it to `tiny.exe`)
+    - Linux: `~/.tiny/tiny` (Rename it to `tiny` and run `chmod +x ~/.tiny/tiny`)
+3.  **Add to PATH**:
+    - **Windows**: Search for "Environment Variables" -> Edit the system environment variables -> Path -> New -> add `C:\Users\YourName\.tiny`.
+    - **Linux**: Add `export PATH="$HOME/.tiny:$PATH"` to your `~/.bashrc` or `~/.zshrc`.
+
+### Build from Source
+Build the `tiny` compiler/runtime directly:
 
 ```bash
 # Clone the repo
