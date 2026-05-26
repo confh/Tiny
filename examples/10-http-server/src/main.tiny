@@ -5,9 +5,9 @@ import std "json";
 let server = http.server(8090);
 
 server.get("/", fn(req) {
-    return json.stringify({
+    return http.json({
         message: "hello from Tiny",
-        routes: ["/echo?text=hello"]
+        routes:["/echo?text=hello"]
     });
 });
 
@@ -18,10 +18,19 @@ server.get("/echo", fn(req) {
         text = req.query["text"];
     }
 
-    return json.stringify({
+    return http.json({
         path: req.path,
         method: req.method,
         text: text
+    });
+});
+
+
+server.get("/test/:id", fn(req) {
+    const id: string= req.params["id"];
+
+    return http.json({
+        id: id
     });
 });
 

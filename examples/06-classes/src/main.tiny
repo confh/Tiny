@@ -2,6 +2,8 @@ import std "io";
 import std "json";
 
 class Log {
+    field messages = [];
+
     fn init() {
         this.messages = [];
     }
@@ -17,6 +19,7 @@ class Log {
 }
 
 class Box {
+    field value = null;
     embed log;
 
     fn init(value) {
