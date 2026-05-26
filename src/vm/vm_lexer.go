@@ -155,6 +155,8 @@ func (l *Lexer) NextToken() Token {
 			tok.Type = TOKEN_PUBLIC
 		case "instanceof":
 			tok.Type = TOKEN_INSTANCEOF
+		case "iota":
+			tok.Type = TOKEN_IOTA
 		default:
 			tok.Type = TOKEN_IDENT
 		}

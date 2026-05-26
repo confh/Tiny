@@ -101,6 +101,13 @@ const (
 	OP_GET_PROPERTY_LOCAL
 	OP_MUL_LOCAL_CONST
 	OP_ADD_PROPERTY_LOCAL_LOCAL
+
+	OP_ADD_LOCAL_LOCAL
+	OP_SUB_LOCAL_LOCAL
+	OP_MUL_LOCAL_LOCAL
+	OP_DIV_LOCAL_LOCAL
+
+	OP_ADD_LOCAL_CONST
 )
 
 type Instruction struct {
@@ -275,4 +282,9 @@ type ClassField struct {
 	Value    Value
 	TypeHint TypeHint
 	Private  bool
+}
+
+type EnumField struct {
+	Name  string
+	Value Expr
 }

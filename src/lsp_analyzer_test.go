@@ -514,6 +514,61 @@ func TestLSPNamespaceCompletionIncludesExportedEnumsAndClasses(t *testing.T) {
 	}
 }
 
+func TestLSPLocalEnumMemberCompletion(t *testing.T) {
+	text := strings.Join([]string{
+		"enum Status {",
+		"    Pending,",
+		"    Done = 2",
+		"}",
+		"Status.",
+	}, "\n")
+
+	items := getCompletions("file:///enum.tiny", text, Position{
+		Line:      4,
+		Character: len("Status."),
+	})
+
+	if !completionLabelsContain(items, "Pending") {
+		t.Fatalf("expected Status. completions to include Pending, got %#v", completionLabels(items))
+	}
+	if !completionLabelsContain(items, "Done") {
+		t.Fatalf("expected Status. completions to include Done, got %#v", completionLabels(items))
+	}
+}
+
+func TestLSPImportedEnumMemberCompletion(t *testing.T) {
+	dir := t.TempDir()
+	todoPath := filepath.Join(dir, "todo.tiny")
+	mainPath := filepath.Join(dir, "main.tiny")
+
+	err := os.WriteFile(todoPath, []byte(strings.Join([]string{
+		"export enum Status {",
+		"    Pending,",
+		"    Done = 2",
+		"}",
+	}, "\n")), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	text := strings.Join([]string{
+		"import \"todo.tiny\" as Todo;",
+		"Todo.Status.",
+	}, "\n")
+
+	items := getCompletions(pathToFileURI(mainPath), text, Position{
+		Line:      1,
+		Character: len("Todo.Status."),
+	})
+
+	if !completionLabelsContain(items, "Pending") {
+		t.Fatalf("expected Todo.Status. completions to include Pending, got %#v", completionLabels(items))
+	}
+	if !completionLabelsContain(items, "Done") {
+		t.Fatalf("expected Todo.Status. completions to include Done, got %#v", completionLabels(items))
+	}
+}
+
 func TestLSPNamespaceCompletionIncludesOpenExportedClass(t *testing.T) {
 	dir := t.TempDir()
 	todoPath := filepath.Join(dir, "todo.tiny")

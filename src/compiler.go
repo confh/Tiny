@@ -1333,11 +1333,11 @@ func (c *Compiler) compileEnum(stmt EnumStmt) {
 	obj := ObjectValue{}
 
 	for _, member := range stmt.Members {
-		if _, exists := obj[member]; exists {
-			c.fatalError(ErrorName, "duplicate enum member %s.%s", stmt.Name, member)
+		if _, exists := obj[member.Name]; exists {
+			c.fatalError(ErrorName, "duplicate enum member %s.%s", stmt.Name, member.Name)
 		}
 
-		obj[member] = member
+		obj[member.Name] = c.evalConstantExpr(member.Value, "enum member must be constant.")
 	}
 
 	c.emit(OP_CONST, obj)
@@ -1596,7 +1596,7 @@ func (c *Compiler) ensureCaptured(name string) (Binding, bool) {
 	}, true
 }
 
-func (c *Compiler) evalConstantExpr(expr Expr) Value {
+func (c *Compiler) evalConstantExpr(expr Expr, err string) Value {
 	switch e := expr.(type) {
 	case StringExpr:
 		return e.Value
@@ -1616,7 +1616,7 @@ func (c *Compiler) evalConstantExpr(expr Expr) Value {
 		}
 
 		for _, element := range e.Elements {
-			arr.Elements = append(arr.Elements, c.evalConstantExpr(element))
+			arr.Elements = append(arr.Elements, c.evalConstantExpr(element, err))
 		}
 
 		return arr
@@ -1625,7 +1625,7 @@ func (c *Compiler) evalConstantExpr(expr Expr) Value {
 		obj := ObjectValue{}
 
 		for _, pair := range e.Fields {
-			obj[pair.Name] = c.evalConstantExpr(pair.Value)
+			obj[pair.Name] = c.evalConstantExpr(pair.Value, err)
 		}
 
 		return obj
@@ -1633,7 +1633,8 @@ func (c *Compiler) evalConstantExpr(expr Expr) Value {
 	default:
 		c.fatalError(
 			ErrorType,
-			"class field default must be constant",
+			"%s",
+			err,
 		)
 		return UndefinedValue{}
 	}
@@ -1670,14 +1671,14 @@ func (c *Compiler) compileClass(stmt ClassStmt) {
 		classField := ClassField{
 			Constant: field.Constant,
 			Name:     field.Name,
-			Value:    c.evalConstantExpr(field.Value),
+			Value:    c.evalConstantExpr(field.Value, "class field default must be constant."),
 			TypeHint: field.TypeHint,
 			Private:  field.Private,
 		}
 
 		fields = append(fields, classField)
 
-		if !CheckTypeHint(c.evalConstantExpr(field.Value), field.TypeHint) {
+		if !CheckTypeHint(c.evalConstantExpr(field.Value, "class field default must be constant."), field.TypeHint) {
 			c.fatalError(
 				ErrorType,
 				"field %s in class '%s' expected %s, got %s",

@@ -1,1110 +1,245 @@
 <div align="center">
-  <img src="tiny.png" alt="Tiny Logo" width="256" height="256">
-  <h1>Tiny</h1>
-  <p>Tiny is a small, expressive scripting language and bytecode VM written in Go.</p>
-  <p>It is designed for the sweet spot between "quick script" and "real little
-program": command-line tools, file processors, JSON automation, HTTP services,
-small app launchers, native-plugin experiments, and portable packed executables.</p>
-  
-  </div>
+  <img src="examples/tiny.png" alt="Tiny Logo" width="200">
+  <h1>✨ Tiny Programming Language</h1>
+  <p><b>Small. Fast. Expressive.</b></p>
+  <p>Tiny is a lightweight scripting language and stack-based bytecode VM written in Go.</p>
 
+  <p>
+    <img src="https://img.shields.io/badge/Language-Tiny-blue.svg">
+    <img src="https://img.shields.io/badge/Built%20With-Go-00ADD8.svg">
+    <img src="https://img.shields.io/badge/VS%20Code-Extension-007ACC.svg">
+    <img src="https://img.shields.io/badge/License-MIT-green.svg">
+  </p>
+</div>
 
+---
 
-```tiny
-import std "io";
-import std "json";
-import std "fs";
+## 🚀 Experience Tiny
 
-class TodoStore {
-    field path = "tasks.json";
-    field tasks = [];
+Tiny sits in the "sweet spot" between a quick bash script and a complex Go program. It’s perfect for CLI tools, JSON automation, HTTP services, and native-plugin experiments.
 
-    fn init(path = "tasks.json") {
-        this.path = path;
-        this.load();
-    }
+<p align="center">
+  <img src="examples/showcase.gif" width="800px" style="border-radius: 10px; box-shadow: 0 4px 20px rgba(0,0,0,0.3);">
+</p>
 
-    fn load() {
-        try {
-            this.tasks = json.parse(fs.readFile(this.path));
-        } catch err {
-            this.tasks = [];
-        }
-    }
+### Why use Tiny?
+- 🍃 **Ultra-Lightweight**: Bare "Hello World" starts at **< 2MB** RAM (Node.js is ~30MB).
+- 📦 **Zero Dependencies**: Compile your script into a **single standalone binary** with `tiny pack`.
+- ⚡ **Built for Speed**: Uses a specialized bytecode compiler and an optimized stack VM.
+- 🛠️ **Familiar Syntax**: Clean C-style syntax with Classes, Closures, and modern string interpolation.
+- 🏗️ **Memory Safe**: Inherits Go's highly efficient concurrent Garbage Collector.
 
-    fn add(title: string) {
-        this.tasks.push({
-            title: title,
-            done: false
-        });
-        this.save();
-    }
+---
 
-    fn save() {
-        fs.writeFile(this.path, json.pretty(this.tasks));
-    }
-}
+## 🛠️ Installation & Building
 
-const store = TodoStore();
-store.add("ship something tiny");
-io.println(`Saved ${store.tasks.length()} task(s).`);
-```
-
-## What Tiny Gives You
-
-
-| Area             | What you get                                                                                                                                 |
-| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| Language         | variables, constants, functions, closures, classes, fields, methods, enums, namespaces, imports, loops, match, try/catch/finally             |
-| Runtime          | stack-based VM, bytecode compiler, call frames, local slots, class/method dispatch, task objects                                             |
-| Data             | strings, numbers, booleans, arrays, objects, buffers, null, undefined                                                                        |
-| Tooling          | run source, build bytecode, run bytecode, initialize projects, run project tasks, pack executables, create dist folders                      |
-| Standard library | IO, files, JSON, HTTP, TCP, process control, strings, arrays, buffers, regex, path helpers, math, desktop, time, OS/runtime info, app command helpers |
-| Distribution     | JSON bytecode files and standalone packed executables for `windows-amd64` and `linux-amd64`                                                  |
-
-
-## Build Tiny
+Build the `tiny` compiler/runtime directly from source:
 
 ```bash
+# Clone the repo
+git clone https://github.com/confh/Tiny.git tiny
+cd tiny
+
+# Build (Linux)
 ./build.sh
-```
 
-On Windows:
-
-```bash
+# Build (Windows)
 .\build.bat
 ```
 
-Run a file:
+---
 
+## 🚦 Features at a Glance
+
+| Category | Highlights |
+| :--- | :--- |
+| **Language** | Variables (`let`/`const`), Functions, Classes (Fields/Methods), Enums, Namespaces, Try/Catch |
+| **Data** | Strings (Interpolated), Numbers (Int/Float/Int64/Uint64), Arrays, Objects, Buffers |
+| **Runtime** | Optimized Bytecode VM, Native Method Dispatch, Async Tasks (`spawn`/`await`) |
+| **Distribution** | Bytecode Serialization (`.tbc`), Single-binary Packing, `dist` folder generation |
+| **Std Lib** | `io`, `fs`, `json`, `http` (Client/Server), `net`, `process`, `regex`, `desktop`, `math` |
+
+---
+
+## 🌐 Modern Tooling
+
+Tiny comes with built-in tools to manage your entire development lifecycle.
+
+### 🔌 Real-time HTTP Services
+Write and run a JSON API in seconds. Tiny includes a full-featured HTTP server.
+
+<p align="center">
+  <img src="examples/http_server.gif" width="800px" style="border-radius: 10px; border: 1px solid #333;">
+</p>
+
+### 📦 Single-Binary Packing
+Stop shipping source files. Pack your Tiny app into a standalone executable for Windows or Linux.
+
+<p align="center">
+  <img src="examples/packing.gif" width="800px" style="border-radius: 10px; border: 1px solid #333;">
+</p>
+
+### 🛠️ VS Code Support
+Tiny features a built-in **Language Server (LSP)** for a modern development experience. Download the official extension for syntax highlighting, autocompletion, and diagnostics.
+
+<img src="examples/extension.png" alt="Tiny Logo" width="500" style="border-radius:10px; border: 1px solid #333;">
+
+<br/>
+
+👉 **[Tiny for Visual Studio Code](https://github.com/confh/TinyVsCode/releases/latest)**
+
+---
+
+## 🛠️ Project Management
+
+Tiny includes built-in tools to manage your entire development lifecycle, making it easy to grow from a single script to a full application.
+
+### Bootstrapping with `tiny init`
+Create a new project with a standardized structure in one command:
 ```bash
-tiny main.tiny
+tiny init my-awesome-app
+cd my-awesome-app
 ```
+This generates:
+- `src/main.tiny`: Your application entry point.
+- `tiny.json`: The project manifest and configuration.
+- `plugins/`: A home for your native plugins.
+- `.gitignore`: Pre-configured for Tiny's build artifacts.
 
-Run a project:
-
-```bash
-tiny init hello
-cd hello
-tiny
-```
-
-When run without arguments, `tiny` reads `tiny.json` and executes the configured
-entry file.
-
-## Command Line
-
-### Run Source
-
-```bash
-tiny src/main.tiny arg1 arg2
-```
-
-Arguments after the source file are available through `process.args()`.
-
-```tiny
-import std "process";
-import std "io";
-
-io.println(process.args());
-```
-
-Tiny also supports a source-run cache. Disable it when needed:
-
-```bash
-tiny src/main.tiny --disable-cache
-```
-
-### Run A Project
-
-```bash
-tiny
-```
-
-Looks for `tiny.json` in the current folder and runs its `entry`.
-
-### Build Bytecode
-
-```bash
-tiny build src/main.tiny -o dist/app.tbc
-```
-
-The `.tbc` file stores the optimized main instruction stream, function table,
-and class table as Tiny bytecode data.
-
-Run bytecode:
-
-```bash
-tiny run dist/app.tbc
-```
-
-### Pack An Executable
-
-```bash
-tiny pack src/main.tiny -o dist/app
-```
-
-`tiny pack` compiles your program, embeds the bytecode into a Tiny runtime, and
-writes a runnable executable. On Windows, `.exe` is added when appropriate.
-
-Use a target:
-
-```bash
-tiny pack src/main.tiny -o dist/app --target linux-amd64
-tiny pack src/main.tiny -o dist/app.exe --target windows-amd64
-```
-
-Inside a configured project, this works too:
-
-```bash
-tiny pack
-```
-
-### Create A Dist Folder
-
-```bash
-tiny dist src/main.tiny -o dist/app --target windows-amd64
-```
-
-`tiny dist` packs the executable and copies native plugins it can discover from
-`Plugin.load("path")`. You can add extra plugins manually:
-
-```bash
-tiny dist src/main.tiny -o dist/app --plugin plugins/native_tools.dll
-```
-
-Supported targets:
-
-
-| Target          | Output                                               |
-| --------------- | ---------------------------------------------------- |
-| `windows-amd64` | Windows executable, `.exe` added when missing        |
-| `linux-amd64`   | Linux executable, marked executable with `chmod 755` |
-
-
-### Initialize A Project
-
-```bash
-tiny init my-app
-```
-
-Creates:
-
-```txt
-my-app/
-  tiny.json
-  README.md
-  .gitignore
-  src/main.tiny
-  plugins/
-  dist/
-```
-
-Initialize the current folder:
-
-```bash
-tiny init .
-```
-
-### Run Project Tasks
-
-`tiny task` reads `tiny.json` scripts.
-
-```bash
-tiny task
-tiny task build
-tiny task pack
-```
-
-Project configs created by `tiny init` include:
-
+### The `tiny.json` Manifest
+The `tiny.json` file is the brain of your project. It controls how your app runs, builds, and packs.
 ```json
 {
-  "scripts": {
-    "start": "tiny run",
-    "build": "tiny build",
-    "pack": "tiny pack",
-    "dist": "tiny dist"
-  }
-}
-```
-
-## Project Configuration
-
-`tiny.json` is the project manifest.
-
-```json
-{
-  "name": "hello",
-  "version": "0.1.0",
+  "name": "my-app",
+  "version": 0.1,
   "entry": "src/main.tiny",
-  "outDir": "dist",
   "target": "windows-amd64",
   "scripts": {
-    "start": "tiny run",
-    "build": "tiny build",
-    "pack": "tiny pack",
-    "dist": "tiny dist"
-  },
-  "plugins": [],
-  "compilerOptions": {
-    "stackTraces": true,
-    "strict": false
+    "test": "tiny test.tiny",
+    "clean": "rm -rf dist/*"
   }
 }
 ```
 
-The most important fields are:
+### Custom Scripts with `tiny task`
+Forget complex Makefiles. Define your project's workflow directly in `tiny.json` and run them with `tiny task`.
+```bash
+tiny task        # Lists all available tasks
+tiny task test   # Runs your custom 'test' script
+```
+> **Pro Tip**: If you simply run `tiny` (no arguments) in a project folder, it will automatically look for `tiny.json` and execute the `entry` file.
 
+---
 
-| Field     | Purpose                                                |
-| --------- | ------------------------------------------------------ |
-| `name`    | default packed executable name                         |
-| `entry`   | source file run by `tiny` and used by project commands |
-| `outDir`  | default output directory                               |
-| `target`  | default pack/dist target                               |
-| `scripts` | named shell commands for `tiny task`                   |
+## ⚙️ Under the Hood: Performance & Optimizations
 
+Tiny isn't just an AST interpreter; it's a full compilation pipeline designed for efficiency.
 
-## Language Tour
+- 🏗️ **Bytecode Compiler**: Source code is compiled into a compact binary instruction stream (`.tbc`) before execution.
+- 🚀 **Optimized Dispatch**: The VM uses specialized instructions for common patterns like `OP_INC_LOCAL` or `OP_ARRAY_PUSH_LOCAL`, bypassing slower generic method lookups.
+- 💎 **Constant Folding**: The compiler pre-calculates static expressions (like `1 + 2 * 3`) at compile-time.
+- 📦 **Fast Local Access**: Local variables are indexed by numeric slots, making function scope access extremely fast.
+- ♻️ **Go GC Integration**: Tiny values are directly backed by Go's highly efficient, concurrent, tri-color mark-and-sweep garbage collector.
+- 💾 **Source Cache**: When running `.tiny` files directly, Tiny caches the compiled bytecode in a `.tinycache` folder, making subsequent runs near-instant.
 
-### Comments
+---
 
-```tiny
-// A line comment.
+## 📦 Distribution & Deployment
+
+Tiny provides multiple ways to ship your code, from raw source to standalone system binaries.
+
+### 1. Standalone Executables (`tiny pack`)
+The easiest way to distribute your tool. It bundles the Tiny runtime and your compiled bytecode into a single binary.
+```bash
+tiny pack src/main.tiny -o mytool
 ```
 
-### Values
-
-```tiny
-let count = 10;
-let ratio = 12.5;
-let name = "Tiny";
-let enabled = true;
-let missing = undefined;
-let nothing = null;
+### 2. Full Distribution (`tiny dist`)
+If your project uses **Native Plugins** (DLLs/SOs), `tiny dist` is the answer. It packs the executable *and* automatically gathers all linked plugins into a clean `dist/` folder.
+```bash
+tiny dist src/main.tiny -o release/app
 ```
 
-### Variables And Constants
-
-Use `let` for mutable bindings and `const` for bindings that cannot be rebound.
-
-```tiny
-let score = 1;
-score += 10;
-score++;
-
-const version = "0.1.0";
+### 3. Bytecode Binary (`tiny build`)
+If you want to keep your source private but don't need a standalone binary, you can ship the `.tbc` file.
+```bash
+tiny build src/main.tiny -o app.tbc
+tiny run app.tbc
 ```
 
-Constants protect the binding, not the contents of objects or arrays:
+---
 
-```tiny
-const user = { name: "Ada" };
-user.name = "Grace"; // allowed
-```
+## 📖 Language Tour
 
-### Strings And Interpolation
-
-```tiny
-let language = "Tiny";
-let message = `Hello from ${language}`;
-```
-
-Escape sequences include `\n`, `\r`, `\t`, `\\`, `\"`, and `\0`.
-
-### Arrays
-
-```tiny
-let items = ["lexer", "parser"];
-
-items.push("vm");
-io.println(items[0]);
-io.println(items.length());
-
-items[1] = "compiler";
-items.remove(0);
-```
-
-Useful array methods:
-
-```tiny
-items.length();
-items.push(value);
-items.pop();
-items.get(index);
-items.set(index, value);
-items.contains(value);
-items.join(", ");
-items.reverse();
-items.map(fn(index, value) { return value; });
-items.forEach(fn(index, value) { io.println(value); });
-items.filter(fn(index, value) { return true; });
-items.clear();
-items.remove(index);
-```
-
-### Objects
-
-```tiny
-let user = {
-    name: "Tiny",
-    score: 42,
-    tags: ["compiler", "vm"]
-};
-
-io.println(user.name);
-user.score += 1;
-
-user["role"] = "tool";
-io.println(user["role"]);
-```
-
-Dot property access is checked. Bracket access is dynamic and useful when keys
-come from data.
-
-### Operators
-
-```tiny
-let a = 10 + 2;
-let b = 10 - 2;
-let c = 10 * 2;
-let d = 10 / 2;
-let e = 10 % 3;
-
-let ok = a > b and c != d;
-let fallback = ok or false;
-let label = ok ? "yes" : "no";
-```
-
-Supported assignment forms include:
-
-```tiny
-value = 1;
-value += 2;
-value -= 1;
-value++;
-value--;
-
-user.score += 10;
-```
-
-### Type Hints
-
-Tiny type hints are checked at runtime.
-
-```tiny
-let title: string = "Readme";
-let retries: number = 3;
-
-fn add(a: number, b: number): number {
-    return a + b;
-}
-```
-
-Common hint names:
-
-
-| Hint        | Meaning                 |
-| ----------- | ----------------------- |
-| `any`       | any value               |
-| `number`    | integer or float number |
-| `string`    | text                    |
-| `bool`      | boolean                 |
-| `array`     | array                   |
-| `object`    | object                  |
-| `function`  | callable value          |
-| `null`      | null                    |
-| `undefined` | undefined               |
-| class name  | instance of that class  |
-
-
-Union-like hints appear in several library signatures:
-
-```tiny
-let maybeName: string | null = null;
-```
-
-### Functions
-
-```tiny
-fn add(a, b) {
-    return a + b;
-}
-
-io.println(add(2, 3));
-```
-
-Default parameters:
-
-```tiny
-fn greet(name, prefix = "Hello") {
-    return `${prefix}, ${name}`;
-}
-```
-
-Functions are values:
-
-```tiny
-let transform = fn(value) {
-    return value * 2;
-};
-
-io.println(transform(21));
-```
-
-Closures capture local variables:
-
-```tiny
-fn makeCounter() {
-    let value = 0;
-
-    return fn() {
-        value++;
-        return value;
-    };
-}
-
-let next = makeCounter();
-io.println(next());
-io.println(next());
-```
-
-### Control Flow
-
-```tiny
-if score >= 90 {
-    io.println("excellent");
-} else {
-    io.println("keep going");
-}
-```
-
-```tiny
-while running {
-    tick();
-}
-```
-
-```tiny
-for let i = 0; i < 10; i++ {
-    io.println(i);
-}
-```
-
-```tiny
-for task, index in tasks {
-    io.println(index, task.title);
-}
-```
-
-`break` and `continue` work inside loops.
-
-### Match
-
-```tiny
-match command {
-    "add" {
-        addTask();
-    }
-    "list" {
-        listTasks();
-    }
-    _ {
-        io.println("Unknown command");
-    }
-}
-```
-
-### Enums
-
-```tiny
-enum Status {
-    Open,
-    Done,
-    Blocked
-}
-
-let status = Status.Open;
-```
-
-### Classes
-
-Classes group fields and methods. `init` is the constructor hook.
-
-```tiny
-class User {
-    field name: string = "";
-    field score: number = 0;
-
-    fn init(name: string, score: number = 0) {
-        this.name = name;
-        this.score = score;
-    }
-
-    fn rename(name: string) {
-        this.name = name;
-        return this;
-    }
-
-    fn label(): string {
-        return `${this.name}: ${this.score}`;
-    }
-}
-
-let user = User("Ada", 10);
-user.rename("Grace");
-io.println(user.label());
-```
-
-Private members are available inside the class:
-
-```tiny
-class TokenStore {
-    private field token = "";
-
-    private fn reset() {
-        this.token = "";
-    }
-}
-```
-
-Embedded classes let one object delegate method lookup to another object:
-
-```tiny
-class Logger {
-    fn log(message) {
-        io.println(message);
-    }
-}
-
-class Service {
-    embed logger;
-
-    fn init() {
-        this.logger = Logger();
-    }
-}
-
-let service = Service();
-service.log("delegated through embed");
-```
-
-### `typeof` And `instanceof`
-
-```tiny
-io.println(typeof "hello");   // string
-io.println(typeof [1, 2, 3]); // array
-
-if user instanceof User {
-    io.println("yes");
-}
-```
-
-### Errors
-
-```tiny
-import std "error";
+### Classes & Logic
+```javascript
 import std "io";
 
-try {
-    throw error.new("ValidationError", "title is required");
-} catch err {
-    io.println(err.kind);
-    io.println(err.message);
-} finally {
-    io.println("finished");
+class Greeter {
+    field prefix = "Hello";
+    fn init(p) { this.prefix = p; }
+    fn greet(name) {
+        return `${this.prefix}, ${name}!`;
+    }
 }
+
+let g = Greeter("Welcome");
+io.println(g.greet("Gemini"));
 ```
 
-Thrown strings, objects, and error values are normalized into Tiny error values
-with `kind` and `message`.
+### JSON & File IO
+```javascript
+import std "io";
+import std "fs";
+import std "json";
 
-### Tasks
+let data = { user: "David", score: 100 };
+fs.writeFile("save.json", json.pretty(data));
 
-```tiny
+let loaded = json.parse(fs.readFile("save.json"));
+io.println(`User: ${loaded.user}`);
+```
+
+### Async Tasks
+```javascript
+import std "io";
 import std "time";
-import std "io";
 
 let task = spawn fn() {
-    time.sleep(100);
-    return "done";
+    time.sleep(1000);
+    return "Result from background!";
 };
 
+io.println("Doing other things...");
 io.println(task.await());
 ```
 
-`spawn` creates a task from an anonymous function. `await()` waits for the result.
+---
 
-## Imports, Modules, And Exports
+## 📚 Standard Library Reference
 
-### File Imports
+Tiny includes a robust set of standard modules:
 
-```tiny
-import "lib/math.tiny";
-```
+- **`io`**: Print, Input, ReadLine.
+- **`fs`**: File management (Open, Read, Write, Stat, ReadDir).
+- **`json`**: High-performance JSON Parsing and Stringifying.
+- **`http`**: Clean HTTP Client and Server.
+- **`process`**: Environment variables, CLI args, running shell commands.
+- **`math`**: Full trig, clamping, and even **Matrix Multiplication**.
+- **`desktop`**: Control mouse/keyboard and take screenshots.
 
-Non-aliased imports are loaded into the current program.
+---
 
-### Aliased Imports
+## 🏗️ Repository Structure
 
-```tiny
-import "todo.tiny" as Todo;
+- `src/vm/`: The heart of Tiny — Lexer, Parser, Compiler, and the VM.
+- `src/bytecode/`: Serialization logic for `.tbc` files.
+- `src/tinyplugin/`: A Go-based helper to write native C-shared plugins.
+- `examples/`: Comprehensive guides for every feature.
 
-const manager = Todo.TaskManager();
-manager.add("write docs");
-```
+---
 
-Aliased imports create a namespace object.
-
-### Exports
-
-```tiny
-export const version = "1.0.0";
-
-export fn createUser(name) {
-    return User(name);
-}
-
-export class User {
-    fn init(name) {
-        this.name = name;
-    }
-}
-```
-
-When a namespaced file has explicit exports, only exported declarations are
-visible through the namespace.
-
-### Standard Modules
-
-```tiny
-import std "io";
-import std "json" as JSON;
-
-io.println(JSON.stringify({ ok: true }));
-```
-
-## Standard Library
-
-Tiny's standard library is intentionally compact, but it covers the things
-scripts usually need.
-
-
-| Module       | Purpose                                                                                                   |
-| ---------    | ---------------------------------------------------------------------------------                         |      
-| `io`         | print, println, input, readLine                                                                           |
-| `fs`         | open, readFile, writeFile, writeBytes, exists, readDir, mkDir, stat, copy, remove                         |
-| `json`       | stringify, pretty, parse, readFile, writeFile                                                             |
-| `http`       | HTTP client helpers and an HTTP server object                                                             |
-| `net`        | TCP server creation                                                                                       |
-| `process`    | args, cwd, env, run, shell, start, exit, process handles                                                  |
-| `path`       | join, baseName, dirName, extName, cwd                                                                     |
-| `array`      | range, isArray, from                                                                                      |
-| `string`     | random, isDigit, newBuilder                                                                               |
-| `object`     | get, set, has, delete, keys, values, entries, length                                                      |
-| `buffer`     | alloc, fromString, fromArray                                                                              |
-| `regex`      | matchString, findString                                                                                   |
-| `math`       | numeric conversion, scalar math, trig, matrices, buffer sums                                              |
-| `desktop`    | controlling the mouse, controllin the keyboard, taking a screenshot, controlling clipboard                |
-| `time`       | sleep, nowMs, nowSec, clock                                                                               |
-| `os`         | name, arch                                                                                                |
-| `runtime`    | lockThread, unlockThread                                                                                  |
-| `error`      | create structured error values                                                                            |
-| `app`        | command-style app helper                                                                                  |
-
-
-### IO
-
-```tiny
-import std "io";
-
-io.print("Name: ");
-let name = io.readLine();
-io.println("Hello", name);
-```
-
-### Files And JSON
-
-```tiny
-import std "fs";
-import std "json";
-
-let config = {
-    name: "tiny",
-    fast: true
-};
-
-fs.writeFile("config.json", json.pretty(config));
-
-let loaded = json.parse(fs.readFile("config.json"));
-io.println(loaded.name);
-```
-
-### HTTP Client
-
-```tiny
-import std "http";
-import std "io";
-
-let response = http.get("https://example.com", {
-    headers: {
-        Accept: "text/plain"
-    }
-});
-
-io.println(response.status);
-io.println(response.body);
-```
-
-### HTTP Server
-
-```tiny
-import std "http";
-import std "json";
-import std "io";
-
-let server = http.server(8090);
-
-server.get("/", fn(req) {
-    return http.json({
-        method: req.method,
-        path: req.path,
-        query: req.query
-    });
-});
-
-server.post("/echo", fn(req) {
-    return http.text(req.body);
-});
-
-io.println("Listening on http://localhost:8090");
-server.start();
-```
-
-Server object methods:
-
-```tiny
-server.get(path, handler);
-server.post(path, handler);
-server.getJSON(path, value);
-server.getPrettyJSON(path, value);
-server.start();
-server.start(true); // async
-server.stop();
-```
-
-### Processes
-
-```tiny
-import std "process";
-import std "io";
-
-io.println(process.args());
-io.println(process.cwd());
-io.println(process.getEnv("HOME"));
-
-let result = process.run("go", ["version"], {
-    stdout: true,
-    stderr: true
-});
-
-io.println(result.stdout);
-```
-
-Long-running processes:
-
-```tiny
-let proc = process.start("my-server", [], { stdout: true });
-io.println(proc.pid());
-proc.interrupt();
-proc.wait();
-```
-
-### Buffers
-
-```tiny
-import std "buffer";
-import std "io";
-
-let bytes = buffer.fromString("hello");
-io.println(bytes.length());
-io.println(bytes.toHex());
-
-bytes.setU8(0, 72);
-io.println(bytes.toString());
-```
-
-### Math
-
-```tiny
-import std "math";
-
-io.println(math.toInt("42"));
-io.println(math.sqrt(81));
-io.println(math.clamp(120, 0, 100));
-```
-
-Matrix helpers:
-
-```tiny
-let a = {
-    rows: 2,
-    cols: 2,
-    data: [1, 2, 3, 4]
-};
-
-let scaled = math.matScale(a, 10);
-```
-
-
-### Desktop
-
-```tiny
-import std "desktop";
-
-io.println(desktop.mousePosition());
-desktop.screenshot("screenshot.png");
-```
-
-### Regex
-
-```tiny
-import std "regex";
-
-io.println(regex.matchString("abc123", "[0-9]+"));
-io.println(regex.findString("abc123", "[0-9]+"));
-```
-
-### Path
-
-```tiny
-import std "path";
-
-io.println(path.join("dist", "app.exe"));
-io.println(path.baseName("src/main.tiny"));
-io.println(path.extName("src/main.tiny"));
-```
-
-### App Commands
-
-The `app` module helps build command-based scripts.
-
-```tiny
-import std "app";
-import std "io";
-
-let cli = app.new("tools");
-
-cli.command("hello", fn(args) {
-    io.println("hello", args.join(" "));
-});
-
-cli.run();
-```
-
-Run:
-
-```bash
-tiny tools.tiny hello Tiny
-```
-
-## Native Types
-
-Some values expose methods directly.
-
-
-| Type              | Common methods                                                                                                      |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `array`           | `length`, `push`, `get`, `set`, `pop`, `contains`, `join`, `reverse`, `map`, `forEach`, `filter`, `clear`, `remove` |
-| `string`          | `length`, `toUpperCase`, `toLowerCase`, `upper`, `lower`, `split`, `includes`, `trim`, `replace`, `replaceAll`      |
-| `buffer`          | `length`, `getU8`, `setU8`, `toHex`, `toString`                                                                     |
-| `file`            | `read`, `close`                                                                                                     |
-| `process`         | `pid`, `wait`, `kill`, `killTree`, `interrupt`, `isRunning`, `signal`                                               |
-| `server`          | `get`, `post`, `getJSON`, `getPrettyJSON`, `start`, `stop`                                                          |
-| `stringBuilder`   | `writeString`, `string`                                                                                             |
-| `tcpServerObject` | `start`, `onConnection`                                                                                             |
-
-
-## Native Plugins
-
-Tiny can load native plugins with `Plugin.load`.
-
-```tiny
-let plugin = Plugin.load("plugins/my_plugin");
-io.println(plugin.hello("Tiny"));
-```
-
-The extension is inferred when omitted:
-
-
-| Platform | Extension |
-| -------- | --------- |
-| Windows  | `.dll`    |
-| Linux    | `.so`     |
-
-
-The Go helper package in `src/tinyplugin` makes plugin authoring easier:
-
-```go
-package main
-
-import "C"
-import "language.com/src/tinyplugin"
-
-func init() {
-    tinyplugin.Register("hello", func(args tinyplugin.Args) (any, error) {
-        return "hello " + args.String(0), nil
-    })
-}
-```
-
-Plugins exchange JSON-compatible values with Tiny.
-
-## Bytecode, VM, And Optimizations
-
-Tiny is not an interpreter walking the AST. It compiles source to bytecode, then
-runs that bytecode on a stack-based VM.
-
-```txt
-source files
-  -> import loader
-  -> lexer
-  -> parser
-  -> compiler
-  -> bytecode optimizer
-  -> VM
-```
-
-The VM uses:
-
-- a value stack
-- function call frames
-- local slots
-- globals
-- class and method tables
-- try/catch handler stacks
-- native method dispatch
-
-The compiler and bytecode optimizer include practical optimizations such as:
-
-- constant folding
-- compact bytecode serialization
-- optimized bytecode before source runs, bytecode runs, packing, and dist builds
-- fast local-slot access paths
-- specialized array length/get/push bytecode patterns
-- optimized method dispatch paths for common native methods
-- source-run bytecode cache in `.tinycache`
-
-For scripts, CLIs, and small services, the result is a language that feels light
-while still having a real compilation pipeline.
-
-## Packaging Model
-
-Packed executables are built like this:
-
-1. Load and compile the Tiny program.
-2. Optimize main bytecode and function bytecode.
-3. Serialize the bytecode.
-4. Read the embedded Tiny runtime for the target platform.
-5. Append bytecode bytes to the runtime.
-6. Append the bytecode size.
-7. Append the `TINYAPP1` marker.
-
-At startup, the packed runtime reads its own appended bytecode and runs it.
-
-That means you can hand someone a single executable without shipping `.tiny`
-source files.
-
-## Examples
-
-The `examples/` folder is a syntax tour.
-
-```txt
-examples/
-  01-basics/
-  02-control-flow/
-  03-functions/
-  04-arrays-objects/
-  05-modules/
-  06-classes/
-  07-errors/
-  08-files-json/
-  09-cli-args/
-  10-http-server/
-```
-
-Run one:
-
-```bash
-cd examples/01-basics
-../../tiny
-```
-
-Build one:
-
-```bash
-../../tiny build src/main.tiny -o dist/basics.tbc
-../../tiny run dist/basics.tbc
-```
-
-Pack one:
-
-```bash
-../../tiny pack src/main.tiny -o dist/basics
-```
-
-## Repository Map
-
-```txt
-src/
-  main.go                 CLI entrypoint
-  loader.go               import loader
-  compiler.go             AST to bytecode compiler
-  pack.go                 executable packing
-  dist.go                 dist folder creation
-  dist_plugin.go          plugin discovery/copying for dist
-  project.go              tiny.json helpers
-  task_command.go         tiny task runner
-  bytecode/               bytecode serialization
-  cmd/tiny_runtime/       packed executable runtime
-  tinyerrors/             language error helpers
-  tinyplugin/             native plugin helper package
-  vm/                     lexer, parser, AST, VM, std modules, native types
-```
-
-## Development
-
-Run all tests:
-
-```bash
-go test ./src/...
-```
-
-Build Tiny (linux):
-
-```bash
-./build.sh
-```
-
-Build Tiny (windows):
-
-```bash
-.\build.bat
-```
-
-## Notes
-
-Tiny is experimental and intentionally small. It favors readable implementation,
-fast iteration, and useful scripting features over being a full production
-language runtime.
-
-Current caveats:
-
-- Type hints are runtime checks, not a full static type system.
-- Standard library coverage is useful but intentionally compact.
-- Native plugin loading depends on platform and build support.
-- Packed runtime targets are currently `windows-amd64` and `linux-amd64`.
-- Performance is best judged as a small stack VM built for scripts and tools,
-not as a replacement for mature optimizing runtimes.
-
+<div align="center">
+  <p>Tiny is intentionally small, focusing on readability and iterate-ability.</p>
+  <p>Made with ❤️ using Go.</p>
+</div>

@@ -163,6 +163,7 @@ var tinyKeywords = map[string]bool{
 	"private": true,
 	"public":  true,
 	"enum":    true,
+	"iota":    true,
 
 	"if":    true,
 	"else":  true,
@@ -207,7 +208,10 @@ func formatFunctionSignature(name string, params []StdArg, returns string) strin
 
 	for _, arg := range params {
 		label := arg.Name + ": " + arg.Type
-		if arg.Optional {
+
+		if arg.Variadic {
+			label = "..." + arg.Name + ": " + arg.Type
+		} else if arg.Optional {
 			label = arg.Name + "?: " + arg.Type
 		}
 
@@ -227,7 +231,10 @@ func signatureHelpFromMethod(fullName string, method StdMethodInfo, activeParam 
 	params := []ParameterInformation{}
 	for _, arg := range method.Args {
 		argLabel := arg.Name + ": " + arg.Type
-		if arg.Optional {
+
+		if arg.Variadic {
+			label = "..." + arg.Name + ": " + arg.Type
+		} else if arg.Optional {
 			argLabel = arg.Name + "?: " + arg.Type
 		}
 
@@ -262,7 +269,10 @@ func formatSignatureName(fullName string, method StdMethodInfo) string {
 
 	for _, arg := range method.Args {
 		name := arg.Name
-		if arg.Optional {
+
+		if arg.Variadic {
+			name = "..." + name
+		} else if arg.Optional {
 			name += "?"
 		}
 
@@ -537,7 +547,9 @@ func formatStdSignature(module string, method StdMethodInfo) string {
 	for _, arg := range method.Args {
 		name := arg.Name
 
-		if arg.Optional {
+		if arg.Variadic {
+			name = "..." + name
+		} else if arg.Optional {
 			name += "?"
 		}
 
@@ -819,7 +831,10 @@ func signatureHelpFromFunction(sym SymbolInfo, activeParam int) SignatureHelp {
 
 	for _, arg := range sym.Params {
 		label := arg.Name + ": " + arg.Type
-		if arg.Optional {
+
+		if arg.Variadic {
+			label = "..." + arg.Name + ": " + arg.Type
+		} else if arg.Optional {
 			label = arg.Name + "?: " + arg.Type
 		}
 
@@ -2000,7 +2015,10 @@ func formatNativeSignature(typeName string, method StdMethodInfo) string {
 
 	for _, arg := range method.Args {
 		name := arg.Name
-		if arg.Optional {
+
+		if arg.Variadic {
+			name = "..." + name
+		} else if arg.Optional {
 			name += "?"
 		}
 

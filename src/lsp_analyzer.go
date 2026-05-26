@@ -652,6 +652,7 @@ func fallbackScopeAtPosition(uri string, text string, pos Position) *Scope {
 	}
 
 	// Pass 2: full blocks. This overwrites cheap symbols with params/methods/return types.
+	scanFullEnums(scope, text, maxLine, uri)
 	scanFullClasses(scope, text, maxLine, uri)
 	scanFullFunctions(scope, text, maxLine, uri)
 	scanAnonymousFunctions(scope, text, maxLine, uri)
@@ -750,7 +751,7 @@ func scanEnumLine(scope *Scope, line string, lineNumber int, uri string) {
 		members[name] = SymbolInfo{
 			Name:      name,
 			Kind:      SymbolVariable,
-			Type:      "number",
+			Type:      "any",
 			Detail:    "enum member " + enumName + "." + name,
 			Line:      lineNumber,
 			Column:    indexColumn(line, name),
@@ -791,6 +792,50 @@ func scanClassLine(scope *Scope, line string, lineNumber int, uri string) {
 		SourceURI: uri,
 		Methods:   map[string]SymbolInfo{},
 	})
+}
+
+func scanFullEnums(scope *Scope, text string, maxLine int, uri string) {
+	for _, block := range findBlocks(text, "enum") {
+		if block.Line-1 > maxLine {
+			continue
+		}
+
+		members := map[string]SymbolInfo{}
+		for _, raw := range splitTopLevel(block.Body, ',') {
+			memberName := strings.TrimSpace(raw)
+			if memberName == "" {
+				continue
+			}
+
+			if strings.Contains(memberName, "=") {
+				memberName = strings.TrimSpace(strings.SplitN(memberName, "=", 2)[0])
+			}
+			if memberName == "" {
+				continue
+			}
+
+			members[memberName] = SymbolInfo{
+				Name:      memberName,
+				Kind:      SymbolVariable,
+				Type:      "any",
+				Detail:    "enum member " + block.Name + "." + memberName,
+				Line:      block.Line,
+				Column:    block.Column,
+				SourceURI: uri,
+			}
+		}
+
+		scope.Define(SymbolInfo{
+			Name:      block.Name,
+			Kind:      SymbolEnum,
+			Type:      "enum:" + block.Name,
+			Detail:    "enum " + block.Name,
+			Line:      block.Line,
+			Column:    block.Column,
+			SourceURI: uri,
+			Members:   members,
+		})
+	}
 }
 
 func scanFieldLine(scope *Scope, line string, lineNumber int, uri string) {
@@ -839,7 +884,7 @@ func scanVariableLine(scope *Scope, line string, lineNumber int, uri string) {
 	typeHint := match[2]
 	exprText := strings.TrimSpace(match[3])
 
-	typ := "unknown"
+	typ := "any"
 	fields := map[string]SymbolInfo(nil)
 
 	if typeHint != "" {
@@ -2054,12 +2099,13 @@ func classSymbolFromStmt(scope *Scope, cls ClassStmt, uri string) SymbolInfo {
 
 func enumSymbolFromStmt(enum EnumStmt, uri string) SymbolInfo {
 	members := map[string]SymbolInfo{}
+
 	for _, member := range enum.Members {
-		members[member] = SymbolInfo{
-			Name:      member,
+		members[member.Name] = SymbolInfo{
+			Name:      member.Name,
 			Kind:      SymbolVariable,
-			Type:      "number",
-			Detail:    "enum member " + enum.Name + "." + member,
+			Type:      "any",
+			Detail:    "enum member " + enum.Name + "." + member.Name,
 			Line:      enum.Line,
 			Column:    enum.Column,
 			SourceURI: uri,
@@ -2700,13 +2746,7 @@ func analyzeTopLevelStmt(result AnalysisResult, scope *Scope, stmt Stmt) {
 		})
 
 	case EnumStmt:
-		scope.Define(SymbolInfo{
-			Name:    s.Name,
-			Kind:    SymbolEnum,
-			Type:    "enum:" + s.Name,
-			Detail:  "enum " + s.Name,
-			Members: map[string]SymbolInfo{},
-		})
+		scope.Define(enumSymbolFromStmt(s, ""))
 	}
 }
 
@@ -2726,6 +2766,7 @@ func paramsFromAST(scope *Scope, params []Param) []StdArg {
 			Name:     param.Name,
 			Type:     typ,
 			Optional: param.HasDefault,
+			Variadic: param.Variadic,
 		})
 	}
 
@@ -2927,10 +2968,18 @@ func scanInlineAnonymousFunctionParams(scope *Scope, text string, pos Position, 
 			params := parseFunctionParams(paramsText)
 
 			for _, param := range params {
+				var paramType string
+
+				if param.Variadic {
+					paramType = "array"
+				} else {
+					paramType = normalizeLSPType(scope, param.Type)
+				}
+
 				scope.Define(SymbolInfo{
 					Name:      param.Name,
 					Kind:      SymbolVariable,
-					Type:      normalizeLSPType(scope, param.Type),
+					Type:      paramType,
 					Detail:    "anonymous function parameter " + param.Name,
 					Line:      lineIndex + 1,
 					Column:    indexColumn(line, param.Name),
@@ -2939,26 +2988,6 @@ func scanInlineAnonymousFunctionParams(scope *Scope, text string, pos Position, 
 			}
 		}
 	}
-}
-
-func formatSymbolFunctionSignature(sym SymbolInfo) string {
-	parts := []string{}
-
-	for _, param := range sym.Params {
-		name := param.Name
-		if param.Optional {
-			name += "?"
-		}
-
-		parts = append(parts, name+": "+param.Type)
-	}
-
-	returns := sym.Returns
-	if returns == "" {
-		returns = "any"
-	}
-
-	return sym.Name + "(" + strings.Join(parts, ", ") + "): " + returns
 }
 
 func isPrivateFunctionAt(text string, fnStart int) bool {
@@ -3286,13 +3315,6 @@ func stdArgsFromParams(scope *Scope, params []Param) []StdArg {
 	return args
 }
 
-func returnTypeName(h TypeHint) string {
-	if h.IsEmpty() {
-		return "any"
-	}
-	return h.Name
-}
-
 func returnTypeNameScoped(scope *Scope, h TypeHint) string {
 	if h.IsEmpty() {
 		return "any"
@@ -3352,13 +3374,7 @@ func (a *astSemanticAnalyzer) predeclareStatements(stmts []Stmt) {
 			a.root.Define(SymbolInfo{Name: s.Name, Kind: SymbolVariable, Type: "unknown", Detail: "variable " + s.Name, Line: s.Line, Column: s.Column, SourceURI: a.uri})
 
 		case EnumStmt:
-			if existing, ok := a.root.Resolve(s.Name); ok && existing.Kind == SymbolEnum {
-				existing.Line = s.Line
-				existing.Column = s.Column
-				a.root.Define(existing)
-			} else {
-				a.root.Define(SymbolInfo{Name: s.Name, Kind: SymbolEnum, Type: "enum:" + s.Name, Detail: "enum " + s.Name, Line: s.Line, Column: s.Column, SourceURI: a.uri, Members: map[string]SymbolInfo{}})
-			}
+			a.root.Define(enumSymbolFromStmt(s, a.uri))
 
 		case NamespaceStmt:
 			members := map[string]SymbolInfo{}
@@ -3375,7 +3391,10 @@ func (a *astSemanticAnalyzer) predeclareStatements(stmts []Stmt) {
 				case ClassStmt:
 					members[m.Name] = a.classSymbol(m)
 				case EnumStmt:
-					members[m.Name] = SymbolInfo{Name: m.Name, Kind: SymbolEnum, Type: "enum:" + s.Name + "." + m.Name, Detail: "enum " + m.Name, Line: 1, Column: 1, SourceURI: a.uri, Members: map[string]SymbolInfo{}}
+					enumSym := enumSymbolFromStmt(m, a.uri)
+					enumSym.Type = "enum:" + s.Name + "." + m.Name
+					enumSym.Detail = "enum " + m.Name
+					members[m.Name] = enumSym
 				}
 			}
 			a.root.Define(SymbolInfo{Name: s.Name, Kind: SymbolNamespace, Type: "namespace", Detail: "namespace " + s.Name, Line: 1, Column: 1, SourceURI: a.uri, Members: members})
@@ -3466,11 +3485,7 @@ func (a *astSemanticAnalyzer) visitStmt(stmt Stmt) {
 		a.popScope()
 
 	case EnumStmt:
-		if existing, ok := a.root.Resolve(s.Name); ok && existing.Kind == SymbolEnum {
-			a.define(existing)
-		} else {
-			a.define(SymbolInfo{Name: s.Name, Kind: SymbolEnum, Type: "enum:" + s.Name, Detail: "enum " + s.Name, SourceURI: a.uri, Members: map[string]SymbolInfo{}})
-		}
+		a.define(enumSymbolFromStmt(s, a.uri))
 
 	case ExprStmt:
 		a.inferExprType(s.Value)
@@ -4008,13 +4023,18 @@ func (a *astSemanticAnalyzer) checkArgumentCount(name string, got int, params []
 	}
 
 	required := 0
+	variadic := false
 	for _, param := range params {
 		if !param.Optional {
 			required++
 		}
+
+		if param.Variadic {
+			variadic = true
+		}
 	}
 
-	if got >= required && got <= len(params) {
+	if variadic || (got >= required && got <= len(params)) {
 		return
 	}
 

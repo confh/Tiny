@@ -41,6 +41,12 @@ var stdRuntimeMetadata = StdModuleInfo{
 			Returns:     "object",
 			Description: "Returns current memory usage statistics for the Go runtime including alloc, totalAlloc, sys, and numGC.",
 		},
+		"gc": {
+			Name:        "gc",
+			Args:        []StdArg{},
+			Returns:     "undefined",
+			Description: "Manually triggers garbage collection.",
+		},
 	},
 }
 
@@ -53,6 +59,7 @@ func init() {
 		"onFatal":           stdRuntimeOnFatal,
 		"clearFatalHandler": stdRuntimeClearOnFatal,
 		"memoryStats":       stdRuntimeMemoryStats,
+		"gc":                stdRuntimeGC,
 	}
 	registerStdModule(stdRuntimeMetadata)
 }
@@ -64,6 +71,13 @@ func (vm *VM) callStdRuntime(method string, args []Value) {
 		return
 	}
 	fn(vm, args)
+}
+
+func stdRuntimeGC(vm *VM, args []Value) {
+	dontExpectArgs(vm, "runtime.gc", args)
+
+	runtime.GC()
+	vm.push(UndefinedValue{})
 }
 
 func stdRuntimeLockThread(vm *VM, args []Value) {
@@ -87,10 +101,10 @@ func stdRuntimeMemoryStats(vm *VM, args []Value) {
 	runtime.ReadMemStats(&m)
 
 	vm.push(ObjectValue{
-		"alloc":      m.Alloc,
-		"totalAlloc": m.TotalAlloc,
-		"sys":        m.Sys,
-		"numGC":      m.NumGC,
+		"alloc":      float64(m.Alloc),
+		"totalAlloc": float64(m.TotalAlloc),
+		"sys":        float64(m.Sys),
+		"numGC":      int(m.NumGC),
 	})
 }
 

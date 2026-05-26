@@ -4,6 +4,7 @@ type StdArg struct {
 	Name     string
 	Type     string
 	Optional bool
+	Variadic bool
 }
 
 type StdMethodInfo struct {

@@ -242,6 +242,26 @@ func asFloat(value Value) float64 {
 	switch v := value.(type) {
 	case int:
 		return float64(v)
+	case int8:
+		return float64(v)
+	case int16:
+		return float64(v)
+	case int32:
+		return float64(v)
+	case int64:
+		return float64(v)
+	case uint:
+		return float64(v)
+	case uint8:
+		return float64(v)
+	case uint16:
+		return float64(v)
+	case uint32:
+		return float64(v)
+	case uint64:
+		return float64(v)
+	case float32:
+		return float64(v)
 	case float64:
 		return v
 	case string:
@@ -251,8 +271,6 @@ func asFloat(value Value) float64 {
 			return 0
 		}
 		return f
-	case uint64:
-		return float64(v)
 	default:
 		LangError(ErrorType, "expected number, got %s", TypeName(value))
 		return 0
@@ -263,10 +281,12 @@ func asUint(value Value) uint64 {
 	switch v := value.(type) {
 	case int:
 		return uint64(v)
+	case int64:
+		return uint64(v)
 	case float64:
 		return uint64(v)
 	case uint64:
-		return uint64(v)
+		return v
 	case string:
 		f, err := strconv.ParseUint(v, 10, 64)
 		if err != nil {
@@ -282,9 +302,9 @@ func asUint(value Value) uint64 {
 
 func TypeName(value Value) string {
 	switch v := value.(type) {
-	case int:
+	case int, int64, int32, int16, int8, uint, uint64, uint32, uint16, uint8:
 		return "number"
-	case float64:
+	case float64, float32:
 		return "float"
 	case string:
 		return "string"

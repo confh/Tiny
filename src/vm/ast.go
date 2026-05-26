@@ -34,7 +34,7 @@ func (s NamespaceStmt) stmtNode() {}
 
 type EnumStmt struct {
 	Name    string
-	Members []string
+	Members []EnumField
 	File    string
 	Line    int
 	Column  int

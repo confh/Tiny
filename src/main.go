@@ -53,6 +53,10 @@ func main() {
 			taskCommand(os.Args[2:])
 			return
 
+		case "version", "ver", "v":
+			versionCommand()
+			return
+
 		case "lsp":
 			runLSP()
 			return

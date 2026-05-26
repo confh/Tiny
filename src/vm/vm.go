@@ -94,7 +94,41 @@ func intToString(n int) string {
 	return string(buf[i:])
 }
 
+func int64ToString(n int64) string {
+	if n == 0 {
+		return "0"
+	}
+
+	var buf [20]byte
+	i := len(buf)
+
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + (n % 10))
+		n /= 10
+	}
+
+	return string(buf[i:])
+}
+
 func bigIntToString(n int64) string {
+	if n == 0 {
+		return "0"
+	}
+
+	var buf [20]byte
+	i := len(buf)
+
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + (n % 10))
+		n /= 10
+	}
+
+	return string(buf[i:])
+}
+
+func uintToString(n uint64) string {
 	if n == 0 {
 		return "0"
 	}
@@ -517,6 +551,28 @@ func addValues(left Value, right Value) Value {
 			return l + r
 		case float64:
 			return float64(l) + r
+		case uint64:
+			return uint64(l) + r
+		case int64:
+			return int64(l) + r
+		case string:
+			return intToString(l) + r
+		default:
+			LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
+		}
+
+	case int64:
+		switch r := right.(type) {
+		case int:
+			return l + int64(r)
+		case int64:
+			return l + r
+		case float64:
+			return float64(l) + r
+		case uint64:
+			return uint64(l) + r
+		case string:
+			return int64ToString(l) + r
 		default:
 			LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
 		}
@@ -527,6 +583,12 @@ func addValues(left Value, right Value) Value {
 			return l + float64(r)
 		case float64:
 			return l + r
+		case uint64:
+			return l + float64(r)
+		case int64:
+			return l + float64(r)
+		case string:
+			return FloatToString(l) + r
 		default:
 			LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
 		}
@@ -540,7 +602,25 @@ func addValues(left Value, right Value) Value {
 		case int:
 			return l + intToString(r)
 		case int64:
-			return l + bigIntToString(r)
+			return l + int64ToString(r)
+		case uint64:
+			return l + uintToString(r)
+		default:
+			LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
+		}
+
+	case uint64:
+		switch r := right.(type) {
+		case uint64:
+			return l + r
+		case int:
+			return l + uint64(r)
+		case int64:
+			return l + uint64(r)
+		case float64:
+			return float64(l) + r
+		case string:
+			return uintToString(l) + r
 		default:
 			LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
 		}
@@ -2042,6 +2122,16 @@ func (vm *VM) step() bool {
 			break
 		}
 
+		if _, ok := left.(uint64); ok {
+			vm.push(asUint(left) - asUint(right))
+			break
+		}
+
+		if _, ok := right.(uint64); ok {
+			vm.push(asUint(left) - asUint(right))
+			break
+		}
+
 		if _, ok := left.(int64); ok {
 			vm.push(asInt64(left) - asInt64(right))
 			break
@@ -2072,6 +2162,16 @@ func (vm *VM) step() bool {
 			break
 		}
 
+		if _, ok := left.(uint64); ok {
+			vm.push(asUint(left) * asUint(right))
+			break
+		}
+
+		if _, ok := right.(uint64); ok {
+			vm.push(asUint(left) * asUint(right))
+			break
+		}
+
 		if _, ok := left.(int64); ok {
 			vm.push(asInt64(left) * asInt64(right))
 			break
@@ -2092,16 +2192,6 @@ func (vm *VM) step() bool {
 			vm.fatalError(ErrorType, "cannot divide %s and %s", TypeName(left), TypeName(right))
 		}
 
-		if _, ok := left.(uint64); ok {
-			vm.push(asUint(left) / asUint(right))
-			break
-		}
-
-		if _, ok := right.(uint64); ok {
-			vm.push(asUint(left) / asUint(right))
-			break
-		}
-
 		if _, ok := left.(float64); ok {
 			vm.push(asFloat(left) / asFloat(right))
 			break
@@ -2109,6 +2199,16 @@ func (vm *VM) step() bool {
 
 		if _, ok := right.(float64); ok {
 			vm.push(asFloat(left) / asFloat(right))
+			break
+		}
+
+		if _, ok := left.(uint64); ok {
+			vm.push(asUint(left) / asUint(right))
+			break
+		}
+
+		if _, ok := right.(uint64); ok {
+			vm.push(asUint(left) / asUint(right))
 			break
 		}
 
@@ -2122,7 +2222,7 @@ func (vm *VM) step() bool {
 			break
 		}
 
-		vm.push(left.(int) * right.(int))
+		vm.push(left.(int) / right.(int))
 
 	case OP_EQ:
 		right := vm.popFast()

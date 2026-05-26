@@ -54,6 +54,8 @@ const (
 	TOKEN_EMBED      TokenType = "EMBED"
 	TOKEN_INSTANCEOF TokenType = "INSTANCEOF"
 
+	TOKEN_IOTA = "IOTA"
+
 	TOKEN_BANG           TokenType = "!"
 	TOKEN_ASSIGN         TokenType = "="
 	TOKEN_PLUS           TokenType = "+"

@@ -114,6 +114,37 @@ func NewParser(lexer *Lexer) *Parser {
 	return p
 }
 
+func (p *Parser) compareTwoConst(expr1 Expr, expr2 Expr) bool {
+	switch expr1.(type) {
+	case StringExpr:
+		_, ok := expr2.(StringExpr)
+		return ok
+
+	case NumberExpr:
+		_, ok := expr2.(NumberExpr)
+		return ok
+
+	case BoolExpr:
+		_, ok := expr2.(BoolExpr)
+		return ok
+
+	case NullExpr:
+		_, ok := expr2.(NullExpr)
+		return ok
+
+	case ArrayExpr:
+		_, ok := expr2.(ArrayExpr)
+		return ok
+
+	case ObjectExpr:
+		_, ok := expr2.(ObjectExpr)
+		return ok
+
+	default:
+		return false
+	}
+}
+
 func (p *Parser) advance() {
 	p.current = p.next
 	p.next = p.lexer.NextToken()
@@ -2123,12 +2154,16 @@ func (p *Parser) parseEnumStatement() Stmt {
 		)
 	}
 
+	enumFile := p.current.File
+	enumLine := p.current.Line
+	enumColumn := p.current.Column
 	name := p.current.Literal
 	p.advance()
 
 	p.expect(TOKEN_LBRACE)
 
-	members := []string{}
+	members := []EnumField{}
+	iotaEnum := false
 
 	for p.current.Type != TOKEN_RBRACE && p.current.Type != TOKEN_EOF {
 		if p.current.Type != TOKEN_IDENT {
@@ -2141,8 +2176,70 @@ func (p *Parser) parseEnumStatement() Stmt {
 			)
 		}
 
-		members = append(members, p.current.Literal)
+		name := p.current.Literal
 		p.advance()
+
+		if p.current.Type == TOKEN_ASSIGN {
+			p.advance()
+
+			if p.current.Type == TOKEN_IOTA {
+				if len(members) > 0 {
+					LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "the 'iota' keyword can only be used for the first member of an enum.")
+				}
+				iotaEnum = true
+				// Add field for iota usage
+				members = append(members, EnumField{
+					Name:  name,
+					Value: NumberExpr{Value: 0}, // Value will be overwritten after the loop if iotaEnum
+				})
+				p.advance()
+			} else {
+				if iotaEnum {
+					LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "enums using 'iota' may not contain members with explicit values of other types.")
+				}
+
+				value := p.parseExpression()
+
+				// enforce strings and numbers only
+				switch value.(type) {
+				case StringExpr, NumberExpr:
+					break
+				default:
+					LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "enum members must be either a numeric or string constant.")
+				}
+
+				// enforce the same type
+				if !iotaEnum && len(members) > 0 {
+					for _, v := range members {
+						if !p.compareTwoConst(v.Value, value) {
+							LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "all enum members must have the same type.")
+
+						}
+						break // exit immediately after the first pair
+					}
+				}
+
+				members = append(members, EnumField{
+					Name:  name,
+					Value: value,
+				})
+			}
+		} else {
+			// enforce the same type
+			if !iotaEnum && len(members) > 0 {
+				for _, v := range members {
+					if !p.compareTwoConst(v.Value, StringExpr{Value: name}) {
+						LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "all enum members must have the same type.")
+					}
+					break // exit immediately after the first pair
+				}
+			}
+
+			members = append(members, EnumField{
+				Name:  name,
+				Value: StringExpr{Value: name},
+			})
+		}
 
 		if p.current.Type == TOKEN_COMMA {
 			p.advance()
@@ -2160,6 +2257,12 @@ func (p *Parser) parseEnumStatement() Stmt {
 		}
 	}
 
+	if iotaEnum {
+		for i := range members {
+			members[i].Value = NumberExpr{Value: i}
+		}
+	}
+
 	p.expect(TOKEN_RBRACE)
 
 	// Optional semicolon support:
@@ -2170,6 +2273,9 @@ func (p *Parser) parseEnumStatement() Stmt {
 	return EnumStmt{
 		Name:    name,
 		Members: members,
+		File:    enumFile,
+		Line:    enumLine,
+		Column:  enumColumn,
 	}
 }
 
