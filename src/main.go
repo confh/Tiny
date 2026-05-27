@@ -117,7 +117,7 @@ func runSourceCommand(args []string) {
 
 	if !disableCache {
 		deleteTinyCacheContent(entryFile)
-		saveBytecodeFile(entryFile, cachePath)
+		saveBytecodeFile(entryFile, cachePath, true)
 		runBytecodeFile(cachePath)
 	} else {
 		compileAndRun(entryFile, cliArgs)
@@ -164,7 +164,7 @@ func runBytecodeFile(path string) {
 	vm.Run()
 }
 
-func saveBytecodeFile(entryFile string, outFile string) {
+func saveBytecodeFile(entryFile string, outFile string, cache bool) {
 	program := LoadProgram(entryFile)
 
 	compiler := NewCompiler()
@@ -177,7 +177,7 @@ func saveBytecodeFile(entryFile string, outFile string) {
 		functions[name] = fn
 	}
 
-	SaveBytecode(outFile, mainBytecode, functions, classes)
+	SaveBytecode(outFile, mainBytecode, functions, classes, cache)
 }
 
 func compileAndRun(entryFile string, cliArgs []string) {
@@ -213,7 +213,7 @@ func buildCommand(args []string) {
 		}
 	}
 
-	saveBytecodeFile(entryFile, outFile)
+	saveBytecodeFile(entryFile, outFile, false)
 
 	fmt.Println("Built", outFile)
 }

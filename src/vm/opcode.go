@@ -1,5 +1,7 @@
 package vm
 
+//go:generate stringer -type=OpCode
+
 type OpCode byte
 
 const (
@@ -61,9 +63,12 @@ const (
 	OP_OBJECT_IN
 
 	OP_CALL_DIRECT
+	OP_CALL_DIRECT_SUB_CONST
 
 	OP_GET_PROPERTY_SAFE
 	OP_METHOD_CALL_SAFE
+
+	OP_COALESCE_JUMP
 
 	OP_EQ
 	OP_NEQ
@@ -76,6 +81,10 @@ const (
 
 	OP_TYPEOF
 	OP_SPAWN
+	OP_DEFER
+	OP_AWAIT
+	OP_LOCK_MUTEX
+	OP_UNLOCK_MUTEX
 
 	OP_AND
 	OP_OR
@@ -86,6 +95,8 @@ const (
 	OP_JUMP_LOCAL_GE_CONST
 	OP_JUMP_LOCAL_GE_LOCAL
 	OP_JUMP_MOD_LOCAL_LOCAL_NOT_ZERO
+	OP_JUMP_LOCAL_GT_CONST
+	OP_JUMP_LOCAL_GT_LOCAL
 
 	OP_LOAD_LOCAL_0
 	OP_LOAD_LOCAL_1
@@ -100,19 +111,22 @@ const (
 	OP_ARRAY_PUSH_LOCAL_MUL_CONST
 	OP_GET_PROPERTY_LOCAL
 	OP_MUL_LOCAL_CONST
-	OP_ADD_PROPERTY_LOCAL_LOCAL
 
+	OP_ADD_PROPERTY_LOCAL_LOCAL
+	OP_ADD_LOCAL_LOCAL_STORE
+	OP_ADD_LOCAL_CONST
 	OP_ADD_LOCAL_LOCAL
+
 	OP_SUB_LOCAL_LOCAL
 	OP_MUL_LOCAL_LOCAL
 	OP_DIV_LOCAL_LOCAL
-
-	OP_ADD_LOCAL_CONST
 )
 
 type Instruction struct {
 	Op     OpCode
 	Value  any
+	IntArg int
+	IsInt  bool
 	File   string
 	Line   int
 	Column int
@@ -126,6 +140,7 @@ type Function struct {
 	Instructions []Instruction `json:"instructions"`
 	LocalCount   int           `json:"localCount"`
 	Captures     []CapturedVar
+	Async        bool `json:"async"`
 	HasDefaults  bool `json:"hasDefaults"`
 	HasTypeHints bool `json:"hasTypeHints"`
 }
@@ -193,8 +208,13 @@ type VariableInfo struct {
 	TypeHint TypeHint `json:"typeHint"`
 }
 
+type ObjectFieldsInfo struct {
+	Name string
+	Copy bool
+}
+
 type ObjectInfo struct {
-	Names []string
+	Names []ObjectFieldsInfo
 }
 
 type MethodCallInfo struct {
@@ -266,6 +286,32 @@ type JumpModLocalConstNotZeroInfo struct {
 	LeftSlot int
 	Right    int
 	Target   int
+}
+
+type JumpLocalGTLocalInfo struct {
+	SlotA  int
+	SlotB  int
+	Target int
+}
+
+type AddLocalLocalStoreInfo struct {
+	SlotA    int
+	SlotB    int
+	DestSlot int
+}
+
+type JumpLocalGTConstInfo struct {
+	Slot   int
+	Value  int
+	Target int
+}
+
+type CallDirectSubConstInfo struct {
+	Slot     int
+	SubValue int
+	FnID     int
+	FnName   string
+	ArgCount int
 }
 
 type Class struct {

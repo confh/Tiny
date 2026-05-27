@@ -13,14 +13,18 @@ type Lexer struct {
 	file   string
 	line   int
 	column int
+
+	insertSemi bool
+	EnableASI  bool
 }
 
 func NewLexer(input string, file string) *Lexer {
 	l := &Lexer{
-		input:  []rune(input),
-		file:   file,
-		line:   1,
-		column: 1,
+		input:     []rune(input),
+		file:      file,
+		line:      1,
+		column:    1,
+		EnableASI: true,
 	}
 
 	return l
@@ -63,14 +67,36 @@ func (l *Lexer) peekN(n int) rune {
 }
 
 func (l *Lexer) NextToken() Token {
-	l.skipIgnored()
+	newlineSkipped := l.skipIgnored()
 
 	start := l.pos
 
-	if l.pos >= len(l.input) {
+	if l.EnableASI {
+		if newlineSkipped && l.insertSemi {
+			l.insertSemi = false
+			return l.tokenAt(start, TOKEN_SEMI, ";")
+		}
+
+		if l.pos >= len(l.input) {
+			if l.insertSemi {
+				l.insertSemi = false
+				return l.tokenAt(start, TOKEN_SEMI, ";")
+			}
+			return l.tokenAt(start, TOKEN_EOF, "")
+		}
+	} else if l.pos >= len(l.input) {
 		return l.tokenAt(start, TOKEN_EOF, "")
 	}
 
+	tok := l.scanToken()
+	if l.EnableASI {
+		l.insertSemi = l.canInsertSemi(tok.Type)
+	}
+	return tok
+}
+
+func (l *Lexer) scanToken() Token {
+	start := l.pos
 	ch := l.input[l.pos]
 
 	if unicode.IsLetter(ch) || ch == '_' {
@@ -157,6 +183,12 @@ func (l *Lexer) NextToken() Token {
 			tok.Type = TOKEN_INSTANCEOF
 		case "iota":
 			tok.Type = TOKEN_IOTA
+		case "defer":
+			tok.Type = TOKEN_DEFER
+		case "async":
+			tok.Type = TOKEN_ASYNC
+		case "await":
+			tok.Type = TOKEN_AWAIT
 		default:
 			tok.Type = TOKEN_IDENT
 		}
@@ -195,6 +227,10 @@ func (l *Lexer) NextToken() Token {
 			l.pos += 2
 			l.column += 2
 			return l.tokenAt(start, TOKEN_QUESTION_DOT, "?.")
+		} else if l.peek() == '?' {
+			l.pos += 2
+			l.column += 2
+			return l.tokenAt(start, TOKEN_QUESTION_QUESTION, "??")
 		}
 
 		tok := Token{
@@ -473,6 +509,18 @@ func (l *Lexer) NextToken() Token {
 	}
 }
 
+func (l *Lexer) canInsertSemi(t TokenType) bool {
+	switch t {
+	case TOKEN_IDENT, TOKEN_NUMBER, TOKEN_STRING, TOKEN_BACKTICK_STRING,
+		TOKEN_BREAK, TOKEN_CONTINUE, TOKEN_RETURN, TOKEN_IOTA,
+		TOKEN_TRUE, TOKEN_FALSE, TOKEN_NULL, TOKEN_UNDEFINED,
+		TOKEN_THIS, TOKEN_INCREMENT, TOKEN_DECREMENT,
+		TOKEN_RPAREN, TOKEN_RBRACKET, TOKEN_RBRACE:
+		return true
+	}
+	return false
+}
+
 func (l *Lexer) tokenAt(pos int, tokenType TokenType, literal string) Token {
 	line, column := l.lineColumnAt(pos)
 
@@ -501,10 +549,15 @@ func (l *Lexer) lineColumnAt(pos int) (int, int) {
 	return line, column
 }
 
-func (l *Lexer) skipIgnored() {
+func (l *Lexer) skipIgnored() bool {
+	newline := false
+
 	for {
 		// Skip whitespace
 		for l.pos < len(l.input) && unicode.IsSpace(l.input[l.pos]) {
+			if l.input[l.pos] == '\n' {
+				newline = true
+			}
 			l.advance()
 		}
 
@@ -521,6 +574,8 @@ func (l *Lexer) skipIgnored() {
 
 		break
 	}
+
+	return newline
 }
 
 func (l *Lexer) readIdentifier() string {

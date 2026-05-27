@@ -77,24 +77,24 @@ var typeNamePattern = `[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*`
 var unionTypePattern = typeNamePattern + `(?:\s*\|\s*` + typeNamePattern + `)*`
 
 var variableLineRegex = regexp.MustCompile(
-	`^(?:let|const)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*(` + unionTypePattern + `))?\s*=\s*(.+?);?$`,
+	`(?m)^(?:let|const)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*(` + unionTypePattern + `))?\s*=\s*(.+?)(?:;|\r?$)`,
 )
 var fieldLineRegex = regexp.MustCompile(
-	`^field\s+(?:(?:public|private|const)\s+)*([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*(` + unionTypePattern + `))?\s*(?:=\s*(.+?))?;?$`,
+	`(?m)^field\s+(?:(?:public|private|const)\s+)*([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*(` + unionTypePattern + `))?\s*(?:=\s*(.+?))?(?:;|\r?$)`,
 )
 var functionLineRegex = regexp.MustCompile(
-	`^(?:export\s+)?(?:(?:public|private)\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*(?::\s*(` + unionTypePattern + `))?`,
+	`^(?:export\s+)?(?:async\s+)?(?:(?:public|private)\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*(?::\s*(` + unionTypePattern + `))?`,
 )
-var classLineRegex = regexp.MustCompile(`^(?:export\s+)?class\s+([A-Za-z_][A-Za-z0-9_]*)`)
-var memberCallRegex = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\.([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
-var normalCallRegex = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
-var classEmbedRegex = regexp.MustCompile(`\bembed\s+([A-Za-z_][A-Za-z0-9_]*)\s*;?`)
-var returnRegex = regexp.MustCompile(`return\s+(.+?);`)
-var fileImportRegex = regexp.MustCompile(`import\s+"([^"]+)"(?:\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?\s*;?`)
-var exportLineRegex = regexp.MustCompile(`^\s*export\s+`)
-var memberAccessRegex = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\b`)
-var catchVarRegex = regexp.MustCompile(`\bcatch\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{`)
-var enumLineRegex = regexp.MustCompile(`^(?:export\s+)?enum\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{([^}]*)\}`)
+var classLineRegex = regexp.MustCompile(`(?m)^(?:export\s+)?class\s+([A-Za-z_][A-Za-z0-9_]*)`)
+var memberCallRegex = regexp.MustCompile(`(?m)^([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\.([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
+var normalCallRegex = regexp.MustCompile(`(?m)^([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
+var classEmbedRegex = regexp.MustCompile(`(?m)\bembed\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:;|\r?$)`)
+var returnRegex = regexp.MustCompile(`(?m)return\s+(.+?)(?:;|\r?$)`)
+var fileImportRegex = regexp.MustCompile(`(?m)import\s+"([^"]+)"(?:\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?\s*(?:;|\r?$)`)
+var exportLineRegex = regexp.MustCompile(`(?m)^\s*export\s+`)
+var memberAccessRegex = regexp.MustCompile(`(?m)\b([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\b`)
+var catchVarRegex = regexp.MustCompile(`(?m)\bcatch\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{`)
+var enumLineRegex = regexp.MustCompile(`(?m)^(?:export\s+)?enum\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{([^}]*)\}`)
 var exportedEnumBlockRegex = regexp.MustCompile(`(?s)\bexport\s+enum\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{(.*?)\}`)
 
 type blockInfo struct {
@@ -109,6 +109,7 @@ type blockInfo struct {
 	Line       int
 	Column     int
 	Exported   bool
+	IsAsync    bool
 }
 
 func splitUnionType(typ string) []string {
@@ -423,7 +424,7 @@ func shouldIgnoreIdentifierInSemanticCheck(code string, name string, start int, 
 	switch name {
 	case "true", "false", "null", "undefined":
 		return true
-	case "string", "number", "bool", "object", "array", "any", "void":
+	case "string", "number", "bool", "object", "array", "any":
 		return true
 	}
 
@@ -712,6 +713,11 @@ func scanFunctionLine(scope *Scope, line string, lineNumber int, uri string) {
 		returnType = normalizeLSPType(scope, match[3])
 	}
 
+	// Check for async in the line
+	if strings.Contains(line, "async ") {
+		returnType = "task:" + returnType
+	}
+
 	scope.Define(SymbolInfo{
 		Name:      name,
 		Kind:      SymbolFunction,
@@ -923,6 +929,10 @@ func scanFullFunctions(scope *Scope, text string, maxLine int, uri string) {
 		params := normalizeStdArgs(scope, parseFunctionParams(block.ParamsText))
 		returnType := inferReturnTypeFromBody(scope, block.Body, block.ReturnType)
 
+		if block.IsAsync {
+			returnType = "task:" + returnType
+		}
+
 		scope.Define(SymbolInfo{
 			Name:      block.Name,
 			Kind:      SymbolFunction,
@@ -955,8 +965,8 @@ func scanClassFields(scope *Scope, classBody string, uri string, baseLine int) m
 
 		// Remove modifiers after "field".
 		// Keep looping so this works:
-		// field private const name = "x";
-		// field const private name = "x";
+		// field private const name = "x"
+		// field const private name = "x"
 		for {
 			if strings.HasPrefix(line, "public ") {
 				line = strings.TrimSpace(strings.TrimPrefix(line, "public "))
@@ -979,11 +989,11 @@ func scanClassFields(scope *Scope, classBody string, uri string, baseLine int) m
 		}
 
 		// Support fields without default:
-		// field name: string;
+		// field name: string
 		// Turn it into a fake assignment for variableLineRegex.
 		fakeLine := "let " + line
 		if !strings.Contains(fakeLine, "=") {
-			fakeLine = strings.TrimSuffix(fakeLine, ";") + " = undefined;"
+			fakeLine = strings.TrimSuffix(fakeLine, ";") + " = undefined"
 		}
 
 		match := variableLineRegex.FindStringSubmatch(fakeLine)
@@ -1063,6 +1073,10 @@ func scanFullClasses(scope *Scope, text string, maxLine int, uri string) {
 		for _, methodBlock := range findBlocks(block.Body, "fn") {
 			params := normalizeStdArgs(scope, parseFunctionParams(methodBlock.ParamsText))
 			returnType := inferReturnTypeFromBody(scope, methodBlock.Body, methodBlock.ReturnType)
+
+			if methodBlock.IsAsync {
+				returnType = "task:" + returnType
+			}
 
 			detail := "method " + block.Name + "." + methodBlock.Name
 
@@ -1189,7 +1203,7 @@ func scanAnonymousFunctions(scope *Scope, text string, maxLine int, uri string) 
 	for i := 0; i <= maxLine && i < len(lines); i++ {
 		line := cleanLine(lines[i])
 
-		if !strings.Contains(line, "= spawn fn") && !strings.Contains(line, "= fn") {
+		if !strings.Contains(line, "= spawn fn") && !strings.Contains(line, "= fn") && !strings.Contains(line, "= async fn") {
 			continue
 		}
 
@@ -1213,7 +1227,7 @@ func scanAnonymousFunctions(scope *Scope, text string, maxLine int, uri string) 
 		returnType := inferReturnTypeFromBody(scope, block.Body, block.ReturnType)
 		params := normalizeStdArgs(scope, parseFunctionParams(block.ParamsText))
 
-		if strings.Contains(line, "= spawn fn") {
+		if strings.Contains(line, "= spawn fn") || block.IsAsync {
 			scope.Define(SymbolInfo{
 				Name:      name,
 				Kind:      SymbolVariable,
@@ -1281,6 +1295,21 @@ func findBlocks(text string, kind string) []blockInfo {
 }
 
 func parseFunctionLikeBlockAt(text string, start int, kind string) (blockInfo, bool) {
+	isAsync := false
+	if kind == "fn" {
+		// Check for async before fn
+		i := start - 1
+		for i >= 0 && (text[i] == ' ' || text[i] == '\t') {
+			i--
+		}
+		if i >= 4 && text[i-4:i+1] == "async" {
+			// verify word boundary
+			if i-5 < 0 || !isIdentByte(text[i-5]) {
+				isAsync = true
+			}
+		}
+	}
+
 	i := start + len(kind)
 
 	if !isSpaceAroundKeyword(text, start, kind) {
@@ -1369,6 +1398,7 @@ func parseFunctionLikeBlockAt(text string, start int, kind string) (blockInfo, b
 		End:        closeBrace + 1,
 		Line:       line,
 		Column:     column,
+		IsAsync:    isAsync,
 	}, true
 }
 
@@ -1478,12 +1508,65 @@ func inferReturnTypeFromBody(scope *Scope, body string, explicitReturn string) s
 	return inferExprTypeFromText(scope, expr)
 }
 
+func inferNullishCoalescingTypeFromText(scope *Scope, expr string) string {
+	idx := strings.Index(expr, "??")
+	if idx < 0 {
+		return ""
+	}
+
+	leftExpr := strings.TrimSpace(expr[:idx])
+	rightExpr := strings.TrimSpace(expr[idx+2:])
+
+	leftType := inferExprTypeFromText(scope, leftExpr)
+	rightType := inferExprTypeFromText(scope, rightExpr)
+
+	if leftType == "unknown" {
+		if rightType == "unknown" {
+			return "unknown"
+		}
+		return rightType + " | unknown"
+	}
+
+	if rightType == "unknown" {
+		return leftType
+	}
+
+	// Filter out nullish types from left side
+	parts := splitUnionType(leftType)
+	newParts := []string{}
+	for _, p := range parts {
+		if !isNullishLSPType(p) {
+			newParts = append(newParts, p)
+		}
+	}
+
+	if len(newParts) == 0 {
+		return rightType
+	}
+
+	filteredLeft := strings.Join(newParts, " | ")
+	if filteredLeft == rightType {
+		return rightType
+	}
+
+	return filteredLeft + " | " + rightType
+}
+
 func inferExprTypeFromText(scope *Scope, expr string) string {
 	expr = strings.TrimSpace(expr)
 	expr = strings.TrimSuffix(expr, ";")
 
 	if expr == "" {
 		return "unknown"
+	}
+
+	if strings.HasPrefix(expr, "await ") {
+		inner := strings.TrimSpace(strings.TrimPrefix(expr, "await "))
+		innerType := inferExprTypeFromText(scope, inner)
+		if strings.HasPrefix(innerType, "task:") {
+			return strings.TrimPrefix(innerType, "task:")
+		}
+		return innerType
 	}
 
 	if strings.HasPrefix(expr, `"`) || strings.HasPrefix(expr, "`") || strings.HasPrefix(expr, "'") {
@@ -1524,6 +1607,10 @@ func inferExprTypeFromText(scope *Scope, expr string) string {
 
 	if isNumberText(expr) {
 		return "number"
+	}
+
+	if typ := inferNullishCoalescingTypeFromText(scope, expr); typ != "" {
+		return typ
 	}
 
 	if typ := inferTernaryTypeFromText(scope, expr); typ != "" {
@@ -1581,13 +1668,6 @@ func inferMemberCallTypeFromText(scope *Scope, expr string) string {
 		return ""
 	}
 
-	if strings.HasPrefix(sym.Type, "task:") {
-		if method == "await" {
-			return strings.TrimPrefix(sym.Type, "task:")
-		}
-		return ""
-	}
-
 	if sym.Kind == SymbolNamespace {
 		member, ok := sym.Members[method]
 		if !ok {
@@ -1595,10 +1675,7 @@ func inferMemberCallTypeFromText(scope *Scope, expr string) string {
 		}
 
 		if member.Kind == SymbolFunction {
-			if member.Returns == "" {
-				return "any"
-			}
-			return member.Returns
+			return firstNonEmpty(member.Returns, "any")
 		}
 
 		if member.Kind == SymbolClass {
@@ -1608,8 +1685,36 @@ func inferMemberCallTypeFromText(scope *Scope, expr string) string {
 		return member.Type
 	}
 
-	if strings.HasPrefix(sym.Type, "class:") {
-		className := strings.TrimPrefix(sym.Type, "class:")
+	return inferMemberCallTypeByTypeString(scope, sym.Type, method, sym.Fields)
+}
+
+func inferMemberCallTypeByTypeString(scope *Scope, typ string, method string, fields map[string]SymbolInfo) string {
+	typ = strings.TrimSpace(typ)
+
+	if strings.Contains(typ, "|") {
+		for _, part := range splitUnionType(typ) {
+			if isNullishLSPType(part) {
+				continue
+			}
+
+			result := inferMemberCallTypeByTypeString(scope, part, method, fields)
+			if result != "" && result != "unknown" {
+				return result
+			}
+		}
+
+		return ""
+	}
+
+	if strings.HasPrefix(typ, "task:") {
+		if method == "await" {
+			return strings.TrimPrefix(typ, "task:")
+		}
+		return ""
+	}
+
+	if strings.HasPrefix(typ, "class:") {
+		className := strings.TrimPrefix(typ, "class:")
 
 		classSym, ok := resolveClassSymbol(scope, className)
 		if !ok || classSym.Kind != SymbolClass {
@@ -1621,15 +1726,11 @@ func inferMemberCallTypeFromText(scope *Scope, expr string) string {
 			return ""
 		}
 
-		if methodSym.Returns == "" {
-			return "any"
-		}
-
-		return methodSym.Returns
+		return firstNonEmpty(methodSym.Returns, "any")
 	}
 
-	if strings.HasPrefix(sym.Type, "std:") {
-		module := strings.TrimPrefix(sym.Type, "std:")
+	if strings.HasPrefix(typ, "std:") {
+		module := strings.TrimPrefix(typ, "std:")
 
 		info, ok := GetStdModuleInfo(module)
 		if !ok {
@@ -1644,13 +1745,13 @@ func inferMemberCallTypeFromText(scope *Scope, expr string) string {
 		return methodInfo.Returns
 	}
 
-	methodInfo, ok := GetNativeMethodInfo(sym.Type, method)
+	methodInfo, ok := GetNativeMethodInfo(typ, method)
 	if ok {
 		return methodInfo.Returns
 	}
 
-	if sym.Type == "object" && sym.Fields != nil {
-		if field, ok := sym.Fields[method]; ok {
+	if typ == "object" && fields != nil {
+		if field, ok := fields[method]; ok {
 			return field.Type
 		}
 	}
@@ -2379,6 +2480,10 @@ func scanExportedFunctions(scope *Scope, text string, exports map[string]SymbolI
 		params := normalizeStdArgs(scope, parseFunctionParams(block.ParamsText))
 		returnType := inferReturnTypeFromBody(scope, block.Body, block.ReturnType)
 
+		if block.IsAsync {
+			returnType = "task:" + returnType
+		}
+
 		sym := SymbolInfo{
 			Name:      block.Name,
 			Kind:      SymbolFunction,
@@ -2864,6 +2969,41 @@ func inferExprType(scope *Scope, expr Expr) string {
 			return sym.Type
 		}
 		return "unknown"
+
+	case NullishCoalescingExpr:
+		leftType := inferExprType(scope, e.Left)
+		rightType := inferExprType(scope, e.Right)
+
+		if leftType == "unknown" {
+			if rightType == "unknown" {
+				return "unknown"
+			}
+			return rightType + " | unknown"
+		}
+
+		if rightType == "unknown" {
+			return leftType
+		}
+
+		// Filter out nullish types from left side
+		parts := splitUnionType(leftType)
+		newParts := []string{}
+		for _, p := range parts {
+			if !isNullishLSPType(p) {
+				newParts = append(newParts, p)
+			}
+		}
+
+		if len(newParts) == 0 {
+			return rightType
+		}
+
+		filteredLeft := strings.Join(newParts, " | ")
+		if filteredLeft == rightType {
+			return rightType
+		}
+
+		return filteredLeft + " | " + rightType
 	case CallValueExpr:
 		for _, arg := range e.Args {
 			inferExprType(scope, arg)
@@ -3072,7 +3212,7 @@ func getHover(uri string, text string, pos Position) any {
 
 		if strings.HasPrefix(receiverType, "task:") && member == "await" {
 			returnType := strings.TrimPrefix(receiverType, "task:")
-			return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "```tiny\ntask.await(): " + returnType + "\n```\nWaits for the task and returns its result."}}
+			return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "```tiny\nawait task: " + returnType + "\n```\nWaits for the task and returns its result."}}
 		}
 
 		methodInfo, ok := GetNativeMethodInfo(receiverType, member)
@@ -3269,9 +3409,9 @@ func collectUnusedSymbolDecls(stmts []Stmt, exported bool, inClass bool) []unuse
 			decls = append(decls, collectUnusedSymbolDecls(s.Body, isExported, false)...)
 
 		case ForInStmt:
-			decls = append(decls, unusedSymbolDecl{name: s.ItemName, kind: "variable", line: 1, col: 1})
+			decls = append(decls, unusedSymbolDecl{name: s.ItemName, kind: "variable", line: s.Line, col: s.Column})
 			if s.IndexName != "" {
-				decls = append(decls, unusedSymbolDecl{name: s.IndexName, kind: "variable", line: 1, col: 1})
+				decls = append(decls, unusedSymbolDecl{name: s.IndexName, kind: "variable", line: s.Line, col: s.Column})
 			}
 			decls = append(decls, collectUnusedSymbolDecls(s.Body, isExported, false)...)
 
@@ -3772,8 +3912,43 @@ func (a *astSemanticAnalyzer) inferExprType(expr Expr) string {
 		if sym, ok := a.resolve("this"); ok {
 			return sym.Type
 		}
-		a.addDiagnostic(1, 1, "cannot use this outside of a method")
+		a.addDiagnostic(e.Line, e.Column, "cannot use this outside of a method")
 		return "unknown"
+	case NullishCoalescingExpr:
+		leftType := a.inferExprType(e.Left)
+		rightType := a.inferExprType(e.Right)
+
+		if leftType == "unknown" {
+			if rightType == "unknown" {
+				return "unknown"
+			}
+			return rightType + " | unknown"
+		}
+
+		if rightType == "unknown" {
+			return leftType
+		}
+
+		// Filter out nullish types from left side
+		parts := splitUnionType(leftType)
+		newParts := []string{}
+		for _, p := range parts {
+			if !isNullishLSPType(p) {
+				newParts = append(newParts, p)
+			}
+		}
+
+		if len(newParts) == 0 {
+			return rightType
+		}
+
+		filteredLeft := strings.Join(newParts, " | ")
+		if filteredLeft == rightType {
+			return rightType
+		}
+
+		return filteredLeft + " | " + rightType
+
 	case PropertyExpr:
 		// Special case: namespace property access like models.User
 		if ident, ok := e.Object.(IdentExpr); ok {

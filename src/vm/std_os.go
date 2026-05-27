@@ -24,12 +24,13 @@ var stdOSMetadata = StdModuleInfo{
 	},
 }
 
-var stdOSMethods = map[string]StdModuleFunc{
-	"name": osName,
-	"arch": osArch,
-}
+var stdOSMethods map[string]StdModuleFunc
 
 func init() {
+	stdOSMethods = map[string]StdModuleFunc{
+		"name": osName,
+		"arch": osArch,
+	}
 	registerStdModule(stdOSMetadata)
 }
 

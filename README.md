@@ -225,7 +225,21 @@ let task = spawn fn() {
 };
 
 io.println("Doing other things...");
-io.println(task.await());
+io.println(await task);
+```
+
+### Async Functions
+```javascript
+import std "io";
+import std "time";
+
+async fn task() {
+    time.sleep(1000);
+    return "Result from background!";
+}
+
+io.println("Doing other things...");
+io.println(await task());
 ```
 
 ---

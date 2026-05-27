@@ -16,11 +16,12 @@ var stdAppMetadata = StdModuleInfo{
 	},
 }
 
-var stdAppMethods = map[string]StdModuleFunc{
-	"new": stdAppNew,
-}
+var stdAppMethods map[string]StdModuleFunc
 
 func init() {
+	stdAppMethods = map[string]StdModuleFunc{
+		"new": stdAppNew,
+	}
 	registerStdModule(stdAppMetadata)
 }
 

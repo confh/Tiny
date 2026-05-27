@@ -1,6 +1,7 @@
 package main
 
 import (
+	"maps"
 	"path/filepath"
 	"strconv"
 
@@ -223,9 +224,18 @@ func optimizeExpr(expr Expr) Expr {
 		fields := make([]ObjectField, len(e.Fields))
 
 		for i, field := range e.Fields {
-			fields[i] = ObjectField{
-				Name:  field.Name,
-				Value: optimizeExpr(field.Value),
+			if field.HasCopy {
+				fields[i] = ObjectField{
+					Name:    field.Name,
+					Value:   nil,
+					Copy:    field.Copy,
+					HasCopy: true,
+				}
+			} else {
+				fields[i] = ObjectField{
+					Name:  field.Name,
+					Value: optimizeExpr(field.Value),
+				}
 			}
 		}
 
@@ -460,6 +470,7 @@ func (c *Compiler) compileFunctionLiteral(stmt FunctionStmt) {
 		Instructions: functionInstructions,
 		LocalCount:   localCount,
 		Captures:     captures,
+		Async:        stmt.Async,
 		HasDefaults:  hasDefaults,
 		HasTypeHints: hasTypeHints,
 	}
@@ -660,6 +671,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 
 		c.functions[fullName] = Function{
 			ID:     c.getFunctionID(fullName),
+			Async:  fn.Async,
 			Name:   fullName,
 			Params: fn.Params,
 		}
@@ -1298,6 +1310,10 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 		c.setLocation(s.File, s.Line, s.Column)
 		c.compileIfStatement(s)
 
+	case LockStmt:
+		c.setLocation(s.File, s.Line, s.Column)
+		c.compileLockStmt(s)
+
 	case WhileStmt:
 		c.setLocation(s.File, s.Line, s.Column)
 		c.compileWhileStatement(s)
@@ -1321,7 +1337,7 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 		return
 
 	default:
-		c.fatalError(ErrorInternal, c.currentFile, c.currentLine, c.currentColumn, "unknown statement")
+		c.fatalError(ErrorInternal, "unknown statement")
 	}
 }
 
@@ -1662,6 +1678,7 @@ func (c *Compiler) compileClass(stmt ClassStmt) {
 			Params:  method.Params,
 			Body:    method.Body,
 			Private: method.Private,
+			Async:   method.Async,
 		}
 
 		c.compileMethod(stmt.Name, classMethod)
@@ -1764,6 +1781,19 @@ func (c *Compiler) compileWhileStatement(stmt WhileStmt) {
 	}
 }
 
+func (c *Compiler) compileLockStmt(stmt LockStmt) {
+	// lock mutex
+	c.compileExpr(stmt.Mutex)
+	c.emit(OP_LOCK_MUTEX, nil)
+
+	// run block while mutex is locked
+	c.compileScopedBlock(stmt.Block)
+
+	// unlock mutex after done
+	c.compileExpr(stmt.Mutex)
+	c.emit(OP_UNLOCK_MUTEX, nil)
+}
+
 func (c *Compiler) compileIfStatement(stmt IfStmt) {
 	c.compileExpr(stmt.Condition)
 
@@ -1798,6 +1828,7 @@ func (c *Compiler) compileFunction(stmt FunctionStmt) {
 		Params:       stmt.Params,
 		HasDefaults:  hasDefaults,
 		HasTypeHints: hasTypeHints,
+		Async:        stmt.Async,
 	}
 
 	oldInstructions := c.currentInstructions
@@ -1839,6 +1870,7 @@ func (c *Compiler) compileFunction(stmt FunctionStmt) {
 		LocalCount:   localCount,
 		HasDefaults:  hasDefaults,
 		HasTypeHints: hasTypeHints,
+		Async:        stmt.Async,
 	}
 
 	c.currentInstructions = oldInstructions
@@ -2098,6 +2130,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 			Captures:     captures,
 			HasDefaults:  hasDefaults,
 			HasTypeHints: hasTypeHints,
+			Async:        false,
 		}
 
 		c.currentInstructions = oldInstructions
@@ -2122,16 +2155,30 @@ func (c *Compiler) compileExpr(expr Expr) {
 		c.emit(OP_CONST, UndefinedValue{})
 
 	case ObjectExpr:
-		names := make([]string, len(e.Fields))
+		names := make([]ObjectFieldsInfo, len(e.Fields))
 
 		for i, field := range e.Fields {
-			names[i] = field.Name
-			c.compileExpr(field.Value)
+			names[i] = ObjectFieldsInfo{
+				Name: field.Name,
+			}
+
+			if field.HasCopy {
+				names[i].Copy = true
+				c.compileExpr(field.Copy)
+			} else {
+				c.compileExpr(field.Value)
+			}
 		}
 
 		c.emit(OP_OBJECT, ObjectInfo{
 			Names: names,
 		})
+
+	case NullishCoalescingExpr:
+		c.compileExpr(e.Left)
+		c.compileExpr(e.Right)
+
+		c.emit(OP_COALESCE_JUMP, nil)
 
 	case PropertyExpr:
 		c.compileExpr(e.Object)
@@ -2149,6 +2196,19 @@ func (c *Compiler) compileExpr(expr Expr) {
 	case SpawnExpr:
 		c.compileExpr(e.Function)
 		c.emit(OP_SPAWN, nil)
+
+	case DeferExpr:
+		c.setLocation(e.File, e.Line, e.Column)
+		if !c.isInsideFunction() {
+			c.fatalError(ErrorName, "cannot use defer outside of a function")
+		}
+		c.compileExpr(e.Function)
+		c.emit(OP_DEFER, nil)
+
+	case AwaitExpr:
+		c.setLocation(e.File, e.Line, e.Column)
+		c.compileExpr(e.Task)
+		c.emit(OP_AWAIT, nil)
 
 	case ArrayExpr:
 		for _, element := range e.Elements {
@@ -2268,32 +2328,6 @@ func (c *Compiler) compileExpr(expr Expr) {
 		return
 
 	case BinaryExpr:
-		// if e.Op == TOKEN_AND {
-		// 	c.compileExpr(e.Left)
-
-		// 	endJump := c.emitJump(OP_JUMP_IF_FALSE)
-
-		// 	c.emit(OP_POP, nil)
-
-		// 	c.compileExpr(e.Right)
-
-		// 	c.patchJump(endJump)
-		// 	return
-		// }
-
-		// if e.Op == TOKEN_OR {
-		// 	c.compileExpr(e.Left)
-
-		// 	endJump := c.emitJump(OP_JUMP)
-
-		// 	c.emit(OP_POP, nil)
-
-		// 	c.compileExpr(e.Right)
-
-		// 	c.patchJump(endJump)
-		// 	return
-		// }
-
 		if e.Op == TOKEN_PLUS {
 			parts := []Expr{}
 			hasString := flattenStringConcat(e, &parts)
@@ -2454,7 +2488,6 @@ func (c *Compiler) compileExpr(expr Expr) {
 				}
 
 				c.setLocation(ident.File, ident.Line, ident.Column)
-
 				c.emit(OP_CALL_DIRECT, DirectCallInfo{
 					ID:       c.getFunctionID(ident.Name),
 					Name:     ident.Name,
@@ -2543,7 +2576,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 		c.fatalError(ErrorName, "cannot use this outside of a method")
 
 	default:
-		c.fatalError(ErrorInternal, "unknown expression")
+		c.fatalError(ErrorInternal, "unknown expression, %T", expr)
 	}
 }
 
@@ -2570,9 +2603,7 @@ func (c *Compiler) compileMethod(className string, stmt FunctionStmt) {
 	// import "logger.tiny" as Logger;
 	globalScope := map[string]Binding{}
 	if len(oldScopes) > 0 {
-		for key, binding := range oldScopes[0] {
-			globalScope[key] = binding
-		}
+		maps.Copy(globalScope, oldScopes[0])
 	}
 
 	c.scopes = []map[string]Binding{globalScope}
@@ -2624,6 +2655,7 @@ func (c *Compiler) compileMethod(className string, stmt FunctionStmt) {
 		LocalCount:   c.localCount,
 		HasDefaults:  hasDefaults,
 		HasTypeHints: hasTypeHints,
+		Async:        stmt.Async,
 	}
 
 	c.currentInstructions = oldInstructions
@@ -2635,9 +2667,17 @@ func (c *Compiler) compileMethod(className string, stmt FunctionStmt) {
 }
 
 func (c *Compiler) emit(op OpCode, value any) {
+	intVal := 0
+	hasInt := false
+	if v, ok := value.(int); ok {
+		intVal = v
+		hasInt = true
+	}
 	*c.currentInstructions = append(*c.currentInstructions, Instruction{
 		Op:     op,
 		Value:  value,
+		IntArg: intVal,
+		IsInt:  hasInt,
 		File:   c.currentFile,
 		Line:   c.currentLine,
 		Column: c.currentColumn,
@@ -2654,5 +2694,7 @@ func (c *Compiler) emitJump(op OpCode) int {
 }
 
 func (c *Compiler) patchJump(index int) {
-	(*c.currentInstructions)[index].Value = len(*c.currentInstructions)
+	target := len(*c.currentInstructions)
+	(*c.currentInstructions)[index].Value = target
+	(*c.currentInstructions)[index].IntArg = target
 }

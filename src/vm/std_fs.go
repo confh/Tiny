@@ -17,7 +17,7 @@ var stdFsMetadata = StdModuleInfo{
 			Args: []StdArg{
 				{Name: "path", Type: "string", Optional: false},
 			},
-			Returns:     "File",
+			Returns:     "file",
 			Description: "Opens a file and returns a file object.",
 		},
 		"readFile": {
@@ -98,20 +98,21 @@ var stdFsMetadata = StdModuleInfo{
 	},
 }
 
-var stdFsMethods = map[string]StdModuleFunc{
-	"open":       stdFsOpen,
-	"readFile":   stdFsReadFile,
-	"writeFile":  stdFsWriteFile,
-	"writeBytes": stdFsWriteBytes,
-	"exists":     stdFsExists,
-	"readDir":    stdFsReadDir,
-	"mkDir":      stdFsMkDir,
-	"stat":       stdFsStat,
-	"copy":       stdFsCopy,
-	"remove":     stdFsRemove,
-}
+var stdFsMethods map[string]StdModuleFunc
 
 func init() {
+	stdFsMethods = map[string]StdModuleFunc{
+		"open":       stdFsOpen,
+		"readFile":   stdFsReadFile,
+		"writeFile":  stdFsWriteFile,
+		"writeBytes": stdFsWriteBytes,
+		"exists":     stdFsExists,
+		"readDir":    stdFsReadDir,
+		"mkDir":      stdFsMkDir,
+		"stat":       stdFsStat,
+		"copy":       stdFsCopy,
+		"remove":     stdFsRemove,
+	}
 	registerStdModule(stdFsMetadata)
 }
 

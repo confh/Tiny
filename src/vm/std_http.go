@@ -70,16 +70,17 @@ var stdHttpMetadata = StdModuleInfo{
 	},
 }
 
-var stdHttpMethods = map[string]StdModuleFunc{
-	"server":       stdHttpServer,
-	"get":          stdHttpGet,
-	"post":         stdHttpPost,
-	"json":         stdHttpJsonResponse,
-	"text":         stdHttpTextResponse,
-	"downloadFile": stdHttpDownloadFile,
-}
+var stdHttpMethods map[string]StdModuleFunc
 
 func init() {
+	stdHttpMethods = map[string]StdModuleFunc{
+		"server":       stdHttpServer,
+		"get":          stdHttpGet,
+		"post":         stdHttpPost,
+		"json":         stdHttpJsonResponse,
+		"text":         stdHttpTextResponse,
+		"downloadFile": stdHttpDownloadFile,
+	}
 	registerStdModule(stdHttpMetadata)
 }
 

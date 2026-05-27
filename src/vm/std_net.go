@@ -25,11 +25,13 @@ var stdNetMetadata = StdModuleInfo{
 	},
 }
 
-var stdNetMethods = map[string]StdModuleFunc{
-	"tcpServer": netTcpServer,
-}
+var stdNetMethods map[string]StdModuleFunc
 
 func init() {
+	stdNetMethods = map[string]StdModuleFunc{
+		"tcpServer": netTcpServer,
+	}
+
 	registerStdModule(stdNetMetadata)
 }
 

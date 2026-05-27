@@ -1,11 +1,11 @@
-import std "io";
-import std "json";
+import std "io"
+import std "json"
 
-import "text.tiny" as Text;
-import "numbers.tiny" as Numbers;
+import "text.tiny" as Text
+import "numbers.tiny" as Numbers
 
-const words = ["Tiny", "module", "example"];
-const numbers = [2, 4, 6, 8];
+const words = ["Tiny", "module", "example"]
+const numbers = [2, 4, 6, 8]
 
 io.println(json.pretty({
     slug: Text.slug(words.join(" ")),
@@ -13,4 +13,4 @@ io.println(json.pretty({
     total: Numbers.sum(numbers),
     average: Numbers.average(numbers),
     exportedConstant: Numbers.defaultStep
-}));
+}))

@@ -1,25 +1,25 @@
-import std "io";
-import std "json";
+import std "io"
+import std "json"
 
-const language: string = "Tiny";
-const step = 2;
-let count: number = 3;
-let ratio = 2.5;
-let enabled = true;
-let empty = null;
-let missing = undefined;
+const language: string = "Tiny"
+const step = 2
+let count: number = 3
+let ratio = 2.5
+let enabled = true
+let empty = null
+let missing = undefined
 
-count = count + step;
+count = count + step
 
-let text = `Language: ${language}, count: ${count}`;
-let numbers = [1, 2, 3, count];
+let text = `Language: ${language}, count: ${count}`
+let numbers = [1, 2, 3, count]
 let user = {
     name: "Ada",
     active: enabled
-};
+}
 
-user.role = "reader";
-user["level"] = "beginner";
+user.role = "reader"
+user["level"] = "beginner"
 
 let result = {
     text: text,
@@ -31,6 +31,6 @@ let result = {
     firstNumber: numbers[0],
     user: user,
     comparison: count > 3 and enabled
-};
+}
 
-io.println(json.pretty(result));
+io.println(json.pretty(result))

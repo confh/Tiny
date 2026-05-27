@@ -394,6 +394,10 @@ func rewritePluginExprForDist(expr Expr, target string) Expr {
 		e.Function = rewritePluginExprForDist(e.Function, target)
 		return e
 
+	case DeferExpr:
+		e.Function = rewritePluginExprForDist(e.Function, target)
+		return e
+
 	case InstanceOfExpr:
 		e.Object = rewritePluginExprForDist(e.Object, target)
 		e.Class = rewritePluginExprForDist(e.Class, target)

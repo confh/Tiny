@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -78,7 +79,7 @@ func hashTinyProject(entryPath string, sourceText string) (string, error) {
 
 	input := strings.Join([]string{
 		"TinyVersion=" + TinyVersion,
-		"BytecodeCacheVersion=1",
+		"BytecodeCacheVersion=" + strconv.Itoa(BytecodeCacheVersion),
 		"EntryPath=" + entryPath,
 		"SourceText=" + sourceText,
 		"ImportedText=" + importedText,

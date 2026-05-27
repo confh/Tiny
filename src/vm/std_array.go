@@ -35,13 +35,14 @@ var stdArrayMetadata = StdModuleInfo{
 	},
 }
 
-var stdArrayMethods = map[string]StdModuleFunc{
-	"range":   stdArrayRange,
-	"isArray": stdArrayIsArray,
-	"from":    stdArrayFrom,
-}
+var stdArrayMethods map[string]StdModuleFunc
 
 func init() {
+	stdArrayMethods = map[string]StdModuleFunc{
+		"range":   stdArrayRange,
+		"isArray": stdArrayIsArray,
+		"from":    stdArrayFrom,
+	}
 	registerStdModule(stdArrayMetadata)
 }
 

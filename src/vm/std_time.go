@@ -15,6 +15,12 @@ var stdTimeMetadata = StdModuleInfo{
 			Returns:     "undefined",
 			Description: "Sleeps for the given number of milliseconds.",
 		},
+		"nowNs": {
+			Name:        "nowNs",
+			Args:        []StdArg{},
+			Returns:     "number",
+			Description: "Returns the current Unix epoch time in nanoseconds.",
+		},
 		"nowMs": {
 			Name:        "nowMs",
 			Args:        []StdArg{},
@@ -36,14 +42,16 @@ var stdTimeMetadata = StdModuleInfo{
 	},
 }
 
-var stdTimeMethods = map[string]StdModuleFunc{
-	"sleep":  stdTimeSleep,
-	"nowMs":  stdTimeNowMs,
-	"nowSec": stdTimeNowSec,
-	"clock":  stdTimeClock,
-}
+var stdTimeMethods map[string]StdModuleFunc
 
 func init() {
+	stdTimeMethods = map[string]StdModuleFunc{
+		"sleep":  stdTimeSleep,
+		"nowNs":  stdTimeNowNs,
+		"nowMs":  stdTimeNowMs,
+		"nowSec": stdTimeNowSec,
+		"clock":  stdTimeClock,
+	}
 	registerStdModule(stdTimeMetadata)
 }
 
@@ -61,6 +69,11 @@ func stdTimeSleep(vm *VM, args []Value) {
 	ms := argInt(vm, "time.sleep", args, 0)
 	time.Sleep(time.Duration(ms) * time.Millisecond)
 	vm.push(UndefinedValue{})
+}
+
+func stdTimeNowNs(vm *VM, args []Value) {
+	dontExpectArgs(vm, "time.nowNs", args)
+	vm.push(time.Now().UnixNano())
 }
 
 func stdTimeNowMs(vm *VM, args []Value) {

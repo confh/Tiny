@@ -129,7 +129,7 @@ func packProgramToOutput(program Program, outFile string, target string) {
 		functions[name] = fn
 	}
 
-	bytecodeBytes := SaveBytecodeToBytes(mainInstructions, functions, classes)
+	bytecodeBytes := SaveBytecodeToBytes(mainInstructions, functions, classes, false)
 
 	runtimeBytes := getEmbeddedRuntimeForTarget(target)
 

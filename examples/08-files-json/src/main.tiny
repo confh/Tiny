@@ -1,18 +1,18 @@
-import std "fs";
-import std "io";
-import std "json";
+import std "fs"
+import std "io"
+import std "json"
 
-let text = fs.readFile("data/input.json");
-let data = json.parse(text);
+let text = fs.readFile("data/input.json")
+let data = json.parse(text)
 
 if typeof data["version"] == "undefined" {
-    data.version = "0.1.0";
+    data.version = "0.1.0"
 }
 
-data.featureCount = data.features.length();
-data.summary = `${data.name} has ${data.featureCount} listed features`;
+data.featureCount = data.features.length()
+data.summary = `${data.name} has ${data.featureCount} listed features`
 
-fs.writeFile("data/output.json", json.pretty(data));
+fs.writeFile("data/output.json", json.pretty(data))
 
-io.println(data.summary);
-io.println("wrote data/output.json");
+io.println(data.summary)
+io.println("wrote data/output.json")

@@ -1,50 +1,50 @@
-import std "io";
-import std "json";
+import std "io"
+import std "json"
 
 class Log {
-    field messages = [];
+    field messages = []
 
     fn init() {
-        this.messages = [];
+        this.messages = []
     }
 
     fn add(message) {
-        this.messages.push(message);
-        return this;
+        this.messages.push(message)
+        return this
     }
 
     fn all() {
-        return this.messages;
+        return this.messages
     }
 }
 
 class Box {
-    field value = null;
-    embed log;
+    field value = null
+    embed log
 
     fn init(value) {
-        this.value = value;
-        this.log = Log();
-        this.add("created");
+        this.value = value
+        this.log = Log()
+        this.add("created")
     }
 
     fn set(value) {
-        this.value = value;
-        this.add("changed");
-        return this;
+        this.value = value
+        this.add("changed")
+        return this
     }
 
     fn get() {
-        return this.value;
+        return this.value
     }
 }
 
-let box = Box("start");
-box.set("middle").set("end");
+let box = Box("start")
+box.set("middle").set("end")
 
 io.println(json.pretty({
     value: box.get(),
     messages: box.all(),
     isBox: box instanceof Box,
     hasLog: box.log instanceof Log
-}));
+}))

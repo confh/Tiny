@@ -153,6 +153,8 @@ var tinyKeywords = map[string]bool{
 	"std":    true,
 	"as":     true,
 	"export": true,
+	"await":  true,
+	"async":  true,
 
 	"fn":      true,
 	"let":     true,
@@ -179,6 +181,7 @@ var tinyKeywords = map[string]bool{
 	"catch":    true,
 	"finally":  true,
 	"throw":    true,
+	"defer":    true,
 
 	"true":      true,
 	"false":     true,
@@ -488,8 +491,8 @@ func patchTextForCompletion(text string, pos Position) string {
 			trimmedBefore := strings.TrimRight(before, " \t")
 
 			if strings.HasSuffix(trimmedBefore, ".") {
-				// Important: add semicolon because Tiny requires it.
-				lines[i] = before + "__complete__;" + after
+				// Important: add __complete__ for parser to handle.
+				lines[i] = before + "__complete__" + after
 				continue
 			}
 
@@ -502,7 +505,7 @@ func patchTextForCompletion(text string, pos Position) string {
 
 		if strings.HasSuffix(trimmed, ".") {
 			spaces := line[len(trimmed):]
-			lines[i] = trimmed + "__complete__;" + spaces
+			lines[i] = trimmed + "__complete__" + spaces
 			continue
 		}
 
@@ -512,7 +515,7 @@ func patchTextForCompletion(text string, pos Position) string {
 	return strings.Join(lines, "\n")
 }
 
-func getStdCompletions(module string) []CompletionItem {
+func getStdCompletions(module string, hasParens bool) []CompletionItem {
 	info, ok := GetStdModuleInfo(module)
 	if !ok {
 		return []CompletionItem{}
@@ -533,7 +536,7 @@ func getStdCompletions(module string) []CompletionItem {
 			Label:            method.Name,
 			Kind:             2,
 			Detail:           formatStdSignature(module, method),
-			InsertText:       callableInsertText(method.Name),
+			InsertText:       callableInsertText(method.Name, hasParens),
 			InsertTextFormat: 2,
 		})
 	}
@@ -1956,18 +1959,18 @@ func stdModuleNameCompletions() []CompletionItem {
 	return items
 }
 
-func getNativeTypeCompletions(typeName string) []CompletionItem {
-	if strings.HasPrefix(typeName, "task:") {
-		return []CompletionItem{
-			{
-				Label:            "await",
-				Kind:             2,
-				Detail:           "task.await(): " + strings.TrimPrefix(typeName, "task:"),
-				InsertText:       callableInsertText("await"),
-				InsertTextFormat: 2,
-			},
-		}
-	}
+func getNativeTypeCompletions(typeName string, hasParens bool) []CompletionItem {
+	// if strings.HasPrefix(typeName, "task:") {
+	// 	return []CompletionItem{
+	// 		{
+	// 			Label:            "await",
+	// 			Kind:             2,
+	// 			Detail:           "task.await(): " + strings.TrimPrefix(typeName, "task:"),
+	// 			InsertText:       callableInsertText("await", hasParens),
+	// 			InsertTextFormat: 2,
+	// 		},
+	// 	}
+	// }
 
 	info, ok := GetNativeTypeInfo(typeName)
 	if !ok {
@@ -1989,7 +1992,7 @@ func getNativeTypeCompletions(typeName string) []CompletionItem {
 			Label:            method.Name,
 			Kind:             2,
 			Detail:           formatNativeSignature(typeName, method),
-			InsertText:       callableInsertText(method.Name),
+			InsertText:       callableInsertText(method.Name, hasParens),
 			InsertTextFormat: 2,
 		})
 	}
@@ -1997,7 +2000,7 @@ func getNativeTypeCompletions(typeName string) []CompletionItem {
 	items = append(items, CompletionItem{
 		Label:            "toString",
 		Kind:             2,
-		InsertText:       callableInsertText("toString"),
+		InsertText:       callableInsertText("toString", hasParens),
 		InsertTextFormat: 2,
 		Detail: formatNativeSignature(typeName, StdMethodInfo{
 			Name:        "toString",
@@ -2028,18 +2031,18 @@ func formatNativeSignature(typeName string, method StdMethodInfo) string {
 	return typeName + "." + method.Name + "(" + strings.Join(parts, ", ") + "): " + method.Returns
 }
 
-func scopeCompletions(scope *Scope, uri string, text string) []CompletionItem {
+func scopeCompletions(scope *Scope, uri string, text string, hasParens bool) []CompletionItem {
 	items := []CompletionItem{
-		snippetCompletion("import", "import statement", "import \"$1\";$0"),
-		snippetCompletion("import std", "standard library import", "import std \"$1\";$0"),
+		snippetCompletion("import", "import statement", "import \"$1\"$0"),
+		snippetCompletion("import std", "standard library import", "import std \"$1\"$0"),
 		{Label: "export", Kind: 14, Detail: "export statement", InsertText: "export $0", InsertTextFormat: 2},
 		{Label: "std", Kind: 14, Detail: "standard library import"},
 		snippetCompletion("fn", "function", "fn ${1:name}(${2}) {\n    $0\n}"),
-		snippetCompletion("let", "variable", "let ${1:name} = ${2:value};$0"),
-		snippetCompletion("const", "constant", "const ${1:name} = ${2:value};$0"),
+		snippetCompletion("let", "variable", "let ${1:name} = ${2:value}$0"),
+		snippetCompletion("const", "constant", "const ${1:name} = ${2:value}$0"),
 		{Label: "class", Kind: 7, Detail: "class", InsertText: "class ${1:Name} {\n    $0\n}", InsertTextFormat: 2},
 		{Label: "embed", Kind: 14, Detail: "embed class methods"},
-		snippetCompletion("field", "class field", "field ${1:name} = ${2:value};$0"),
+		snippetCompletion("field", "class field", "field ${1:name} = ${2:value}$0"),
 		{Label: "private", Kind: 14, Detail: "private field"},
 		{Label: "public", Kind: 14, Detail: "public field"},
 		snippetCompletion("if", "if statement", "if ${1:condition} {\n    $0\n}"),
@@ -2048,14 +2051,16 @@ func scopeCompletions(scope *Scope, uri string, text string) []CompletionItem {
 		snippetCompletion("for", "for loop", "for let ${1:i} = 0; ${1:i} < ${2:count}; ${1:i}++ {\n    $0\n}"),
 		snippetCompletion("for in", "for-in loop", "for ${1:item} in ${2:items} {\n    $0\n}"),
 		snippetCompletion("match", "match expression", "match ${1:value} {\n    ${2:case} {\n        $0\n    }\n    _ {\n    }\n}"),
-		snippetCompletion("return", "return", "return ${1:value};$0"),
+		snippetCompletion("return", "return", "return ${1:value}$0"),
 		{Label: "break", Kind: 14, Detail: "break"},
 		{Label: "continue", Kind: 14, Detail: "continue"},
 		snippetCompletion("try", "try statement", "try {\n    $0\n} catch ${1:err} {\n    \n}"),
 		{Label: "catch", Kind: 14, Detail: "catch block"},
 		{Label: "finally", Kind: 14, Detail: "finally block"},
-		snippetCompletion("throw", "throw error", "throw ${1:error};$0"),
+		snippetCompletion("throw", "throw error", "throw ${1:error}$0"),
 		snippetCompletion("spawn", "spawn task", "spawn fn() {\n    $0\n}"),
+		snippetCompletion("defer", "defer statement", "defer fn() {\n    $0\n}"),
+		{Label: "await ", Kind: 14, Detail: "await statement"},
 		{Label: "typeof", Kind: 14, Detail: "type operator"},
 		{Label: "instanceof", Kind: 14, Detail: "instance check"},
 		{Label: "true", Kind: 14, Detail: "boolean literal"},
@@ -2086,14 +2091,14 @@ func scopeCompletions(scope *Scope, uri string, text string) []CompletionItem {
 				Label:            sym.Name,
 				Kind:             symbolKindToCompletionKind(sym.Kind),
 				Detail:           symbolDetail(sym),
-				InsertText:       completionInsertText(sym),
-				InsertTextFormat: completionInsertTextFormat(sym),
+				InsertText:       completionInsertText(sym, hasParens),
+				InsertTextFormat: completionInsertTextFormat(sym, hasParens),
 			})
 		}
 	}
 
 	items = append(items, stdAutoImportCompletions(scope, text)...)
-	items = append(items, fileAutoImportCompletions(scope, uri, text)...)
+	items = append(items, fileAutoImportCompletions(scope, uri, text, hasParens)...)
 
 	return dedupeCompletionItems(items)
 }
@@ -2138,7 +2143,7 @@ func stdAutoImportCompletions(scope *Scope, text string) []CompletionItem {
 	return items
 }
 
-func fileAutoImportCompletions(scope *Scope, uri string, text string) []CompletionItem {
+func fileAutoImportCompletions(scope *Scope, uri string, text string, hasParens bool) []CompletionItem {
 	currentPath := uriToPath(uri)
 	if currentPath == "" {
 		return nil
@@ -2188,7 +2193,7 @@ func fileAutoImportCompletions(scope *Scope, uri string, text string) []Completi
 			insert := alias + "." + sym.Name
 			format := 0
 			if sym.Kind == SymbolClass || sym.Kind == SymbolFunction {
-				insert = alias + "." + callableInsertText(sym.Name)
+				insert = alias + "." + callableInsertText(sym.Name, hasParens)
 				format = 2
 			}
 
@@ -2302,7 +2307,7 @@ func classNameAtPosition(text string, pos Position) string {
 	return ""
 }
 
-func completionItemsForClass(scope *Scope, classSym SymbolInfo, receiver string) []CompletionItem {
+func completionItemsForClass(scope *Scope, classSym SymbolInfo, receiver string, hasParens bool) []CompletionItem {
 	items := []CompletionItem{}
 
 	for _, field := range classSym.Fields {
@@ -2326,7 +2331,7 @@ func completionItemsForClass(scope *Scope, classSym SymbolInfo, receiver string)
 			Label:            method.Name,
 			Kind:             2,
 			Detail:           formatFunctionSignature(method.Name, method.Params, method.Returns),
-			InsertText:       callableInsertText(method.Name),
+			InsertText:       callableInsertText(method.Name, hasParens),
 			InsertTextFormat: 2,
 		})
 	}
@@ -2649,23 +2654,23 @@ func scanClassMethodHeaders(scope *Scope, className string, body string, bodyBas
 	return methods
 }
 
-func completionItemsForReceiver(scope *Scope, text string, pos Position, receiver string) []CompletionItem {
+func completionItemsForReceiver(scope *Scope, text string, pos Position, receiver string, hasParens bool) []CompletionItem {
 	sym, typ, ok := resolveReceiverPath(scope, text, pos, receiver)
 	if !ok {
 		return []CompletionItem{}
 	}
 
 	if strings.Contains(typ, "|") {
-		return getUnionTypeCompletions(scope, typ, receiver)
+		return getUnionTypeCompletions(scope, typ, receiver, hasParens)
 	}
 
 	if sym.Kind == SymbolNamespace || sym.Kind == SymbolEnum {
-		return completionItemsFromMembers(sym.Members)
+		return completionItemsFromMembers(sym.Members, hasParens)
 	}
 
 	if strings.HasPrefix(typ, "std:") {
 		module := strings.TrimPrefix(typ, "std:")
-		return getStdCompletions(module)
+		return getStdCompletions(module, hasParens)
 	}
 
 	if strings.HasPrefix(typ, "class:") {
@@ -2681,6 +2686,7 @@ func completionItemsForReceiver(scope *Scope, text string, pos Position, receive
 			for name, field := range sym.Fields {
 				classSym.Fields[name] = field
 			}
+
 			if classSym.Methods == nil {
 				classSym.Methods = map[string]SymbolInfo{}
 			}
@@ -2688,7 +2694,7 @@ func completionItemsForReceiver(scope *Scope, text string, pos Position, receive
 				classSym.Methods[name] = method
 			}
 		}
-		return completionItemsForClass(scope, classSym, receiver)
+		return completionItemsForClass(scope, classSym, receiver, hasParens)
 	}
 
 	if typ == "object" {
@@ -2696,14 +2702,14 @@ func completionItemsForReceiver(scope *Scope, text string, pos Position, receive
 		for _, field := range sym.Fields {
 			items = append(items, CompletionItem{Label: field.Name, Kind: symbolKindToCompletionKind(field.Kind), Detail: field.Detail + " : " + field.Type})
 		}
-		items = append(items, getNativeTypeCompletions("object")...)
+		items = append(items, getNativeTypeCompletions("object", hasParens)...)
 		return dedupeCompletionItems(items)
 	}
 
-	return getNativeTypeCompletions(typ)
+	return getNativeTypeCompletions(typ, hasParens)
 }
 
-func getUnionTypeCompletions(scope *Scope, typ string, receiver string) []CompletionItem {
+func getUnionTypeCompletions(scope *Scope, typ string, receiver string, hasParens bool) []CompletionItem {
 	items := []CompletionItem{}
 
 	for _, part := range splitUnionType(typ) {
@@ -2737,9 +2743,11 @@ func getUnionTypeCompletions(scope *Scope, typ string, receiver string) []Comple
 				}
 
 				items = append(items, CompletionItem{
-					Label:  method.Name,
-					Kind:   2,
-					Detail: formatFunctionSignature(method.Name, method.Params, method.Returns),
+					Label:            method.Name,
+					Kind:             2,
+					Detail:           formatFunctionSignature(method.Name, method.Params, method.Returns),
+					InsertText:       callableInsertText(method.Name, hasParens),
+					InsertTextFormat: 2,
 				})
 			}
 
@@ -2748,16 +2756,16 @@ func getUnionTypeCompletions(scope *Scope, typ string, receiver string) []Comple
 
 		if strings.HasPrefix(part, "std:") {
 			module := strings.TrimPrefix(part, "std:")
-			items = append(items, getStdCompletions(module)...)
+			items = append(items, getStdCompletions(module, hasParens)...)
 			continue
 		}
 
 		if part == "object" {
-			items = append(items, getNativeTypeCompletions("object")...)
+			items = append(items, getNativeTypeCompletions("object", hasParens)...)
 			continue
 		}
 
-		items = append(items, getNativeTypeCompletions(part)...)
+		items = append(items, getNativeTypeCompletions(part, hasParens)...)
 	}
 
 	return dedupeCompletionItems(items)
@@ -2777,16 +2785,20 @@ func getCompletions(uri string, text string, pos Position) []CompletionItem {
 	before := line[:pos.Character]
 	receiver := receiverBeforeDot(before)
 
+	after := line[pos.Character:]
+	trimmedAfter := strings.TrimLeft(after, " \t")
+	hasParens := len(trimmedAfter) > 0 && trimmedAfter[0] == '('
+
 	scope := scopeAtPosition(uri, text, pos)
 
 	if receiver == "" {
-		return scopeCompletions(scope, uri, text)
+		return scopeCompletions(scope, uri, text, hasParens)
 	}
 
-	return completionItemsForReceiver(scope, text, pos, receiver)
+	return completionItemsForReceiver(scope, text, pos, receiver, hasParens)
 }
 
-func completionItemsFromMembers(members map[string]SymbolInfo) []CompletionItem {
+func completionItemsFromMembers(members map[string]SymbolInfo, hasParens bool) []CompletionItem {
 	items := []CompletionItem{}
 	names := make([]string, 0, len(members))
 
@@ -2807,29 +2819,32 @@ func completionItemsFromMembers(members map[string]SymbolInfo) []CompletionItem 
 			Label:            member.Name,
 			Kind:             symbolKindToCompletionKind(member.Kind),
 			Detail:           detail,
-			InsertText:       completionInsertText(member),
-			InsertTextFormat: completionInsertTextFormat(member),
+			InsertText:       completionInsertText(member, hasParens),
+			InsertTextFormat: completionInsertTextFormat(member, hasParens),
 		})
 	}
 
 	return items
 }
 
-func callableInsertText(name string) string {
-	return name + "($0);"
+func callableInsertText(name string, hasParens bool) string {
+	if hasParens {
+		return name
+	}
+	return name + "($0)"
 }
 
-func completionInsertText(sym SymbolInfo) string {
+func completionInsertText(sym SymbolInfo, hasParens bool) string {
 	switch sym.Kind {
 	case SymbolFunction, SymbolClass:
-		return callableInsertText(sym.Name)
+		return callableInsertText(sym.Name, hasParens)
 	default:
 		return ""
 	}
 }
 
-func completionInsertTextFormat(sym SymbolInfo) int {
-	if completionInsertText(sym) == "" {
+func completionInsertTextFormat(sym SymbolInfo, hasParens bool) int {
+	if completionInsertText(sym, hasParens) == "" {
 		return 0
 	}
 	return 2

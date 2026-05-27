@@ -1,5 +1,9 @@
 package vm
 
+import (
+	"reflect"
+)
+
 func OptimizeBytecode(instructions []Instruction) []Instruction {
 	instructions = optimizeIncLocal(instructions)
 	instructions = optimizeJumpLocalGEConst(instructions)
@@ -14,9 +18,82 @@ func OptimizeBytecode(instructions []Instruction) []Instruction {
 	instructions = optimizeAddPropertyLocalLocal(instructions)
 	instructions = optimizeMulLocalConst(instructions)
 	instructions = optimizeLoadLocalSlots(instructions)
+	instructions = optimizeJumpLocalGTConst(instructions)
+	instructions = optimizeCallDirectSubConst(instructions)
+	instructions = optimizeLoopCondition(instructions)
+	instructions = optimizeAddLocalLocalStore(instructions)
 	// instructions = removeDeadCodeAfterReturn(instructions)
 
 	return instructions
+}
+
+func optimizeLoopCondition(instructions []Instruction) []Instruction {
+	optimized := make([]Instruction, 0, len(instructions))
+	oldToNew := make([]int, len(instructions)+1)
+
+	getLocalSlot := func(inst Instruction) (int, bool) {
+		switch inst.Op {
+		case OP_LOAD_LOCAL_0:
+			return 0, true
+		case OP_LOAD_LOCAL_1:
+			return 1, true
+		case OP_LOAD_LOCAL_2:
+			return 2, true
+		case OP_LOAD_LOCAL_3:
+			return 3, true
+		case OP_LOAD_LOCAL:
+			if slot, ok := inst.Value.(int); ok {
+				return slot, true
+			}
+			if slot, ok := inst.Value.(int64); ok {
+				return int(slot), true
+			}
+		}
+		return 0, false
+	}
+
+	for i := 0; i < len(instructions); {
+		newIndex := len(optimized)
+
+		// Look for: LOAD_LOCAL (i) -> LOAD_LOCAL (n) -> OP_LTE -> OP_JUMP_IF_FALSE
+		if i+3 < len(instructions) &&
+			instructions[i+2].Op == OP_LTE &&
+			instructions[i+3].Op == OP_JUMP_IF_FALSE {
+
+			slotA, okA := getLocalSlot(instructions[i])
+			slotB, okB := getLocalSlot(instructions[i+1])
+			target, okT := instructions[i+3].Value.(int)
+
+			if okA && okB && okT {
+				optimized = append(optimized, Instruction{
+					Op: OP_JUMP_LOCAL_GT_LOCAL,
+					Value: JumpLocalGTLocalInfo{
+						SlotA:  slotA,
+						SlotB:  slotB,
+						Target: target,
+					},
+					File:   instructions[i].File,
+					Line:   instructions[i].Line,
+					Column: instructions[i].Column,
+				})
+
+				oldToNew[i] = newIndex
+				oldToNew[i+1] = newIndex
+				oldToNew[i+2] = newIndex
+				oldToNew[i+3] = newIndex
+				i += 4
+				continue
+			}
+		}
+
+		optimized = append(optimized, instructions[i])
+		oldToNew[i] = newIndex
+		i++
+	}
+
+	oldToNew[len(instructions)] = len(optimized)
+	remapJumpTargets(optimized, oldToNew)
+	return optimized
 }
 
 func optimizeLoadLocalSlots(instructions []Instruction) []Instruction {
@@ -178,6 +255,70 @@ func optimizeGetPropertyLocal(instructions []Instruction) []Instruction {
 				oldToNew[i] = newIndex
 				oldToNew[i+1] = newIndex
 				i += 2
+				continue
+			}
+		}
+
+		optimized = append(optimized, instructions[i])
+		oldToNew[i] = newIndex
+		i++
+	}
+
+	oldToNew[len(instructions)] = len(optimized)
+	remapJumpTargets(optimized, oldToNew)
+
+	return optimized
+}
+
+func optimizeJumpLocalGTConst(instructions []Instruction) []Instruction {
+	optimized := make([]Instruction, 0, len(instructions))
+	oldToNew := make([]int, len(instructions)+1)
+
+	for i := 0; i < len(instructions); {
+		newIndex := len(optimized)
+
+		// OP_LOAD_LOCAL_0
+		// OP_CONST
+		// OP_LTE
+		// OP_JUMP_IF_FALSE
+		if i+3 < len(instructions) &&
+			instructions[i].Op == OP_LOAD_LOCAL_0 &&
+			instructions[i+1].Op == OP_CONST &&
+			instructions[i+2].Op == OP_LTE &&
+			instructions[i+3].Op == OP_JUMP_IF_FALSE {
+
+			var constValue int
+			var constOK bool
+			switch v := instructions[i+1].Value.(type) {
+			case int:
+				constValue = v
+				constOK = true
+			case int64:
+				constValue = int(v)
+				constOK = true
+			}
+
+			target, targetOK := instructions[i+3].Value.(int)
+
+			if constOK && targetOK {
+				optimized = append(optimized, Instruction{
+					Op: OP_JUMP_LOCAL_GT_CONST,
+					Value: JumpLocalGTConstInfo{
+						Slot:   0,
+						Value:  constValue,
+						Target: target,
+					},
+					File:   instructions[i].File,
+					Line:   instructions[i].Line,
+					Column: instructions[i].Column,
+				})
+
+				oldToNew[i] = newIndex
+				oldToNew[i+1] = newIndex
+				oldToNew[i+2] = newIndex
+				oldToNew[i+3] = newIndex
+
+				i += 4
 				continue
 			}
 		}
@@ -731,9 +872,185 @@ func optimizeJumpLocalGELocal(instructions []Instruction) []Instruction {
 	return optimized
 }
 
+func optimizeCallDirectSubConst(instructions []Instruction) []Instruction {
+	optimized := make([]Instruction, 0, len(instructions))
+	oldToNew := make([]int, len(instructions)+1)
+
+	for i := 0; i < len(instructions); {
+		newIndex := len(optimized)
+
+		// Look for the sequence: LOAD_LOCAL_0 -> CONST -> SUB -> CALL_DIRECT
+		if i+3 < len(instructions) &&
+			instructions[i].Op == OP_LOAD_LOCAL_0 &&
+			instructions[i+1].Op == OP_CONST &&
+			instructions[i+2].Op == OP_SUB &&
+			instructions[i+3].Op == OP_CALL_DIRECT {
+
+			// Extract subtraction constant
+			var subAmt int
+			var constOK bool
+			switch v := instructions[i+1].Value.(type) {
+			case int:
+				subAmt = v
+				constOK = true
+			case int64:
+				subAmt = int(v)
+				constOK = true
+			}
+
+			// Extract DirectCallInfo from the original OP_CALL_DIRECT
+			callInfo, callOK := instructions[i+3].Value.(DirectCallInfo)
+
+			if constOK && callOK {
+				optimized = append(optimized, Instruction{
+					Op: OP_CALL_DIRECT_SUB_CONST,
+					Value: CallDirectSubConstInfo{
+						Slot:     0, // Hardcoded to 0 since it's OP_LOAD_LOCAL_0
+						SubValue: subAmt,
+						FnID:     callInfo.ID,
+						FnName:   callInfo.Name,
+						ArgCount: callInfo.ArgCount,
+					},
+					File:   instructions[i].File,
+					Line:   instructions[i].Line,
+					Column: instructions[i].Column,
+				})
+
+				oldToNew[i] = newIndex
+				oldToNew[i+1] = newIndex
+				oldToNew[i+2] = newIndex
+				oldToNew[i+3] = newIndex
+
+				i += 4
+				continue
+			}
+		}
+
+		optimized = append(optimized, instructions[i])
+		oldToNew[i] = newIndex
+		i++
+	}
+
+	oldToNew[len(instructions)] = len(optimized)
+	remapJumpTargets(optimized, oldToNew)
+
+	return optimized
+}
+
+func optimizeAddLocalLocalStore(instructions []Instruction) []Instruction {
+	optimized := make([]Instruction, 0, len(instructions))
+	oldToNew := make([]int, len(instructions)+1)
+
+	getLocalSlot := func(inst Instruction) (int, bool) {
+		switch inst.Op {
+		case OP_LOAD_LOCAL_0:
+			return 0, true
+		case OP_LOAD_LOCAL_1:
+			return 1, true
+		case OP_LOAD_LOCAL_2:
+			return 2, true
+		case OP_LOAD_LOCAL_3:
+			return 3, true
+		case OP_LOAD_LOCAL:
+			if slot, ok := inst.Value.(int); ok {
+				return slot, true
+			}
+			if slot, ok := inst.Value.(int64); ok {
+				return int(slot), true
+			}
+		}
+		return 0, false
+	}
+
+	getAssignSlot := func(inst Instruction) (int, bool) {
+		if inst.Op != OP_ASSIGN_LOCAL && inst.Op != OP_STORE_LOCAL {
+			return 0, false
+		}
+		if slot, ok := inst.Value.(int); ok {
+			return slot, true
+		}
+		if slot, ok := inst.Value.(int64); ok {
+			return int(slot), true
+		}
+		v := reflect.ValueOf(inst.Value)
+		if v.Kind() == reflect.Struct {
+
+			f := v.FieldByName("Slot")
+			if f.IsValid() && (f.Kind() == reflect.Int || f.Kind() == reflect.Int64) {
+				return int(f.Int()), true
+			}
+
+			if v.NumField() >= 2 {
+				f := v.Field(1)
+				if f.Kind() == reflect.Int || f.Kind() == reflect.Int64 {
+					return int(f.Int()), true
+				}
+			}
+		}
+		return 0, false
+	}
+
+	for i := 0; i < len(instructions); {
+		newIndex := len(optimized)
+
+		if i+3 < len(instructions) && instructions[i+2].Op == OP_ADD {
+			slotA, okA := getLocalSlot(instructions[i])
+			slotB, okB := getLocalSlot(instructions[i+1])
+			destSlot, okD := getAssignSlot(instructions[i+3])
+
+			if okA && okB && okD {
+				optimized = append(optimized, Instruction{
+					Op: OP_ADD_LOCAL_LOCAL_STORE,
+					Value: AddLocalLocalStoreInfo{
+						SlotA:    slotA,
+						SlotB:    slotB,
+						DestSlot: destSlot,
+					},
+					File:   instructions[i].File,
+					Line:   instructions[i].Line,
+					Column: instructions[i].Column,
+				})
+
+				oldToNew[i] = newIndex
+				oldToNew[i+1] = newIndex
+				oldToNew[i+2] = newIndex
+				oldToNew[i+3] = newIndex
+				i += 4
+				continue
+			}
+		}
+
+		optimized = append(optimized, instructions[i])
+		oldToNew[i] = newIndex
+		i++
+	}
+
+	oldToNew[len(instructions)] = len(optimized)
+	remapJumpTargets(optimized, oldToNew)
+	return optimized
+}
+
 func remapJumpTargets(instructions []Instruction, oldToNew []int) {
 	for i := range instructions {
 		switch instructions[i].Op {
+		case OP_ADD_LOCAL_LOCAL_STORE:
+
+		case OP_JUMP_LOCAL_GT_LOCAL:
+			info := instructions[i].Value.(JumpLocalGTLocalInfo)
+			if info.Target >= 0 && info.Target < len(oldToNew) {
+				info.Target = oldToNew[info.Target]
+			}
+			instructions[i].Value = info
+		case OP_CALL_DIRECT_SUB_CONST:
+
+		case OP_JUMP_LOCAL_GT_CONST:
+			info := instructions[i].Value.(JumpLocalGTConstInfo)
+
+			if info.Target >= 0 && info.Target < len(oldToNew) {
+				info.Target = oldToNew[info.Target]
+			}
+
+			instructions[i].Value = info
 		case OP_JUMP_MOD_LOCAL_CONST_NOT_ZERO:
 			info := instructions[i].Value.(JumpModLocalConstNotZeroInfo)
 
@@ -761,10 +1078,12 @@ func remapJumpTargets(instructions []Instruction, oldToNew []int) {
 
 			instructions[i].Value = info
 
-		case OP_JUMP, OP_JUMP_IF_FALSE:
+		case OP_JUMP, OP_JUMP_IF_FALSE, OP_JUMP_IF_TRUE:
 			target, ok := instructions[i].Value.(int)
 			if ok && target >= 0 && target < len(oldToNew) {
-				instructions[i].Value = oldToNew[target]
+				newTarget := oldToNew[target]
+				instructions[i].Value = newTarget
+				instructions[i].IntArg = newTarget
 			}
 
 		case OP_JUMP_LOCAL_GE_CONST:

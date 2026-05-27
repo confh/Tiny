@@ -50,11 +50,14 @@ const (
 
 	TOKEN_TYPEOF TokenType = "TYPEOF"
 	TOKEN_SPAWN  TokenType = "SPAWN"
+	TOKEN_ASYNC  TokenType = "ASYNC"
+	TOKEN_AWAIT  TokenType = "AWAIT"
 
 	TOKEN_EMBED      TokenType = "EMBED"
 	TOKEN_INSTANCEOF TokenType = "INSTANCEOF"
 
-	TOKEN_IOTA = "IOTA"
+	TOKEN_IOTA  TokenType = "IOTA"
+	TOKEN_DEFER TokenType = "DEFER"
 
 	TOKEN_BANG           TokenType = "!"
 	TOKEN_ASSIGN         TokenType = "="
@@ -90,8 +93,9 @@ const (
 	TOKEN_COLON    TokenType = ":"
 	TOKEN_PIPE     TokenType = "|"
 
-	TOKEN_DOT_DOT_DOT  TokenType = "..."
-	TOKEN_QUESTION_DOT TokenType = "?."
+	TOKEN_DOT_DOT_DOT       TokenType = "..."
+	TOKEN_QUESTION_DOT      TokenType = "?."
+	TOKEN_QUESTION_QUESTION TokenType = "??"
 )
 
 type Token struct {

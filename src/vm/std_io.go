@@ -45,14 +45,15 @@ var stdIOMetadata = StdModuleInfo{
 	},
 }
 
-var stdIOMethods = map[string]StdModuleFunc{
-	"println":  stdIOPrintln,
-	"print":    stdIOPrint,
-	"input":    stdIOInput,
-	"readLine": stdIOReadLine,
-}
+var stdIOMethods map[string]StdModuleFunc
 
 func init() {
+	stdIOMethods = map[string]StdModuleFunc{
+		"println":  stdIOPrintln,
+		"print":    stdIOPrint,
+		"input":    stdIOInput,
+		"readLine": stdIOReadLine,
+	}
 	registerStdModule(stdIOMetadata)
 }
 

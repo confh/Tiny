@@ -87,19 +87,20 @@ var stdObjectMetadata = StdModuleInfo{
 	},
 }
 
-var stdObjectMethods = map[string]StdModuleFunc{
-	"get":      objectGet,
-	"set":      objectSet,
-	"has":      objectHas,
-	"delete":   objectDelete,
-	"keys":     objectKeys,
-	"values":   objectValues,
-	"enteries": objectEnteries,
-	"length":   objectLength,
-	"clear":    objectClear,
-}
+var stdObjectMethods map[string]StdModuleFunc
 
 func init() {
+	stdObjectMethods = map[string]StdModuleFunc{
+		"get":      objectGet,
+		"set":      objectSet,
+		"has":      objectHas,
+		"delete":   objectDelete,
+		"keys":     objectKeys,
+		"values":   objectValues,
+		"enteries": objectEnteries,
+		"length":   objectLength,
+		"clear":    objectClear,
+	}
 	registerStdModule(stdObjectMetadata)
 }
 

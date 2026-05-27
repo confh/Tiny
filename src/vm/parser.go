@@ -74,6 +74,7 @@ func parseInterpolatedString(input string) Expr {
 		exprSource := input[start+2 : end]
 
 		lexer := NewLexer(exprSource, "")
+		lexer.EnableASI = false
 		parser := NewParser(lexer)
 		expr := parser.parseExpression()
 
@@ -103,6 +104,8 @@ type Parser struct {
 
 	current Token
 	next    Token
+
+	deferCountStack []int
 }
 
 func NewParser(lexer *Lexer) *Parser {
@@ -155,7 +158,9 @@ func (p *Parser) ParseProgram() Program {
 
 	for p.current.Type != TOKEN_EOF {
 		stmt := p.parseStatement()
-		statements = append(statements, stmt)
+		if stmt != nil {
+			statements = append(statements, stmt)
+		}
 	}
 
 	return Program{Statements: statements}
@@ -239,7 +244,7 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 
 		value := p.parseExpression()
 
-		p.expect(TOKEN_SEMI)
+		p.consumeTerminator()
 
 		switch target := left.(type) {
 		case IdentExpr:
@@ -283,7 +288,7 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 	case TOKEN_INCREMENT:
 		p.advance()
 
-		p.expect(TOKEN_SEMI)
+		p.consumeTerminator()
 		switch target := left.(type) {
 		case IdentExpr:
 			return IncrementStmt{
@@ -322,7 +327,7 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 	case TOKEN_DECREMENT:
 		p.advance()
 
-		p.expect(TOKEN_SEMI)
+		p.consumeTerminator()
 		switch target := left.(type) {
 		case IdentExpr:
 			return DecrementStmt{
@@ -358,7 +363,7 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 
 		value := p.parseExpression()
 
-		p.expect(TOKEN_SEMI)
+		p.consumeTerminator()
 
 		switch target := left.(type) {
 		case IdentExpr:
@@ -403,7 +408,7 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 
 		value := p.parseExpression()
 
-		p.expect(TOKEN_SEMI)
+		p.consumeTerminator()
 
 		switch target := left.(type) {
 		case IdentExpr:
@@ -448,7 +453,7 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 
 		value := p.parseExpression()
 
-		p.expect(TOKEN_SEMI)
+		p.consumeTerminator()
 
 		switch target := left.(type) {
 		case IdentExpr:
@@ -493,7 +498,7 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 
 		value := p.parseExpression()
 
-		p.expect(TOKEN_SEMI)
+		p.consumeTerminator()
 
 		switch target := left.(type) {
 		case IdentExpr:
@@ -534,7 +539,7 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 		}
 	}
 
-	p.expect(TOKEN_SEMI)
+	p.consumeTerminator()
 
 	return ExprStmt{
 		Value: left,
@@ -542,6 +547,18 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 }
 
 func (p *Parser) parseStatement() Stmt {
+	for p.current.Type == TOKEN_SEMI {
+		p.advance()
+	}
+
+	if p.current.Type == TOKEN_EOF || p.current.Type == TOKEN_RBRACE {
+		return nil
+	}
+
+	if p.current.Type == TOKEN_IDENT && p.current.Literal == "lock" && p.next.Type == TOKEN_LPAREN {
+		return p.parseLockStatement()
+	}
+
 	switch p.current.Type {
 	case TOKEN_IDENT, TOKEN_THIS:
 		return p.parsePossibleAssignmentStatement()
@@ -552,7 +569,9 @@ func (p *Parser) parseStatement() Stmt {
 	case TOKEN_CONST:
 		return p.parseConstStatement()
 	case TOKEN_FN:
-		return p.parseFunctionStatement()
+		return p.parseFunctionStatement(false)
+	case TOKEN_ASYNC:
+		return p.parseAsyncStmt()
 	case TOKEN_RETURN:
 		return p.parseReturnStatement()
 	case TOKEN_IF:
@@ -594,6 +613,14 @@ func (p *Parser) parseMatchStatement() Stmt {
 	hasDefault := false
 
 	for p.current.Type != TOKEN_RBRACE && p.current.Type != TOKEN_EOF {
+		for p.current.Type == TOKEN_SEMI {
+			p.advance()
+		}
+
+		if p.current.Type == TOKEN_RBRACE || p.current.Type == TOKEN_EOF {
+			break
+		}
+
 		// default case: _ { ... }
 		if p.current.Type == TOKEN_IDENT && p.current.Literal == "_" {
 			if hasDefault {
@@ -614,6 +641,10 @@ func (p *Parser) parseMatchStatement() Stmt {
 		}
 
 		caseValue := p.parseExpression()
+
+		for p.current.Type == TOKEN_SEMI {
+			p.advance()
+		}
 
 		for _, c := range cases {
 			if c.Value == caseValue {
@@ -655,7 +686,7 @@ func (p *Parser) parseExportStatement() Stmt {
 		return ExportStmt{Inner: p.parseLetStatement()}
 
 	case TOKEN_FN:
-		return ExportStmt{Inner: p.parseFunctionStatement()}
+		return ExportStmt{Inner: p.parseFunctionStatement(false)}
 
 	case TOKEN_CLASS:
 		return ExportStmt{Inner: p.parseClassStatement()}
@@ -677,6 +708,8 @@ func (p *Parser) parseExportStatement() Stmt {
 }
 
 func (p *Parser) parseTryCatchStatement() Stmt {
+	line := p.current.Line
+	column := p.current.Column
 	p.expect(TOKEN_TRY)
 
 	tryBody := p.parseBlock()
@@ -702,6 +735,9 @@ func (p *Parser) parseTryCatchStatement() Stmt {
 		TryBody:   tryBody,
 		ErrorName: errorName,
 		CatchBody: catchBody,
+		Line:      line,
+		Column:    column,
+		File:      p.current.File,
 	}
 
 	if p.current.Type == TOKEN_FINALLY {
@@ -714,21 +750,25 @@ func (p *Parser) parseTryCatchStatement() Stmt {
 }
 
 func (p *Parser) parseThrowStatement() Stmt {
+	line := p.current.Line
+	column := p.current.Column
 	p.expect(TOKEN_THROW)
 
 	value := p.parseExpression()
 
-	p.expect(TOKEN_SEMI)
+	p.consumeTerminator()
 
 	return ThrowStmt{
 		Value:  value,
-		Line:   p.current.Line,
-		Column: p.current.Column,
+		Line:   line,
+		Column: column,
 		File:   p.current.File,
 	}
 }
 
 func (p *Parser) parseForStatement() Stmt {
+	line := p.current.Line
+	column := p.current.Column
 	p.expect(TOKEN_FOR)
 
 	if p.current.Type == TOKEN_IDENT {
@@ -765,6 +805,9 @@ func (p *Parser) parseForStatement() Stmt {
 				IndexName: indexName,
 				Iterable:  iterable,
 				Body:      body,
+				Line:      line,
+				Column:    column,
+				File:      p.current.File,
 			}
 		}
 
@@ -813,8 +856,8 @@ func (p *Parser) parseForStatement() Stmt {
 		Condition: condition,
 		Update:    update,
 		Body:      body,
-		Line:      p.current.Line,
-		Column:    p.current.Column,
+		Line:      line,
+		Column:    column,
 		File:      p.current.File,
 	}
 }
@@ -992,14 +1035,14 @@ func (p *Parser) parseForUpdateStatement() Stmt {
 
 func (p *Parser) parseBreakStatement() Stmt {
 	p.expect(TOKEN_BREAK)
-	p.expect(TOKEN_SEMI)
+	p.consumeTerminator()
 
 	return BreakStmt{}
 }
 
 func (p *Parser) parseContinueStatement() Stmt {
 	p.expect(TOKEN_CONTINUE)
-	p.expect(TOKEN_SEMI)
+	p.consumeTerminator()
 
 	return ContinueStmt{}
 }
@@ -1017,6 +1060,39 @@ func (p *Parser) parseWhileStatement() Stmt {
 		Line:      p.current.Line,
 		Column:    p.current.Column,
 		File:      p.current.File,
+	}
+}
+
+func (p *Parser) parseLockStatement() Stmt {
+	file := p.current.File
+	line := p.current.Line
+	column := p.current.Column
+	p.expect(TOKEN_IDENT)
+
+	p.expect(TOKEN_LPAREN)
+
+	if p.current.Type != TOKEN_IDENT {
+		LangErrorAt(
+			ErrorSyntax,
+			p.current.File,
+			p.current.Line,
+			p.current.Column,
+			"expected identifier as lock subject in lock statement, got %s",
+			p.current.Type,
+		)
+	}
+	value := p.parseExpression()
+
+	p.expect(TOKEN_RPAREN)
+
+	block := p.parseBlock()
+
+	return LockStmt{
+		Mutex:  value,
+		Block:  block,
+		File:   file,
+		Line:   line,
+		Column: column,
 	}
 }
 
@@ -1056,7 +1132,10 @@ func (p *Parser) parseBlock() []Stmt {
 	statements := []Stmt{}
 
 	for p.current.Type != TOKEN_RBRACE && p.current.Type != TOKEN_EOF {
-		statements = append(statements, p.parseStatement())
+		stmt := p.parseStatement()
+		if stmt != nil {
+			statements = append(statements, stmt)
+		}
 	}
 
 	p.expect(TOKEN_RBRACE)
@@ -1102,7 +1181,7 @@ func (p *Parser) parseImportStatement() Stmt {
 			p.advance()
 		}
 
-		p.expect(TOKEN_SEMI)
+		p.consumeTerminator()
 
 		return ImportStmt{
 			Path:  moduleName,
@@ -1152,7 +1231,7 @@ func (p *Parser) parseImportStatement() Stmt {
 			)
 		}
 
-		p.expect(TOKEN_SEMI)
+		p.consumeTerminator()
 
 		return ImportStmt{
 			Path:   pluginPath,
@@ -1194,7 +1273,7 @@ func (p *Parser) parseImportStatement() Stmt {
 		p.advance()
 	}
 
-	p.expect(TOKEN_SEMI)
+	p.consumeTerminator()
 
 	return ImportStmt{
 		Path:   path,
@@ -1233,6 +1312,8 @@ func (p *Parser) parseFieldStatement() Stmt {
 	}
 
 	name := p.current.Literal
+	line := p.current.Line
+	column := p.current.Column
 	p.advance()
 
 	typeHint := p.parseOptionalTypeHint()
@@ -1241,7 +1322,7 @@ func (p *Parser) parseFieldStatement() Stmt {
 
 	value := p.parseExpression()
 
-	p.expect(TOKEN_SEMI)
+	p.consumeTerminator()
 
 	return FieldStmt{
 		Name:     name,
@@ -1250,12 +1331,14 @@ func (p *Parser) parseFieldStatement() Stmt {
 		Constant: constant,
 		Private:  private,
 		File:     p.current.File,
-		Line:     p.current.Line,
-		Column:   p.current.Column,
+		Line:     line,
+		Column:   column,
 	}
 }
 
 func (p *Parser) parseLetStatement() Stmt {
+	line := p.current.Line
+	column := p.current.Column
 	p.expect(TOKEN_LET)
 
 	if p.current.Type != TOKEN_IDENT {
@@ -1277,15 +1360,15 @@ func (p *Parser) parseLetStatement() Stmt {
 
 	value := p.parseExpression()
 
-	p.expect(TOKEN_SEMI)
+	p.consumeTerminator()
 
 	return VariableStmt{
 		Name:     name,
 		Value:    value,
 		Constant: false,
 		TypeHint: typeHint,
-		Line:     p.current.Line,
-		Column:   p.current.Column,
+		Line:     line,
+		Column:   column,
 		File:     p.current.File,
 	}
 }
@@ -1367,6 +1450,8 @@ func (p *Parser) parseDefaultParamValue() Value {
 }
 
 func (p *Parser) parseConstStatement() Stmt {
+	line := p.current.Line
+	column := p.current.Column
 	p.expect(TOKEN_CONST)
 
 	if p.current.Type != TOKEN_IDENT {
@@ -1388,20 +1473,22 @@ func (p *Parser) parseConstStatement() Stmt {
 
 	value := p.parseExpression()
 
-	p.expect(TOKEN_SEMI)
+	p.consumeTerminator()
 
 	return VariableStmt{
 		Name:     name,
 		Value:    value,
 		Constant: true,
 		TypeHint: typeHint,
-		Line:     p.current.Line,
-		Column:   p.current.Column,
+		Line:     line,
+		Column:   column,
 		File:     p.current.File,
 	}
 }
 
-func (p *Parser) parseFunctionStatement() Stmt {
+func (p *Parser) parseFunctionStatement(async bool) Stmt {
+	line := p.current.Line
+	column := p.current.Column
 	p.expect(TOKEN_FN)
 
 	if p.current.Type != TOKEN_IDENT {
@@ -1418,8 +1505,9 @@ func (p *Parser) parseFunctionStatement() Stmt {
 		Params:     params,
 		ReturnType: returnType,
 		Body:       body,
-		Line:       p.current.Line,
-		Column:     p.current.Column,
+		Async:      async,
+		Line:       line,
+		Column:     column,
 		File:       p.current.File,
 	}
 }
@@ -1442,6 +1530,14 @@ func (p *Parser) parseParameterList() []Param {
 	}
 
 	for {
+		for p.current.Type == TOKEN_SEMI {
+			p.advance()
+		}
+
+		if p.current.Type == TOKEN_RPAREN {
+			break
+		}
+
 		variadic := false
 		if p.current.Type == TOKEN_DOT_DOT_DOT {
 			p.expect(TOKEN_DOT_DOT_DOT)
@@ -1666,36 +1762,53 @@ func cloneDefaultValue(value Value) Value {
 }
 
 func (p *Parser) parseReturnStatement() Stmt {
+	line := p.current.Line
+	column := p.current.Column
 	p.expect(TOKEN_RETURN)
 
 	if p.current.Type == TOKEN_SEMI {
-		p.expect(TOKEN_SEMI)
+		p.consumeTerminator()
 
 		return ReturnStmt{
 			HasValue: false,
-			Line:     p.current.Line,
-			Column:   p.current.Column,
+			Line:     line,
+			Column:   column,
 			File:     p.current.File,
 		}
 	}
 
 	value := p.parseExpression()
 
-	p.expect(TOKEN_SEMI)
+	p.consumeTerminator()
 
 	return ReturnStmt{
 		Value:    value,
 		HasValue: true,
-		Line:     p.current.Line,
-		Column:   p.current.Column,
+		Line:     line,
+		Column:   column,
 		File:     p.current.File,
 	}
+}
+
+func (p *Parser) consumeTerminator() {
+	if p.current.Type == TOKEN_SEMI {
+		for p.current.Type == TOKEN_SEMI {
+			p.advance()
+		}
+		return
+	}
+
+	if p.current.Type == TOKEN_RBRACE || p.current.Type == TOKEN_EOF {
+		return
+	}
+
+	p.expect(TOKEN_SEMI)
 }
 
 func (p *Parser) parseExpressionStatement() Stmt {
 	value := p.parseExpression()
 
-	p.expect(TOKEN_SEMI)
+	p.consumeTerminator()
 
 	return ExprStmt{
 		Value: value,
@@ -1869,6 +1982,23 @@ func (p *Parser) parsePostfix() Expr {
 				Column: p.current.Column,
 			}
 
+		case TOKEN_QUESTION_QUESTION:
+			p.advance()
+
+			right := p.parseExpression()
+
+			file := p.current.File
+			line := p.current.Line
+			column := p.current.Column
+
+			return NullishCoalescingExpr{
+				Left:   expr,
+				Right:  right,
+				File:   file,
+				Line:   line,
+				Column: column,
+			}
+
 		case TOKEN_DOT, TOKEN_QUESTION_DOT:
 			safe := p.current.Type == TOKEN_QUESTION_DOT
 			p.advance()
@@ -1948,8 +2078,20 @@ func (p *Parser) parseArrayLiteral() Expr {
 	}
 
 	for {
+		for p.current.Type == TOKEN_SEMI {
+			p.advance()
+		}
+
+		if p.current.Type == TOKEN_RBRACKET {
+			break
+		}
+
 		element := p.parseExpression()
 		elements = append(elements, element)
+
+		for p.current.Type == TOKEN_SEMI {
+			p.advance()
+		}
 
 		if p.current.Type != TOKEN_COMMA {
 			break
@@ -1974,6 +2116,49 @@ func (p *Parser) parseObjectLiteral() Expr {
 	}
 
 	for {
+		if p.current.Type == TOKEN_DOT_DOT_DOT {
+			p.advance()
+			name := p.current.Literal
+			tokenType := p.current.Type
+			p.advance()
+
+			if tokenType != TOKEN_IDENT {
+				LangErrorAt(
+					ErrorSyntax,
+					p.current.File,
+					p.current.Line,
+					p.current.Column,
+					"expected object field name, got %s",
+					tokenType,
+				)
+			}
+
+			value := IdentExpr{
+				Name:   name,
+				File:   p.current.File,
+				Line:   p.current.Line,
+				Column: p.current.Column,
+			}
+
+			fields = append(fields, ObjectField{
+				Name:    name,
+				Value:   nil,
+				Copy:    value,
+				HasCopy: true,
+			})
+
+			if p.current.Type == TOKEN_SEMI {
+				p.advance()
+			}
+
+			if p.current.Type != TOKEN_COMMA {
+				break
+			}
+
+			p.advance()
+
+			continue
+		}
 		if p.current.Type != TOKEN_IDENT && p.current.Type != TOKEN_STRING {
 			LangErrorAt(
 				ErrorSyntax,
@@ -1985,16 +2170,45 @@ func (p *Parser) parseObjectLiteral() Expr {
 		}
 
 		name := p.current.Literal
+		tokenType := p.current.Type
 		p.advance()
 
-		p.expect(TOKEN_COLON)
+		if p.current.Type == TOKEN_COLON {
+			p.expect(TOKEN_COLON)
 
-		value := p.parseExpression()
+			value := p.parseExpression()
 
-		fields = append(fields, ObjectField{
-			Name:  name,
-			Value: value,
-		})
+			fields = append(fields, ObjectField{
+				Name:  name,
+				Value: value,
+			})
+		} else {
+			if tokenType != TOKEN_IDENT {
+				LangErrorAt(
+					ErrorSyntax,
+					p.current.File,
+					p.current.Line,
+					p.current.Column,
+					"expected object field name, got %s",
+					tokenType,
+				)
+			}
+			value := IdentExpr{
+				Name:   name,
+				File:   p.current.File,
+				Line:   p.current.Line,
+				Column: p.current.Column,
+			}
+
+			fields = append(fields, ObjectField{
+				Name:  name,
+				Value: value,
+			})
+		}
+
+		for p.current.Type == TOKEN_SEMI {
+			p.advance()
+		}
 
 		if p.current.Type != TOKEN_COMMA {
 			break
@@ -2009,6 +2223,11 @@ func (p *Parser) parseObjectLiteral() Expr {
 }
 
 func (p *Parser) parseFunctionSignatureAndBody() ([]Param, TypeHint, []Stmt) {
+	p.deferCountStack = append(p.deferCountStack, 0)
+	defer func() {
+		p.deferCountStack = p.deferCountStack[:len(p.deferCountStack)-1]
+	}()
+
 	p.expect(TOKEN_LPAREN)
 
 	params := p.parseParameterList()
@@ -2116,7 +2335,11 @@ func (p *Parser) parsePrimary() Expr {
 
 	case TOKEN_THIS:
 		p.advance()
-		return ThisExpr{}
+		return ThisExpr{
+			File:   p.current.File,
+			Line:   p.current.Line,
+			Column: p.current.Column,
+		}
 
 	case TOKEN_NULL:
 		p.advance()
@@ -2166,6 +2389,14 @@ func (p *Parser) parseEnumStatement() Stmt {
 	iotaEnum := false
 
 	for p.current.Type != TOKEN_RBRACE && p.current.Type != TOKEN_EOF {
+		for p.current.Type == TOKEN_SEMI {
+			p.advance()
+		}
+
+		if p.current.Type == TOKEN_RBRACE || p.current.Type == TOKEN_EOF {
+			break
+		}
+
 		if p.current.Type != TOKEN_IDENT {
 			LangErrorAt(
 				ErrorSyntax,
@@ -2241,6 +2472,10 @@ func (p *Parser) parseEnumStatement() Stmt {
 			})
 		}
 
+		for p.current.Type == TOKEN_SEMI {
+			p.advance()
+		}
+
 		if p.current.Type == TOKEN_COMMA {
 			p.advance()
 			continue
@@ -2277,6 +2512,12 @@ func (p *Parser) parseEnumStatement() Stmt {
 		Line:    enumLine,
 		Column:  enumColumn,
 	}
+}
+
+func (p *Parser) parseAsyncStmt() Stmt {
+	p.expect(TOKEN_ASYNC)
+
+	return p.parseFunctionStatement(true)
 }
 
 func (p *Parser) parseFunctionExpr() Expr {
@@ -2317,6 +2558,14 @@ func (p *Parser) parseClassStatement() Stmt {
 	fields := []FieldStmt{}
 
 	for p.current.Type != TOKEN_RBRACE {
+		for p.current.Type == TOKEN_SEMI {
+			p.advance()
+		}
+
+		if p.current.Type == TOKEN_RBRACE {
+			break
+		}
+
 		if p.current.Type == TOKEN_EOF {
 			LangErrorAt(
 				ErrorSyntax,
@@ -2353,24 +2602,31 @@ func (p *Parser) parseClassStatement() Stmt {
 			embeds = append(embeds, p.current.Literal)
 			p.advance()
 
-			p.expect(TOKEN_SEMI)
+			p.consumeTerminator()
 			continue
 		}
 
 		functionPrivate := false
 
 		if p.current.Type == TOKEN_PRIVATE {
-			p.expect(TOKEN_PRIVATE)
+			p.advance()
 			functionPrivate = true
 		} else if p.current.Type == TOKEN_PUBLIC {
-			p.expect(TOKEN_PUBLIC)
+			p.advance()
+		}
+
+		async := false
+
+		if p.current.Type == TOKEN_ASYNC {
+			p.advance()
+			async = true
 		}
 
 		if p.current.Type != TOKEN_FN {
 			LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "expected declared variable, method or embed in class")
 		}
 
-		method := p.parseFunctionStatement()
+		method := p.parseFunctionStatement(async)
 
 		fn, ok := method.(FunctionStmt)
 		if !ok {
@@ -2422,6 +2678,54 @@ func (p *Parser) parseUnary() Expr {
 		return TypeOfExpr{
 			Value: value,
 		}
+
+	case TOKEN_AWAIT:
+		p.advance()
+		expr := p.parsePostfix()
+		return AwaitExpr{
+			Task:   expr,
+			File:   p.current.File,
+			Line:   p.current.Line,
+			Column: p.current.Column,
+		}
+
+	case TOKEN_DEFER:
+		p.advance()
+
+		if len(p.deferCountStack) > 0 {
+			p.deferCountStack[len(p.deferCountStack)-1]++
+			if p.deferCountStack[len(p.deferCountStack)-1] > 1 {
+				LangErrorAt(
+					ErrorSyntax,
+					p.current.File,
+					p.current.Line,
+					p.current.Column,
+					"multiple defer statements are not permitted within the same function scope",
+				)
+			}
+		}
+
+		fn := p.parseUnary()
+
+		_, ok := fn.(FunctionExpr)
+		if !ok {
+			LangErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"expected function after defer, got %s",
+				p.current.Type,
+			)
+		}
+
+		return DeferExpr{
+			Function: fn,
+			File:     p.current.File,
+			Line:     p.current.Line,
+			Column:   p.current.Column,
+		}
+
 	case TOKEN_SPAWN:
 		p.advance()
 
@@ -2455,8 +2759,20 @@ func (p *Parser) parseArgumentList() []Expr {
 	}
 
 	for {
+		for p.current.Type == TOKEN_SEMI {
+			p.advance()
+		}
+
+		if p.current.Type == TOKEN_RPAREN {
+			break
+		}
+
 		arg := p.parseExpression()
 		args = append(args, arg)
+
+		for p.current.Type == TOKEN_SEMI {
+			p.advance()
+		}
 
 		if p.current.Type != TOKEN_COMMA {
 			break

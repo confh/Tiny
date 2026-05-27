@@ -37,13 +37,14 @@ var stdStringMetadata = StdModuleInfo{
 	},
 }
 
-var stdStringMethods = map[string]StdModuleFunc{
-	"newBuilder": stdStringNewBuilder,
-	"isDigit":    stdStringIsDigit,
-	"random":     stdStringRandom,
-}
+var stdStringMethods map[string]StdModuleFunc
 
 func init() {
+	stdStringMethods = map[string]StdModuleFunc{
+		"newBuilder": stdStringNewBuilder,
+		"isDigit":    stdStringIsDigit,
+		"random":     stdStringRandom,
+	}
 	registerStdModule(stdStringMetadata)
 }
 

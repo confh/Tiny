@@ -51,15 +51,16 @@ var stdPathMetadata = StdModuleInfo{
 	},
 }
 
-var stdPathMethods = map[string]StdModuleFunc{
-	"join":     pathJoin,
-	"baseName": pathBaseName,
-	"dirName":  pathDirName,
-	"extName":  pathExtName,
-	"cwd":      pathCwd,
-}
+var stdPathMethods map[string]StdModuleFunc
 
 func init() {
+	stdPathMethods = map[string]StdModuleFunc{
+		"join":     pathJoin,
+		"baseName": pathBaseName,
+		"dirName":  pathDirName,
+		"extName":  pathExtName,
+		"cwd":      pathCwd,
+	}
 	registerStdModule(stdPathMetadata)
 }
 

@@ -1,0 +1,10 @@
+import std "io";
+
+fn tester() {
+    defer fn() {
+        io.println("deferred");
+    };
+    io.println("after defer");
+}
+
+tester();

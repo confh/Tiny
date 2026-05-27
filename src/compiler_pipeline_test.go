@@ -219,7 +219,7 @@ func TestTinyPipelineTypeHintErrors(t *testing.T) {
 func TestTinyPipelineBytecodeRoundTrip(t *testing.T) {
 	mainInstructions, functions, classes := compileTinyFile(t, fixturePath("arithmetic.tiny"))
 
-	data := bytecode.SaveBytecodeToBytes(mainInstructions, functions, classes)
+	data := bytecode.SaveBytecodeToBytes(mainInstructions, functions, classes, false)
 	loadedMain, loadedFunctions, loadedClasses := bytecode.LoadBytecodeFromBytes(data)
 
 	out := requireTinySuccess(t, runTinyBytecode(t, loadedMain, loadedFunctions, loadedClasses))
@@ -227,6 +227,15 @@ func TestTinyPipelineBytecodeRoundTrip(t *testing.T) {
 	const want = "7\nhello Tiny v1\nstring\n"
 	if out != want {
 		t.Fatalf("unexpected output after bytecode round trip:\nwant:\n%q\ngot:\n%q", want, out)
+	}
+}
+
+func TestTinyPipelineDefer(t *testing.T) {
+	out := requireTinySuccess(t, runTinyFile(t, fixturePath("defer.tiny")))
+
+	const want = "after defer\ndeferred\n"
+	if out != want {
+		t.Fatalf("unexpected output:\nwant:\n%q\ngot:\n%q", want, out)
 	}
 }
 

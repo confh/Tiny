@@ -111,6 +111,9 @@ type ForInStmt struct {
 	IndexName string
 	Iterable  Expr
 	Body      []Stmt
+	File      string
+	Line      int
+	Column    int
 }
 
 func (s ForInStmt) stmtNode() {}
@@ -175,6 +178,16 @@ type IfStmt struct {
 
 func (s IfStmt) stmtNode() {}
 
+type LockStmt struct {
+	Mutex  Expr
+	Block  []Stmt
+	File   string
+	Line   int
+	Column int
+}
+
+func (s LockStmt) stmtNode() {}
+
 type StringExpr struct {
 	Value string
 }
@@ -216,7 +229,29 @@ type SpawnExpr struct {
 
 func (e SpawnExpr) exprNode() {}
 
-type ThisExpr struct{}
+type AwaitExpr struct {
+	Task   Expr
+	File   string
+	Line   int
+	Column int
+}
+
+func (e AwaitExpr) exprNode() {}
+
+type DeferExpr struct {
+	Function Expr
+	File     string
+	Line     int
+	Column   int
+}
+
+func (e DeferExpr) exprNode() {}
+
+type ThisExpr struct {
+	File   string
+	Line   int
+	Column int
+}
 
 func (e ThisExpr) exprNode() {}
 
@@ -274,6 +309,9 @@ func (e UnaryExpr) exprNode() {}
 type ObjectField struct {
 	Name  string
 	Value Expr
+
+	Copy    IdentExpr
+	HasCopy bool
 }
 
 type ObjectExpr struct {
@@ -292,6 +330,16 @@ type PropertyExpr struct {
 }
 
 func (e PropertyExpr) exprNode() {}
+
+type NullishCoalescingExpr struct {
+	Left   Expr
+	Right  Expr
+	File   string
+	Line   int
+	Column int
+}
+
+func (e NullishCoalescingExpr) exprNode() {}
 
 type NullExpr struct{}
 
@@ -340,6 +388,7 @@ type FunctionStmt struct {
 	Params     []Param
 	ReturnType TypeHint
 	Body       []Stmt
+	Async      bool
 	Private    bool
 	File       string
 	Line       int

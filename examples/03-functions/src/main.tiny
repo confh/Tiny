@@ -1,33 +1,33 @@
-import std "io";
-import std "json";
+import std "io"
+import std "json"
 
 fn add(a: number, b: number): number {
-    return a + b;
+    return a + b
 }
 
 fn greet(name, prefix = "Hello") {
-    return `${prefix}, ${name}`;
+    return `${prefix}, ${name}`
 }
 
 fn apply(value, callback) {
-    return callback(value);
+    return callback(value)
 }
 
 fn makeCounter(start) {
-    let current = start;
-    const step = 1;
+    let current = start
+    const step = 1
 
     return fn() {
-        current = current + step;
-        return current;
-    };
+        current = current + step
+        return current
+    }
 }
 
 let double = fn(value) {
-    return value * 2;
-};
+    return value * 2
+}
 
-let next = makeCounter(10);
+let next = makeCounter(10)
 
 let output = {
     add: add(2, 3),
@@ -36,6 +36,6 @@ let output = {
     callbackResult: apply(7, double),
     firstCounterValue: next(),
     secondCounterValue: next()
-};
+}
 
-io.println(json.pretty(output));
+io.println(json.pretty(output))

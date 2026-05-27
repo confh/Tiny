@@ -1,0 +1,17 @@
+import std "io"
+
+fn runSimulation() {
+    io.println("Opening resource...")
+    
+    // Schedule cleanup to run when this function returns
+    defer fn() {
+        io.println("Cleanup: Closing resource.")
+    }
+
+    io.println("Doing some work with the resource...")
+    io.println("Function body finished.")
+}
+
+io.println("--- Defer Example ---")
+runSimulation()
+io.println("Back in main scope.")

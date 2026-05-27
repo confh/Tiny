@@ -1,26 +1,26 @@
-import std "error";
-import std "io";
-import std "json";
+import std "error"
+import std "io"
+import std "json"
 
 let input = {
     name: "Tiny",
     enabled: true
-};
+}
 
 try {
     if typeof input["path"] == "undefined" {
-        throw error.new("ValidationError", "path is required");
+        throw error.new("ValidationError", "path is required")
     }
 
-    io.println("input is valid");
+    io.println("input is valid")
 } catch err {
     io.println(json.pretty({
         caught: true,
         kind: err.kind,
         message: err.message
-    }));
+    }))
 } finally {
-    io.println("program after try and catch");
+    io.println("program after try and catch")
 }
 
-io.println("program continued after catch");
+io.println("program continued after catch")

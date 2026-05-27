@@ -1,5 +1,5 @@
-import std "io";
-import std "json";
+import std "io"
+import std "json"
 
 enum State {
     Small,
@@ -7,57 +7,57 @@ enum State {
     Large
 }
 
-let values = [1, 2, 3, 4, 5, 6, 7];
-let evenValues = [];
-let labels = [];
-let index = 0;
-const step = 1;
+let values = [1, 2, 3, 4, 5, 6, 7]
+let evenValues = []
+let labels = []
+let index = 0
+const step = 1
 
 while index < values.length() {
-    const value = values.get(index);
-    index = index + step;
+    const value = values.get(index)
+    index = index + step
 
     if value == 5 {
-        continue;
+        continue
     }
 
     if value > 6 {
-        break;
+        break
     }
 
     if value % 2 == 0 {
-        evenValues.push(value);
+        evenValues.push(value)
     }
 }
 
 for let i = 0; i < values.length(); i = i + step {
-    const value = values.get(i);
-    const label = value < 4 ? "low" : "high";
-    labels.push(label);
+    const value = values.get(i)
+    const label = value < 4 ? "low" : "high"
+    labels.push(label)
 }
 
-let states = [];
+let states = []
 
 for value in values {
-    let state = State.Small;
+    let state = State.Small
 
     if value >= 3 and value <= 5 {
-        state = State.Medium;
+        state = State.Medium
     }
 
     if value > 5 {
-        state = State.Large;
+        state = State.Large
     }
 
     match state {
         "Small" {
-            states.push("small");
+            states.push("small")
         }
         "Medium" {
-            states.push("medium");
+            states.push("medium")
         }
         _ {
-            states.push("large");
+            states.push("large")
         }
     }
 }
@@ -66,4 +66,4 @@ io.println(json.pretty({
     evenValues: evenValues,
     labels: labels,
     states: states
-}));
+}))

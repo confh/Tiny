@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	. "language.com/src/tinyerrors"
 )
@@ -33,6 +34,18 @@ type ObjectValue map[Value]Value
 
 type NativeTaskValue struct {
 	Done chan TaskResult
+}
+
+type NativeMutexValue struct {
+	mu sync.Mutex
+}
+
+func (this *NativeMutexValue) Lock() {
+	this.mu.Lock()
+}
+
+func (this *NativeMutexValue) Unlock() {
+	this.mu.Unlock()
 }
 
 type TaskResult struct {
@@ -59,6 +72,7 @@ type FunctionValue struct {
 	ID       int
 	Name     string
 	Captures map[int]*Cell
+	Async    bool
 }
 
 type NativeServerValue struct {
@@ -318,7 +332,7 @@ func TypeName(value Value) string {
 		return "undefined"
 	case ObjectValue:
 		if className, ok := v["__class"].(string); ok {
-			return className
+			return "class::" + className
 		}
 
 		return "object"
@@ -336,6 +350,8 @@ func TypeName(value Value) string {
 		return "tcp server"
 	case *NativeTcpConnectionValue:
 		return "tcp connection"
+	case *NativeMutexValue:
+		return "mutex"
 	case *NativeProcessValue:
 		return "process"
 	case ErrorValue:
@@ -568,6 +584,8 @@ func valueToString(value Value) string {
 		return "<app " + v.Name + ">"
 	case *NativeTaskValue:
 		return "<task>"
+	case *NativeMutexValue:
+		return "<mutex>"
 	case NamespaceValue:
 		return "<namespace " + v.Name + ">"
 	case *NamespaceValue:

@@ -16,12 +16,12 @@ var stdErrorMetadata = StdModuleInfo{
 	},
 }
 
-// Error module function dispatch
-var stdErrorMethods = map[string]StdModuleFunc{
-	"new": stdErrorNew,
-}
+var stdErrorMethods map[string]StdModuleFunc
 
 func init() {
+	stdErrorMethods = map[string]StdModuleFunc{
+		"new": stdErrorNew,
+	}
 	registerStdModule(stdErrorMetadata)
 }
 

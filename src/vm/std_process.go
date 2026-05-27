@@ -96,21 +96,22 @@ var stdProcessMetadata = StdModuleInfo{
 	},
 }
 
-var stdProcessMethods = map[string]StdModuleFunc{
-	"args":     processArgs,
-	"exit":     processExit,
-	"close":    processClose,
-	"cwd":      processCwd,
-	"getEnv":   processGetEnv,
-	"setEnv":   processSetEnv,
-	"unsetEnv": processUnsetEnv,
-	"halt":     processHalt,
-	"run":      processRun,
-	"shell":    processShell,
-	"start":    processStart,
-}
+var stdProcessMethods map[string]StdModuleFunc
 
 func init() {
+	stdProcessMethods = map[string]StdModuleFunc{
+		"args":     processArgs,
+		"exit":     processExit,
+		"close":    processClose,
+		"cwd":      processCwd,
+		"getEnv":   processGetEnv,
+		"setEnv":   processSetEnv,
+		"unsetEnv": processUnsetEnv,
+		"halt":     processHalt,
+		"run":      processRun,
+		"shell":    processShell,
+		"start":    processStart,
+	}
 	registerStdModule(stdProcessMetadata)
 }
 

@@ -2,6 +2,7 @@ package vm
 
 import (
 	"fmt"
+	"maps"
 	"math"
 	"net/http"
 	"sort"
@@ -29,6 +30,11 @@ type TryHandler struct {
 	FrameDepth int
 }
 
+type DeferHandler struct {
+	Function   FunctionValue
+	FrameDepth int
+}
+
 type Frame struct {
 	function     Function
 	ip           int
@@ -48,7 +54,7 @@ type VM struct {
 	mainInstructions []Instruction
 	functions        map[string]Function
 	classes          map[string]Class
-	framePool        []Frame
+	framePool        []*Frame
 	functionList     []Function
 
 	nativeFrames []NativeCallFrame
@@ -64,7 +70,8 @@ type VM struct {
 
 	cliArgs []string
 
-	tryHandlers []TryHandler
+	tryHandlers   []TryHandler
+	deferHandlers []DeferHandler
 
 	mu sync.Mutex
 
@@ -74,7 +81,7 @@ type VM struct {
 	globals         map[string]Value
 	globalConstants map[string]bool
 
-	frames []Frame
+	frames []*Frame
 }
 
 func intToString(n int) string {
@@ -201,7 +208,8 @@ func NewVM(mainInstructions []Instruction, functions map[string]Function, classe
 		globalTypes:      map[string]TypeHint{},
 		top:              0,
 		stack:            make([]Value, 1024),
-		framePool:        make([]Frame, 0, 1024),
+		framePool:        make([]*Frame, 0, 1024),
+		frames:           []*Frame{},
 	}
 }
 
@@ -285,13 +293,17 @@ func (vm *VM) SetCLIArgs(args []string) {
 	vm.cliArgs = args
 }
 
-func (vm *VM) getFrame(fn Function) Frame {
-	var frame Frame
+func (vm *VM) getFrame(fn Function) *Frame {
+	var frame *Frame
 
 	if len(vm.framePool) > 0 {
 		last := len(vm.framePool) - 1
 		frame = vm.framePool[last]
 		vm.framePool = vm.framePool[:last]
+	}
+
+	if frame == nil {
+		frame = &Frame{}
 	}
 
 	if cap(frame.locals) < fn.LocalCount {
@@ -333,7 +345,7 @@ func (vm *VM) getFrame(fn Function) Frame {
 	return frame
 }
 
-func (vm *VM) releaseFrame(frame Frame) {
+func (vm *VM) releaseFrame(frame *Frame) {
 	if frame.hasEscapedLocals {
 		return
 	}
@@ -365,8 +377,8 @@ func (vm *VM) CloneForTask() *VM {
 		functionList:     vm.functionList,
 
 		stack:       make([]Value, 256),
-		framePool:   make([]Frame, 0, 256),
-		frames:      []Frame{},
+		framePool:   make([]*Frame, 0, 256),
+		frames:      []*Frame{},
 		tryHandlers: []TryHandler{},
 
 		globals:         vm.globals,
@@ -970,7 +982,6 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 	expected := len(fn.Params)
 	isVariadic := expected > 0 && fn.Params[expected-1].Variadic
 
-	// Defaults are easier through the old path, except variadic should not use defaults.
 	if fn.HasDefaults && !isVariadic {
 		args := vm.popArgs(argCount)
 		args = vm.applyDefaultArgs(fn, args, 0, callableName)
@@ -1114,8 +1125,277 @@ func isNullish(value Value) bool {
 	}
 }
 
+func (vm *VM) throwValue(value Value) {
+	errorObject := makeErrorObject(value)
+
+	if len(vm.tryHandlers) == 0 {
+		message := valueToString(errorObject["message"])
+		kind := valueToString(errorObject["kind"])
+
+		trace := vm.stackTrace()
+
+		if len(vm.deferHandlers) > 0 {
+			currentDepth := len(vm.frames)
+
+			for i := len(vm.deferHandlers) - 1; i >= 0; i-- {
+				handler := vm.deferHandlers[i]
+
+				if handler.FrameDepth < currentDepth {
+					break
+				}
+				vm.deferHandlers = vm.deferHandlers[:i]
+
+				vm.callFunctionValue(handler.Function, nil)
+			}
+		}
+
+		panic(LangErrorType{
+			Kind:    ErrorKind(kind),
+			Message: message + "\n\nStack trace:\n" + trace,
+		})
+	}
+
+	handler := vm.tryHandlers[len(vm.tryHandlers)-1]
+	vm.tryHandlers = vm.tryHandlers[:len(vm.tryHandlers)-1]
+
+	for len(vm.frames) > handler.FrameDepth {
+		vm.frames = vm.frames[:len(vm.frames)-1]
+	}
+
+	if handler.IsLocal {
+		if handler.FrameDepth == 0 {
+			vm.fatalError(ErrorInternal, "local catch handler has no frame")
+		}
+
+		frame := vm.frames[handler.FrameDepth-1]
+
+		if handler.Slot < 0 || handler.Slot >= len(frame.locals) {
+			vm.fatalError(ErrorInternal, "catch local slot out of range")
+		}
+
+		setCellValue(frame.locals[handler.Slot], errorObject)
+		frame.constants[handler.Slot] = false
+	} else {
+		vm.globals[handler.Name] = errorObject
+		vm.globalConstants[handler.Name] = false
+	}
+
+	if handler.FrameDepth == 0 {
+		vm.ip = handler.CatchIP
+	} else {
+		vm.frames[handler.FrameDepth-1].ip = handler.CatchIP
+	}
+}
+
+func makeErrorObject(value Value) ObjectValue {
+	switch err := value.(type) {
+	case ErrorValue:
+		return ObjectValue{
+			"kind":    err.Kind,
+			"message": err.Message,
+		}
+
+	case *ErrorValue:
+		return ObjectValue{
+			"kind":    err.Kind,
+			"message": err.Message,
+		}
+
+	case ObjectValue:
+		return err
+
+	case string:
+		return ObjectValue{
+			"kind":    "Error",
+			"message": err,
+		}
+
+	default:
+		return ObjectValue{
+			"kind":    "Error",
+			"message": valueToString(value),
+		}
+	}
+}
+
+func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []Value) {
+	fn, ok := vm.functions[fnValue.Name]
+	if !ok {
+		vm.fatalError(ErrorName, "undefined function: %s", fnValue.Name)
+	}
+
+	expected := len(fn.Params)
+	isVariadic := expected > 0 && fn.Params[expected-1].Variadic
+
+	if isVariadic {
+		minArgs := expected - 1
+
+		if len(args) < minArgs {
+			vm.runtimeError(
+				ErrorRuntime,
+				"function %s expects at least %d arguments, got %d",
+				fn.Name,
+				minArgs,
+				len(args),
+			)
+		}
+	} else {
+		if fn.HasDefaults {
+			args = vm.applyDefaultArgs(fn, args, 0, fn.Name)
+		} else if len(args) != expected {
+			vm.runtimeError(
+				ErrorRuntime,
+				"function %s expects %d arguments, gosst %d",
+				fn.Name,
+				expected,
+				len(args),
+			)
+		}
+	}
+
+	frame := vm.getFrame(fn)
+
+	if len(fnValue.Captures) > 0 {
+		frame.hasEscapedLocals = true
+	}
+
+	for slot, cell := range fnValue.Captures {
+		if slot < 0 || slot >= len(frame.locals) {
+			vm.fatalError(ErrorInternal, "capture slot out of range in function value: %d", slot)
+		}
+
+		frame.locals[slot] = cell
+	}
+
+	if isVariadic {
+		fixedCount := expected - 1
+
+		for i := 0; i < fixedCount; i++ {
+			setCellValue(frame.locals[i], args[i])
+			frame.constants[i] = false
+		}
+
+		rest := &ArrayValue{
+			Elements: make([]Value, 0, len(args)-fixedCount),
+		}
+
+		for i := fixedCount; i < len(args); i++ {
+			rest.Elements = append(rest.Elements, args[i])
+		}
+
+		setCellValue(frame.locals[fixedCount], rest)
+		frame.constants[fixedCount] = false
+	} else {
+		for i, arg := range args {
+			param := fn.Params[i]
+
+			if fn.HasTypeHints && !param.TypeHint.IsEmpty() && !CheckTypeHint(arg, param.TypeHint) {
+				vm.fatalError(
+					ErrorType,
+					"function %s parameter %s expected %s, got %s",
+					fn.Name,
+					param.Name,
+					param.TypeHint.String(),
+					TypeName(arg),
+				)
+			}
+
+			setCellValue(frame.locals[i], arg)
+			frame.constants[i] = false
+			frame.localTypes[i] = param.TypeHint
+		}
+	}
+
+	vm.frames = append(vm.frames, frame)
+}
+
+func (vm *VM) runFunctionToCompletion(fn Function, args []Value) Value {
+	vm.callFunctionDirect(fn, args)
+
+	targetDepth := len(vm.frames) - 1
+
+	for len(vm.frames) > targetDepth {
+		if vm.step() {
+			break
+		}
+	}
+
+	return vm.pop()
+}
+
+func (vm *VM) runFrameToCompletion(frame *Frame) Value {
+	vm.frames = append(vm.frames, frame)
+
+	targetDepth := len(vm.frames) - 1
+
+	for len(vm.frames) > targetDepth {
+		if vm.step() {
+			break
+		}
+	}
+
+	return vm.pop()
+}
+
+func (vm *VM) callFunctionDirect(fn Function, args []Value) {
+	args = vm.applyDefaultArgs(fn, args, 0, "function "+fn.Name)
+
+	frame := vm.getFrame(fn)
+
+	for i, arg := range args {
+		param := fn.Params[i]
+
+		if fn.HasTypeHints && !param.TypeHint.IsEmpty() && !CheckTypeHint(arg, param.TypeHint) {
+			vm.fatalError(
+				ErrorType,
+				"function %s parameter %s expected %s, got %s",
+				fn.Name,
+				param.Name,
+				param.TypeHint.String(),
+				TypeName(arg),
+			)
+		}
+
+		frame.locals[i].Value = arg
+		frame.constants[i] = false
+		frame.localTypes[i] = param.TypeHint
+	}
+
+	vm.frames = append(vm.frames, frame)
+}
+
+func (vm *VM) callFunctionValue(fnValue FunctionValue, args []Value) Value {
+	frameDepthBefore := len(vm.frames)
+	stackDepthBefore := vm.top
+
+	vm.callFunctionValueWithArgs(fnValue, args)
+
+	for len(vm.frames) > frameDepthBefore {
+		if vm.step() {
+			vm.fatalError(ErrorRuntime, "program halted while running function value")
+		}
+	}
+
+	if vm.top <= stackDepthBefore {
+		return UndefinedValue{}
+	}
+
+	return vm.pop()
+
+}
+
+func (vm *VM) Run() {
+	for {
+		if vm.step() {
+			return
+		}
+	}
+}
+
 func (vm *VM) step() bool {
+	vm.lastInstructionIndex = vm.currentIP()
 	instr := vm.fetchInstruction()
+	vm.lastInstruction = instr
 
 	if len(vm.frames) > 0 {
 		vm.lastFunctionName = vm.frames[len(vm.frames)-1].function.Name
@@ -1124,10 +1404,110 @@ func (vm *VM) step() bool {
 	}
 
 	switch instr.Op {
+	case OP_ADD_LOCAL_LOCAL_STORE:
+		info := instr.Value.(AddLocalLocalStoreInfo)
+		frame := vm.frames[len(vm.frames)-1]
+
+		valA := frame.locals[info.SlotA]
+		valB := frame.locals[info.SlotB]
+
+		if valA.IsInt && valB.IsInt {
+			frame.locals[info.DestSlot].Int = valA.Int + valB.Int
+			frame.locals[info.DestSlot].IsInt = true
+		} else {
+			vm.fatalError(ErrorType, "Optimized addition expects integers")
+		}
+	case OP_JUMP_LOCAL_GT_LOCAL:
+		info := instr.Value.(JumpLocalGTLocalInfo)
+		frame := vm.frames[len(vm.frames)-1]
+
+		valA := frame.locals[info.SlotA]
+		valB := frame.locals[info.SlotB]
+
+		if valA.IsInt && valB.IsInt {
+			if valA.Int > valB.Int {
+				frame.ip = info.Target
+			}
+		} else {
+			vm.fatalError(ErrorType, "Loop condition expects integers")
+		}
+	case OP_CALL_DIRECT_SUB_CONST:
+		info := instr.Value.(CallDirectSubConstInfo)
+
+		currentFrame := vm.frames[len(vm.frames)-1]
+		if info.Slot < 0 || info.Slot >= len(currentFrame.locals) {
+			vm.fatalError(ErrorInternal, "local slot out of range in OP_CALL_DIRECT_SUB_CONST")
+		}
+		cell := currentFrame.locals[info.Slot]
+		if cell == nil || !cell.IsInt {
+			vm.fatalError(ErrorType, "expected int in local slot for math optimization")
+		}
+
+		finalArgValue := cell.Int - info.SubValue
+
+		fn, exists := vm.functions[info.FnName]
+		if !exists {
+			vm.fatalError(ErrorRuntime, "undefined function: %s", info.FnName)
+		}
+
+		newFrame := vm.getFrame(fn)
+
+		if len(newFrame.locals) > 0 {
+			setCellValue(newFrame.locals[0], finalArgValue)
+			newFrame.constants[0] = false
+		}
+
+		vm.frames = append(vm.frames, newFrame)
+
+		return false
+
+	case OP_JUMP_LOCAL_GT_CONST:
+		info := instr.Value.(JumpLocalGTConstInfo)
+		frame := vm.frames[len(vm.frames)-1]
+		if info.Slot < 0 || info.Slot >= len(frame.locals) {
+			vm.fatalError(ErrorInternal, "local slot out of range in OP_JUMP_LOCAL_GT_CONST")
+		}
+		cell := frame.locals[info.Slot]
+		if cell == nil {
+			vm.fatalError(ErrorInternal, "local cell is nil in OP_JUMP_LOCAL_GT_CONST")
+		}
+
+		if cell.IsInt {
+			if cell.Int > info.Value {
+				if len(vm.frames) == 0 {
+					vm.ip = info.Target
+				} else {
+					vm.frames[len(vm.frames)-1].ip = info.Target
+				}
+			}
+			break
+		}
+
+		shouldJump := false
+		switch v := cellValue(cell).(type) {
+		case int:
+			shouldJump = v > info.Value
+		case int64:
+			shouldJump = v > int64(info.Value)
+		case float64:
+			shouldJump = v > float64(info.Value)
+		case float32:
+			shouldJump = v > float32(info.Value)
+		default:
+			vm.fatalError(ErrorType, "cannot compare %s and number", TypeName(cellValue(cell)))
+		}
+
+		if shouldJump {
+			if len(vm.frames) == 0 {
+				vm.ip = info.Target
+			} else {
+				vm.frames[len(vm.frames)-1].ip = info.Target
+			}
+		}
 	case OP_JUMP_LOCAL_GE_LOCAL:
 		info := instr.Value.(JumpLocalGELocalInfo)
 
-		frame := &vm.frames[len(vm.frames)-1]
+		frame := vm.frames[len(vm.frames)-1]
 
 		leftCell := frame.locals[info.LeftSlot]
 		rightCell := frame.locals[info.RightSlot]
@@ -1187,7 +1567,7 @@ func (vm *VM) step() bool {
 	case OP_JUMP_MOD_LOCAL_LOCAL_NOT_ZERO:
 		info := instr.Value.(JumpModLocalLocalNotZeroInfo)
 
-		frame := &vm.frames[len(vm.frames)-1]
+		frame := vm.frames[len(vm.frames)-1]
 
 		leftCell := frame.locals[info.LeftSlot]
 		rightCell := frame.locals[info.RightSlot]
@@ -1244,7 +1624,7 @@ func (vm *VM) step() bool {
 	case OP_JUMP_MOD_LOCAL_CONST_NOT_ZERO:
 		info := instr.Value.(JumpModLocalConstNotZeroInfo)
 
-		frame := &vm.frames[len(vm.frames)-1]
+		frame := vm.frames[len(vm.frames)-1]
 
 		if info.LeftSlot < 0 || info.LeftSlot >= len(frame.locals) {
 			vm.fatalError(ErrorInternal, "local slot out of range in OP_JUMP_MOD_LOCAL_CONST_NOT_ZERO")
@@ -1285,7 +1665,7 @@ func (vm *VM) step() bool {
 	case OP_ADD_ASSIGN_LOCAL:
 		info := instr.Value.(AssignLocalInfo)
 
-		frame := &vm.frames[len(vm.frames)-1]
+		frame := vm.frames[len(vm.frames)-1]
 
 		if info.TargetSlot < 0 || info.TargetSlot >= len(frame.locals) {
 			vm.fatalError(ErrorInternal, "target local slot out of range in OP_ADD_ASSIGN_LOCAL")
@@ -1379,7 +1759,7 @@ func (vm *VM) step() bool {
 	case OP_SUB_ASSIGN_LOCAL:
 		info := instr.Value.(AssignLocalInfo)
 
-		frame := &vm.frames[len(vm.frames)-1]
+		frame := vm.frames[len(vm.frames)-1]
 
 		if info.TargetSlot < 0 || info.TargetSlot >= len(frame.locals) {
 			vm.fatalError(ErrorInternal, "target local slot out of range in OP_SUB_ASSIGN_LOCAL")
@@ -1470,7 +1850,7 @@ func (vm *VM) step() bool {
 	case OP_JUMP_LOCAL_GE_CONST:
 		info := instr.Value.(JumpLocalGEConstInfo)
 
-		frame := &vm.frames[len(vm.frames)-1]
+		frame := vm.frames[len(vm.frames)-1]
 
 		if info.Slot < 0 || info.Slot >= len(frame.locals) {
 			vm.fatalError(ErrorInternal, "local slot out of range in OP_JUMP_LOCAL_GE_CONST")
@@ -1520,7 +1900,7 @@ func (vm *VM) step() bool {
 		}
 
 	case OP_STRING_JOIN:
-		count := instr.Value.(int)
+		count := instr.IntArg
 
 		if vm.top < count {
 			vm.handleUnderflow()
@@ -1562,7 +1942,36 @@ func (vm *VM) step() bool {
 			}
 		}
 
-		vm.callFunctionDirectFromStack(fn, info.ArgCount, "function "+info.Name)
+		if fn.Async {
+			args := vm.popArgs(info.ArgCount)
+			task := &NativeTaskValue{
+				Done: make(chan TaskResult, 1),
+			}
+
+			taskVM := vm.CloneForTask()
+
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						task.Done <- TaskResult{
+							Error: r,
+						}
+					}
+				}()
+
+				result := taskVM.runFunctionToCompletion(fn, args)
+
+				task.Done <- TaskResult{
+					Value: result,
+				}
+			}()
+
+			vm.push(task)
+		} else {
+			vm.callFunctionDirectFromStack(fn, info.ArgCount, "function "+info.Name)
+		}
+
+		return false
 
 	case OP_OBJECT_IN:
 		keyValue := vm.pop()
@@ -1591,6 +2000,69 @@ func (vm *VM) step() bool {
 		}
 
 		vm.push(vm.isInstanceOf(objectValue, className))
+
+	case OP_AWAIT:
+		value := vm.pop()
+
+		task, ok := value.(*NativeTaskValue)
+
+		if !ok {
+			vm.push(value)
+			break
+		}
+
+		result := <-task.Done
+
+		if result.Error != nil {
+			panic(result.Error)
+		}
+
+		vm.push(result.Value)
+
+	case OP_LOCK_MUTEX:
+		value := vm.pop()
+
+		mutex, ok := value.(*NativeMutexValue)
+		if !ok {
+			vm.fatalError(ErrorType, "lock mutex expects mutex, got %s", TypeName(value))
+		}
+
+		mutex.Lock()
+
+		vm.push(UndefinedValue{})
+
+	case OP_UNLOCK_MUTEX:
+		value := vm.pop()
+
+		mutex, ok := value.(*NativeMutexValue)
+		if !ok {
+			vm.fatalError(ErrorType, "unlock mutex expects mutex, got %s", TypeName(value))
+		}
+
+		mutex.Unlock()
+
+		vm.push(UndefinedValue{})
+
+	case OP_DEFER:
+		value := vm.pop()
+
+		fn, ok := value.(FunctionValue)
+		if !ok {
+			vm.fatalError(ErrorType, "defer expects function, got %s", TypeName(value))
+		}
+
+		for _, handler := range vm.deferHandlers {
+			if handler.FrameDepth == len(vm.frames) {
+				vm.fatalError(ErrorRuntime, "multiple defer statements are not permitted within the same function scope")
+			}
+		}
+
+		vm.deferHandlers = append(vm.deferHandlers, DeferHandler{
+			Function:   fn,
+			FrameDepth: len(vm.frames),
+		})
+
+		vm.push(UndefinedValue{})
 
 	case OP_SPAWN:
 		value := vm.pop()
@@ -1690,7 +2162,8 @@ func (vm *VM) step() bool {
 		})
 
 	case OP_CONST:
-		vm.push(instr.Value)
+		vm.stack[vm.top] = instr.Value
+		vm.top++
 
 	case OP_SET_PROPERTY:
 		name := instr.Value.(string)
@@ -1729,6 +2202,16 @@ func (vm *VM) step() bool {
 		}
 
 		vm.callMethodResolved(info.Method, objectValue, args)
+
+	case OP_COALESCE_JUMP:
+		right := vm.pop()
+		left := vm.pop()
+
+		if isNullish(left) {
+			vm.push(right)
+		} else {
+			vm.push(left)
+		}
 
 	case OP_GET_PROPERTY_SAFE:
 		name := instr.Value.(string)
@@ -1793,8 +2276,8 @@ func (vm *VM) step() bool {
 		vm.globalTypes[info.Name] = info.TypeHint
 
 	case OP_LOAD_LOCAL:
-		slot := instr.Value.(int)
-		frame := &vm.frames[len(vm.frames)-1]
+		slot := instr.IntArg
+		frame := vm.frames[len(vm.frames)-1]
 
 		if slot < 0 || slot >= len(frame.locals) {
 			vm.fatalError(
@@ -1819,36 +2302,56 @@ func (vm *VM) step() bool {
 		vm.push(cellValue(frame.locals[slot]))
 
 	case OP_LOAD_LOCAL_0:
-		frame := &vm.frames[len(vm.frames)-1]
+		frame := vm.frames[len(vm.frames)-1]
 		cell := frame.locals[0]
-		if cell == nil {
-			vm.fatalError(ErrorInternal, "local slot is nil: function=%s slot=0 locals=%d", frame.function.Name, len(frame.locals))
+		if cell.IsInt {
+			vm.stack[vm.top] = cell.Int
+		} else {
+			if cell == nil {
+				vm.fatalError(ErrorInternal, "local slot is nil: function=%s slot=0 locals=%d", frame.function.Name, len(frame.locals))
+			}
+			vm.stack[vm.top] = cell.Value
 		}
-		vm.push(cellValue(cell))
+		vm.top++
 
 	case OP_LOAD_LOCAL_1:
-		frame := &vm.frames[len(vm.frames)-1]
+		frame := vm.frames[len(vm.frames)-1]
 		cell := frame.locals[1]
-		if cell == nil {
-			vm.fatalError(ErrorInternal, "local slot is nil: function=%s slot=1 locals=%d", frame.function.Name, len(frame.locals))
+		if cell.IsInt {
+			vm.stack[vm.top] = cell.Int
+		} else {
+			if cell == nil {
+				vm.fatalError(ErrorInternal, "local slot is nil: function=%s slot=1 locals=%d", frame.function.Name, len(frame.locals))
+			}
+			vm.stack[vm.top] = cell.Value
 		}
-		vm.push(cellValue(cell))
+		vm.top++
 
 	case OP_LOAD_LOCAL_2:
-		frame := &vm.frames[len(vm.frames)-1]
+		frame := vm.frames[len(vm.frames)-1]
 		cell := frame.locals[2]
-		if cell == nil {
-			vm.fatalError(ErrorInternal, "local slot is nil: function=%s slot=2 locals=%d", frame.function.Name, len(frame.locals))
+		if cell.IsInt {
+			vm.stack[vm.top] = cell.Int
+		} else {
+			if cell == nil {
+				vm.fatalError(ErrorInternal, "local slot is nil: function=%s slot=2 locals=%d", frame.function.Name, len(frame.locals))
+			}
+			vm.stack[vm.top] = cell.Value
 		}
-		vm.push(cellValue(cell))
+		vm.top++
 
 	case OP_LOAD_LOCAL_3:
-		frame := &vm.frames[len(vm.frames)-1]
+		frame := vm.frames[len(vm.frames)-1]
 		cell := frame.locals[3]
-		if cell == nil {
-			vm.fatalError(ErrorInternal, "local slot is nil: function=%s slot=3 locals=%d", frame.function.Name, len(frame.locals))
+		if cell.IsInt {
+			vm.stack[vm.top] = cell.Int
+		} else {
+			if cell == nil {
+				vm.fatalError(ErrorInternal, "local slot is nil: function=%s slot=3 locals=%d", frame.function.Name, len(frame.locals))
+			}
+			vm.stack[vm.top] = cell.Value
 		}
-		vm.push(cellValue(cell))
+		vm.top++
 
 	case OP_STORE_LOCAL:
 		info := instr.Value.(VariableInfo)
@@ -1980,7 +2483,7 @@ func (vm *VM) step() bool {
 	case OP_INC_LOCAL:
 		info := instr.Value.(IncrementInfo)
 
-		frame := &vm.frames[len(vm.frames)-1]
+		frame := vm.frames[len(vm.frames)-1]
 
 		if info.Slot < 0 || info.Slot >= len(frame.locals) {
 			vm.fatalError(ErrorInternal, "local slot out of range in OP_INC_LOCAL")
@@ -2052,10 +2555,10 @@ func (vm *VM) step() bool {
 		}
 
 	case OP_ASSIGN_LOCAL:
-		slot := instr.Value.(int)
+		slot := instr.IntArg
 		value := vm.popFast()
 
-		frame := &vm.frames[len(vm.frames)-1]
+		frame := vm.frames[len(vm.frames)-1]
 
 		if slot < 0 || slot >= len(frame.locals) {
 			vm.fatalError(
@@ -2096,13 +2599,21 @@ func (vm *VM) step() bool {
 
 	case OP_MUL_LOCAL_CONST:
 		info := instr.Value.(LocalConstInfo)
-		frame := &vm.frames[len(vm.frames)-1]
+		frame := vm.frames[len(vm.frames)-1]
 		vm.push(multiplyByInt(frameLocalValue(frame, info.Slot, "OP_MUL_LOCAL_CONST"), info.Value))
 
 	case OP_ADD:
 		right := vm.popFast()
 		left := vm.popFast()
-		vm.push(addValues(left, right))
+
+		li, okL := left.(int)
+		ri, okR := right.(int)
+
+		if okL && okR {
+			vm.push(li + ri)
+		} else {
+			vm.push(addValues(left, right))
+		}
 
 	case OP_SUB:
 		right := vm.popFast()
@@ -2308,11 +2819,11 @@ func (vm *VM) step() bool {
 		vm.push(isTruthy(left) || isTruthy(right))
 
 	case OP_JUMP:
-		target := instr.Value.(int)
+		target := instr.IntArg
 		vm.setIP(target)
 
 	case OP_JUMP_IF_FALSE:
-		target := instr.Value.(int)
+		target := instr.IntArg
 		condition := vm.popFast()
 
 		if !isTruthy(condition) {
@@ -2320,7 +2831,7 @@ func (vm *VM) step() bool {
 		}
 
 	case OP_JUMP_IF_TRUE:
-		target := instr.Value.(int)
+		target := instr.IntArg
 		condition := vm.popFast()
 
 		if isTruthy(condition) {
@@ -2334,7 +2845,7 @@ func (vm *VM) step() bool {
 
 	case OP_METHOD_CALL_LOCAL_0:
 		info := instr.Value.(MethodLocalCallInfo)
-		frame := &vm.frames[len(vm.frames)-1]
+		frame := vm.frames[len(vm.frames)-1]
 		objectValue := frameLocalValue(frame, info.ReceiverSlot, "OP_METHOD_CALL_LOCAL_0")
 
 		if vm.callZeroArgNativeMethod(info.Method, objectValue) {
@@ -2344,7 +2855,7 @@ func (vm *VM) step() bool {
 
 	case OP_METHOD_CALL_LOCAL_1:
 		info := instr.Value.(MethodLocalCallInfo)
-		frame := &vm.frames[len(vm.frames)-1]
+		frame := vm.frames[len(vm.frames)-1]
 		objectValue := frameLocalValue(frame, info.ReceiverSlot, "OP_METHOD_CALL_LOCAL_1")
 		arg := frameLocalValue(frame, info.ArgSlot, "OP_METHOD_CALL_LOCAL_1")
 
@@ -2355,7 +2866,7 @@ func (vm *VM) step() bool {
 
 	case OP_ARRAY_LEN_LOCAL:
 		info := instr.Value.(ArrayLocalCallInfo)
-		frame := &vm.frames[len(vm.frames)-1]
+		frame := vm.frames[len(vm.frames)-1]
 		arrayValue := frameLocalValue(frame, info.ArraySlot, "OP_ARRAY_LEN_LOCAL")
 
 		if array, ok := arrayValue.(*ArrayValue); ok {
@@ -2366,7 +2877,7 @@ func (vm *VM) step() bool {
 
 	case OP_ARRAY_GET_LOCAL:
 		info := instr.Value.(ArrayLocalCallInfo)
-		frame := &vm.frames[len(vm.frames)-1]
+		frame := vm.frames[len(vm.frames)-1]
 		arrayValue := frameLocalValue(frame, info.ArraySlot, "OP_ARRAY_GET_LOCAL")
 		indexValue := frameLocalValue(frame, info.ArgSlot, "OP_ARRAY_GET_LOCAL")
 
@@ -2385,7 +2896,7 @@ func (vm *VM) step() bool {
 
 	case OP_ARRAY_PUSH_LOCAL:
 		info := instr.Value.(ArrayLocalCallInfo)
-		frame := &vm.frames[len(vm.frames)-1]
+		frame := vm.frames[len(vm.frames)-1]
 		arrayValue := frameLocalValue(frame, info.ArraySlot, "OP_ARRAY_PUSH_LOCAL")
 		value := frameLocalValue(frame, info.ArgSlot, "OP_ARRAY_PUSH_LOCAL")
 
@@ -2398,7 +2909,7 @@ func (vm *VM) step() bool {
 
 	case OP_ARRAY_PUSH_LOCAL_MUL_CONST:
 		info := instr.Value.(ArrayLocalMulConstInfo)
-		frame := &vm.frames[len(vm.frames)-1]
+		frame := vm.frames[len(vm.frames)-1]
 		arrayValue := frameLocalValue(frame, info.ArraySlot, "OP_ARRAY_PUSH_LOCAL_MUL_CONST")
 		arg := multiplyByInt(frameLocalValue(frame, info.ArgSlot, "OP_ARRAY_PUSH_LOCAL_MUL_CONST"), info.Factor)
 
@@ -2445,6 +2956,8 @@ func (vm *VM) step() bool {
 
 		vm.callFunction(info.Name, info.ArgCount)
 
+		return false
+
 	case OP_CALL_VALUE:
 		info := instr.Value.(CallInfo)
 
@@ -2470,6 +2983,8 @@ func (vm *VM) step() bool {
 		default:
 			vm.fatalError(ErrorType, "expected function or class, got %s", TypeName(callee))
 		}
+
+		return false
 
 	case OP_BUILTIN_CALL:
 		info := instr.Value.(BuiltinCallInfo)
@@ -2604,13 +3119,26 @@ func (vm *VM) step() bool {
 
 		if len(vm.frames) == 0 {
 			vm.push(returnValue)
-			return true
+			return true // Halt
 		}
 
-		returningDepth := len(vm.frames)
-		vm.removeTryHandlersAtOrAbove(returningDepth)
+		if len(vm.deferHandlers) > 0 {
+			currentDepth := len(vm.frames)
+
+			for i := len(vm.deferHandlers) - 1; i >= 0; i-- {
+				handler := vm.deferHandlers[i]
+
+				if handler.FrameDepth < currentDepth {
+					break
+				}
+				vm.deferHandlers = vm.deferHandlers[:i]
+
+				vm.callFunctionValue(handler.Function, nil)
+			}
+		}
 
 		frame := vm.frames[len(vm.frames)-1]
+		vm.frames = vm.frames[:len(vm.frames)-1]
 
 		if !frame.function.ReturnType.IsEmpty() && !CheckTypeHint(returnValue, frame.function.ReturnType) {
 			vm.fatalError(
@@ -2621,12 +3149,6 @@ func (vm *VM) step() bool {
 				TypeName(returnValue),
 			)
 		}
-
-		if len(vm.frames) == 0 {
-			vm.fatalError(ErrorRuntime, "return used outside of function")
-		}
-
-		vm.frames = vm.frames[:len(vm.frames)-1]
 
 		vm.releaseFrame(frame)
 
@@ -2681,8 +3203,18 @@ func (vm *VM) step() bool {
 		object := make(ObjectValue, len(info.Names))
 		start := vm.top - len(info.Names)
 
-		for i, name := range info.Names {
-			object[name] = vm.stack[start+i]
+		for i, fieldInfo := range info.Names {
+			if fieldInfo.Copy {
+				obj, ok := vm.stack[start+i].(ObjectValue)
+
+				if !ok {
+					vm.fatalError(ErrorType, "expected an object to copy with {...%s}, but got %s", fieldInfo.Name, TypeName(vm.stack[start+i]))
+				}
+
+				maps.Copy(object, obj)
+			} else {
+				object[fieldInfo.Name] = vm.stack[start+i]
+			}
 			vm.stack[start+i] = nil
 		}
 		vm.top = start
@@ -2695,12 +3227,12 @@ func (vm *VM) step() bool {
 
 	case OP_GET_PROPERTY_LOCAL:
 		info := instr.Value.(PropertyLocalInfo)
-		frame := &vm.frames[len(vm.frames)-1]
+		frame := vm.frames[len(vm.frames)-1]
 		vm.push(propertyValue(vm, frameLocalValue(frame, info.Slot, "OP_GET_PROPERTY_LOCAL"), info.Name))
 
 	case OP_ADD_PROPERTY_LOCAL_LOCAL:
 		info := instr.Value.(PropertyLocalAssignInfo)
-		frame := &vm.frames[len(vm.frames)-1]
+		frame := vm.frames[len(vm.frames)-1]
 		objectValue := frameLocalValue(frame, info.ObjectSlot, "OP_ADD_PROPERTY_LOCAL_LOCAL")
 		object, ok := objectValue.(ObjectValue)
 		if !ok {
@@ -2735,242 +3267,6 @@ func (vm *VM) step() bool {
 	}
 
 	return false
-}
-
-func (vm *VM) removeTryHandlersAtOrAbove(depth int) {
-	filtered := vm.tryHandlers[:0]
-
-	for _, handler := range vm.tryHandlers {
-		if handler.FrameDepth < depth {
-			filtered = append(filtered, handler)
-		}
-	}
-
-	vm.tryHandlers = filtered
-}
-
-func (vm *VM) throwValue(value Value) {
-	errorObject := makeErrorObject(value)
-
-	if len(vm.tryHandlers) == 0 {
-		message := valueToString(errorObject["message"])
-		kind := valueToString(errorObject["kind"])
-
-		trace := vm.stackTrace()
-
-		panic(LangErrorType{
-			Kind:    ErrorKind(kind),
-			Message: message + "\n\nStack trace:\n" + trace,
-		})
-	}
-
-	handler := vm.tryHandlers[len(vm.tryHandlers)-1]
-	vm.tryHandlers = vm.tryHandlers[:len(vm.tryHandlers)-1]
-
-	for len(vm.frames) > handler.FrameDepth {
-		vm.frames = vm.frames[:len(vm.frames)-1]
-	}
-
-	if handler.IsLocal {
-		if handler.FrameDepth == 0 {
-			vm.fatalError(ErrorInternal, "local catch handler has no frame")
-		}
-
-		frame := &vm.frames[handler.FrameDepth-1]
-
-		if handler.Slot < 0 || handler.Slot >= len(frame.locals) {
-			vm.fatalError(ErrorInternal, "catch local slot out of range")
-		}
-
-		setCellValue(frame.locals[handler.Slot], errorObject)
-		frame.constants[handler.Slot] = false
-	} else {
-		vm.globals[handler.Name] = errorObject
-		vm.globalConstants[handler.Name] = false
-	}
-
-	if handler.FrameDepth == 0 {
-		vm.ip = handler.CatchIP
-	} else {
-		vm.frames[handler.FrameDepth-1].ip = handler.CatchIP
-	}
-}
-
-func makeErrorObject(value Value) ObjectValue {
-	switch err := value.(type) {
-	case ErrorValue:
-		return ObjectValue{
-			"kind":    err.Kind,
-			"message": err.Message,
-		}
-
-	case *ErrorValue:
-		return ObjectValue{
-			"kind":    err.Kind,
-			"message": err.Message,
-		}
-
-	case ObjectValue:
-		return err
-
-	case string:
-		return ObjectValue{
-			"kind":    "Error",
-			"message": err,
-		}
-
-	default:
-		return ObjectValue{
-			"kind":    "Error",
-			"message": valueToString(value),
-		}
-	}
-}
-
-func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []Value) {
-	fn, ok := vm.functions[fnValue.Name]
-	if !ok {
-		vm.fatalError(ErrorName, "undefined function: %s", fnValue.Name)
-	}
-
-	expected := len(fn.Params)
-	isVariadic := expected > 0 && fn.Params[expected-1].Variadic
-
-	if isVariadic {
-		minArgs := expected - 1
-
-		if len(args) < minArgs {
-			vm.runtimeError(
-				ErrorRuntime,
-				"function %s expects at least %d arguments, got %d",
-				fn.Name,
-				minArgs,
-				len(args),
-			)
-		}
-	} else {
-		if fn.HasDefaults {
-			args = vm.applyDefaultArgs(fn, args, 0, fn.Name)
-		} else if len(args) != expected {
-			vm.runtimeError(
-				ErrorRuntime,
-				"function %s expects %d arguments, gosst %d",
-				fn.Name,
-				expected,
-				len(args),
-			)
-		}
-	}
-
-	frame := vm.getFrame(fn)
-
-	if len(fnValue.Captures) > 0 {
-		frame.hasEscapedLocals = true
-	}
-
-	for slot, cell := range fnValue.Captures {
-		if slot < 0 || slot >= len(frame.locals) {
-			vm.fatalError(ErrorInternal, "capture slot out of range in function value: %d", slot)
-		}
-
-		frame.locals[slot] = cell
-	}
-
-	if isVariadic {
-		fixedCount := expected - 1
-
-		for i := 0; i < fixedCount; i++ {
-			setCellValue(frame.locals[i], args[i])
-			frame.constants[i] = false
-		}
-
-		rest := &ArrayValue{
-			Elements: make([]Value, 0, len(args)-fixedCount),
-		}
-
-		for i := fixedCount; i < len(args); i++ {
-			rest.Elements = append(rest.Elements, args[i])
-		}
-
-		setCellValue(frame.locals[fixedCount], rest)
-		frame.constants[fixedCount] = false
-	} else {
-		for i, arg := range args {
-			param := fn.Params[i]
-
-			if fn.HasTypeHints && !param.TypeHint.IsEmpty() && !CheckTypeHint(arg, param.TypeHint) {
-				vm.fatalError(
-					ErrorType,
-					"function %s parameter %s expected %s, got %s",
-					fn.Name,
-					param.Name,
-					param.TypeHint.String(),
-					TypeName(arg),
-				)
-			}
-
-			setCellValue(frame.locals[i], arg)
-			frame.constants[i] = false
-			frame.localTypes[i] = param.TypeHint
-		}
-	}
-
-	vm.frames = append(vm.frames, frame)
-}
-
-func (vm *VM) callFunctionDirect(fn Function, args []Value) {
-	args = vm.applyDefaultArgs(fn, args, 0, "function "+fn.Name)
-
-	frame := vm.getFrame(fn)
-
-	for i, arg := range args {
-		param := fn.Params[i]
-
-		if fn.HasTypeHints && !param.TypeHint.IsEmpty() && !CheckTypeHint(arg, param.TypeHint) {
-			vm.fatalError(
-				ErrorType,
-				"function %s parameter %s expected %s, got %s",
-				fn.Name,
-				param.Name,
-				param.TypeHint.String(),
-				TypeName(arg),
-			)
-		}
-
-		frame.locals[i].Value = arg
-		frame.constants[i] = false
-		frame.localTypes[i] = param.TypeHint
-	}
-
-	vm.frames = append(vm.frames, frame)
-}
-
-func (vm *VM) callFunctionValue(fnValue FunctionValue, args []Value) Value {
-	frameDepthBefore := len(vm.frames)
-	stackDepthBefore := vm.top
-
-	vm.callFunctionValueWithArgs(fnValue, args)
-
-	for len(vm.frames) > frameDepthBefore {
-		if vm.step() {
-			vm.fatalError(ErrorRuntime, "program halted while running function value")
-		}
-	}
-
-	if vm.top <= stackDepthBefore {
-		return UndefinedValue{}
-	}
-
-	return vm.pop()
-
-}
-
-func (vm *VM) Run() {
-	for {
-		if vm.step() {
-			return
-		}
-	}
 }
 
 func writeServerResponse(w http.ResponseWriter, value any, responseType HttpResponseType) {
@@ -3069,6 +3365,9 @@ func (vm *VM) callZeroArgNativeMethod(method string, objectValue Value) bool {
 		return true
 	case string:
 		vm.callStringMethod(value, method, []Value{})
+		return true
+	case *NativeMutexValue:
+		vm.callNativeMutexMethod(value, method, []Value{})
 		return true
 	}
 	return false
@@ -3323,6 +3622,10 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 		vm.callTcpConnMethod(val, method, args)
 		return
 
+	case *NativeMutexValue:
+		vm.callNativeMutexMethod(val, method, args)
+		return
+
 	case *BufferValue:
 		vm.callBufferMethod(val, method, args)
 		return
@@ -3333,10 +3636,6 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 
 	case *ArrayValue:
 		vm.callArrayMethod(val, method, args)
-		return
-
-	case *NativeTaskValue:
-		vm.callTaskMethod(val, method, args)
 		return
 
 	case *NativeProcessValue:
@@ -3435,7 +3734,7 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 		fixedCount := userParamCount - 1
 
 		// normal params before ...args
-		for i := 0; i < fixedCount; i++ {
+		for i := range fixedCount {
 			paramIndex := paramOffset + i
 			param := fn.Params[paramIndex]
 			arg := args[i]
@@ -3506,6 +3805,32 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 			frame.constants[paramIndex] = false
 			frame.localTypes[paramIndex] = param.TypeHint
 		}
+	}
+
+	if fn.Async {
+		task := &NativeTaskValue{
+			Done: make(chan TaskResult, 1),
+		}
+
+		taskVM := vm.CloneForTask()
+
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					task.Done <- TaskResult{Error: r}
+				}
+			}()
+
+			result := taskVM.runFrameToCompletion(frame)
+
+			task.Done <- TaskResult{
+				Value: result,
+			}
+		}()
+
+		vm.push(task)
+
+		return
 	}
 
 	vm.frames = append(vm.frames, frame)
@@ -3650,7 +3975,7 @@ func (vm *VM) fetchInstruction() Instruction {
 		return instr
 	}
 
-	frame := &vm.frames[len(vm.frames)-1]
+	frame := vm.frames[len(vm.frames)-1]
 	ip := frame.ip
 	instructions := frame.instructions
 
@@ -3669,7 +3994,7 @@ func (vm *VM) currentFrame() *Frame {
 		vm.fatalError(ErrorInternal, "no current function frame")
 	}
 
-	return &vm.frames[len(vm.frames)-1]
+	return vm.frames[len(vm.frames)-1]
 }
 
 func (vm *VM) popArgs(count int) []Value {
@@ -3720,7 +4045,7 @@ func (vm *VM) handleUnderflow() {
 		"stack underflow at function=%s ip=%d op=%v value=%#v",
 		vm.lastFunctionName,
 		vm.lastInstructionIndex,
-		vm.lastInstruction.Op,
+		vm.lastInstruction.Op.String(),
 		vm.lastInstruction.Value,
 	)
 }

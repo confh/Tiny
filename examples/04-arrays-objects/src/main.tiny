@@ -1,18 +1,18 @@
-import std "array";
-import std "io";
-import std "json";
+import std "array"
+import std "io"
+import std "json"
 
-let words = ["tiny", "language", "syntax"];
+let words = ["tiny", "language", "syntax"]
 
-words.push("examples");
+words.push("examples")
 
 let uppercase = words.map(fn(index, word) {
-    return word.toUpperCase();
-});
+    return word.toUpperCase()
+})
 
 let longWords = words.filter(fn(index, word) {
-    return word.length() > 5;
-});
+    return word.length() > 5
+})
 
 let user = {
     name: "Sam",
@@ -20,9 +20,9 @@ let user = {
     meta: {
         created: true
     }
-};
+}
 
-user["note"] = "bracket access can set fields";
+user["note"] = "bracket access can set fields"
 
 let output = {
     range: array.range(1, 4),
@@ -32,6 +32,6 @@ let output = {
     longWords: longWords,
     containsTiny: words.contains("tiny"),
     user: user
-};
+}
 
-io.println(json.pretty(output));
+io.println(json.pretty(output))

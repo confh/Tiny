@@ -173,29 +173,30 @@ var stdMathMetadata = StdModuleInfo{
 	},
 }
 
-var stdMathMethods = map[string]StdModuleFunc{
-	"toFloat":      stdMathToFloat,
-	"toInt":        stdMathToInt,
-	"abs":          stdMathAbs,
-	"pow":          stdMathPow,
-	"sqrt":         stdMathSqrt,
-	"ceil":         stdMathCeil,
-	"floor":        stdMathFloor,
-	"round":        stdMathRound,
-	"clamp":        stdMathClamp,
-	"sin":          stdMathSin,
-	"cos":          stdMathCos,
-	"tan":          stdMathTan,
-	"radToDeg":     stdMathRadToDeg,
-	"degToRad":     stdMathDegToRad,
-	"atan2":        stdMathAtan2,
-	"sum":          stdMathSum,
-	"matMul":       stdMathMatMul,
-	"matTranspose": stdMathMatTranspose,
-	"matScale":     stdMathMatScale,
-}
+var stdMathMethods map[string]StdModuleFunc
 
 func init() {
+	stdMathMethods = map[string]StdModuleFunc{
+		"toFloat":      stdMathToFloat,
+		"toInt":        stdMathToInt,
+		"abs":          stdMathAbs,
+		"pow":          stdMathPow,
+		"sqrt":         stdMathSqrt,
+		"ceil":         stdMathCeil,
+		"floor":        stdMathFloor,
+		"round":        stdMathRound,
+		"clamp":        stdMathClamp,
+		"sin":          stdMathSin,
+		"cos":          stdMathCos,
+		"tan":          stdMathTan,
+		"radToDeg":     stdMathRadToDeg,
+		"degToRad":     stdMathDegToRad,
+		"atan2":        stdMathAtan2,
+		"sum":          stdMathSum,
+		"matMul":       stdMathMatMul,
+		"matTranspose": stdMathMatTranspose,
+		"matScale":     stdMathMatScale,
+	}
 	registerStdModule(stdMathMetadata)
 }
 

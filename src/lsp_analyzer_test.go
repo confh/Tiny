@@ -717,7 +717,7 @@ func TestLSPCallableCompletionInsertText(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected greet completion, got %#v", completionLabels(items))
 	}
-	if item.InsertText != "greet($0);" || item.InsertTextFormat != 2 {
+	if item.InsertText != "greet($0)" || item.InsertTextFormat != 2 {
 		t.Fatalf("expected callable snippet insert text, got %#v", item)
 	}
 }
@@ -785,7 +785,7 @@ func TestLSPFileAutoImportCompletion(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected TaskManager auto-import completion, got %#v", completionLabels(items))
 	}
-	if item.InsertText != "Todo.TaskManager($0);" || item.InsertTextFormat != 2 {
+	if item.InsertText != "Todo.TaskManager($0)" || item.InsertTextFormat != 2 {
 		t.Fatalf("expected namespaced constructor snippet, got %#v", item)
 	}
 	if len(item.AdditionalTextEdits) != 1 || item.AdditionalTextEdits[0].NewText != "import \"todo.tiny\" as Todo;\n" {

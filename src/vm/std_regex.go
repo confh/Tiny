@@ -30,12 +30,13 @@ var stdRegexMetadata = StdModuleInfo{
 	},
 }
 
-var stdRegexMethods = map[string]StdModuleFunc{
-	"matchString": stdRegexMatchString,
-	"findString":  stdRegexFindString,
-}
+var stdRegexMethods map[string]StdModuleFunc
 
 func init() {
+	stdRegexMethods = map[string]StdModuleFunc{
+		"matchString": stdRegexMatchString,
+		"findString":  stdRegexFindString,
+	}
 	registerStdModule(stdRegexMetadata)
 }
 

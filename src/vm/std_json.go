@@ -54,15 +54,16 @@ var stdJsonMetadata = StdModuleInfo{
 	},
 }
 
-var stdJsonMethods = map[string]StdModuleFunc{
-	"stringify": stdJsonStringify,
-	"pretty":    stdJsonPretty,
-	"parse":     stdJsonParse,
-	"readFile":  stdJsonReadFile,
-	"writeFile": stdJsonWriteFile,
-}
+var stdJsonMethods map[string]StdModuleFunc
 
 func init() {
+	stdJsonMethods = map[string]StdModuleFunc{
+		"stringify": stdJsonStringify,
+		"pretty":    stdJsonPretty,
+		"parse":     stdJsonParse,
+		"readFile":  stdJsonReadFile,
+		"writeFile": stdJsonWriteFile,
+	}
 	registerStdModule(stdJsonMetadata)
 }
 

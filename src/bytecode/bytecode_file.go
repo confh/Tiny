@@ -2,6 +2,7 @@ package bytecode
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 
 	json "github.com/goccy/go-json"
@@ -40,6 +41,7 @@ type SerializableFunction struct {
 	LocalCount   int                       `json:"localCount"`
 	Captures     []CapturedVar             `json:"captures"`
 	Instructions []SerializableInstruction `json:"instructions"`
+	Async        bool                      `json:"async"`
 	HasDefaults  bool                      `json:"hasDefaults"`
 	HasTypeHints bool                      `json:"hasTypeHints"`
 }
@@ -126,10 +128,10 @@ func deserializeParams(params []SerializableParam) []Param {
 	return result
 }
 
-func SaveBytecode(path string, main []Instruction, functions map[string]Function, classes map[string]Class) {
+func SaveBytecode(path string, main []Instruction, functions map[string]Function, classes map[string]Class, cache bool) {
 	file := BytecodeFile{
 		Version:   BytecodeVersion,
-		Main:      serializeInstructions(main),
+		Main:      serializeInstructions(main, cache),
 		Functions: map[string]SerializableFunction{},
 		Classes:   serializeClasses(classes),
 	}
@@ -143,9 +145,10 @@ func SaveBytecode(path string, main []Instruction, functions map[string]Function
 			ReturnType:   fn.ReturnType,
 			LocalCount:   fn.LocalCount,
 			Captures:     fn.Captures,
-			Instructions: serializeInstructions(fn.Instructions),
+			Instructions: serializeInstructions(fn.Instructions, cache),
 			HasDefaults:  fn.HasDefaults,
 			HasTypeHints: fn.HasTypeHints,
+			Async:        fn.Async,
 		}
 	}
 
@@ -155,15 +158,17 @@ func SaveBytecode(path string, main []Instruction, functions map[string]Function
 	}
 }
 
-func SaveBytecodeToBytes(main []Instruction, functions map[string]Function, classes map[string]Class) []byte {
+func SaveBytecodeToBytes(main []Instruction, functions map[string]Function, classes map[string]Class, cache bool) []byte {
 	file := BytecodeFile{
 		Version:   BytecodeVersion,
-		Main:      serializeInstructions(main),
+		Main:      serializeInstructions(main, cache),
 		Functions: map[string]SerializableFunction{},
 		Classes:   serializeClasses(classes),
 	}
 
 	for name, fn := range functions {
+		fmt.Println(fn.Async)
+		fmt.Println("Data")
 		file.Functions[name] = SerializableFunction{
 			ID:           fn.ID,
 			Name:         fn.Name,
@@ -171,9 +176,10 @@ func SaveBytecodeToBytes(main []Instruction, functions map[string]Function, clas
 			ReturnType:   fn.ReturnType,
 			LocalCount:   fn.LocalCount,
 			Captures:     fn.Captures,
-			Instructions: serializeInstructions(fn.Instructions),
+			Instructions: serializeInstructions(fn.Instructions, cache),
 			HasDefaults:  fn.HasDefaults,
 			HasTypeHints: fn.HasTypeHints,
+			Async:        fn.Async,
 		}
 	}
 
@@ -213,6 +219,7 @@ func LoadBytecodeFromBytes(data []byte) ([]Instruction, map[string]Function, map
 			Instructions: deserializeInstructions(fn.Instructions),
 			HasDefaults:  fn.HasDefaults,
 			HasTypeHints: fn.HasTypeHints,
+			Async:        fn.Async,
 		}
 	}
 
@@ -302,14 +309,22 @@ func deserializeClasses(classes map[string]SerializableClass) map[string]Class {
 	return result
 }
 
-func serializeInstructions(instructions []Instruction) []SerializableInstruction {
+func serializeInstructions(instructions []Instruction, cache bool) []SerializableInstruction {
 	result := make([]SerializableInstruction, len(instructions))
 
 	for i, instr := range instructions {
+		var filePath string
+
+		if !cache {
+			sanitizeBytecodeFilePath(instr.File)
+		} else {
+			filePath = instr.File
+		}
+
 		result[i] = SerializableInstruction{
 			Op:     instr.Op,
 			Value:  EncodeValue(instr.Value),
-			File:   sanitizeBytecodeFilePath(instr.File),
+			File:   filePath,
 			Line:   instr.Line,
 			Column: instr.Column,
 		}
@@ -330,9 +345,20 @@ func deserializeInstructions(instructions []SerializableInstruction) []Instructi
 	result := make([]Instruction, len(instructions))
 
 	for i, instr := range instructions {
+		val := DecodeValue(instr.Value)
+
+		intVal := 0
+		hasInt := false
+		if v, ok := val.(int); ok {
+			intVal = v
+			hasInt = true
+		}
+
 		result[i] = Instruction{
 			Op:     instr.Op,
-			Value:  DecodeValue(instr.Value),
+			Value:  val,
+			IntArg: intVal,
+			IsInt:  hasInt,
 			File:   instr.File,
 			Line:   instr.Line,
 			Column: instr.Column,
@@ -397,6 +423,18 @@ func EncodeValue(value any) EncodedValue {
 
 	case JumpLocalGELocalInfo:
 		return EncodedValue{Type: "jumpLocalGELocal", Data: v}
+
+	case JumpLocalGTConstInfo:
+		return EncodedValue{Type: "jumpLocalGTConst", Data: v}
+
+	case AddLocalLocalStoreInfo:
+		return EncodedValue{Type: "addLocalStore", Data: v}
+
+	case JumpLocalGTLocalInfo:
+		return EncodedValue{Type: "jumpLocalGTLocal", Data: v}
+
+	case CallDirectSubConstInfo:
+		return EncodedValue{Type: "callDirectSubConst", Data: v}
 
 	case InterpolateInfo:
 		return EncodedValue{Type: "interpolate", Data: v}
@@ -564,6 +602,26 @@ func DecodeValue(value EncodedValue) any {
 
 	case "jumpLocalGELocal":
 		var result JumpLocalGELocalInfo
+		decodeInto(value.Data, &result)
+		return result
+
+	case "jumpLocalGTLocal":
+		var result JumpLocalGTLocalInfo
+		decodeInto(value.Data, &result)
+		return result
+
+	case "addLocalStore":
+		var result AddLocalLocalStoreInfo
+		decodeInto(value.Data, &result)
+		return result
+
+	case "jumpLocalGTConst":
+		var result JumpLocalGTConstInfo
+		decodeInto(value.Data, &result)
+		return result
+
+	case "callDirectSubConst":
+		var result CallDirectSubConstInfo
 		decodeInto(value.Data, &result)
 		return result
 

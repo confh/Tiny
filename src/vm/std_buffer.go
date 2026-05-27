@@ -37,13 +37,14 @@ var stdBufferMetadata = StdModuleInfo{
 	},
 }
 
-var stdBufferMethods = map[string]StdModuleFunc{
-	"fromString": bufferFromString,
-	"fromArray":  bufferFromArray,
-	"alloc":      bufferAlloc,
-}
+var stdBufferMethods map[string]StdModuleFunc
 
 func init() {
+	stdBufferMethods = map[string]StdModuleFunc{
+		"fromString": bufferFromString,
+		"fromArray":  bufferFromArray,
+		"alloc":      bufferAlloc,
+	}
 	registerStdModule(stdBufferMetadata)
 }
 
