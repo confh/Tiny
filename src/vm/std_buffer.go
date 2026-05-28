@@ -63,9 +63,9 @@ func bufferFromString(vm *VM, args []Value) {
 
 	text := argString(vm, "buffer.fromString", args, 0)
 
-	vm.push(&BufferValue{
+	vm.push(NewNative(&BufferValue{
 		Bytes: []byte(text),
-	})
+	}))
 }
 
 func bufferFromArray(vm *VM, args []Value) {
@@ -83,9 +83,9 @@ func bufferFromArray(vm *VM, args []Value) {
 		byteSlice = unsafe.Slice((*byte)(unsafe.Pointer(&floats[0])), len(floats)*8)
 	}
 
-	vm.push(&BufferValue{
+	vm.push(NewNative(&BufferValue{
 		Bytes: byteSlice,
-	})
+	}))
 }
 
 func bufferAlloc(vm *VM, args []Value) {
@@ -99,7 +99,7 @@ func bufferAlloc(vm *VM, args []Value) {
 		data[i] = defaultValue
 	}
 
-	vm.push(&BufferValue{
+	vm.push(NewNative(&BufferValue{
 		Bytes: unsafe.Slice((*byte)(unsafe.Pointer(&data[0])), len(data)*8),
-	})
+	}))
 }

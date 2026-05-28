@@ -22,7 +22,6 @@ func OptimizeBytecode(instructions []Instruction) []Instruction {
 	instructions = optimizeCallDirectSubConst(instructions)
 	instructions = optimizeLoopCondition(instructions)
 	instructions = optimizeAddLocalLocalStore(instructions)
-	// instructions = removeDeadCodeAfterReturn(instructions)
 
 	return instructions
 }
@@ -1184,29 +1183,4 @@ func constIntAmount(value any) (int, bool) {
 	default:
 		return 0, false
 	}
-}
-
-func removeDeadCodeAfterReturn(instructions []Instruction) []Instruction {
-	optimized := make([]Instruction, 0, len(instructions))
-	dead := false
-
-	for _, instr := range instructions {
-		if dead {
-			// Stop removing when we hit a jump target-ish instruction.
-			// For now, keep this conservative.
-			if instr.Op == OP_SETUP_TRY {
-				dead = false
-			} else {
-				continue
-			}
-		}
-
-		optimized = append(optimized, instr)
-
-		if instr.Op == OP_RETURN {
-			dead = true
-		}
-	}
-
-	return optimized
 }

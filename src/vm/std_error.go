@@ -38,8 +38,8 @@ func stdErrorNew(vm *VM, args []Value) {
 	expectArgs(vm, "error.new", args, 2)
 	kind := argString(vm, "error.new", args, 0)
 	message := argString(vm, "error.new", args, 1)
-	vm.push(ErrorValue{
+	vm.push(NewNative(ErrorValue{
 		Kind:    kind,
 		Message: message,
-	})
+	}))
 }

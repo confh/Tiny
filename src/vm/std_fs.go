@@ -133,10 +133,10 @@ func stdFsOpen(vm *VM, args []Value) {
 	if err != nil {
 		vm.runtimeError(ErrorRuntime, "failed to open file: %v", err)
 	}
-	vm.push(&NativeFileValue{
+	vm.push(NewNative(&NativeFileValue{
 		File: file,
 		Path: path,
-	})
+	}))
 }
 
 func stdFsReadFile(vm *VM, args []Value) {
@@ -147,7 +147,7 @@ func stdFsReadFile(vm *VM, args []Value) {
 	if err != nil {
 		vm.runtimeError(ErrorRuntime, "error reading file: %s", err)
 	}
-	vm.push(string(data))
+	vm.push(NewNative(string(data)))
 }
 
 func stdFsWriteFile(vm *VM, args []Value) {
@@ -159,7 +159,7 @@ func stdFsWriteFile(vm *VM, args []Value) {
 	if err != nil {
 		vm.runtimeError(ErrorRuntime, "error writing file: %s", err)
 	}
-	vm.push(true)
+	vm.push(NewNative(true))
 }
 
 func stdFsWriteBytes(vm *VM, args []Value) {
@@ -171,7 +171,7 @@ func stdFsWriteBytes(vm *VM, args []Value) {
 	if err != nil {
 		vm.runtimeError(ErrorRuntime, "error writing file: %s", err)
 	}
-	vm.push(true)
+	vm.push(NewNative(true))
 }
 
 func stdFsExists(vm *VM, args []Value) {
@@ -180,9 +180,9 @@ func stdFsExists(vm *VM, args []Value) {
 	fileName := argString(vm, "fs.exists", args, 0)
 	_, err := os.Stat(fileName)
 	if err == nil {
-		vm.push(true)
+		vm.push(NewNative(true))
 	} else if errors.Is(err, os.ErrNotExist) {
-		vm.push(false)
+		vm.push(NewNative(false))
 	} else {
 		vm.runtimeError(ErrorRuntime, "something went wrong: %s", err)
 	}
@@ -200,9 +200,9 @@ func stdFsReadDir(vm *VM, args []Value) {
 		Elements: []Value{},
 	}
 	for _, file := range files {
-		fileNames.Elements = append(fileNames.Elements, file.Name())
+		fileNames.Elements = append(fileNames.Elements, NewNative(file.Name()))
 	}
-	vm.push(fileNames)
+	vm.push(NewNative(fileNames))
 }
 
 func stdFsMkDir(vm *VM, args []Value) {
@@ -214,7 +214,7 @@ func stdFsMkDir(vm *VM, args []Value) {
 		vm.runtimeError(ErrorRuntime, "error creating directory: %s", err)
 	}
 
-	vm.push(UndefinedValue{})
+	vm.push(NewUndefined())
 }
 
 func stdFsStat(vm *VM, args []Value) {
@@ -226,12 +226,12 @@ func stdFsStat(vm *VM, args []Value) {
 		vm.runtimeError(ErrorRuntime, "error checking file stat: %s", err)
 	}
 
-	vm.push(ObjectValue{
-		"name":    fileInfo.Name(),
-		"size":    fileInfo.Size(),
-		"isDir":   fileInfo.IsDir(),
-		"modTime": fileInfo.ModTime(),
-	})
+	vm.push(NewNative(ObjectValue{
+		"name":    NewNative(fileInfo.Name()),
+		"size":    NewInt(int(fileInfo.Size())),
+		"isDir":   NewNative(fileInfo.IsDir()),
+		"modTime": NewNative(fileInfo.ModTime()),
+	}))
 }
 
 func stdFsCopy(vm *VM, args []Value) {
@@ -305,8 +305,9 @@ func stdFsCopy(vm *VM, args []Value) {
 		return
 	}
 
-	vm.push(n)
+	vm.push(NewInt(int(n)))
 }
+
 func stdFsRemove(vm *VM, args []Value) {
 	expectArgs(vm, "fs.remove", args, 1)
 
@@ -317,5 +318,5 @@ func stdFsRemove(vm *VM, args []Value) {
 		vm.runtimeError(ErrorRuntime, "error while removing file: %s", err)
 	}
 
-	vm.push(UndefinedValue{})
+	vm.push(NewUndefined())
 }

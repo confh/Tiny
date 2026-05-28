@@ -60,7 +60,7 @@ func stdRegexMatchString(vm *VM, args []Value) {
 		vm.runtimeError(ErrorRuntime, "invalid regex: %s", err.Error())
 		return
 	}
-	vm.push(re.MatchString(str))
+	vm.push(NewNative(re.MatchString(str)))
 }
 
 func stdRegexFindString(vm *VM, args []Value) {
@@ -74,5 +74,5 @@ func stdRegexFindString(vm *VM, args []Value) {
 		vm.runtimeError(ErrorRuntime, "invalid regex: %s", err.Error())
 		return
 	}
-	vm.push(re.FindString(str))
+	vm.push(NewNative(re.FindString(str)))
 }

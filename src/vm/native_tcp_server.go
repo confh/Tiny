@@ -54,9 +54,9 @@ func handleConn(vm *VM, tcp *NativeTcpServerValue, conn net.Conn) {
 	}
 
 	vm.callFunctionValue(*tcp.ConnectionHandler, []Value{
-		&NativeTcpConnectionValue{
+		NewNative(&NativeTcpConnectionValue{
 			Connection: conn,
-		},
+		}),
 	})
 }
 
@@ -76,7 +76,7 @@ func tcpOnConnection(vm *VM, tcp *NativeTcpServerValue, args []Value) {
 
 	tcp.ConnectionHandler = &callback
 
-	vm.push(UndefinedValue{})
+	vm.push(NewUndefined())
 }
 
 func tcpStart(vm *VM, tcp *NativeTcpServerValue, args []Value) {
@@ -110,11 +110,11 @@ func tcpStart(vm *VM, tcp *NativeTcpServerValue, args []Value) {
 
 	if async {
 		go acceptLoop()
-		vm.push(true)
+		vm.push(NewNative(true))
 		return
 	}
 
 	acceptLoop()
 
-	vm.push(UndefinedValue{})
+	vm.push(NewUndefined())
 }

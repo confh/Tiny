@@ -1,9 +1,6 @@
 package main
 
 import (
-	"path/filepath"
-	"runtime"
-
 	. "language.com/src/vm"
 )
 
@@ -405,23 +402,4 @@ func rewritePluginExprForDist(expr Expr, target string) Expr {
 	}
 
 	return expr
-}
-
-func normalizePluginPath(path string) string {
-	ext := filepath.Ext(path)
-
-	if ext != "" {
-		return path
-	}
-
-	switch runtime.GOOS {
-	case "windows":
-		return path + ".dll"
-	case "linux":
-		return path + ".so"
-	case "darwin":
-		return path + ".dylib"
-	default:
-		return path
-	}
 }

@@ -102,17 +102,17 @@ func (vm *VM) callStringMethod(value string, method string, args []Value) {
 
 func stringLength(vm *VM, value string, args []Value) {
 	expectArgs(vm, "string.length", args, 0)
-	vm.push(len(value))
+	vm.push(NewInt(len(value)))
 }
 
 func stringToUpperCase(vm *VM, value string, args []Value) {
 	expectArgs(vm, "string.toUpperCase", args, 0)
-	vm.push(strings.ToUpper(value))
+	vm.push(NewNative(strings.ToUpper(value)))
 }
 
 func stringToLowerCase(vm *VM, value string, args []Value) {
 	expectArgs(vm, "string.toLowerCase", args, 0)
-	vm.push(strings.ToLower(value))
+	vm.push(NewNative(strings.ToLower(value)))
 }
 
 func stringUpper(vm *VM, value string, args []Value) {
@@ -120,7 +120,7 @@ func stringUpper(vm *VM, value string, args []Value) {
 
 	result := strings.ToUpper(value[:1]) + value[1:]
 
-	vm.push(result)
+	vm.push(NewNative(result))
 }
 
 func stringLower(vm *VM, value string, args []Value) {
@@ -128,7 +128,7 @@ func stringLower(vm *VM, value string, args []Value) {
 
 	result := strings.ToLower(value[:1]) + value[1:]
 
-	vm.push(result)
+	vm.push(NewNative(result))
 }
 
 func stringSplit(vm *VM, value string, args []Value) {
@@ -139,9 +139,9 @@ func stringSplit(vm *VM, value string, args []Value) {
 		runes := []rune(value)
 		elements := make([]Value, len(runes))
 		for i, r := range runes {
-			elements[i] = string(r)
+			elements[i] = NewNative(string(r))
 		}
-		vm.push(&ArrayValue{Elements: elements})
+		vm.push(NewNative(&ArrayValue{Elements: elements}))
 		return
 	}
 
@@ -151,27 +151,27 @@ func stringSplit(vm *VM, value string, args []Value) {
 	for {
 		idx := strings.Index(value, separator)
 		if idx == -1 {
-			elements = append(elements, value)
+			elements = append(elements, NewNative(value))
 			break
 		}
-		elements = append(elements, value[:idx])
+		elements = append(elements, NewNative(value[:idx]))
 		value = value[idx+len(separator):]
 	}
 
-	vm.push(&ArrayValue{Elements: elements})
+	vm.push(NewNative(&ArrayValue{Elements: elements}))
 }
 
 func stringIncludes(vm *VM, value string, args []Value) {
 	expectArgs(vm, "string.includes", args, 1)
 
 	search := argString(vm, "string.includes", args, 0)
-	vm.push(strings.Contains(value, search))
+	vm.push(NewNative(strings.Contains(value, search)))
 }
 
 func stringTrim(vm *VM, value string, args []Value) {
 	expectArgs(vm, "string.trim", args, 0)
 
-	vm.push(strings.TrimSpace(value))
+	vm.push(NewNative(strings.TrimSpace(value)))
 }
 
 func stringReplace(vm *VM, value string, args []Value) {
@@ -179,7 +179,7 @@ func stringReplace(vm *VM, value string, args []Value) {
 
 	oldText := argString(vm, "string.replace", args, 0)
 	newText := argString(vm, "string.replace", args, 1)
-	vm.push(strings.Replace(value, oldText, newText, 1))
+	vm.push(NewNative(strings.Replace(value, oldText, newText, 1)))
 }
 
 func stringReplaceAll(vm *VM, value string, args []Value) {
@@ -187,5 +187,5 @@ func stringReplaceAll(vm *VM, value string, args []Value) {
 
 	oldText := argString(vm, "string.replaceAll", args, 0)
 	newText := argString(vm, "string.replaceAll", args, 1)
-	vm.push(strings.ReplaceAll(value, oldText, newText))
+	vm.push(NewNative(strings.ReplaceAll(value, oldText, newText)))
 }

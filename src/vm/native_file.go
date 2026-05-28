@@ -66,7 +66,7 @@ func fileRead(vm *VM, file *NativeFileValue, args []Value) {
 		return
 	}
 
-	vm.push(string(buffer[:n]))
+	vm.push(NewNative(string(buffer[:n])))
 }
 
 func fileClose(vm *VM, file *NativeFileValue, args []Value) {
@@ -81,5 +81,5 @@ func fileClose(vm *VM, file *NativeFileValue, args []Value) {
 		file.Closed = true
 	}
 
-	vm.push(true)
+	vm.push(NewNative(true))
 }

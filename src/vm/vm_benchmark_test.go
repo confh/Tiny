@@ -58,15 +58,15 @@ func BenchmarkNumericLoopVM(b *testing.B) {
 
 func BenchmarkNativeArrayMethods(b *testing.B) {
 	machine := NewVM(nil, nil, nil)
-	array := &ArrayValue{Elements: []Value{1, 2, 3, 4, 5}}
+	array := &ArrayValue{Elements: []Value{NewInt(1), NewInt(2), NewInt(3), NewInt(4), NewInt(5)}}
 
 	b.ReportAllocs()
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		machine.callOneArgNativeMethod("get", array, 2)
+		machine.callOneArgNativeMethod("get", NewNative(array), NewInt(2))
 		machine.popFast()
-		machine.callZeroArgNativeMethod("length", array)
+		machine.callZeroArgNativeMethod("length", NewNative(array))
 		machine.popFast()
 	}
 }

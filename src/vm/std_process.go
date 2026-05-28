@@ -129,9 +129,9 @@ func processArgs(vm *VM, args []Value) {
 
 	argsArray := &ArrayValue{Elements: make([]Value, 0, len(vm.cliArgs))}
 	for _, v := range vm.cliArgs {
-		argsArray.Elements = append(argsArray.Elements, v)
+		argsArray.Elements = append(argsArray.Elements, NewNative(v))
 	}
-	vm.push(argsArray)
+	vm.push(NewNative(argsArray))
 }
 
 func processExit(vm *VM, args []Value) {
@@ -155,14 +155,14 @@ func processCwd(vm *VM, args []Value) {
 		vm.runtimeError(ErrorRuntime, "Error getting current directory: %s", err)
 		return
 	}
-	vm.push(root)
+	vm.push(NewNative(root))
 }
 
 func processGetEnv(vm *VM, args []Value) {
 	expectArgs(vm, "process.getEnv", args, 1)
 
 	value := argString(vm, "process.getEnv", args, 0)
-	vm.push(os.Getenv(value))
+	vm.push(NewNative(os.Getenv(value)))
 }
 
 func processSetEnv(vm *VM, args []Value) {
@@ -186,7 +186,7 @@ func processHalt(vm *VM, args []Value) {
 	fmt.Println("Press Enter to exit...")
 	reader := bufio.NewReader(os.Stdin)
 	_, _ = reader.ReadString('\n')
-	vm.push(UndefinedValue{})
+	vm.push(NewUndefined())
 }
 
 func processRun(vm *VM, args []Value) {
@@ -201,7 +201,7 @@ func processRun(vm *VM, args []Value) {
 	if len(args) > 1 {
 		attachedArgs := argArray(vm, "process.run", args, 1)
 		for _, el := range attachedArgs.Elements {
-			if str, ok := el.(string); ok {
+			if str, ok := el.Value.(string); ok {
 				cmdArgs = append(cmdArgs, str)
 			} else {
 				vm.runtimeError(ErrorType, "process.run expects an array of strings as second argument.")
@@ -251,12 +251,12 @@ func processRun(vm *VM, args []Value) {
 		success = cmd.ProcessState.Success()
 	}
 
-	vm.push(ObjectValue{
-		"exitCode": exitCode,
-		"stdout":   stdout,
-		"stderr":   stderr,
-		"success":  success,
-	})
+	vm.push(NewNative(ObjectValue{
+		"exitCode": NewInt(exitCode),
+		"stdout":   NewNative(stdout),
+		"stderr":   NewNative(stderr),
+		"success":  NewNative(success),
+	}))
 }
 
 func processShell(vm *VM, args []Value) {
@@ -321,12 +321,12 @@ func processShell(vm *VM, args []Value) {
 		success = cmd.ProcessState.Success()
 	}
 
-	vm.push(ObjectValue{
-		"exitCode": exitCode,
-		"stdout":   stdout,
-		"stderr":   stderr,
-		"success":  success,
-	})
+	vm.push(NewNative(ObjectValue{
+		"exitCode": NewInt(exitCode),
+		"stdout":   NewNative(stdout),
+		"stderr":   NewNative(stderr),
+		"success":  NewNative(success),
+	}))
 }
 
 func processStart(vm *VM, args []Value) {
@@ -341,7 +341,7 @@ func processStart(vm *VM, args []Value) {
 	if len(args) > 1 {
 		attachedArgs := argArray(vm, "process.start", args, 1)
 		for _, el := range attachedArgs.Elements {
-			if str, ok := el.(string); ok {
+			if str, ok := el.Value.(string); ok {
 				cmdArgs = append(cmdArgs, str)
 			} else {
 				vm.runtimeError(ErrorType, "process.start expects an array of strings as second argument.")
@@ -381,5 +381,5 @@ func processStart(vm *VM, args []Value) {
 		Running: true,
 	}
 
-	vm.push(processValue)
+	vm.push(NewNative(processValue))
 }

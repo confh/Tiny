@@ -75,23 +75,20 @@ func (vm *VM) callStdRuntime(method string, args []Value) {
 
 func stdRuntimeGC(vm *VM, args []Value) {
 	dontExpectArgs(vm, "runtime.gc", args)
-
 	runtime.GC()
-	vm.push(UndefinedValue{})
+	vm.push(NewUndefined())
 }
 
 func stdRuntimeLockThread(vm *VM, args []Value) {
 	dontExpectArgs(vm, "runtime.lockThread", args)
-
 	runtime.LockOSThread()
-	vm.push(UndefinedValue{})
+	vm.push(NewUndefined())
 }
 
 func stdRuntimeUnlockThread(vm *VM, args []Value) {
 	dontExpectArgs(vm, "runtime.unlockThread", args)
-
 	runtime.UnlockOSThread()
-	vm.push(UndefinedValue{})
+	vm.push(NewUndefined())
 }
 
 func stdRuntimeMemoryStats(vm *VM, args []Value) {
@@ -100,31 +97,28 @@ func stdRuntimeMemoryStats(vm *VM, args []Value) {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 
-	vm.push(ObjectValue{
-		"alloc":      float64(m.Alloc),
-		"totalAlloc": float64(m.TotalAlloc),
-		"sys":        float64(m.Sys),
-		"numGC":      int(m.NumGC),
-	})
+	vm.push(NewNative(ObjectValue{
+		"alloc":      NewNative(float64(m.Alloc)),
+		"totalAlloc": NewNative(float64(m.TotalAlloc)),
+		"sys":        NewNative(float64(m.Sys)),
+		"numGC":      NewInt(int(m.NumGC)),
+	}))
 }
 
 func stdRuntimeOnFatal(vm *VM, args []Value) {
 	expectArgs(vm, "runtime.onFatal", args, 1)
 
-	fn, ok := args[0].(FunctionValue)
-	if !ok {
-		vm.fatalError(ErrorType, "runtime.onFatal expects function")
-	}
+	fn := argFn(vm, "runtime.onFatal", args, 0)
 
 	SetFatalHook(func(info FatalCrashInfo) bool {
-		errObj := ObjectValue{
-			"kind":    string(info.Kind),
-			"message": info.Message,
-			"file":    info.File,
-			"line":    info.Line,
-			"column":  info.Column,
-			"fatal":   true,
-		}
+		errObj := NewNative(ObjectValue{
+			"kind":    NewNative(string(info.Kind)),
+			"message": NewNative(info.Message),
+			"file":    NewNative(info.File),
+			"line":    NewInt(info.Line),
+			"column":  NewInt(info.Column),
+			"fatal":   NewNative(true),
+		})
 
 		func() {
 			defer func() {
@@ -137,12 +131,11 @@ func stdRuntimeOnFatal(vm *VM, args []Value) {
 		return true
 	})
 
-	vm.push(UndefinedValue{})
+	vm.push(NewUndefined())
 }
 
 func stdRuntimeClearOnFatal(vm *VM, args []Value) {
-	expectArgs(vm, "runtime.clearFatalHandler", args, 0)
-
+	dontExpectArgs(vm, "runtime.clearFatalHandler", args)
 	ClearFatalHook()
-	vm.push(UndefinedValue{})
+	vm.push(NewUndefined())
 }

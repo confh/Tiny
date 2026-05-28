@@ -58,5 +58,5 @@ func netTcpServer(vm *VM, args []Value) {
 		ConnectionHandler: nil,
 	}
 
-	vm.push(connectionValue)
+	vm.push(NewNative(connectionValue))
 }

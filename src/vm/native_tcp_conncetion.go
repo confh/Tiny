@@ -46,11 +46,11 @@ func tcpConnReadLine(vm *VM, tcp *NativeTcpConnectionValue, args []Value) {
 	if err != nil {
 		if err == io.EOF {
 			if line == "" {
-				vm.push(UndefinedValue{})
+				vm.push(NewUndefined())
 				return
 			}
 
-			vm.push(line)
+			vm.push(NewNative(line))
 			return
 		}
 
@@ -58,8 +58,7 @@ func tcpConnReadLine(vm *VM, tcp *NativeTcpConnectionValue, args []Value) {
 		return
 	}
 
-	vm.push(line)
-
+	vm.push(NewNative(line))
 }
 
 func tcpConnRead(vm *VM, tcp *NativeTcpConnectionValue, args []Value) {
@@ -79,19 +78,19 @@ func tcpConnRead(vm *VM, tcp *NativeTcpConnectionValue, args []Value) {
 		return
 	}
 
-	vm.push(string(buf))
+	vm.push(NewNative(string(buf)))
 }
 
 func tcpConnAddress(vm *VM, tcp *NativeTcpConnectionValue, args []Value) {
 	dontExpectArgs(vm, "tcp.write", args)
 
-	vm.push(tcp.Connection.RemoteAddr().String())
+	vm.push(NewNative(tcp.Connection.RemoteAddr().String()))
 }
 
 func tcpConnWrite(vm *VM, tcp *NativeTcpConnectionValue, args []Value) {
 	expectArgs(vm, "tcp.write", args, 1)
 
-	switch v := args[0].(type) {
+	switch v := args[0].Value.(type) {
 	case string:
 		tcp.Connection.Write([]byte(v))
 
@@ -99,10 +98,10 @@ func tcpConnWrite(vm *VM, tcp *NativeTcpConnectionValue, args []Value) {
 		tcp.Connection.Write(v.Bytes)
 
 	default:
-		vm.runtimeError(ErrorRuntime, "tcp.write expects string or buffer, got %s.", TypeName(v))
+		vm.runtimeError(ErrorRuntime, "tcp.write expects string or buffer, got %s.", TypeName(args[0]))
 	}
 
-	vm.push(UndefinedValue{})
+	vm.push(NewUndefined())
 }
 
 func tcpConnClose(vm *VM, tcp *NativeTcpConnectionValue, args []Value) {
@@ -110,5 +109,5 @@ func tcpConnClose(vm *VM, tcp *NativeTcpConnectionValue, args []Value) {
 
 	tcp.Connection.Close()
 
-	vm.push(UndefinedValue{})
+	vm.push(NewUndefined())
 }

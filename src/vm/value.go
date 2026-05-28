@@ -30,7 +30,7 @@ type ArrayValue struct {
 	Elements []Value
 }
 
-type ObjectValue map[Value]Value
+type ObjectValue map[any]Value
 
 type NativeTaskValue struct {
 	Done chan TaskResult
@@ -133,14 +133,18 @@ type NamespaceMemberRef struct {
 	GlobalName string
 }
 
-type Value any
+type Value struct {
+	Value any
+	IsInt bool
+	AsInt int
+}
 
 func asInt64(value Value) int64 {
-	switch v := value.(type) {
-	case int:
-		return int64(v)
-	case int64:
-		return v
+	if value.IsInt {
+		return int64(value.AsInt)
+	}
+
+	switch v := value.Value.(type) {
 	case float64:
 		return int64(v)
 	case uint64:
@@ -152,17 +156,11 @@ func asInt64(value Value) int64 {
 }
 
 func asInt(value Value) int {
-	switch n := value.(type) {
-	case int:
-		return n
-	case int8:
-		return int(n)
-	case int16:
-		return int(n)
-	case int32:
-		return int(n)
-	case int64:
-		return int(n)
+	if value.IsInt {
+		return value.AsInt
+	}
+
+	switch n := value.Value.(type) {
 	case uint:
 		return int(n)
 	case uint8:
@@ -192,7 +190,11 @@ func asInt(value Value) int {
 }
 
 func asFloat32(value Value) float32 {
-	switch n := value.(type) {
+	if value.IsInt {
+		return float32(value.AsInt)
+	}
+
+	switch n := value.Value.(type) {
 	case float32:
 		return n
 	case float64:
@@ -204,13 +206,11 @@ func asFloat32(value Value) float32 {
 }
 
 func asFloat64(value Value) float64 {
-	switch v := value.(type) {
-	case int:
-		return float64(v)
+	if value.IsInt {
+		return float64(value.AsInt)
+	}
 
-	case int64:
-		return float64(v)
-
+	switch v := value.Value.(type) {
 	case float32:
 		return float64(v)
 
@@ -235,8 +235,12 @@ func asFloat64(value Value) float64 {
 }
 
 func isNumber(value Value) bool {
-	switch value.(type) {
-	case int, int64, float64, uint64:
+	if value.IsInt {
+		return true
+	}
+
+	switch value.Value.(type) {
+	case float64, uint64:
 		return true
 	default:
 		return false
@@ -244,7 +248,11 @@ func isNumber(value Value) bool {
 }
 
 func isString(value Value) bool {
-	switch value.(type) {
+	if value.IsInt {
+		return false
+	}
+
+	switch value.Value.(type) {
 	case string:
 		return true
 	default:
@@ -253,7 +261,11 @@ func isString(value Value) bool {
 }
 
 func asFloat(value Value) float64 {
-	switch v := value.(type) {
+	if value.IsInt {
+		return float64(value.AsInt)
+	}
+
+	switch v := value.Value.(type) {
 	case int:
 		return float64(v)
 	case int8:
@@ -292,7 +304,11 @@ func asFloat(value Value) float64 {
 }
 
 func asUint(value Value) uint64 {
-	switch v := value.(type) {
+	if value.IsInt {
+		return uint64(value.AsInt)
+	}
+
+	switch v := value.Value.(type) {
 	case int:
 		return uint64(v)
 	case int64:
@@ -315,8 +331,12 @@ func asUint(value Value) uint64 {
 }
 
 func TypeName(value Value) string {
-	switch v := value.(type) {
-	case int, int64, int32, int16, int8, uint, uint64, uint32, uint16, uint8:
+	if value.IsInt {
+		return "number"
+	}
+
+	switch v := value.Value.(type) {
+	case uint, uint64, uint32, uint16, uint8:
 		return "number"
 	case float64, float32:
 		return "float"
@@ -331,10 +351,11 @@ func TypeName(value Value) string {
 	case UndefinedValue:
 		return "undefined"
 	case ObjectValue:
-		if className, ok := v["__class"].(string); ok {
-			return "class::" + className
+		if classNameVal, exists := v["__class"]; exists {
+			if className, ok := classNameVal.Value.(string); ok {
+				return "class::" + className
+			}
 		}
-
 		return "object"
 	case nil:
 		return "nil"
@@ -388,11 +409,11 @@ func TypeName(value Value) string {
 }
 
 func valueToJSONCompatible(value Value) any {
-	switch v := value.(type) {
-	case int:
-		return v
-	case int64:
-		return v
+	if value.IsInt {
+		return value.AsInt
+	}
+
+	switch v := value.Value.(type) {
 	case float64:
 		return v
 
@@ -455,23 +476,43 @@ func valueToJSONCompatible(value Value) any {
 	}
 }
 
-func jsonToTinyValue(value any) Value {
+func ToValue(value any) Value {
 	switch v := value.(type) {
 	case nil:
-		return NullValue{}
-
-	case string:
-		return v
-
-	case bool:
-		return v
-
-	case float64:
-		if v == float64(int(v)) {
-			return int(v)
+		return Value{
+			Value: NullValue{},
+			IsInt: false,
+			AsInt: 0,
 		}
 
+	case Value:
 		return v
+
+	case string:
+		return Value{
+			Value: v,
+			IsInt: false,
+			AsInt: 0,
+		}
+
+	case bool:
+		return Value{
+			Value: v,
+			IsInt: false,
+			AsInt: 0,
+		}
+
+	case int:
+		return NewInt(v)
+	case int64:
+		return NewInt(int(v))
+	case int32:
+		return NewInt(int(v))
+	case float64:
+		if v == float64(int(v)) {
+			return NewInt(int(v))
+		}
+		return NewNative(v)
 
 	case []any:
 		elements := make([]Value, len(v))
@@ -480,8 +521,12 @@ func jsonToTinyValue(value any) Value {
 			elements[i] = jsonToTinyValue(item)
 		}
 
-		return &ArrayValue{
-			Elements: elements,
+		return Value{
+			Value: &ArrayValue{
+				Elements: elements,
+			},
+			IsInt: false,
+			AsInt: 0,
 		}
 
 	case map[string]any:
@@ -491,19 +536,29 @@ func jsonToTinyValue(value any) Value {
 			object[key] = jsonToTinyValue(item)
 		}
 
-		return object
+		return Value{
+			Value: object,
+			IsInt: false,
+			AsInt: 0,
+		}
 
 	default:
-		return valueToString(v)
+		return NewNative(v)
 	}
 }
 
+func jsonToTinyValue(value any) Value {
+	return ToValue(value)
+}
+
 func valueToString(value Value) string {
-	switch v := value.(type) {
+	if value.IsInt {
+		return strconv.Itoa(value.AsInt)
+	}
+
+	switch v := value.Value.(type) {
 	case string:
 		return v
-	case int:
-		return strconv.Itoa(v)
 	case float64:
 		return strconv.FormatFloat(v, 'f', -1, 64)
 	case bool:
@@ -516,7 +571,7 @@ func valueToString(value Value) string {
 		parts := make([]string, len(v.Elements))
 
 		for i, item := range v.Elements {
-			value, ok := item.(string)
+			value, ok := item.Value.(string)
 			if ok {
 				parts[i] = "\"" + value + "\""
 			} else {
@@ -547,7 +602,7 @@ func valueToString(value Value) string {
 
 		for key, item := range v {
 			entries = append(entries, objectEntry{
-				keyText: valueToString(key),
+				keyText: valueToString(ToValue(key)),
 				value:   item,
 			})
 		}
@@ -608,7 +663,7 @@ func valueToString(value Value) string {
 }
 
 func asString(value Value, vm *VM) string {
-	stringValue, ok := value.(string)
+	stringValue, ok := value.Value.(string)
 	if !ok {
 		vm.runtimeError(ErrorSyntax, "expected string, got %s", TypeName(value))
 	}
@@ -617,7 +672,7 @@ func asString(value Value, vm *VM) string {
 }
 
 func asObject(value Value, vm *VM) ObjectValue {
-	objectValue, ok := value.(ObjectValue)
+	objectValue, ok := value.Value.(ObjectValue)
 	if !ok {
 		vm.runtimeError(ErrorSyntax, "expected object, got %s", TypeName(value))
 	}
@@ -626,7 +681,7 @@ func asObject(value Value, vm *VM) ObjectValue {
 }
 
 func asBuffer(value Value, vm *VM) *BufferValue {
-	bufferValue, ok := value.(*BufferValue)
+	bufferValue, ok := value.Value.(*BufferValue)
 	if !ok {
 		vm.runtimeError(ErrorSyntax, "expected buffer, got %s", TypeName(value))
 	}
@@ -635,7 +690,7 @@ func asBuffer(value Value, vm *VM) *BufferValue {
 }
 
 func asArray(value Value, vm *VM) *ArrayValue {
-	arrayValue, ok := value.(*ArrayValue)
+	arrayValue, ok := value.Value.(*ArrayValue)
 	if !ok {
 		vm.runtimeError(ErrorSyntax, "expected array, got %s", TypeName(value))
 	}
@@ -644,7 +699,7 @@ func asArray(value Value, vm *VM) *ArrayValue {
 }
 
 func asBool(value Value, vm *VM) bool {
-	boolean, ok := value.(bool)
+	boolean, ok := value.Value.(bool)
 	if !ok {
 		vm.runtimeError(ErrorSyntax, "expected bool, got %s", TypeName(value))
 	}
@@ -653,11 +708,13 @@ func asBool(value Value, vm *VM) bool {
 }
 
 func isTruthy(value Value) bool {
-	switch v := value.(type) {
+	if value.IsInt {
+		return value.AsInt != 0
+	}
+
+	switch v := value.Value.(type) {
 	case bool:
 		return v
-	case int:
-		return v != 0
 	case string:
 		return v != ""
 	case NullValue:
@@ -665,24 +722,27 @@ func isTruthy(value Value) bool {
 	case UndefinedValue:
 		return false
 	default:
-		return value != nil
+		return v != nil
 	}
 }
 
 func valuesEqual(a Value, b Value) bool {
-	switch left := a.(type) {
-	case int:
-		switch right := b.(type) {
-		case int:
-			return left == right
+	if a.IsInt {
+		if b.IsInt {
+			return a.AsInt == b.AsInt
+		}
+
+		switch right := b.Value.(type) {
 		case float64:
-			return float64(left) == right
+			return float64(a.AsInt) == right
 		default:
 			return false
 		}
+	}
 
+	switch left := a.Value.(type) {
 	case float64:
-		switch right := b.(type) {
+		switch right := b.Value.(type) {
 		case int:
 			return left == float64(right)
 		case float64:
@@ -692,22 +752,54 @@ func valuesEqual(a Value, b Value) bool {
 		}
 
 	case string:
-		right, ok := b.(string)
+		right, ok := b.Value.(string)
 		return ok && left == right
 
 	case bool:
-		right, ok := b.(bool)
+		right, ok := b.Value.(bool)
 		return ok && left == right
 
 	case NullValue:
-		_, ok := b.(NullValue)
+		_, ok := b.Value.(NullValue)
 		return ok
 
 	case UndefinedValue:
-		_, ok := b.(UndefinedValue)
+		_, ok := b.Value.(UndefinedValue)
 		return ok
 
 	default:
 		return a == b
+	}
+}
+
+func NewInt(val int) Value {
+	return Value{
+		Value: nil,
+		IsInt: true,
+		AsInt: val,
+	}
+}
+
+func NewNull() Value {
+	return Value{
+		Value: NullValue{},
+		IsInt: false,
+		AsInt: 0,
+	}
+}
+
+func NewUndefined() Value {
+	return Value{
+		Value: UndefinedValue{},
+		IsInt: false,
+		AsInt: 0,
+	}
+}
+
+func NewNative(variable any) Value {
+	return Value{
+		Value: variable,
+		IsInt: false,
+		AsInt: 0,
 	}
 }

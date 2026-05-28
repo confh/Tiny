@@ -38,5 +38,5 @@ func (vm *VM) callStdSync(method string, args []Value) {
 func syncMakeMutex(vm *VM, args []Value) {
 	dontExpectArgs(vm, "sync.mutex", args)
 
-	vm.push(&NativeMutexValue{})
+	vm.push(NewNative(&NativeMutexValue{}))
 }

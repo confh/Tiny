@@ -110,10 +110,18 @@ func deserializeParams(params []SerializableParam) []Param {
 	result := make([]Param, len(params))
 
 	for i, param := range params {
-		defaultValue := Value(UndefinedValue{})
+		defaultValue := NewUndefined()
 
 		if param.HasDefault {
-			defaultValue = DecodeValue(param.DefaultValue).(Value)
+			decoded := DecodeValue(param.DefaultValue)
+
+			if valStruct, ok := decoded.(Value); ok {
+				defaultValue = valStruct
+			} else if intVal, ok := decoded.(int); ok {
+				defaultValue = NewInt(intVal)
+			} else {
+				defaultValue = NewNative(decoded)
+			}
 		}
 
 		result[i] = Param{
@@ -290,7 +298,7 @@ func deserializeClasses(classes map[string]SerializableClass) map[string]Class {
 		for _, field := range class.Fields {
 			fields = append(fields, ClassField{
 				Name:     field.Name,
-				Value:    DecodeValue(field.Value),
+				Value:    ToValue(DecodeValue(field.Value)),
 				TypeHint: field.TypeHint,
 				Constant: field.Constant,
 				Private:  field.Private,
@@ -387,6 +395,12 @@ func EncodeValue(value any) EncodedValue {
 
 	case bool:
 		return EncodedValue{Type: "bool", Data: v}
+
+	case Value:
+		if v.IsInt {
+			return EncodeValue(v.AsInt)
+		}
+		return EncodeValue(v.Value)
 
 	case VariableInfo:
 		return EncodedValue{Type: "variable", Data: v}
@@ -580,6 +594,11 @@ func DecodeValue(value EncodedValue) any {
 	case "bool":
 		return value.Data.(bool)
 
+	case "value":
+		var result Value
+		decodeInto(value.Data, &result)
+		return result
+
 	case "incLocal":
 		var result IncrementInfo
 		decodeInto(value.Data, &result)
@@ -722,10 +741,10 @@ func DecodeValue(value EncodedValue) any {
 		obj := ObjectValue{}
 
 		for key, encoded := range raw {
-			obj[key] = DecodeValue(encoded)
+			obj[key] = ToValue(DecodeValue(encoded))
 		}
 
-		return obj
+		return NewNative(obj)
 
 	case "array":
 		var result ArrayInfo
@@ -738,10 +757,10 @@ func DecodeValue(value EncodedValue) any {
 		return result
 
 	case "null":
-		return NullValue{}
+		return NewNull()
 
 	case "undefined":
-		return UndefinedValue{}
+		return NewUndefined()
 
 	case "namespace":
 		var data SerializableNamespaceValue
@@ -750,7 +769,7 @@ func DecodeValue(value EncodedValue) any {
 		members := map[string]Value{}
 
 		for name, encodedMember := range data.Members {
-			members[name] = DecodeValue(encodedMember)
+			members[name] = ToValue(DecodeValue(encodedMember))
 		}
 
 		return NamespaceValue{

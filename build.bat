@@ -14,7 +14,7 @@ if errorlevel 1 exit /b 1
 @REM if errorlevel 1 exit /b 1
 
 echo Building Tiny compiler...
-set CGO_ENABLED=1
+set CGO_ENABLED=0
 set GOOS=windows
 set GOARCH=amd64
 go build -ldflags "-s -w" -o tiny.exe .\src

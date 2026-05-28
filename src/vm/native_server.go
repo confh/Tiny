@@ -68,7 +68,7 @@ func init() {
 func (vm *VM) callServerMethod(server *NativeServerValue, method string, args []Value) {
 	fn, ok := serverMethods[method]
 	if !ok {
-		vm.runtimeError(ErrorName, "unknown server method: %s", method)
+		vm.fatalError(ErrorName, "unknown server method: %s", method)
 		return
 	}
 	fn(vm, server, args)
@@ -83,8 +83,8 @@ func serverGetPrettyJSON(vm *VM, server *NativeServerValue, args []Value) {
 		vm.runtimeError(ErrorRuntime, "failed to convert value to JSON: %v", err)
 		return
 	}
-	server.GetRoutes[path] = string(bytes)
-	vm.push(UndefinedValue{})
+	server.GetRoutes[path] = NewNative(string(bytes))
+	vm.push(NewUndefined())
 }
 
 func serverGetJSON(vm *VM, server *NativeServerValue, args []Value) {
@@ -96,15 +96,15 @@ func serverGetJSON(vm *VM, server *NativeServerValue, args []Value) {
 		vm.runtimeError(ErrorRuntime, "failed to convert value to JSON: %v", err)
 		return
 	}
-	server.GetRoutes[path] = string(bytes)
-	vm.push(UndefinedValue{})
+	server.GetRoutes[path] = NewNative(string(bytes))
+	vm.push(NewUndefined())
 }
 
 func serverGet(vm *VM, server *NativeServerValue, args []Value) {
 	expectArgs(vm, "server.get", args, 2)
 	path := argString(vm, "server.get", args, 0)
 	handler := args[1]
-	switch handler.(type) {
+	switch handler.Value.(type) {
 	case string:
 		server.GetRoutes[path] = handler
 	case FunctionValue:
@@ -113,14 +113,14 @@ func serverGet(vm *VM, server *NativeServerValue, args []Value) {
 		vm.runtimeError(ErrorType, "server.get expects string or function as second argument")
 		return
 	}
-	vm.push(UndefinedValue{})
+	vm.push(NewUndefined())
 }
 
 func serverPost(vm *VM, server *NativeServerValue, args []Value) {
 	expectArgs(vm, "server.post", args, 2)
 	path := argString(vm, "server.post", args, 0)
 	handler := args[1]
-	switch handler.(type) {
+	switch handler.Value.(type) {
 	case string:
 		server.PostRoutes[path] = handler
 	case FunctionValue:
@@ -129,13 +129,13 @@ func serverPost(vm *VM, server *NativeServerValue, args []Value) {
 		vm.runtimeError(ErrorType, "server.post expects string or function as second argument")
 		return
 	}
-	vm.push(UndefinedValue{})
+	vm.push(NewUndefined())
 }
 
 func serverStop(vm *VM, server *NativeServerValue, args []Value) {
 	expectArgs(vm, "server.stop", args, 0)
 	server.closed = true
-	vm.push(true)
+	vm.push(NewNative(true))
 }
 
 func serverStart(vm *VM, server *NativeServerValue, args []Value) {
@@ -152,7 +152,6 @@ func serverStart(vm *VM, server *NativeServerValue, args []Value) {
 	mux := http.NewServeMux()
 	server.mux = mux
 
-	// Collect all unique paths for GET and POST
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if server.closed {
 			return
@@ -165,10 +164,8 @@ func serverStart(vm *VM, server *NativeServerValue, args []Value) {
 		switch r.Method {
 		case http.MethodGet:
 			handler, params, found = findRoute(server.GetRoutes, r.URL.Path)
-
 		case http.MethodPost:
 			handler, params, found = findRoute(server.PostRoutes, r.URL.Path)
-
 		default:
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 			return
@@ -179,47 +176,45 @@ func serverStart(vm *VM, server *NativeServerValue, args []Value) {
 			return
 		}
 
-		switch h := handler.(type) {
+		switch h := handler.Value.(type) {
 		case string:
 			writeServerResponse(w, h, HttpText)
-
 		case FunctionValue:
 			bodyBytes, err := io.ReadAll(r.Body)
 			if err != nil {
 				vm.runtimeError(ErrorRuntime, "failed to read request body: %v", err)
 				return
 			}
-
 			body := string(bodyBytes)
 
 			obj := ObjectValue{
-				"path":   r.URL.Path,
-				"method": r.Method,
-				"body":   body,
-				"params": params,
+				"path":   NewNative(r.URL.Path),
+				"method": NewNative(r.Method),
+				"body":   NewNative(body),
+				"params": NewNative(params),
 			}
 
 			queryMap := make(ObjectValue)
 			for key, values := range r.URL.Query() {
 				if len(values) > 0 {
-					queryMap[key] = values[0]
+					queryMap[key] = NewNative(values[0])
 				} else {
-					queryMap[key] = ""
+					queryMap[key] = NewNative("")
 				}
 			}
-			obj["query"] = queryMap
+			obj["query"] = NewNative(queryMap)
 
 			headers := make(ObjectValue)
 			for k, v := range r.Header {
 				if len(v) > 0 {
-					headers[k] = v[0]
+					headers[k] = NewNative(v[0])
 				} else {
-					headers[k] = ""
+					headers[k] = NewNative("")
 				}
 			}
-			obj["headers"] = headers
+			obj["headers"] = NewNative(headers)
 
-			reqObj := Value(obj)
+			reqObj := NewNative(obj)
 
 			vm.mu.Lock()
 			defer vm.mu.Unlock()
@@ -232,7 +227,7 @@ func serverStart(vm *VM, server *NativeServerValue, args []Value) {
 				result = vm.callFunctionValue(h, []Value{reqObj})
 			}
 
-			httpResponseObject, ok := result.(NativeHttpResponseValue)
+			httpResponseObject, ok := result.Value.(NativeHttpResponseValue)
 			if !ok {
 				vm.runtimeError(ErrorRuntime, "expected httpResponse, got %s.", TypeName(result))
 				return
@@ -261,7 +256,7 @@ func serverStart(vm *VM, server *NativeServerValue, args []Value) {
 		}
 	}
 
-	vm.push(UndefinedValue{})
+	vm.push(NewUndefined())
 }
 
 func matchRoute(pattern string, actualPath string) (bool, ObjectValue) {
@@ -295,7 +290,7 @@ func matchRoute(pattern string, actualPath string) (bool, ObjectValue) {
 				return false, params
 			}
 
-			params[paramName] = actualPart
+			params[paramName] = NewNative(actualPart)
 			continue
 		}
 
@@ -308,12 +303,12 @@ func matchRoute(pattern string, actualPath string) (bool, ObjectValue) {
 }
 
 func findRoute(routes map[string]Value, actualPath string) (Value, ObjectValue, bool) {
-	// 1. Exact match first.
+	// exact match
 	if handler, ok := routes[actualPath]; ok {
 		return handler, ObjectValue{}, true
 	}
 
-	// 2. Dynamic match.
+	// dynamic match
 	for pattern, handler := range routes {
 		matched, params := matchRoute(pattern, actualPath)
 		if matched {
@@ -321,5 +316,5 @@ func findRoute(routes map[string]Value, actualPath string) (Value, ObjectValue, 
 		}
 	}
 
-	return nil, ObjectValue{}, false
+	return NewNull(), ObjectValue{}, false
 }

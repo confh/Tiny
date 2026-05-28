@@ -45,6 +45,8 @@ type Compiler struct {
 	anonymousFunctionCount int
 	declaredFunctions      map[string]bool
 
+	activeLocks []Expr
+
 	functionIDs    map[string]int
 	nextFunctionID int
 
@@ -451,7 +453,7 @@ func (c *Compiler) compileFunctionLiteral(stmt FunctionStmt) {
 		c.compileStatement(bodyStmt)
 	}
 
-	c.emit(OP_CONST, UndefinedValue{})
+	c.emit(OP_CONST, NewUndefined())
 	c.emit(OP_RETURN, nil)
 
 	captures := []CapturedVar{}
@@ -621,9 +623,9 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 
 		c.compileNamespace(ns)
 
-		members[ns.Name] = NamespaceMemberRef{
+		members[ns.Name] = NewNative(NamespaceMemberRef{
 			GlobalName: ns.Name,
-		}
+		})
 	}
 
 	for _, raw := range stmt.Statements {
@@ -666,7 +668,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		namespaceFunctions[fn.Name] = fullName
 
 		if !hasExplicitExports || exported {
-			members[fn.Name] = FunctionValue{Name: fullName}
+			members[fn.Name] = NewNative(FunctionValue{Name: fullName})
 		}
 
 		c.functions[fullName] = Function{
@@ -691,7 +693,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		namespaceVariables[v.Name] = fullName
 
 		if !hasExplicitExports || exported {
-			members[v.Name] = NamespaceMemberRef{GlobalName: fullName}
+			members[v.Name] = NewNative(NamespaceMemberRef{GlobalName: fullName})
 		}
 	}
 
@@ -709,7 +711,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		namespaceClasses[classStmt.Name] = fullName
 
 		if !hasExplicitExports || exported {
-			members[classStmt.Name] = Class{Name: fullName}
+			members[classStmt.Name] = NewNative(Class{Name: fullName})
 		}
 	}
 
@@ -727,9 +729,9 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		namespaceEnums[enumStmt.Name] = fullName
 
 		if !hasExplicitExports || exported {
-			members[enumStmt.Name] = NamespaceMemberRef{
+			members[enumStmt.Name] = NewNative(NamespaceMemberRef{
 				GlobalName: fullName,
-			}
+			})
 		}
 	}
 
@@ -803,7 +805,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 				c.fatalError(ErrorName, "duplicate enum member %s.%s", enumStmt.Name, member)
 			}
 
-			obj[member] = member
+			obj[member] = NewNative(member)
 		}
 
 		c.emit(OP_CONST, obj)
@@ -1288,7 +1290,12 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 		if s.HasValue {
 			c.compileExpr(s.Value)
 		} else {
-			c.emit(OP_CONST, UndefinedValue{})
+			c.emit(OP_CONST, NewUndefined())
+		}
+
+		for i := len(c.activeLocks) - 1; i >= 0; i-- {
+			c.compileExpr(c.activeLocks[i])
+			c.emit(OP_UNLOCK_MUTEX, nil)
 		}
 
 		c.emit(OP_RETURN, nil)
@@ -1615,16 +1622,16 @@ func (c *Compiler) ensureCaptured(name string) (Binding, bool) {
 func (c *Compiler) evalConstantExpr(expr Expr, err string) Value {
 	switch e := expr.(type) {
 	case StringExpr:
-		return e.Value
+		return NewNative(e.Value)
 
 	case NumberExpr:
-		return e.Value
+		return NewInt(e.Value)
 
 	case BoolExpr:
-		return e.Value
+		return NewNative(e.Value)
 
 	case NullExpr:
-		return NullValue{}
+		return NewNull()
 
 	case ArrayExpr:
 		arr := &ArrayValue{
@@ -1635,7 +1642,7 @@ func (c *Compiler) evalConstantExpr(expr Expr, err string) Value {
 			arr.Elements = append(arr.Elements, c.evalConstantExpr(element, err))
 		}
 
-		return arr
+		return NewNative(arr)
 
 	case ObjectExpr:
 		obj := ObjectValue{}
@@ -1644,7 +1651,7 @@ func (c *Compiler) evalConstantExpr(expr Expr, err string) Value {
 			obj[pair.Name] = c.evalConstantExpr(pair.Value, err)
 		}
 
-		return obj
+		return NewNative(obj)
 
 	default:
 		c.fatalError(
@@ -1652,7 +1659,7 @@ func (c *Compiler) evalConstantExpr(expr Expr, err string) Value {
 			"%s",
 			err,
 		)
-		return UndefinedValue{}
+		return NewUndefined()
 	}
 }
 
@@ -1702,7 +1709,7 @@ func (c *Compiler) compileClass(stmt ClassStmt) {
 				field.Name,
 				stmt.Name,
 				field.TypeHint.Name,
-				TypeName(field.Value),
+				TypeName(c.evalConstantExpr(field.Value, "class field default must be constant.")),
 			)
 		}
 
@@ -1786,8 +1793,15 @@ func (c *Compiler) compileLockStmt(stmt LockStmt) {
 	c.compileExpr(stmt.Mutex)
 	c.emit(OP_LOCK_MUTEX, nil)
 
-	// run block while mutex is locked
+	// register this mutex as active before compiling the block
+	c.activeLocks = append(c.activeLocks, stmt.Mutex)
+
+	// run block
+	c.setLocation(stmt.File, stmt.Line, stmt.Column)
 	c.compileScopedBlock(stmt.Block)
+
+	// unregister it (pop from stack) since the block is done
+	c.activeLocks = c.activeLocks[:len(c.activeLocks)-1]
 
 	// unlock mutex after done
 	c.compileExpr(stmt.Mutex)
@@ -1821,7 +1835,6 @@ func (c *Compiler) compileFunction(stmt FunctionStmt) {
 
 	hasDefaults, hasTypeHints := getParamFlags(stmt.Params)
 
-	// Predeclare function so recursion works.
 	c.functions[stmt.Name] = Function{
 		ID:           c.getFunctionID(stmt.Name),
 		Name:         stmt.Name,
@@ -1857,7 +1870,7 @@ func (c *Compiler) compileFunction(stmt FunctionStmt) {
 		c.compileStatement(bodyStmt)
 	}
 
-	c.emit(OP_CONST, UndefinedValue{})
+	c.emit(OP_CONST, NewUndefined())
 	c.emit(OP_RETURN, nil)
 
 	localCount := c.localCount
@@ -1900,8 +1913,6 @@ func (c *Compiler) collectCapturableBindings() map[string]Binding {
 
 	if c.outerBindings != nil {
 		for name, binding := range c.outerBindings {
-			// Only expose real locals from outer functions.
-			// Do NOT force-capture everything here.
 			if binding.Kind == BindingLocal {
 				result[name] = binding
 			}
@@ -2108,7 +2119,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 			c.compileStatement(bodyStmt)
 		}
 
-		c.emit(OP_CONST, UndefinedValue{})
+		c.emit(OP_CONST, NewUndefined())
 		c.emit(OP_RETURN, nil)
 
 		captures := []CapturedVar{}
@@ -2152,7 +2163,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 		c.emit(OP_CONST, NullValue{})
 
 	case UndefinedExpr:
-		c.emit(OP_CONST, UndefinedValue{})
+		c.emit(OP_CONST, NewUndefined())
 
 	case ObjectExpr:
 		names := make([]ObjectFieldsInfo, len(e.Fields))
@@ -2272,7 +2283,6 @@ func (c *Compiler) compileExpr(expr Expr) {
 		}
 
 		// 3. Only capture REAL outer locals.
-		// Do NOT capture imports/std namespaces/globals.
 		if binding, exists := c.ensureCaptured(e.Name); exists {
 			if binding.Kind == BindingLocal {
 				c.emit(OP_LOAD_LOCAL, binding.Slot)
@@ -2323,7 +2333,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 			e.Name,
 		)
 
-		// 7. Fallback global.
+		// 7. Fallback global
 		c.emit(OP_LOAD_GLOBAL, e.Name)
 		return
 
@@ -2598,9 +2608,6 @@ func (c *Compiler) compileMethod(className string, stmt FunctionStmt) {
 
 	c.currentInstructions = &functionInstructions
 
-	// Keep global/import bindings like:
-	// import "models.tiny" as models;
-	// import "logger.tiny" as Logger;
 	globalScope := map[string]Binding{}
 	if len(oldScopes) > 0 {
 		maps.Copy(globalScope, oldScopes[0])
@@ -2626,15 +2633,11 @@ func (c *Compiler) compileMethod(className string, stmt FunctionStmt) {
 		c.declareVariable(param.Name, false)
 	}
 
-	// DO NOT declare class fields here.
-	// Fields are accessed through this.name, not as local variables.
-	// This also avoids conflicts like field author + param author.
-
 	for _, bodyStmt := range stmt.Body {
 		c.compileStatement(bodyStmt)
 	}
 
-	c.emit(OP_CONST, UndefinedValue{})
+	c.emit(OP_CONST, NewUndefined())
 	c.emit(OP_RETURN, nil)
 
 	params := make([]Param, 0, len(stmt.Params)+1)

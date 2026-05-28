@@ -102,7 +102,7 @@ func stdHttpServer(vm *VM, args []Value) {
 		GetRoutes:  map[string]Value{},
 		PostRoutes: map[string]Value{},
 	}
-	vm.push(server)
+	vm.push(NewNative(server))
 }
 
 func stdHttpGet(vm *VM, args []Value) {
@@ -110,50 +110,62 @@ func stdHttpGet(vm *VM, args []Value) {
 
 	url := argString(vm, "http.get", args, 0)
 
-	var headers ObjectValue
+	var headers ObjectValue = ObjectValue{}
 
 	if len(args) > 1 {
 		extra := argObject(vm, "http.get", args, 1)
 
 		if h, hasHeaders := extra["headers"]; hasHeaders {
-			headers, _ = h.(ObjectValue)
+			if val, ok := h.Value.(ObjectValue); ok {
+				headers = val
+			}
 		}
 	}
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		vm.runtimeError(ErrorRuntime, "http.get request creation failed: %s", err.Error())
+		return
 	}
 	for key, value := range headers {
-		valStr, ok := value.(string)
-		if ok {
-			req.Header.Set(valueToString(key), valStr)
+		strKey := valueToString(ToValue(key))
+		var valStr string
+		if s, ok := value.Value.(string); ok {
+			valStr = s
+		} else if value.IsInt {
+			valStr = valueToString(value)
+		} else {
+			valStr = valueToString(value)
 		}
+		req.Header.Set(strKey, valStr)
 	}
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
 		vm.runtimeError(ErrorRuntime, "http.get failed: %s", err.Error())
+		return
 	}
 
 	defer resp.Body.Close()
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		vm.runtimeError(ErrorRuntime, "http.get read response failed: %s", err.Error())
+		return
+	}
+
+	headersObj := ObjectValue{}
+	for k, v := range resp.Header {
+		headersObj[k] = NewNative(strings.Join(v, ","))
 	}
 
 	result := ObjectValue{
-		"status":  resp.StatusCode,
-		"headers": ObjectValue{},
-		"body":    string(bodyBytes),
+		"status":  NewInt(resp.StatusCode),
+		"headers": NewNative(headersObj),
+		"body":    NewNative(string(bodyBytes)),
 	}
 
-	for k, v := range resp.Header {
-		result["headers"].(ObjectValue)[k] = strings.Join(v, ",")
-	}
-
-	vm.push(result)
+	vm.push(NewNative(result))
 }
 
 func stdHttpPost(vm *VM, args []Value) {
@@ -162,16 +174,20 @@ func stdHttpPost(vm *VM, args []Value) {
 	url := argString(vm, "http.post", args, 0)
 	data := argObject(vm, "http.post", args, 1)
 
-	var headers ObjectValue
+	var headers ObjectValue = ObjectValue{}
 	returnBytes := false
 	if len(args) == 3 {
 		options := asObject(args[2], vm)
 		if h, hasHeaders := options["headers"]; hasHeaders {
-			headers, _ = h.(ObjectValue)
+			if val, ok := h.Value.(ObjectValue); ok {
+				headers = val
+			}
 		}
 
 		if h, hasHeaders := options["bytes"]; hasHeaders {
-			returnBytes, _ = h.(bool)
+			if val, ok := h.Value.(bool); ok {
+				returnBytes = val
+			}
 		}
 	}
 
@@ -179,50 +195,61 @@ func stdHttpPost(vm *VM, args []Value) {
 	jsonData, err := json.Marshal(cleanedData)
 	if err != nil {
 		vm.runtimeError(ErrorRuntime, "http.post failed to encode JSON data: %s", err.Error())
+		return
 	}
 
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
 		vm.runtimeError(ErrorRuntime, "http.post request creation failed: %s", err.Error())
+		return
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 
 	for key, value := range headers {
-		valStr, ok := value.(string)
-		if ok {
-			req.Header.Set(valueToString(key), valStr)
+		strKey := valueToString(ToValue(key))
+		var valStr string
+		if s, ok := value.Value.(string); ok {
+			valStr = s
+		} else if value.IsInt {
+			valStr = valueToString(value)
+		} else {
+			valStr = valueToString(value)
 		}
+		req.Header.Set(strKey, valStr)
 	}
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
 		vm.runtimeError(ErrorRuntime, "http.post failed: %s", err.Error())
+		return
 	}
 
 	defer resp.Body.Close()
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		vm.runtimeError(ErrorRuntime, "http.post read response failed: %s", err.Error())
+		return
+	}
+
+	headersObj := ObjectValue{}
+	for k, v := range resp.Header {
+		headersObj[k] = NewNative(strings.Join(v, ","))
 	}
 
 	result := ObjectValue{
-		"status":  resp.StatusCode,
-		"headers": ObjectValue{},
+		"status":  NewInt(resp.StatusCode),
+		"headers": NewNative(headersObj),
 	}
 
 	if returnBytes {
-		result["body"] = bodyBytes
+		result["body"] = NewNative(bodyBytes)
 	} else {
-		result["body"] = string(bodyBytes)
+		result["body"] = NewNative(string(bodyBytes))
 	}
 
-	for k, v := range resp.Header {
-		result["headers"].(ObjectValue)[k] = strings.Join(v, ",")
-	}
-
-	vm.push(result)
+	vm.push(NewNative(result))
 }
 
 func stdHttpJsonResponse(vm *VM, args []Value) {
@@ -230,10 +257,10 @@ func stdHttpJsonResponse(vm *VM, args []Value) {
 
 	jsonValue := argObject(vm, "http.json", args, 0)
 
-	vm.push(NativeHttpResponseValue{
+	vm.push(NewNative(NativeHttpResponseValue{
 		Type:  HttpJson,
-		Value: jsonValue,
-	})
+		Value: NewNative(jsonValue),
+	}))
 }
 
 func stdHttpTextResponse(vm *VM, args []Value) {
@@ -241,10 +268,10 @@ func stdHttpTextResponse(vm *VM, args []Value) {
 
 	strValue := argString(vm, "http.text", args, 0)
 
-	vm.push(NativeHttpResponseValue{
+	vm.push(NewNative(NativeHttpResponseValue{
 		Type:  HttpText,
-		Value: strValue,
-	})
+		Value: NewNative(strValue),
+	}))
 }
 
 func stdHttpDownloadFile(vm *VM, args []Value) {
@@ -256,25 +283,27 @@ func stdHttpDownloadFile(vm *VM, args []Value) {
 	out, err := os.Create(path)
 	if err != nil {
 		vm.runtimeError(ErrorRuntime, "error while creating file to download: %s", err)
+		return
 	}
 	defer out.Close()
 
 	resp, err := http.Get(url)
 	if err != nil {
 		vm.runtimeError(ErrorRuntime, "error while downloading file: %s", err)
+		return
 	}
 	defer resp.Body.Close()
 
 	_, err = io.Copy(out, resp.Body)
 
-	vm.push(true)
+	vm.push(NewNative(true))
 }
 
-func cleanMapForJSON(vmMap map[Value]Value) map[string]any {
+func cleanMapForJSON(vmMap ObjectValue) map[string]any {
 	clean := make(map[string]any, len(vmMap))
 
 	for k, v := range vmMap {
-		keyStr := valueToString(k)
+		keyStr := valueToString(ToValue(k))
 		clean[keyStr] = cleanValueForJSON(v)
 	}
 

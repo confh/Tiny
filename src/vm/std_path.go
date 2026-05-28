@@ -83,7 +83,7 @@ func pathJoin(vm *VM, args []Value) {
 	}
 
 	joined := filepath.Join(parts...)
-	vm.push(joined)
+	vm.push(NewNative(joined))
 }
 
 func pathBaseName(vm *VM, args []Value) {
@@ -91,7 +91,7 @@ func pathBaseName(vm *VM, args []Value) {
 
 	path := argString(vm, "path.baseName", args, 0)
 
-	vm.push(filepath.Base(path))
+	vm.push(NewNative(filepath.Base(path)))
 }
 
 func pathDirName(vm *VM, args []Value) {
@@ -99,7 +99,7 @@ func pathDirName(vm *VM, args []Value) {
 
 	directoryPath := argString(vm, "path.dirName", args, 0)
 
-	vm.push(filepath.Dir(directoryPath))
+	vm.push(NewNative(filepath.Dir(directoryPath)))
 }
 
 func pathExtName(vm *VM, args []Value) {
@@ -107,7 +107,7 @@ func pathExtName(vm *VM, args []Value) {
 
 	path := argString(vm, "path.extName", args, 0)
 
-	vm.push(filepath.Ext(path))
+	vm.push(NewNative(filepath.Ext(path)))
 }
 
 func pathCwd(vm *VM, args []Value) {
@@ -116,7 +116,9 @@ func pathCwd(vm *VM, args []Value) {
 	dir, err := os.Getwd()
 	if err != nil {
 		vm.runtimeError(ErrorRuntime, "could not get current working directory: %s", err)
+		vm.push(NewUndefined())
+		return
 	}
 
-	vm.push(dir)
+	vm.push(NewNative(dir))
 }

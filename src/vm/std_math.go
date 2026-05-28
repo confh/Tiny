@@ -170,6 +170,14 @@ var stdMathMetadata = StdModuleInfo{
 			Returns:     "object",
 			Description: "Scales a matrix by a scalar (returns a new matrix object).",
 		},
+		"fib": {
+			Name: "fib",
+			Args: []StdArg{
+				{Name: "n", Type: "int", Optional: false},
+			},
+			Returns:     "int",
+			Description: "Returns the nth Fibonacci number (recursive implementation).",
+		},
 	},
 }
 
@@ -196,15 +204,15 @@ func init() {
 		"matMul":       stdMathMatMul,
 		"matTranspose": stdMathMatTranspose,
 		"matScale":     stdMathMatScale,
+		"fib":          stdMathFib,
 	}
 	registerStdModule(stdMathMetadata)
 }
 
 func (vm *VM) callStdMath(method string, args []Value) {
-	// blas64.Use(netlib.Implementation{})
 	fn, ok := stdMathMethods[method]
 	if !ok {
-		vm.runtimeError(ErrorName, "unknown math function: %s", method)
+		vm.push(NewUndefined())
 		return
 	}
 	fn(vm, args)
@@ -228,27 +236,45 @@ func DegToRad(deg float64) float64 {
 	return deg * (math.Pi / 180)
 }
 
+func nativeFib(n int) int {
+	if n < 2 {
+		return n
+	}
+
+	a, b := 0, 1
+	for i := 2; i <= n; i++ {
+		a, b = b, a+b
+	}
+	return b
+}
+
 func getMatrixFields(v ObjectValue, matName string, vm *VM) (int, int, []float64) {
-	rows, ok := v["rows"].(int)
-	if !ok {
+	rows := v["rows"]
+	if !rows.IsInt {
 		vm.runtimeError(ErrorType, "%s matrix missing or invalid 'rows' field", matName)
+		vm.push(NewUndefined())
+		return 0, 0, nil
 	}
-	cols, ok := v["cols"].(int)
-	if !ok {
+	cols := v["cols"]
+	if !cols.IsInt {
 		vm.runtimeError(ErrorType, "%s matrix missing or invalid 'cols' field", matName)
+		vm.push(NewUndefined())
+		return 0, 0, nil
 	}
-	rawData, ok := v["data"].(*BufferValue)
+	rawData, ok := v["data"].Value.(*BufferValue)
 	if !ok {
 		vm.runtimeError(ErrorType, "%s matrix missing or invalid 'data' field", matName)
+		vm.push(NewUndefined())
+		return 0, 0, nil
 	}
 
 	if len(rawData.Bytes) == 0 {
-		return rows, cols, nil
+		return rows.AsInt, cols.AsInt, nil
 	}
 
 	data := unsafe.Slice((*float64)(unsafe.Pointer(&rawData.Bytes[0])), len(rawData.Bytes)/8)
 
-	return rows, cols, data
+	return rows.AsInt, cols.AsInt, data
 }
 
 func float64SliceToBytes(data []float64) []byte {
@@ -260,50 +286,51 @@ func float64SliceToBytes(data []float64) []byte {
 
 func stdMathToFloat(vm *VM, args []Value) {
 	expectArgs(vm, "math.toFloat", args, 1)
-
-	vm.push(asFloat(args[0]))
+	val := asFloat(args[0])
+	vm.push(NewNative(val))
 }
 
 func stdMathToInt(vm *VM, args []Value) {
 	expectArgs(vm, "math.toInt", args, 1)
-	vm.push(int(asFloat(args[0])))
+	val := int(asFloat(args[0]))
+	vm.push(NewInt(val))
 }
 
 func stdMathAbs(vm *VM, args []Value) {
 	expectArgs(vm, "math.abs", args, 1)
 	value := asFloat64(args[0])
-	vm.push(math.Abs(value))
+	vm.push(NewNative(math.Abs(value)))
 }
 
 func stdMathPow(vm *VM, args []Value) {
 	expectArgs(vm, "math.pow", args, 2)
 	base := asFloat64(args[0])
 	exp := asFloat64(args[1])
-	vm.push(math.Pow(base, exp))
+	vm.push(NewNative(math.Pow(base, exp)))
 }
 
 func stdMathSqrt(vm *VM, args []Value) {
 	expectArgs(vm, "math.sqrt", args, 1)
 	x := asFloat64(args[0])
-	vm.push(math.Sqrt(x))
+	vm.push(NewNative(math.Sqrt(x)))
 }
 
 func stdMathCeil(vm *VM, args []Value) {
 	expectArgs(vm, "math.ceil", args, 1)
 	x := asFloat64(args[0])
-	vm.push(math.Ceil(x))
+	vm.push(NewNative(math.Ceil(x)))
 }
 
 func stdMathFloor(vm *VM, args []Value) {
 	expectArgs(vm, "math.floor", args, 1)
 	x := asFloat64(args[0])
-	vm.push(math.Floor(x))
+	vm.push(NewNative(math.Floor(x)))
 }
 
 func stdMathRound(vm *VM, args []Value) {
 	expectArgs(vm, "math.round", args, 1)
 	x := asFloat64(args[0])
-	vm.push(math.Round(x))
+	vm.push(NewNative(math.Round(x)))
 }
 
 func stdMathClamp(vm *VM, args []Value) {
@@ -311,51 +338,51 @@ func stdMathClamp(vm *VM, args []Value) {
 	value := asFloat64(args[0])
 	min := asFloat64(args[1])
 	max := asFloat64(args[2])
-	vm.push(Clamp(value, min, max))
+	vm.push(NewNative(Clamp(value, min, max)))
 }
 
 func stdMathSin(vm *VM, args []Value) {
 	expectArgs(vm, "math.sin", args, 1)
 	rad := asFloat64(args[0])
-	vm.push(math.Sin(rad))
+	vm.push(NewNative(math.Sin(rad)))
 }
 
 func stdMathCos(vm *VM, args []Value) {
 	expectArgs(vm, "math.cos", args, 1)
 	rad := asFloat64(args[0])
-	vm.push(math.Cos(rad))
+	vm.push(NewNative(math.Cos(rad)))
 }
 
 func stdMathTan(vm *VM, args []Value) {
 	expectArgs(vm, "math.tan", args, 1)
 	rad := asFloat64(args[0])
-	vm.push(math.Tan(rad))
+	vm.push(NewNative(math.Tan(rad)))
 }
 
 func stdMathRadToDeg(vm *VM, args []Value) {
 	expectArgs(vm, "math.radToDeg", args, 1)
 	rad := asFloat64(args[0])
-	vm.push(RadToDeg(rad))
+	vm.push(NewNative(RadToDeg(rad)))
 }
 
 func stdMathDegToRad(vm *VM, args []Value) {
 	expectArgs(vm, "math.degToRad", args, 1)
 	deg := asFloat64(args[0])
-	vm.push(DegToRad(deg))
+	vm.push(NewNative(DegToRad(deg)))
 }
 
 func stdMathAtan2(vm *VM, args []Value) {
 	expectArgs(vm, "math.atan2", args, 2)
 	y := asFloat64(args[0])
 	x := asFloat64(args[1])
-	vm.push(math.Atan2(y, x))
+	vm.push(NewNative(math.Atan2(y, x)))
 }
 
 func stdMathSum(vm *VM, args []Value) {
 	expectArgs(vm, "math.sum", args, 1)
 	buf := asBuffer(args[0], vm)
 	if len(buf.Bytes) == 0 {
-		vm.push(0.0)
+		vm.push(NewNative(0.0))
 		return
 	}
 	floats := unsafe.Slice((*float64)(unsafe.Pointer(&buf.Bytes[0])), len(buf.Bytes)/8)
@@ -363,7 +390,7 @@ func stdMathSum(vm *VM, args []Value) {
 	for _, val := range floats {
 		total += val
 	}
-	vm.push(total)
+	vm.push(NewNative(total))
 }
 
 func stdMathMatMul(vm *VM, args []Value) {
@@ -375,7 +402,8 @@ func stdMathMatMul(vm *VM, args []Value) {
 	bRows, bCols, bData := getMatrixFields(bValue, "second", vm)
 
 	if aCols != bRows {
-		vm.runtimeError(ErrorRuntime, "matrix multiply size mismatch: %dx%d and %dx%d", aRows, aCols, bRows, bCols)
+		vm.push(NewUndefined())
+		return
 	}
 
 	a := mat.NewDense(aRows, aCols, aData)
@@ -384,13 +412,13 @@ func stdMathMatMul(vm *VM, args []Value) {
 	res.Mul(a, b)
 	r, c := res.Dims()
 	resultData := res.RawMatrix().Data
-	vm.push(ObjectValue{
-		"rows": r,
-		"cols": c,
-		"data": &BufferValue{
+	vm.push(NewNative(ObjectValue{
+		"rows": NewInt(r),
+		"cols": NewInt(c),
+		"data": NewNative(&BufferValue{
 			Bytes: float64SliceToBytes(resultData),
-		},
-	})
+		}),
+	}))
 }
 
 func stdMathMatTranspose(vm *VM, args []Value) {
@@ -403,13 +431,13 @@ func stdMathMatTranspose(vm *VM, args []Value) {
 	res.CloneFrom(transposed)
 	r, c := res.Dims()
 	resultData := res.RawMatrix().Data
-	vm.push(ObjectValue{
-		"rows": r,
-		"cols": c,
-		"data": &BufferValue{
+	vm.push(NewNative(ObjectValue{
+		"rows": NewInt(r),
+		"cols": NewInt(c),
+		"data": NewNative(&BufferValue{
 			Bytes: float64SliceToBytes(resultData),
-		},
-	})
+		}),
+	}))
 }
 
 func stdMathMatScale(vm *VM, args []Value) {
@@ -422,11 +450,17 @@ func stdMathMatScale(vm *VM, args []Value) {
 	res.Scale(scalar, m)
 	r, c := res.Dims()
 	resultData := res.RawMatrix().Data
-	vm.push(ObjectValue{
-		"rows": r,
-		"cols": c,
-		"data": &BufferValue{
+	vm.push(NewNative(ObjectValue{
+		"rows": NewInt(r),
+		"cols": NewInt(c),
+		"data": NewNative(&BufferValue{
 			Bytes: float64SliceToBytes(resultData),
-		},
-	})
+		}),
+	}))
+}
+
+func stdMathFib(vm *VM, args []Value) {
+	expectArgs(vm, "math.fib", args, 1)
+	n := argInt(vm, "math.fib", args, 0)
+	vm.push(NewInt(nativeFib(n)))
 }

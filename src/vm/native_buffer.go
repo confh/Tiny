@@ -65,13 +65,13 @@ func (vm *VM) callBufferMethod(buffer *BufferValue, method string, args []Value)
 func bufferToHex(vm *VM, buffer *BufferValue, args []Value) {
 	expectArgs(vm, "buffer.toHex", args, 0)
 
-	vm.push(hex.EncodeToString(buffer.Bytes))
+	vm.push(NewNative(hex.EncodeToString(buffer.Bytes)))
 }
 
 func bufferLength(vm *VM, buffer *BufferValue, args []Value) {
 	expectArgs(vm, "buffer.length", args, 0)
 
-	vm.push(len(buffer.Bytes))
+	vm.push(NewInt(len(buffer.Bytes)))
 }
 
 func bufferGetU8(vm *VM, buffer *BufferValue, args []Value) {
@@ -89,7 +89,7 @@ func bufferGetU8(vm *VM, buffer *BufferValue, args []Value) {
 		return
 	}
 
-	vm.push(int(buffer.Bytes[offset]))
+	vm.push(NewInt(int(buffer.Bytes[offset])))
 }
 
 func bufferSetU8(vm *VM, buffer *BufferValue, args []Value) {
@@ -119,5 +119,5 @@ func bufferSetU8(vm *VM, buffer *BufferValue, args []Value) {
 
 	buffer.Bytes[offset] = byte(value)
 
-	vm.push(true)
+	vm.push(NewNative(true))
 }

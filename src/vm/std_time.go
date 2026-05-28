@@ -68,25 +68,25 @@ func stdTimeSleep(vm *VM, args []Value) {
 	expectArgs(vm, "time.sleep", args, 1)
 	ms := argInt(vm, "time.sleep", args, 0)
 	time.Sleep(time.Duration(ms) * time.Millisecond)
-	vm.push(UndefinedValue{})
+	vm.push(NewUndefined())
 }
 
 func stdTimeNowNs(vm *VM, args []Value) {
 	dontExpectArgs(vm, "time.nowNs", args)
-	vm.push(time.Now().UnixNano())
+	vm.push(NewInt(int(time.Now().UnixNano())))
 }
 
 func stdTimeNowMs(vm *VM, args []Value) {
 	dontExpectArgs(vm, "time.nowMs", args)
-	vm.push(time.Now().UnixMilli())
+	vm.push(NewInt(int(time.Now().UnixMilli())))
 }
 
 func stdTimeNowSec(vm *VM, args []Value) {
 	dontExpectArgs(vm, "time.nowSec", args)
-	vm.push(time.Now().Unix())
+	vm.push(NewInt(int(time.Now().Unix())))
 }
 
 func stdTimeClock(vm *VM, args []Value) {
 	dontExpectArgs(vm, "time.clock", args)
-	vm.push(int(time.Now().UnixMilli() - vm.start))
+	vm.push(NewNative(int(time.Now().UnixMilli() - vm.start)))
 }

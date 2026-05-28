@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -153,37 +154,7 @@ func uintToString(n uint64) string {
 }
 
 func FloatToString(val float64) string {
-	var sb strings.Builder
-
-	if val < 0 {
-		sb.WriteByte('-')
-		val = -val
-	}
-
-	// 2. Extract integer part
-	intPart := int64(val)
-	// Extract remaining fractional part
-	fracPart := val - float64(intPart)
-
-	// 3. Convert integer part to string
-	sb.WriteString(bigIntToString(intPart))
-
-	// 4. If precision is 0, we are done
-	// if precision <= 0 {
-	// 	return sb.String()
-	// }
-
-	sb.WriteByte('.')
-
-	// 5. Convert fractional part
-	for i := 0; i < 6; i++ {
-		fracPart *= 10
-		digit := int64(fracPart)
-		sb.WriteByte(byte('0' + digit))
-		fracPart -= float64(digit)
-	}
-
-	return sb.String()
+	return strconv.FormatFloat(val, 'f', 6, 64)
 }
 
 func isClass(value ObjectValue) bool {
@@ -329,7 +300,7 @@ func (vm *VM) getFrame(fn Function) *Frame {
 			frame.locals[i] = &Cell{}
 		}
 
-		setCellValue(frame.locals[i], UndefinedValue{})
+		setCellValue(frame.locals[i], NewUndefined())
 		frame.constants[i] = false
 		frame.localTypes[i] = TypeHint{}
 	}
@@ -338,7 +309,7 @@ func (vm *VM) getFrame(fn Function) *Frame {
 	frame.ip = 0
 	frame.instructions = fn.Instructions
 	frame.methodClass = ""
-	frame.returnOverride = nil
+	frame.returnOverride = Value{}
 	frame.hasReturnOverride = false
 	frame.hasEscapedLocals = false
 
@@ -355,10 +326,9 @@ func (vm *VM) releaseFrame(frame *Frame) {
 		return
 	}
 
-	// Clear references so big objects can be GC'd.
 	for i := range frame.locals {
 		if frame.locals[i] != nil {
-			setCellValue(frame.locals[i], nil)
+			setCellValue(frame.locals[i], Value{})
 		}
 	}
 
@@ -383,13 +353,21 @@ func (vm *VM) CloneForTask() *VM {
 
 		globals:         vm.globals,
 		globalConstants: vm.globalConstants,
+		globalTypes:     vm.globalTypes,
 
 		cliArgs: vm.cliArgs,
 	}
 }
 
 func cloneValue(value Value) Value {
-	switch v := value.(type) {
+	var raw any
+	if value.IsInt {
+		raw = value.AsInt
+	} else {
+		raw = value.Value
+	}
+
+	switch v := raw.(type) {
 	case ObjectValue:
 		copyObj := ObjectValue{}
 
@@ -397,7 +375,7 @@ func cloneValue(value Value) Value {
 			copyObj[key] = cloneValue(val)
 		}
 
-		return copyObj
+		return NewNative(copyObj)
 
 	case *ObjectValue:
 		copyObj := ObjectValue{}
@@ -406,7 +384,7 @@ func cloneValue(value Value) Value {
 			copyObj[key] = cloneValue(val)
 		}
 
-		return copyObj
+		return NewNative(copyObj)
 
 	case *ArrayValue:
 		copyArr := &ArrayValue{
@@ -417,7 +395,7 @@ func cloneValue(value Value) Value {
 			copyArr.Elements[i] = cloneValue(val)
 		}
 
-		return copyArr
+		return NewNative(copyArr)
 
 	case ArrayValue:
 		copyArr := ArrayValue{
@@ -428,23 +406,23 @@ func cloneValue(value Value) Value {
 			copyArr.Elements[i] = cloneValue(val)
 		}
 
-		return copyArr
+		return NewNative(copyArr)
 
 	case *BufferValue:
 		bytes := make([]byte, len(v.Bytes))
 		copy(bytes, v.Bytes)
 
-		return &BufferValue{
+		return NewNative(&BufferValue{
 			Bytes: bytes,
-		}
+		})
 
 	case BufferValue:
 		bytes := make([]byte, len(v.Bytes))
 		copy(bytes, v.Bytes)
 
-		return BufferValue{
+		return NewNative(BufferValue{
 			Bytes: bytes,
-		}
+		})
 
 	default:
 		return value
@@ -453,23 +431,21 @@ func cloneValue(value Value) Value {
 
 func cellValue(cell *Cell) Value {
 	if cell.IsInt {
-		return cell.Int
+		return NewInt(cell.Int)
 	}
-
 	return cell.Value
 }
 
 func setCellValue(cell *Cell, value Value) {
-	if intValue, ok := value.(int); ok {
-		cell.Int = intValue
-		cell.Value = nil
+	if value.IsInt {
+		cell.Int = value.AsInt
+		cell.Value = Value{}
 		cell.IsInt = true
-		return
+	} else {
+		cell.Value = value
+		cell.Int = 0
+		cell.IsInt = false
 	}
-
-	cell.Value = value
-	cell.Int = 0
-	cell.IsInt = false
 }
 
 func frameLocalValue(frame *Frame, slot int, op string) Value {
@@ -486,7 +462,7 @@ func frameLocalValue(frame *Frame, slot int, op string) Value {
 }
 
 func propertyValue(vm *VM, objectValue Value, name string) Value {
-	if object, ok := objectValue.(ObjectValue); ok {
+	if object, ok := objectValue.Value.(ObjectValue); ok {
 		if !vm.canAccessField(object, name) {
 			vm.fatalError(ErrorRuntime, "cannot access private field: %s", name)
 		}
@@ -499,7 +475,7 @@ func propertyValue(vm *VM, objectValue Value, name string) Value {
 		return value
 	}
 
-	if ns, ok := objectValue.(NamespaceValue); ok {
+	if ns, ok := objectValue.Value.(NamespaceValue); ok {
 		value, exists := ns.Members[name]
 		if !exists {
 			vm.fatalError(ErrorName, "namespace %s has no member: %s", ns.Name, name)
@@ -507,7 +483,7 @@ func propertyValue(vm *VM, objectValue Value, name string) Value {
 		return resolveNamespaceValue(vm, value)
 	}
 
-	if ns, ok := objectValue.(*NamespaceValue); ok {
+	if ns, ok := objectValue.Value.(*NamespaceValue); ok {
 		value, exists := ns.Members[name]
 		if !exists {
 			vm.fatalError(ErrorName, "namespace %s has no member: %s", ns.Name, name)
@@ -516,11 +492,11 @@ func propertyValue(vm *VM, objectValue Value, name string) Value {
 	}
 
 	vm.fatalError(ErrorType, "expected object, got %s", TypeName(objectValue))
-	return nil
+	return NewNull()
 }
 
 func resolveNamespaceValue(vm *VM, value Value) Value {
-	if ref, ok := value.(NamespaceMemberRef); ok {
+	if ref, ok := value.Value.(NamespaceMemberRef); ok {
 		actual, exists := vm.globals[ref.GlobalName]
 		if !exists {
 			vm.fatalError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
@@ -528,7 +504,7 @@ func resolveNamespaceValue(vm *VM, value Value) Value {
 		return actual
 	}
 
-	if ref, ok := value.(*NamespaceMemberRef); ok {
+	if ref, ok := value.Value.(*NamespaceMemberRef); ok {
 		actual, exists := vm.globals[ref.GlobalName]
 		if !exists {
 			vm.fatalError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
@@ -540,99 +516,113 @@ func resolveNamespaceValue(vm *VM, value Value) Value {
 }
 
 func multiplyByInt(value Value, factor int) Value {
-	switch v := value.(type) {
-	case int:
-		return v * factor
-	case int64:
-		return v * int64(factor)
+	if value.IsInt {
+		return NewInt(value.AsInt * factor)
+	}
+
+	switch v := value.Value.(type) {
 	case float64:
-		return v * float64(factor)
+		return NewNative(v * float64(factor))
 	case float32:
-		return v * float32(factor)
+		return NewNative(v * float32(factor))
 	default:
 		LangError(ErrorType, "cannot multiply %s and number", TypeName(value))
-		return nil
+		return Value{}
 	}
 }
 
 func addValues(left Value, right Value) Value {
-	switch l := left.(type) {
+	var leftVal any
+	if left.IsInt {
+		leftVal = left.AsInt
+	} else {
+		leftVal = left.Value
+	}
+
+	var rightVal any
+	if right.IsInt {
+		rightVal = right.AsInt
+	} else {
+		rightVal = right.Value
+	}
+
+	switch l := leftVal.(type) {
 	case int:
-		switch r := right.(type) {
+		switch r := rightVal.(type) {
 		case int:
-			return l + r
+			return NewInt(l + r)
 		case float64:
-			return float64(l) + r
+			return NewNative(float64(l) + r)
 		case uint64:
-			return uint64(l) + r
+			return NewNative(uint64(l) + r)
 		case int64:
-			return int64(l) + r
+			return NewNative(int64(l) + r)
 		case string:
-			return intToString(l) + r
+			return NewNative(intToString(l) + r)
 		default:
 			LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
 		}
 
 	case int64:
-		switch r := right.(type) {
+		switch r := rightVal.(type) {
 		case int:
-			return l + int64(r)
+			return NewNative(l + int64(r))
 		case int64:
-			return l + r
+			return NewNative(l + r)
 		case float64:
-			return float64(l) + r
+			return NewNative(float64(l) + r)
 		case uint64:
-			return uint64(l) + r
+			return NewNative(uint64(l) + r)
 		case string:
-			return int64ToString(l) + r
+			return NewNative(int64ToString(l) + r)
 		default:
 			LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
 		}
 
 	case float64:
-		switch r := right.(type) {
+		switch r := rightVal.(type) {
 		case int:
-			return l + float64(r)
+			return NewNative(l + float64(r))
 		case float64:
-			return l + r
+			return NewNative(l + r)
 		case uint64:
-			return l + float64(r)
+			return NewNative(l + float64(r))
 		case int64:
-			return l + float64(r)
+			return NewNative(l + float64(r))
 		case string:
-			return FloatToString(l) + r
+			return NewNative(FloatToString(l) + r)
 		default:
 			LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
 		}
 
 	case string:
-		switch r := right.(type) {
+		switch r := rightVal.(type) {
 		case string:
-			return l + r
+			return NewNative(l + r)
 		case float64:
-			return l + FloatToString(r)
+			return NewNative(l + FloatToString(r))
 		case int:
-			return l + intToString(r)
+			return NewNative(l + intToString(r))
 		case int64:
-			return l + int64ToString(r)
+			return NewNative(l + int64ToString(r))
 		case uint64:
-			return l + uintToString(r)
+			return NewNative(l + uintToString(r))
 		default:
 			LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
 		}
 
 	case uint64:
-		switch r := right.(type) {
+		switch r := rightVal.(type) {
 		case uint64:
-			return l + r
+			return NewNative(l + r)
 		case int:
-			return l + uint64(r)
+			return NewNative(l + uint64(r))
 		case int64:
-			return l + uint64(r)
+			return NewNative(l + uint64(r))
 		case float64:
-			return float64(l) + r
+			return NewNative(float64(l) + r)
 		case string:
-			return uintToString(l) + r
+			return NewNative(uintToString(l) + r)
 		default:
 			LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
 		}
@@ -641,7 +631,7 @@ func addValues(left Value, right Value) Value {
 		LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
 	}
 
-	return nil
+	return Value{}
 }
 
 func (vm *VM) canAccessField(object ObjectValue, field string) bool {
@@ -649,9 +639,9 @@ func (vm *VM) canAccessField(object ObjectValue, field string) bool {
 	if !isClass {
 		return true
 	}
-	privateFields := object["__privateFields"].(map[string]bool)
+	privateFields := object["__privateFields"].Value.(map[string]bool)
 	if _, fieldIsPrivate := privateFields[field]; fieldIsPrivate {
-		return vm.currentMethodClass() == className
+		return vm.currentMethodClass() == className.Value.(string)
 	}
 
 	return true
@@ -662,9 +652,9 @@ func (vm *VM) canAccessMethod(object ObjectValue, method string) bool {
 	if !isClass {
 		return true
 	}
-	privateMethods := object["__privateMethods"].(map[string]bool)
+	privateMethods := object["__privateMethods"].Value.(map[string]bool)
 	if _, methodIsPrivate := privateMethods[method]; methodIsPrivate {
-		return vm.currentMethodClass() == className
+		return vm.currentMethodClass() == className.Value.(string)
 	}
 
 	return true
@@ -672,23 +662,23 @@ func (vm *VM) canAccessMethod(object ObjectValue, method string) bool {
 
 func (vm *VM) getProperty(objectValue Value, name string, safe bool) Value {
 	if safe && isNullish(objectValue) {
-		return UndefinedValue{}
+		return NewUndefined()
 	}
 
-	if ns, ok := objectValue.(NamespaceValue); ok {
+	if ns, ok := objectValue.Value.(NamespaceValue); ok {
 		value, exists := ns.Members[name]
 		if !exists {
 			if safe {
-				return UndefinedValue{}
+				return NewUndefined()
 			}
 			vm.nameError("namespace %s has no member: %s", ns.Name, name)
 		}
 
-		if ref, ok := value.(NamespaceMemberRef); ok {
+		if ref, ok := value.Value.(NamespaceMemberRef); ok {
 			actual, exists := vm.globals[ref.GlobalName]
 			if !exists {
 				if safe {
-					return UndefinedValue{}
+					return NewUndefined()
 				}
 				vm.nameError("undefined namespace global: %s", ref.GlobalName)
 			}
@@ -698,20 +688,20 @@ func (vm *VM) getProperty(objectValue Value, name string, safe bool) Value {
 		return value
 	}
 
-	if ns, ok := objectValue.(*NamespaceValue); ok {
+	if ns, ok := objectValue.Value.(*NamespaceValue); ok {
 		value, exists := ns.Members[name]
 		if !exists {
 			if safe {
-				return UndefinedValue{}
+				return NewUndefined()
 			}
 			vm.nameError("namespace %s has no member: %s", ns.Name, name)
 		}
 
-		if ref, ok := value.(NamespaceMemberRef); ok {
+		if ref, ok := value.Value.(NamespaceMemberRef); ok {
 			actual, exists := vm.globals[ref.GlobalName]
 			if !exists {
 				if safe {
-					return UndefinedValue{}
+					return NewUndefined()
 				}
 				vm.nameError("undefined namespace global: %s", ref.GlobalName)
 			}
@@ -721,10 +711,10 @@ func (vm *VM) getProperty(objectValue Value, name string, safe bool) Value {
 		return value
 	}
 
-	object, ok := objectValue.(ObjectValue)
+	object, ok := objectValue.Value.(ObjectValue)
 	if !ok {
 		if safe {
-			return UndefinedValue{}
+			return NewUndefined()
 		}
 		vm.typeError("expected object, got %s", TypeName(objectValue))
 	}
@@ -732,7 +722,7 @@ func (vm *VM) getProperty(objectValue Value, name string, safe bool) Value {
 	value, exists := object[name]
 	if !exists {
 		if safe {
-			return UndefinedValue{}
+			return NewUndefined()
 		}
 		vm.nameError("object has no property: %s", name)
 	}
@@ -742,20 +732,20 @@ func (vm *VM) getProperty(objectValue Value, name string, safe bool) Value {
 
 func (vm *VM) callClassWithArgs(class Class, args []Value) {
 	object := ObjectValue{
-		"__class":          class.Name,
-		"__constFields":    map[string]bool{},
-		"__privateFields":  map[string]bool{},
-		"__privateMethods": map[string]bool{},
+		"__class":          NewNative(class.Name),
+		"__constFields":    NewNative(map[string]bool{}),
+		"__privateFields":  NewNative(map[string]bool{}),
+		"__privateMethods": NewNative(map[string]bool{}),
 	}
 
-	constFields, _ := object["__constFields"].(map[string]bool)
-	privateFields, _ := object["__privateFields"].(map[string]bool)
-	privateMethods, _ := object["__privateMethods"].(map[string]bool)
+	constFields, _ := object["__constFields"].Value.(map[string]bool)
+	privateFields, _ := object["__privateFields"].Value.(map[string]bool)
+	privateMethods, _ := object["__privateMethods"].Value.(map[string]bool)
 
 	for methodName, functionName := range class.Methods {
-		object[methodName] = FunctionValue{
+		object[methodName] = NewNative(FunctionValue{
 			Name: functionName,
-		}
+		})
 
 		if class.PrivateMethods[methodName] {
 			privateMethods[methodName] = true
@@ -797,7 +787,7 @@ func (vm *VM) callClassWithArgs(class Class, args []Value) {
 
 		frame := vm.getFrame(fn)
 
-		setCellValue(frame.locals[0], object)
+		setCellValue(frame.locals[0], NewNative(object))
 		frame.constants[0] = true
 
 		for i, arg := range args {
@@ -818,7 +808,7 @@ func (vm *VM) callClassWithArgs(class Class, args []Value) {
 		}
 	}
 
-	vm.push(object)
+	vm.push(NewNative(object))
 }
 
 func (vm *VM) callClassByName(name string, args []Value) {
@@ -853,7 +843,12 @@ func (vm *VM) stackTrace() string {
 	if len(vm.frames) == 0 {
 		location := ""
 
-		instr := vm.currentInstr
+		var instr Instruction
+		ip := vm.ip - 1
+		if ip >= 0 && ip < len(vm.mainInstructions) {
+			instr = vm.mainInstructions[ip]
+		}
+
 		if instr.File != "" && instr.Line > 0 {
 			location = fmt.Sprintf(" (%s:%d", instr.File, instr.Line)
 
@@ -929,15 +924,15 @@ func (vm *VM) runtimeError(kind ErrorKind, format string, args ...any) {
 	message := fmt.Sprintf(format, args...)
 
 	errObj := ObjectValue{
-		"kind":    string(kind),
-		"message": message,
+		"kind":    NewNative(string(kind)),
+		"message": NewNative(message),
 	}
 
-	vm.throwValue(errObj)
+	vm.throwValue(NewNative(errObj))
 }
 
 func (vm *VM) isInstanceOf(value Value, className string) bool {
-	object, ok := value.(ObjectValue)
+	object, ok := value.Value.(ObjectValue)
 	if !ok {
 		return false
 	}
@@ -948,7 +943,7 @@ func (vm *VM) isInstanceOf(value Value, className string) bool {
 func (vm *VM) objectIsOrEmbedsClass(object ObjectValue, className string) bool {
 	currentClassValue, ok := object["__class"]
 	if ok {
-		currentClassName, ok := currentClassValue.(string)
+		currentClassName, ok := currentClassValue.Value.(string)
 		if ok && currentClassName == className {
 			return true
 		}
@@ -962,7 +957,7 @@ func (vm *VM) objectIsOrEmbedsClass(object ObjectValue, className string) bool {
 						continue
 					}
 
-					embeddedObject, ok := fieldValue.(ObjectValue)
+					embeddedObject, ok := fieldValue.Value.(ObjectValue)
 					if !ok {
 						continue
 					}
@@ -1025,7 +1020,6 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 	if isVariadic {
 		fixedCount := expected - 1
 
-		// Fixed params before ...args
 		for i := 0; i < fixedCount; i++ {
 			arg := vm.stack[start+i]
 			param := fn.Params[i]
@@ -1045,7 +1039,7 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 			frame.constants[i] = false
 			frame.localTypes[i] = param.TypeHint
 
-			vm.stack[start+i] = nil
+			vm.stack[start+i] = Value{}
 		}
 
 		// Rest param gets remaining args as array
@@ -1069,10 +1063,10 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 			}
 
 			rest.Elements = append(rest.Elements, arg)
-			vm.stack[start+i] = nil
+			vm.stack[start+i] = Value{}
 		}
 
-		setCellValue(frame.locals[fixedCount], rest)
+		setCellValue(frame.locals[fixedCount], NewNative(rest))
 		frame.constants[fixedCount] = false
 		frame.localTypes[fixedCount] = TypeHint{Name: "array"}
 
@@ -1101,14 +1095,14 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 			frame.constants[i] = false
 			frame.localTypes[i] = param.TypeHint
 
-			vm.stack[start+i] = nil
+			vm.stack[start+i] = Value{}
 		}
 	} else {
 		for i := 0; i < argCount; i++ {
 			setCellValue(frame.locals[i], vm.stack[start+i])
 			frame.constants[i] = false
 
-			vm.stack[start+i] = nil
+			vm.stack[start+i] = Value{}
 		}
 	}
 
@@ -1117,7 +1111,10 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 }
 
 func isNullish(value Value) bool {
-	switch value.(type) {
+	if value.IsInt {
+		return false
+	}
+	switch value.Value.(type) {
 	case NullValue, UndefinedValue:
 		return true
 	default:
@@ -1129,25 +1126,26 @@ func (vm *VM) throwValue(value Value) {
 	errorObject := makeErrorObject(value)
 
 	if len(vm.tryHandlers) == 0 {
-		message := valueToString(errorObject["message"])
-		kind := valueToString(errorObject["kind"])
+		var rawMsg any
+		if errorObject["message"].IsInt {
+			rawMsg = errorObject["message"].AsInt
+		} else {
+			rawMsg = errorObject["message"].Value
+		}
+
+		var rawKind any
+		if errorObject["kind"].IsInt {
+			rawKind = errorObject["kind"].AsInt
+		} else {
+			rawKind = errorObject["kind"].Value
+		}
+
+		message := valueToString(NewNative(rawMsg))
+		kind := valueToString(NewNative(rawKind))
 
 		trace := vm.stackTrace()
 
-		if len(vm.deferHandlers) > 0 {
-			currentDepth := len(vm.frames)
-
-			for i := len(vm.deferHandlers) - 1; i >= 0; i-- {
-				handler := vm.deferHandlers[i]
-
-				if handler.FrameDepth < currentDepth {
-					break
-				}
-				vm.deferHandlers = vm.deferHandlers[:i]
-
-				vm.callFunctionValue(handler.Function, nil)
-			}
-		}
+		vm.runDefersAboveDepth(0)
 
 		panic(LangErrorType{
 			Kind:    ErrorKind(kind),
@@ -1157,6 +1155,8 @@ func (vm *VM) throwValue(value Value) {
 
 	handler := vm.tryHandlers[len(vm.tryHandlers)-1]
 	vm.tryHandlers = vm.tryHandlers[:len(vm.tryHandlers)-1]
+
+	vm.runDefersAboveDepth(handler.FrameDepth)
 
 	for len(vm.frames) > handler.FrameDepth {
 		vm.frames = vm.frames[:len(vm.frames)-1]
@@ -1173,10 +1173,10 @@ func (vm *VM) throwValue(value Value) {
 			vm.fatalError(ErrorInternal, "catch local slot out of range")
 		}
 
-		setCellValue(frame.locals[handler.Slot], errorObject)
+		setCellValue(frame.locals[handler.Slot], NewNative(errorObject))
 		frame.constants[handler.Slot] = false
 	} else {
-		vm.globals[handler.Name] = errorObject
+		vm.globals[handler.Name] = NewNative(errorObject)
 		vm.globalConstants[handler.Name] = false
 	}
 
@@ -1188,17 +1188,24 @@ func (vm *VM) throwValue(value Value) {
 }
 
 func makeErrorObject(value Value) ObjectValue {
-	switch err := value.(type) {
+	var raw any
+	if value.IsInt {
+		raw = value.AsInt
+	} else {
+		raw = value.Value
+	}
+
+	switch err := raw.(type) {
 	case ErrorValue:
 		return ObjectValue{
-			"kind":    err.Kind,
-			"message": err.Message,
+			"kind":    NewNative(err.Kind),
+			"message": NewNative(err.Message),
 		}
 
 	case *ErrorValue:
 		return ObjectValue{
-			"kind":    err.Kind,
-			"message": err.Message,
+			"kind":    NewNative(err.Kind),
+			"message": NewNative(err.Message),
 		}
 
 	case ObjectValue:
@@ -1206,14 +1213,14 @@ func makeErrorObject(value Value) ObjectValue {
 
 	case string:
 		return ObjectValue{
-			"kind":    "Error",
-			"message": err,
+			"kind":    NewNative("Error"),
+			"message": NewNative(err),
 		}
 
 	default:
 		return ObjectValue{
-			"kind":    "Error",
-			"message": valueToString(value),
+			"kind":    NewNative("Error"),
+			"message": NewNative(valueToString(value)),
 		}
 	}
 }
@@ -1245,7 +1252,7 @@ func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []Value) {
 		} else if len(args) != expected {
 			vm.runtimeError(
 				ErrorRuntime,
-				"function %s expects %d arguments, gosst %d",
+				"function %s expects %d arguments, got %d",
 				fn.Name,
 				expected,
 				len(args),
@@ -1270,7 +1277,7 @@ func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []Value) {
 	if isVariadic {
 		fixedCount := expected - 1
 
-		for i := 0; i < fixedCount; i++ {
+		for i := range fixedCount {
 			setCellValue(frame.locals[i], args[i])
 			frame.constants[i] = false
 		}
@@ -1283,7 +1290,7 @@ func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []Value) {
 			rest.Elements = append(rest.Elements, args[i])
 		}
 
-		setCellValue(frame.locals[fixedCount], rest)
+		setCellValue(frame.locals[fixedCount], NewNative(rest))
 		frame.constants[fixedCount] = false
 	} else {
 		for i, arg := range args {
@@ -1356,7 +1363,7 @@ func (vm *VM) callFunctionDirect(fn Function, args []Value) {
 			)
 		}
 
-		frame.locals[i].Value = arg
+		setCellValue(frame.locals[i], arg)
 		frame.constants[i] = false
 		frame.localTypes[i] = param.TypeHint
 	}
@@ -1377,11 +1384,10 @@ func (vm *VM) callFunctionValue(fnValue FunctionValue, args []Value) Value {
 	}
 
 	if vm.top <= stackDepthBefore {
-		return UndefinedValue{}
+		return NewUndefined()
 	}
 
 	return vm.pop()
-
 }
 
 func (vm *VM) Run() {
@@ -1392,10 +1398,22 @@ func (vm *VM) Run() {
 	}
 }
 
+func (vm *VM) runDefersAboveDepth(targetDepth int) {
+	for len(vm.deferHandlers) > 0 {
+		handler := vm.deferHandlers[len(vm.deferHandlers)-1]
+
+		if handler.FrameDepth > targetDepth {
+			vm.deferHandlers = vm.deferHandlers[:len(vm.deferHandlers)-1]
+
+			vm.callFunctionValue(handler.Function, nil)
+		} else {
+			break
+		}
+	}
+}
+
 func (vm *VM) step() bool {
-	vm.lastInstructionIndex = vm.currentIP()
 	instr := vm.fetchInstruction()
-	vm.lastInstruction = instr
 
 	if len(vm.frames) > 0 {
 		vm.lastFunctionName = vm.frames[len(vm.frames)-1].function.Name
@@ -1453,7 +1471,7 @@ func (vm *VM) step() bool {
 		newFrame := vm.getFrame(fn)
 
 		if len(newFrame.locals) > 0 {
-			setCellValue(newFrame.locals[0], finalArgValue)
+			setCellValue(newFrame.locals[0], NewInt(finalArgValue))
 			newFrame.constants[0] = false
 		}
 
@@ -1484,7 +1502,14 @@ func (vm *VM) step() bool {
 		}
 
 		shouldJump := false
-		switch v := cellValue(cell).(type) {
+		var val any
+		if cell.Value.IsInt {
+			val = cell.Value.AsInt
+		} else {
+			val = cell.Value.Value
+		}
+
+		switch v := val.(type) {
 		case int:
 			shouldJump = v > info.Value
 		case int64:
@@ -1494,7 +1519,7 @@ func (vm *VM) step() bool {
 		case float32:
 			shouldJump = v > float32(info.Value)
 		default:
-			vm.fatalError(ErrorType, "cannot compare %s and number", TypeName(cellValue(cell)))
+			vm.fatalError(ErrorType, "cannot compare %s and number", TypeName(cell.Value))
 		}
 
 		if shouldJump {
@@ -1523,14 +1548,25 @@ func (vm *VM) step() bool {
 			break
 		}
 
-		left := cellValue(leftCell)
-		right := cellValue(rightCell)
+		var leftVal any
+		if leftCell.Value.IsInt {
+			leftVal = leftCell.Value.AsInt
+		} else {
+			leftVal = leftCell.Value.Value
+		}
+
+		var rightVal any
+		if rightCell.Value.IsInt {
+			rightVal = rightCell.Value.AsInt
+		} else {
+			rightVal = rightCell.Value.Value
+		}
 
 		shouldJump := false
 
-		switch l := left.(type) {
+		switch l := leftVal.(type) {
 		case int:
-			switch r := right.(type) {
+			switch r := rightVal.(type) {
 			case int:
 				shouldJump = l >= r
 			case int64:
@@ -1538,11 +1574,11 @@ func (vm *VM) step() bool {
 			case float64:
 				shouldJump = float64(l) >= r
 			default:
-				vm.fatalError(ErrorType, "cannot compare %s and %s", TypeName(left), TypeName(right))
+				vm.fatalError(ErrorType, "cannot compare %s and %s", TypeName(leftCell.Value), TypeName(rightCell.Value))
 			}
 
 		case int64:
-			switch r := right.(type) {
+			switch r := rightVal.(type) {
 			case int:
 				shouldJump = l >= int64(r)
 			case int64:
@@ -1550,14 +1586,14 @@ func (vm *VM) step() bool {
 			case float64:
 				shouldJump = float64(l) >= r
 			default:
-				vm.fatalError(ErrorType, "cannot compare %s and %s", TypeName(left), TypeName(right))
+				vm.fatalError(ErrorType, "cannot compare %s and %s", TypeName(leftCell.Value), TypeName(rightCell.Value))
 			}
 
 		case float64:
-			shouldJump = l >= asFloat64(right)
+			shouldJump = l >= asFloat64(rightCell.Value)
 
 		default:
-			vm.fatalError(ErrorType, "cannot compare %s and %s", TypeName(left), TypeName(right))
+			vm.fatalError(ErrorType, "cannot compare %s and %s", TypeName(leftCell.Value), TypeName(rightCell.Value))
 		}
 
 		if shouldJump {
@@ -1586,35 +1622,39 @@ func (vm *VM) step() bool {
 			break
 		}
 
-		left := cellValue(leftCell)
-		right := cellValue(rightCell)
+		var leftVal any
+		if leftCell.Value.IsInt {
+			leftVal = leftCell.Value.AsInt
+		} else {
+			leftVal = leftCell.Value.Value
+		}
 
 		shouldJump := false
 
-		switch l := left.(type) {
+		switch l := leftVal.(type) {
 		case int:
-			r := asInt(right)
+			r := asInt(rightCell.Value)
 			if r == 0 {
 				vm.fatalError(ErrorRuntime, "cannot modulo by zero")
 			}
 			shouldJump = l%r != 0
 
 		case int64:
-			r := int64(asInt(right))
+			r := int64(asInt(rightCell.Value))
 			if r == 0 {
 				vm.fatalError(ErrorRuntime, "cannot modulo by zero")
 			}
 			shouldJump = l%r != 0
 
 		case float64:
-			r := asFloat64(right)
+			r := asFloat64(rightCell.Value)
 			if r == 0 {
 				vm.fatalError(ErrorRuntime, "cannot modulo by zero")
 			}
 			shouldJump = math.Mod(l, r) != 0
 
 		default:
-			vm.fatalError(ErrorType, "cannot modulo %s and %s", TypeName(left), TypeName(right))
+			vm.fatalError(ErrorType, "cannot modulo %s and %s", TypeName(leftCell.Value), TypeName(rightCell.Value))
 		}
 
 		if shouldJump {
@@ -1643,8 +1683,13 @@ func (vm *VM) step() bool {
 		if leftCell.IsInt {
 			shouldJump = leftCell.Int%info.Right != 0
 		} else {
-			left := cellValue(leftCell)
-			switch l := left.(type) {
+			var leftVal any
+			if leftCell.Value.IsInt {
+				leftVal = leftCell.Value.AsInt
+			} else {
+				leftVal = leftCell.Value.Value
+			}
+			switch l := leftVal.(type) {
 			case int:
 				shouldJump = l%info.Right != 0
 			case int64:
@@ -1654,7 +1699,7 @@ func (vm *VM) step() bool {
 			case float32:
 				shouldJump = math.Mod(float64(l), float64(info.Right)) != 0
 			default:
-				vm.fatalError(ErrorType, "cannot modulo %s and number", TypeName(left))
+				vm.fatalError(ErrorType, "cannot modulo %s and number", TypeName(leftCell.Value))
 			}
 		}
 
@@ -1691,69 +1736,83 @@ func (vm *VM) step() bool {
 			break
 		}
 
-		switch target := cellValue(targetCell).(type) {
+		var targetVal any
+		if targetCell.Value.IsInt {
+			targetVal = targetCell.Value.AsInt
+		} else {
+			targetVal = targetCell.Value.Value
+		}
+
+		var sourceVal any
+		if sourceCell.Value.IsInt {
+			sourceVal = sourceCell.Value.AsInt
+		} else {
+			sourceVal = sourceCell.Value.Value
+		}
+
+		switch target := targetVal.(type) {
 		case int:
-			switch source := cellValue(sourceCell).(type) {
+			switch source := sourceVal.(type) {
 			case int:
 				targetCell.Int = target + source
 				targetCell.IsInt = true
 			case int64:
-				setCellValue(targetCell, int64(target)+source)
+				setCellValue(targetCell, NewNative(int64(target)+source))
 			case float64:
-				setCellValue(targetCell, float64(target)+source)
+				setCellValue(targetCell, NewNative(float64(target)+source))
 			case float32:
-				setCellValue(targetCell, float32(target)+source)
+				setCellValue(targetCell, NewNative(float32(target)+source))
 			default:
-				vm.fatalError(ErrorType, "cannot add %s and %s", TypeName(cellValue(targetCell)), TypeName(cellValue(sourceCell)))
+				vm.fatalError(ErrorType, "cannot add %s and %s", TypeName(targetCell.Value), TypeName(sourceCell.Value))
 			}
 
 		case int64:
-			switch source := cellValue(sourceCell).(type) {
+			switch source := sourceVal.(type) {
 			case int:
-				setCellValue(targetCell, target+int64(source))
+				setCellValue(targetCell, NewNative(target+int64(source)))
 			case int64:
-				setCellValue(targetCell, target+source)
+				setCellValue(targetCell, NewNative(target+source))
 			case float64:
-				setCellValue(targetCell, float64(target)+source)
+				setCellValue(targetCell, NewNative(float64(target)+source))
 			case float32:
-				setCellValue(targetCell, float32(target)+source)
+				setCellValue(targetCell, NewNative(float32(target)+source))
 			default:
-				vm.fatalError(ErrorType, "cannot add %s and %s", TypeName(cellValue(targetCell)), TypeName(cellValue(sourceCell)))
+				vm.fatalError(ErrorType, "cannot add %s and %s", TypeName(targetCell.Value), TypeName(sourceCell.Value))
 			}
 
 		case float64:
-			switch source := cellValue(sourceCell).(type) {
+			switch source := sourceVal.(type) {
 			case int:
-				setCellValue(targetCell, target+float64(source))
+				setCellValue(targetCell, NewNative(target+float64(source)))
 			case int64:
-				setCellValue(targetCell, target+float64(source))
+				setCellValue(targetCell, NewNative(target+float64(source)))
 			case float64:
-				setCellValue(targetCell, target+source)
+				setCellValue(targetCell, NewNative(target+source))
 			case float32:
-				setCellValue(targetCell, target+float64(source))
+				setCellValue(targetCell, NewNative(target+float64(source)))
 			default:
-				vm.fatalError(ErrorType, "cannot add %s and %s", TypeName(cellValue(targetCell)), TypeName(cellValue(sourceCell)))
+				vm.fatalError(ErrorType, "cannot add %s and %s", TypeName(targetCell.Value), TypeName(sourceCell.Value))
 			}
 
 		case float32:
-			switch source := cellValue(sourceCell).(type) {
+			switch source := sourceVal.(type) {
 			case int:
-				setCellValue(targetCell, target+float32(source))
+				setCellValue(targetCell, NewNative(target+float32(source)))
 			case int64:
-				setCellValue(targetCell, target+float32(source))
+				setCellValue(targetCell, NewNative(target+float32(source)))
 			case float64:
-				setCellValue(targetCell, float64(target)+source)
+				setCellValue(targetCell, NewNative(float64(target)+source))
 			case float32:
-				setCellValue(targetCell, target+source)
+				setCellValue(targetCell, NewNative(target+source))
 			default:
-				vm.fatalError(ErrorType, "cannot add %s and %s", TypeName(cellValue(targetCell)), TypeName(cellValue(sourceCell)))
+				vm.fatalError(ErrorType, "cannot add %s and %s", TypeName(targetCell.Value), TypeName(sourceCell.Value))
 			}
 
 		case string:
-			setCellValue(targetCell, target+valueToString(cellValue(sourceCell)))
+			setCellValue(targetCell, NewNative(target+valueToString(sourceCell.Value)))
 
 		default:
-			vm.fatalError(ErrorType, "cannot add to %s", TypeName(cellValue(targetCell)))
+			vm.fatalError(ErrorType, "cannot add to %s", TypeName(targetCell.Value))
 		}
 
 	case OP_SUB_ASSIGN_LOCAL:
@@ -1785,66 +1844,80 @@ func (vm *VM) step() bool {
 			break
 		}
 
-		switch target := cellValue(targetCell).(type) {
+		var targetVal any
+		if targetCell.Value.IsInt {
+			targetVal = targetCell.Value.AsInt
+		} else {
+			targetVal = targetCell.Value.Value
+		}
+
+		var sourceVal any
+		if sourceCell.Value.IsInt {
+			sourceVal = sourceCell.Value.AsInt
+		} else {
+			sourceVal = sourceCell.Value.Value
+		}
+
+		switch target := targetVal.(type) {
 		case int:
-			switch source := cellValue(sourceCell).(type) {
+			switch source := sourceVal.(type) {
 			case int:
 				targetCell.Int = target - source
 				targetCell.IsInt = true
 			case int64:
-				setCellValue(targetCell, int64(target)-source)
+				setCellValue(targetCell, NewNative(int64(target)-source))
 			case float64:
-				setCellValue(targetCell, float64(target)-source)
+				setCellValue(targetCell, NewNative(float64(target)-source))
 			case float32:
-				setCellValue(targetCell, float32(target)-source)
+				setCellValue(targetCell, NewNative(float32(target)-source))
 			default:
-				vm.fatalError(ErrorType, "cannot subtract %s and %s", TypeName(cellValue(targetCell)), TypeName(cellValue(sourceCell)))
+				vm.fatalError(ErrorType, "cannot subtract %s and %s", TypeName(targetCell.Value), TypeName(sourceCell.Value))
 			}
 
 		case int64:
-			switch source := cellValue(sourceCell).(type) {
+			switch source := sourceVal.(type) {
 			case int:
-				setCellValue(targetCell, target-int64(source))
+				setCellValue(targetCell, NewNative(target-int64(source)))
 			case int64:
-				setCellValue(targetCell, target-source)
+				setCellValue(targetCell, NewNative(target-source))
 			case float64:
-				setCellValue(targetCell, float64(target)-source)
+				setCellValue(targetCell, NewNative(float64(target)-source))
 			case float32:
-				setCellValue(targetCell, float32(target)-source)
+				setCellValue(targetCell, NewNative(float32(target)-source))
 			default:
-				vm.fatalError(ErrorType, "cannot subtract %s and %s", TypeName(cellValue(targetCell)), TypeName(cellValue(sourceCell)))
+				vm.fatalError(ErrorType, "cannot subtract %s and %s", TypeName(targetCell.Value), TypeName(sourceCell.Value))
 			}
 
 		case float64:
-			switch source := cellValue(sourceCell).(type) {
+			switch source := sourceVal.(type) {
 			case int:
-				setCellValue(targetCell, target-float64(source))
+				setCellValue(targetCell, NewNative(target-float64(source)))
 			case int64:
-				setCellValue(targetCell, target-float64(source))
+				setCellValue(targetCell, NewNative(target-float64(source)))
 			case float64:
-				setCellValue(targetCell, target-source)
+				setCellValue(targetCell, NewNative(target-source))
 			case float32:
-				setCellValue(targetCell, target-float64(source))
+				setCellValue(targetCell, NewNative(target-float64(source)))
 			default:
-				vm.fatalError(ErrorType, "cannot subtract %s and %s", TypeName(cellValue(targetCell)), TypeName(cellValue(sourceCell)))
+				vm.fatalError(ErrorType, "cannot subtract %s and %s", TypeName(targetCell.Value), TypeName(sourceCell.Value))
 			}
 
 		case float32:
-			switch source := cellValue(sourceCell).(type) {
+			switch source := sourceVal.(type) {
 			case int:
-				setCellValue(targetCell, target-float32(source))
+				setCellValue(targetCell, NewNative(target-float32(source)))
 			case int64:
-				setCellValue(targetCell, target-float32(source))
+				setCellValue(targetCell, NewNative(target-float32(source)))
 			case float64:
-				setCellValue(targetCell, float64(target)-source)
+				setCellValue(targetCell, NewNative(float64(target)-source))
 			case float32:
-				setCellValue(targetCell, target-source)
+				setCellValue(targetCell, NewNative(target-source))
 			default:
-				vm.fatalError(ErrorType, "cannot subtract %s and %s", TypeName(cellValue(targetCell)), TypeName(cellValue(sourceCell)))
+				vm.fatalError(ErrorType, "cannot subtract %s and %s", TypeName(targetCell.Value), TypeName(sourceCell.Value))
 			}
 
 		default:
-			vm.fatalError(ErrorType, "cannot subtract to %s", TypeName(cellValue(targetCell)))
+			vm.fatalError(ErrorType, "cannot subtract to %s", TypeName(targetCell.Value))
 		}
 
 	case OP_JUMP_LOCAL_GE_CONST:
@@ -1873,8 +1946,14 @@ func (vm *VM) step() bool {
 		}
 
 		shouldJump := false
+		var val any
+		if cell.Value.IsInt {
+			val = cell.Value.AsInt
+		} else {
+			val = cell.Value.Value
+		}
 
-		switch v := cellValue(cell).(type) {
+		switch v := val.(type) {
 		case int:
 			shouldJump = v >= info.Value
 
@@ -1888,7 +1967,7 @@ func (vm *VM) step() bool {
 			shouldJump = v >= float32(info.Value)
 
 		default:
-			vm.fatalError(ErrorType, "cannot compare %s and number", TypeName(cellValue(cell)))
+			vm.fatalError(ErrorType, "cannot compare %s and number", TypeName(cell.Value))
 		}
 
 		if shouldJump {
@@ -1912,11 +1991,11 @@ func (vm *VM) step() bool {
 
 		for i := start; i < vm.top; i++ {
 			builder.WriteString(valueToString(vm.stack[i]))
-			vm.stack[i] = nil
+			vm.stack[i] = Value{}
 		}
 
 		vm.top = start
-		vm.push(builder.String())
+		vm.push(NewNative(builder.String()))
 
 	case OP_CALL_DIRECT:
 		info := instr.Value.(DirectCallInfo)
@@ -1966,7 +2045,7 @@ func (vm *VM) step() bool {
 				}
 			}()
 
-			vm.push(task)
+			vm.push(NewNative(task))
 		} else {
 			vm.callFunctionDirectFromStack(fn, info.ArgCount, "function "+info.Name)
 		}
@@ -1974,21 +2053,34 @@ func (vm *VM) step() bool {
 		return false
 
 	case OP_OBJECT_IN:
-		keyValue := vm.pop()
-		objectValue := asObject(vm.pop(), vm)
+		keyValue := vm.popFast()
+		objectValue := asObject(vm.popFast(), vm)
+
+		var rawKey any
+		if keyValue.IsInt {
+			rawKey = keyValue.AsInt
+		} else {
+			rawKey = keyValue.Value
+		}
 
 		found := false
-		_, found = objectValue[keyValue]
+		_, found = objectValue[rawKey]
 
-		vm.push(found)
+		vm.push(NewNative(found))
 
 	case OP_INSTANCEOF:
-		classValue := vm.pop()
-		objectValue := vm.pop()
+		classValue := vm.popFast()
+		objectValue := vm.popFast()
 
 		var className string
+		var rawClass any
+		if classValue.IsInt {
+			rawClass = classValue.AsInt
+		} else {
+			rawClass = classValue.Value
+		}
 
-		switch c := classValue.(type) {
+		switch c := rawClass.(type) {
 		case Class:
 			className = c.Name
 
@@ -1999,12 +2091,12 @@ func (vm *VM) step() bool {
 			vm.fatalError(ErrorType, "right side of instanceof must be class, got %s", TypeName(classValue))
 		}
 
-		vm.push(vm.isInstanceOf(objectValue, className))
+		vm.push(NewNative(vm.isInstanceOf(objectValue, className)))
 
 	case OP_AWAIT:
-		value := vm.pop()
+		value := vm.popFast()
 
-		task, ok := value.(*NativeTaskValue)
+		task, ok := value.Value.(*NativeTaskValue)
 
 		if !ok {
 			vm.push(value)
@@ -2020,33 +2112,33 @@ func (vm *VM) step() bool {
 		vm.push(result.Value)
 
 	case OP_LOCK_MUTEX:
-		value := vm.pop()
+		value := vm.popFast()
 
-		mutex, ok := value.(*NativeMutexValue)
+		mutex, ok := value.Value.(*NativeMutexValue)
 		if !ok {
 			vm.fatalError(ErrorType, "lock mutex expects mutex, got %s", TypeName(value))
 		}
 
 		mutex.Lock()
 
-		vm.push(UndefinedValue{})
+		vm.push(NewUndefined())
 
 	case OP_UNLOCK_MUTEX:
-		value := vm.pop()
+		value := vm.popFast()
 
-		mutex, ok := value.(*NativeMutexValue)
+		mutex, ok := value.Value.(*NativeMutexValue)
 		if !ok {
 			vm.fatalError(ErrorType, "unlock mutex expects mutex, got %s", TypeName(value))
 		}
 
 		mutex.Unlock()
 
-		vm.push(UndefinedValue{})
+		vm.push(NewUndefined())
 
 	case OP_DEFER:
-		value := vm.pop()
+		value := vm.popFast()
 
-		fn, ok := value.(FunctionValue)
+		fn, ok := value.Value.(FunctionValue)
 		if !ok {
 			vm.fatalError(ErrorType, "defer expects function, got %s", TypeName(value))
 		}
@@ -2062,12 +2154,12 @@ func (vm *VM) step() bool {
 			FrameDepth: len(vm.frames),
 		})
 
-		vm.push(UndefinedValue{})
+		vm.push(NewUndefined())
 
 	case OP_SPAWN:
-		value := vm.pop()
+		value := vm.popFast()
 
-		fn, ok := value.(FunctionValue)
+		fn, ok := value.Value.(FunctionValue)
 		if !ok {
 			vm.fatalError(ErrorType, "spawn expects function, got %s", TypeName(value))
 		}
@@ -2094,27 +2186,32 @@ func (vm *VM) step() bool {
 			}
 		}()
 
-		vm.push(task)
+		vm.push(NewNative(task))
 
 	case OP_TYPEOF:
-		value := vm.pop()
-		vm.push(TypeName(value))
+		value := vm.popFast()
+		vm.push(NewNative(TypeName(value)))
 
 	case OP_NEGATE:
-		value := vm.pop()
+		value := vm.popFast()
 
-		switch v := value.(type) {
+		if value.IsInt {
+			vm.push(NewInt(-value.AsInt))
+			break
+		}
+
+		switch v := value.Value.(type) {
 		case int:
-			vm.push(-v)
+			vm.push(NewInt(-v))
 
 		case int64:
-			vm.push(-v)
+			vm.push(NewNative(-v))
 
 		case float64:
-			vm.push(-v)
+			vm.push(NewNative(-v))
 
 		case float32:
-			vm.push(-v)
+			vm.push(NewNative(-v))
 
 		default:
 			vm.fatalError(ErrorType, "cannot negate %s", TypeName(value))
@@ -2156,29 +2253,38 @@ func (vm *VM) step() bool {
 			}
 		}
 
-		vm.push(FunctionValue{
+		vm.push(NewNative(FunctionValue{
 			Name:     info.Name,
 			Captures: captures,
-		})
+		}))
 
 	case OP_CONST:
-		vm.stack[vm.top] = instr.Value
+		var wrapped Value
+		switch v := instr.Value.(type) {
+		case int:
+			wrapped = NewInt(v)
+		case int64:
+			wrapped = NewInt(int(v))
+		default:
+			wrapped = NewNative(v)
+		}
+		vm.stack[vm.top] = wrapped
 		vm.top++
 
 	case OP_SET_PROPERTY:
 		name := instr.Value.(string)
 
-		value := vm.pop()
-		objectValue := vm.pop()
+		value := vm.popFast()
+		objectValue := vm.popFast()
 
-		object, ok := objectValue.(ObjectValue)
+		object, ok := objectValue.Value.(ObjectValue)
 		if !ok {
 			vm.fatalError(ErrorType, "expected object, got %s", TypeName(objectValue))
 		}
 
 		_, isClass := object["__class"]
 		if isClass {
-			constFields := object["__constFields"].(map[string]bool)
+			constFields, _ := object["__constFields"].Value.(map[string]bool)
 			if _, isConstant := constFields[name]; isConstant {
 				vm.runtimeError(ErrorRuntime, "cannot assign to constant field: %s", name)
 			}
@@ -2194,18 +2300,18 @@ func (vm *VM) step() bool {
 		info := instr.Value.(MethodCallInfo)
 
 		args := vm.popArgs(info.ArgCount)
-		objectValue := vm.pop()
+		objectValue := vm.popFast()
 
 		if isNullish(objectValue) {
-			vm.push(UndefinedValue{})
+			vm.push(NewUndefined())
 			break
 		}
 
 		vm.callMethodResolved(info.Method, objectValue, args)
 
 	case OP_COALESCE_JUMP:
-		right := vm.pop()
-		left := vm.pop()
+		right := vm.popFast()
+		left := vm.popFast()
 
 		if isNullish(left) {
 			vm.push(right)
@@ -2215,7 +2321,7 @@ func (vm *VM) step() bool {
 
 	case OP_GET_PROPERTY_SAFE:
 		name := instr.Value.(string)
-		objectValue := vm.pop()
+		objectValue := vm.popFast()
 		vm.push(vm.getProperty(objectValue, name, true))
 
 	case OP_LOAD_GLOBAL:
@@ -2259,7 +2365,7 @@ func (vm *VM) step() bool {
 
 	case OP_STORE_GLOBAL:
 		info := instr.Value.(VariableInfo)
-		value := vm.pop()
+		value := vm.popFast()
 
 		if !CheckTypeHint(value, info.TypeHint) {
 			vm.fatalError(
@@ -2271,9 +2377,11 @@ func (vm *VM) step() bool {
 			)
 		}
 
+		vm.mu.Lock()
 		vm.globals[info.Name] = value
 		vm.globalConstants[info.Name] = info.Constant
 		vm.globalTypes[info.Name] = info.TypeHint
+		vm.mu.Unlock()
 
 	case OP_LOAD_LOCAL:
 		slot := instr.IntArg
@@ -2305,7 +2413,7 @@ func (vm *VM) step() bool {
 		frame := vm.frames[len(vm.frames)-1]
 		cell := frame.locals[0]
 		if cell.IsInt {
-			vm.stack[vm.top] = cell.Int
+			vm.stack[vm.top] = NewInt(cell.Int)
 		} else {
 			if cell == nil {
 				vm.fatalError(ErrorInternal, "local slot is nil: function=%s slot=0 locals=%d", frame.function.Name, len(frame.locals))
@@ -2318,7 +2426,7 @@ func (vm *VM) step() bool {
 		frame := vm.frames[len(vm.frames)-1]
 		cell := frame.locals[1]
 		if cell.IsInt {
-			vm.stack[vm.top] = cell.Int
+			vm.stack[vm.top] = NewInt(cell.Int)
 		} else {
 			if cell == nil {
 				vm.fatalError(ErrorInternal, "local slot is nil: function=%s slot=1 locals=%d", frame.function.Name, len(frame.locals))
@@ -2331,7 +2439,7 @@ func (vm *VM) step() bool {
 		frame := vm.frames[len(vm.frames)-1]
 		cell := frame.locals[2]
 		if cell.IsInt {
-			vm.stack[vm.top] = cell.Int
+			vm.stack[vm.top] = NewInt(cell.Int)
 		} else {
 			if cell == nil {
 				vm.fatalError(ErrorInternal, "local slot is nil: function=%s slot=2 locals=%d", frame.function.Name, len(frame.locals))
@@ -2344,7 +2452,7 @@ func (vm *VM) step() bool {
 		frame := vm.frames[len(vm.frames)-1]
 		cell := frame.locals[3]
 		if cell.IsInt {
-			vm.stack[vm.top] = cell.Int
+			vm.stack[vm.top] = NewInt(cell.Int)
 		} else {
 			if cell == nil {
 				vm.fatalError(ErrorInternal, "local slot is nil: function=%s slot=3 locals=%d", frame.function.Name, len(frame.locals))
@@ -2355,7 +2463,7 @@ func (vm *VM) step() bool {
 
 	case OP_STORE_LOCAL:
 		info := instr.Value.(VariableInfo)
-		value := vm.pop()
+		value := vm.popFast()
 
 		frame := vm.currentFrame()
 
@@ -2380,7 +2488,7 @@ func (vm *VM) step() bool {
 
 	case OP_ASSIGN_GLOBAL:
 		name := instr.Value.(string)
-		value := vm.pop()
+		value := vm.popFast()
 
 		if vm.globalConstants[name] {
 			vm.fatalError(ErrorConst, "cannot assign to constant global")
@@ -2398,133 +2506,159 @@ func (vm *VM) step() bool {
 			)
 		}
 
+		vm.mu.Lock()
 		vm.globals[name] = value
-
-	case OP_DEC_LOCAL:
-		info := instr.Value.(DecrementInfo)
-		slot := info.Slot
-
-		frame := vm.currentFrame()
-
-		if slot < 0 || slot >= len(frame.locals) {
-			vm.fatalError(
-				ErrorInternal,
-				"local slot out of range: function=%s slot=%d locals=%d",
-				frame.function.Name,
-				slot,
-				len(frame.locals),
-			)
-		}
-
-		if frame.locals[slot] == nil {
-			vm.fatalError(
-				ErrorInternal,
-				"local slot is nil during increment: function=%s slot=%d locals=%d",
-				frame.function.Name,
-				slot,
-				len(frame.locals),
-			)
-		}
-
-		if frame.constants[slot] {
-			vm.fatalError(ErrorConst, "cannot increment constant local")
-		}
-
-		value := cellValue(frame.locals[slot])
-
-		switch v := value.(type) {
-		case int:
-			if info.IsFloat {
-				setCellValue(frame.locals[slot], float64(v)-info.FloatAmount)
-			} else {
-				frame.locals[slot].Int = v - info.IntAmount
-				frame.locals[slot].IsInt = true
-			}
-
-		case float64:
-			if info.IsFloat {
-				setCellValue(frame.locals[slot], v-info.FloatAmount)
-			} else {
-				setCellValue(frame.locals[slot], v-float64(info.IntAmount))
-			}
-
-		default:
-			vm.fatalError(ErrorType, "cannot increment %s", TypeName(value))
-		}
-
-	case OP_DEC_GLOBAL:
-		info := instr.Value.(DecrementInfo)
-		name := info.Name
-
-		if vm.globalConstants[name] {
-			vm.fatalError(ErrorConst, "cannot increment constant global")
-		}
-
-		value, exists := vm.globals[name]
-		if !exists {
-			vm.fatalError(ErrorName, "undefined global variable: %s", name)
-		}
-
-		switch v := value.(type) {
-		case int:
-			vm.globals[name] = v - info.IntAmount
-
-		case float64:
-			if info.IsFloat {
-				vm.globals[name] = v - info.FloatAmount
-			} else {
-				vm.globals[name] = v - float64(info.IntAmount)
-			}
-
-		default:
-			vm.fatalError(ErrorType, "cannot increment %s", TypeName(value))
-		}
+		vm.mu.Unlock()
 
 	case OP_INC_LOCAL:
-		info := instr.Value.(IncrementInfo)
+		var slot int
+		intAmount := 1
+		floatAmount := 1.0
+		isFloat := false
+
+		switch info := instr.Value.(type) {
+		case int:
+			slot = info
+		case int64:
+			slot = int(info)
+		case IncrementInfo:
+			slot = info.Slot
+			intAmount = info.IntAmount
+			floatAmount = info.FloatAmount
+			isFloat = info.IsFloat
+		default:
+			vm.fatalError(ErrorInternal, "unexpected type for OP_INC_LOCAL: %T", instr.Value)
+		}
 
 		frame := vm.frames[len(vm.frames)-1]
 
-		if info.Slot < 0 || info.Slot >= len(frame.locals) {
+		if slot < 0 || slot >= len(frame.locals) {
 			vm.fatalError(ErrorInternal, "local slot out of range in OP_INC_LOCAL")
 		}
 
-		cell := frame.locals[info.Slot]
+		cell := frame.locals[slot]
 
 		if cell == nil {
 			vm.fatalError(ErrorInternal, "local cell is nil in OP_INC_LOCAL")
 		}
 
-		if frame.constants[info.Slot] {
+		if frame.constants[slot] {
 			vm.fatalError(ErrorConst, "cannot assign to constant local")
 		}
 
-		if cell.IsInt && !info.IsFloat {
-			cell.Int += info.IntAmount
+		if cell.IsInt && !isFloat {
+			cell.Int += intAmount
 			break
 		}
 
-		switch v := cellValue(cell).(type) {
+		var rawVal any
+		if cell.Value.IsInt {
+			rawVal = cell.Value.AsInt
+		} else {
+			rawVal = cell.Value.Value
+		}
+
+		switch v := rawVal.(type) {
 		case int:
-			cell.Int = v + info.IntAmount
+			cell.Int = v + intAmount
 			cell.IsInt = true
 
 		case int64:
-			setCellValue(cell, v+int64(info.IntAmount))
+			setCellValue(cell, NewNative(v+int64(intAmount)))
 
 		case float64:
-			setCellValue(cell, v+info.FloatAmount)
+			setCellValue(cell, NewNative(v+floatAmount))
 
 		case float32:
-			setCellValue(cell, v+float32(info.FloatAmount))
+			setCellValue(cell, NewNative(v+float32(floatAmount)))
 
 		default:
-			vm.runtimeError(ErrorType, "cannot increment %s", TypeName(cellValue(cell)))
+			vm.runtimeError(ErrorType, "cannot increment %s", TypeName(cell.Value))
+		}
+
+	case OP_DEC_LOCAL:
+		var slot int
+		intAmount := 1
+		floatAmount := 1.0
+		isFloat := false
+
+		switch info := instr.Value.(type) {
+		case int:
+			slot = info
+		case int64:
+			slot = int(info)
+		case DecrementInfo:
+			slot = info.Slot
+			intAmount = info.IntAmount
+			floatAmount = info.FloatAmount
+			isFloat = info.IsFloat
+		default:
+			vm.fatalError(ErrorInternal, "unexpected type for OP_DEC_LOCAL: %T", instr.Value)
+		}
+
+		frame := vm.frames[len(vm.frames)-1]
+
+		if slot < 0 || slot >= len(frame.locals) {
+			vm.fatalError(ErrorInternal, "local slot out of range in OP_DEC_LOCAL")
+		}
+
+		cell := frame.locals[slot]
+
+		if cell == nil {
+			vm.fatalError(ErrorInternal, "local cell is nil in OP_DEC_LOCAL")
+		}
+
+		if frame.constants[slot] {
+			vm.fatalError(ErrorConst, "cannot assign to constant local")
+		}
+
+		if cell.IsInt && !isFloat {
+			cell.Int -= intAmount
+			break
+		}
+
+		var rawVal any
+		if cell.Value.IsInt {
+			rawVal = cell.Value.AsInt
+		} else {
+			rawVal = cell.Value.Value
+		}
+
+		switch v := rawVal.(type) {
+		case int:
+			cell.Int = v - intAmount
+			cell.IsInt = true
+
+		case int64:
+			setCellValue(cell, NewNative(v-int64(intAmount)))
+
+		case float64:
+			setCellValue(cell, NewNative(v-floatAmount))
+
+		case float32:
+			setCellValue(cell, NewNative(v-float32(floatAmount)))
+
+		default:
+			vm.runtimeError(ErrorType, "cannot decrement %s", TypeName(cell.Value))
 		}
 
 	case OP_INC_GLOBAL:
-		info := instr.Value.(IncrementInfo)
-		name := info.Name
+		var name string
+		intAmount := 1
+		floatAmount := 1.0
+		isFloat := false
+
+		switch info := instr.Value.(type) {
+		case string:
+			name = info
+		case IncrementInfo:
+			name = info.Name
+			intAmount = info.IntAmount
+			floatAmount = info.FloatAmount
+			isFloat = info.IsFloat
+		default:
+			vm.fatalError(ErrorInternal, "unexpected type for OP_INC_GLOBAL: %T", instr.Value)
+		}
 
 		if vm.globalConstants[name] {
 			vm.fatalError(ErrorConst, "cannot increment constant global")
@@ -2535,24 +2669,88 @@ func (vm *VM) step() bool {
 			vm.fatalError(ErrorName, "undefined global variable: %s", name)
 		}
 
-		switch v := value.(type) {
+		var rawVal any
+		if value.IsInt {
+			rawVal = value.AsInt
+		} else {
+			rawVal = value.Value
+		}
+
+		vm.mu.Lock()
+		switch v := rawVal.(type) {
 		case int:
-			if info.IsFloat {
-				vm.globals[name] = float64(v) + info.FloatAmount
+			if isFloat {
+				vm.globals[name] = NewNative(float64(v) + floatAmount)
 			} else {
-				vm.globals[name] = v + info.IntAmount
+				vm.globals[name] = NewInt(v + intAmount)
 			}
 
 		case float64:
-			if info.IsFloat {
-				vm.globals[name] = v + info.FloatAmount
+			if isFloat {
+				vm.globals[name] = NewNative(v + floatAmount)
 			} else {
-				vm.globals[name] = v + float64(info.IntAmount)
+				vm.globals[name] = NewNative(v + float64(intAmount))
 			}
 
 		default:
 			vm.fatalError(ErrorType, "cannot increment %s", TypeName(value))
 		}
+		vm.mu.Unlock()
+
+	case OP_DEC_GLOBAL:
+		var name string
+		intAmount := 1
+		floatAmount := 1.0
+		isFloat := false
+
+		switch info := instr.Value.(type) {
+		case string:
+			name = info
+		case DecrementInfo:
+			name = info.Name
+			intAmount = info.IntAmount
+			floatAmount = info.FloatAmount
+			isFloat = info.IsFloat
+		default:
+			vm.fatalError(ErrorInternal, "unexpected type for OP_DEC_GLOBAL: %T", instr.Value)
+		}
+
+		if vm.globalConstants[name] {
+			vm.fatalError(ErrorConst, "cannot decrement constant global")
+		}
+
+		value, exists := vm.globals[name]
+		if !exists {
+			vm.fatalError(ErrorName, "undefined global variable: %s", name)
+		}
+
+		var rawVal any
+		if value.IsInt {
+			rawVal = value.AsInt
+		} else {
+			rawVal = value.Value
+		}
+
+		vm.mu.Lock()
+		switch v := rawVal.(type) {
+		case int:
+			if isFloat {
+				vm.globals[name] = NewNative(float64(v) - floatAmount)
+			} else {
+				vm.globals[name] = NewInt(v - intAmount)
+			}
+
+		case float64:
+			if isFloat {
+				vm.globals[name] = NewNative(v - floatAmount)
+			} else {
+				vm.globals[name] = NewNative(v - float64(intAmount))
+			}
+
+		default:
+			vm.fatalError(ErrorType, "cannot decrement %s", TypeName(value))
+		}
+		vm.mu.Unlock()
 
 	case OP_ASSIGN_LOCAL:
 		slot := instr.IntArg
@@ -2606,11 +2804,8 @@ func (vm *VM) step() bool {
 		right := vm.popFast()
 		left := vm.popFast()
 
-		li, okL := left.(int)
-		ri, okR := right.(int)
-
-		if okL && okR {
-			vm.push(li + ri)
+		if left.IsInt && right.IsInt {
+			vm.push(NewInt(left.AsInt + right.AsInt))
 		} else {
 			vm.push(addValues(left, right))
 		}
@@ -2619,156 +2814,235 @@ func (vm *VM) step() bool {
 		right := vm.popFast()
 		left := vm.popFast()
 
+		if left.IsInt && right.IsInt {
+			vm.push(NewInt(left.AsInt - right.AsInt))
+			break
+		}
+
+		var leftVal any
+		if left.IsInt {
+			leftVal = left.AsInt
+		} else {
+			leftVal = left.Value
+		}
+
+		var rightVal any
+		if right.IsInt {
+			rightVal = right.AsInt
+		} else {
+			rightVal = right.Value
+		}
+
 		if !isNumber(left) || !isNumber(right) {
 			vm.fatalError(ErrorType, "cannot subtract %s and %s", TypeName(left), TypeName(right))
 		}
 
-		if _, ok := left.(float64); ok {
-			vm.push(asFloat(left) - asFloat(right))
+		if _, ok := leftVal.(float64); ok {
+			vm.push(NewNative(asFloat(left) - asFloat(right)))
 			break
 		}
 
-		if _, ok := right.(float64); ok {
-			vm.push(asFloat(left) - asFloat(right))
+		if _, ok := rightVal.(float64); ok {
+			vm.push(NewNative(asFloat(left) - asFloat(right)))
 			break
 		}
 
-		if _, ok := left.(uint64); ok {
-			vm.push(asUint(left) - asUint(right))
+		if _, ok := leftVal.(uint64); ok {
+			vm.push(NewNative(asUint(left) - asUint(right)))
 			break
 		}
 
-		if _, ok := right.(uint64); ok {
-			vm.push(asUint(left) - asUint(right))
+		if _, ok := rightVal.(uint64); ok {
+			vm.push(NewNative(asUint(left) - asUint(right)))
 			break
 		}
 
-		if _, ok := left.(int64); ok {
-			vm.push(asInt64(left) - asInt64(right))
+		if _, ok := leftVal.(int64); ok {
+			vm.push(NewNative(asInt64(left) - asInt64(right)))
 			break
 		}
 
-		if _, ok := right.(int64); ok {
-			vm.push(asInt64(left) - asInt64(right))
+		if _, ok := rightVal.(int64); ok {
+			vm.push(NewNative(asInt64(left) - asInt64(right)))
 			break
 		}
 
-		vm.push(left.(int) - right.(int))
+		vm.push(NewInt(leftVal.(int) - rightVal.(int)))
 
 	case OP_MUL:
 		right := vm.popFast()
 		left := vm.popFast()
 
+		if left.IsInt && right.IsInt {
+			vm.push(NewInt(left.AsInt * right.AsInt))
+			break
+		}
+
+		var leftVal any
+		if left.IsInt {
+			leftVal = left.AsInt
+		} else {
+			leftVal = left.Value
+		}
+
+		var rightVal any
+		if right.IsInt {
+			rightVal = right.AsInt
+		} else {
+			rightVal = right.Value
+		}
+
 		if !isNumber(left) || !isNumber(right) {
 			vm.fatalError(ErrorType, "cannot multiply %s and %s", TypeName(left), TypeName(right))
 		}
 
-		if _, ok := left.(float64); ok {
-			vm.push(asFloat(left) * asFloat(right))
+		if _, ok := leftVal.(float64); ok {
+			vm.push(NewNative(asFloat(left) * asFloat(right)))
 			break
 		}
 
-		if _, ok := right.(float64); ok {
-			vm.push(asFloat(left) * asFloat(right))
+		if _, ok := rightVal.(float64); ok {
+			vm.push(NewNative(asFloat(left) * asFloat(right)))
 			break
 		}
 
-		if _, ok := left.(uint64); ok {
-			vm.push(asUint(left) * asUint(right))
+		if _, ok := leftVal.(uint64); ok {
+			vm.push(NewNative(asUint(left) * asUint(right)))
 			break
 		}
 
-		if _, ok := right.(uint64); ok {
-			vm.push(asUint(left) * asUint(right))
+		if _, ok := rightVal.(uint64); ok {
+			vm.push(NewNative(asUint(left) * asUint(right)))
 			break
 		}
 
-		if _, ok := left.(int64); ok {
-			vm.push(asInt64(left) * asInt64(right))
+		if _, ok := leftVal.(int64); ok {
+			vm.push(NewNative(asInt64(left) * asInt64(right)))
 			break
 		}
 
-		if _, ok := right.(int64); ok {
-			vm.push(asInt64(left) * asInt64(right))
+		if _, ok := rightVal.(int64); ok {
+			vm.push(NewNative(asInt64(left) * asInt64(right)))
 			break
 		}
 
-		vm.push(left.(int) * right.(int))
+		vm.push(NewInt(leftVal.(int) * rightVal.(int)))
 
 	case OP_DIV:
 		right := vm.popFast()
 		left := vm.popFast()
 
+		if left.IsInt && right.IsInt {
+			if right.AsInt == 0 {
+				vm.fatalError(ErrorRuntime, "cannot divide by zero")
+			}
+			vm.push(NewInt(left.AsInt / right.AsInt))
+			break
+		}
+
+		var leftVal any
+		if left.IsInt {
+			leftVal = left.AsInt
+		} else {
+			leftVal = left.Value
+		}
+
+		var rightVal any
+		if right.IsInt {
+			rightVal = right.AsInt
+		} else {
+			rightVal = right.Value
+		}
+
 		if !isNumber(left) || !isNumber(right) {
 			vm.fatalError(ErrorType, "cannot divide %s and %s", TypeName(left), TypeName(right))
 		}
 
-		if _, ok := left.(float64); ok {
-			vm.push(asFloat(left) / asFloat(right))
+		if _, ok := leftVal.(float64); ok {
+			vm.push(NewNative(asFloat(left) / asFloat(right)))
 			break
 		}
 
-		if _, ok := right.(float64); ok {
-			vm.push(asFloat(left) / asFloat(right))
+		if _, ok := rightVal.(float64); ok {
+			vm.push(NewNative(asFloat(left) / asFloat(right)))
 			break
 		}
 
-		if _, ok := left.(uint64); ok {
-			vm.push(asUint(left) / asUint(right))
+		if _, ok := leftVal.(uint64); ok {
+			vm.push(NewNative(asUint(left) / asUint(right)))
 			break
 		}
 
-		if _, ok := right.(uint64); ok {
-			vm.push(asUint(left) / asUint(right))
+		if _, ok := rightVal.(uint64); ok {
+			vm.push(NewNative(asUint(left) / asUint(right)))
 			break
 		}
 
-		if _, ok := left.(int64); ok {
-			vm.push(asInt64(left) / asInt64(right))
+		if _, ok := leftVal.(int64); ok {
+			vm.push(NewNative(asInt64(left) / asInt64(right)))
 			break
 		}
 
-		if _, ok := right.(int64); ok {
-			vm.push(asInt64(left) / asInt64(right))
+		if _, ok := rightVal.(int64); ok {
+			vm.push(NewNative(asInt64(left) / asInt64(right)))
 			break
 		}
 
-		vm.push(left.(int) / right.(int))
+		vm.push(NewInt(leftVal.(int) / rightVal.(int)))
 
 	case OP_EQ:
 		right := vm.popFast()
 		left := vm.popFast()
-		vm.push(valuesEqual(left, right))
+		vm.push(NewNative(valuesEqual(left, right)))
 
 	case OP_NEQ:
 		right := vm.popFast()
 		left := vm.popFast()
-		vm.push(!valuesEqual(left, right))
+		vm.push(NewNative(!valuesEqual(left, right)))
 
 	case OP_LT:
 		right := vm.popFast()
 		left := vm.popFast()
 
-		switch l := left.(type) {
+		if left.IsInt && right.IsInt {
+			vm.push(NewNative(left.AsInt < right.AsInt))
+			break
+		}
+
+		var leftVal any
+		if left.IsInt {
+			leftVal = left.AsInt
+		} else {
+			leftVal = left.Value
+		}
+
+		var rightVal any
+		if right.IsInt {
+			rightVal = right.AsInt
+		} else {
+			rightVal = right.Value
+		}
+
+		switch l := leftVal.(type) {
 		case int:
-			switch r := right.(type) {
+			switch r := rightVal.(type) {
 			case int:
-				vm.push(l < r)
+				vm.push(NewNative(l < r))
 
 			case float64:
-				vm.push(float64(l) < r)
+				vm.push(NewNative(float64(l) < r))
 
 			default:
 				vm.fatalError(ErrorType, "cannot compare %s and %s", TypeName(left), TypeName(right))
 			}
 
 		case float64:
-			switch r := right.(type) {
+			switch r := rightVal.(type) {
 			case int:
-				vm.push(l < float64(r))
+				vm.push(NewNative(l < float64(r)))
 
 			case float64:
-				vm.push(l < r)
+				vm.push(NewNative(l < r))
 
 			default:
 				vm.fatalError(ErrorType, "cannot compare %s and %s", TypeName(left), TypeName(right))
@@ -2782,41 +3056,56 @@ func (vm *VM) step() bool {
 		right := vm.popFast()
 		left := vm.popFast()
 
+		if left.IsInt && right.IsInt {
+			vm.push(NewNative(left.AsInt > right.AsInt))
+			break
+		}
+
 		if !isNumber(left) || !isNumber(right) {
 			vm.fatalError(ErrorType, "cannot compare %s and %s", TypeName(left), TypeName(right))
 		}
 
-		vm.push(asFloat(left) > asFloat(right))
+		vm.push(NewNative(asFloat(left) > asFloat(right)))
 
 	case OP_LTE:
 		right := vm.popFast()
 		left := vm.popFast()
 
+		if left.IsInt && right.IsInt {
+			vm.push(NewNative(left.AsInt <= right.AsInt))
+			break
+		}
+
 		if !isNumber(left) || !isNumber(right) {
 			vm.fatalError(ErrorType, "cannot compare %s and %s", TypeName(left), TypeName(right))
 		}
 
-		vm.push(asFloat(left) <= asFloat(right))
+		vm.push(NewNative(asFloat(left) <= asFloat(right)))
 
 	case OP_GTE:
 		right := vm.popFast()
 		left := vm.popFast()
 
+		if left.IsInt && right.IsInt {
+			vm.push(NewNative(left.AsInt >= right.AsInt))
+			break
+		}
+
 		if !isNumber(left) || !isNumber(right) {
 			vm.fatalError(ErrorType, "cannot compare %s and %s", TypeName(left), TypeName(right))
 		}
 
-		vm.push(asFloat(left) >= asFloat(right))
+		vm.push(NewNative(asFloat(left) >= asFloat(right)))
 
 	case OP_AND:
 		right := vm.popFast()
 		left := vm.popFast()
-		vm.push(isTruthy(left) && isTruthy(right))
+		vm.push(NewNative(isTruthy(left) && isTruthy(right)))
 
 	case OP_OR:
 		right := vm.popFast()
 		left := vm.popFast()
-		vm.push(isTruthy(left) || isTruthy(right))
+		vm.push(NewNative(isTruthy(left) || isTruthy(right)))
 
 	case OP_JUMP:
 		target := instr.IntArg
@@ -2869,8 +3158,8 @@ func (vm *VM) step() bool {
 		frame := vm.frames[len(vm.frames)-1]
 		arrayValue := frameLocalValue(frame, info.ArraySlot, "OP_ARRAY_LEN_LOCAL")
 
-		if array, ok := arrayValue.(*ArrayValue); ok {
-			vm.push(len(array.Elements))
+		if array, ok := arrayValue.Value.(*ArrayValue); ok {
+			vm.push(NewInt(len(array.Elements)))
 			break
 		}
 		vm.callMethodResolved("length", arrayValue, nil)
@@ -2881,10 +3170,16 @@ func (vm *VM) step() bool {
 		arrayValue := frameLocalValue(frame, info.ArraySlot, "OP_ARRAY_GET_LOCAL")
 		indexValue := frameLocalValue(frame, info.ArgSlot, "OP_ARRAY_GET_LOCAL")
 
-		if array, ok := arrayValue.(*ArrayValue); ok {
-			index, ok := indexValue.(int)
-			if !ok {
-				vm.runtimeError(ErrorType, "array.get argument 1 expected number, got %s", TypeName(indexValue))
+		if array, ok := arrayValue.Value.(*ArrayValue); ok {
+			var index int
+			if indexValue.IsInt {
+				index = indexValue.AsInt
+			} else {
+				var ok bool
+				index, ok = indexValue.Value.(int)
+				if !ok {
+					vm.runtimeError(ErrorType, "array.get argument 1 expected number, got %s", TypeName(indexValue))
+				}
 			}
 			if index < 0 || index >= len(array.Elements) {
 				vm.runtimeError(ErrorRuntime, "array index out of range: %d", index)
@@ -2900,9 +3195,9 @@ func (vm *VM) step() bool {
 		arrayValue := frameLocalValue(frame, info.ArraySlot, "OP_ARRAY_PUSH_LOCAL")
 		value := frameLocalValue(frame, info.ArgSlot, "OP_ARRAY_PUSH_LOCAL")
 
-		if array, ok := arrayValue.(*ArrayValue); ok {
+		if array, ok := arrayValue.Value.(*ArrayValue); ok {
 			array.Elements = append(array.Elements, value)
-			vm.push(array)
+			vm.push(arrayValue)
 			break
 		}
 		vm.callMethodResolved("push", arrayValue, []Value{value})
@@ -2913,9 +3208,9 @@ func (vm *VM) step() bool {
 		arrayValue := frameLocalValue(frame, info.ArraySlot, "OP_ARRAY_PUSH_LOCAL_MUL_CONST")
 		arg := multiplyByInt(frameLocalValue(frame, info.ArgSlot, "OP_ARRAY_PUSH_LOCAL_MUL_CONST"), info.Factor)
 
-		if array, ok := arrayValue.(*ArrayValue); ok {
+		if array, ok := arrayValue.Value.(*ArrayValue); ok {
 			array.Elements = append(array.Elements, arg)
-			vm.push(array)
+			vm.push(arrayValue)
 			break
 		}
 		vm.callMethodResolved("push", arrayValue, []Value{arg})
@@ -2923,24 +3218,31 @@ func (vm *VM) step() bool {
 	case OP_LEN:
 		value := vm.popFast()
 
-		switch v := value.(type) {
+		var rawVal any
+		if value.IsInt {
+			rawVal = value.AsInt
+		} else {
+			rawVal = value.Value
+		}
+
+		switch v := rawVal.(type) {
 		case *ArrayValue:
-			vm.push(len(v.Elements))
+			vm.push(NewInt(len(v.Elements)))
 
 		case ArrayValue:
-			vm.push(len(v.Elements))
+			vm.push(NewInt(len(v.Elements)))
 
 		case string:
-			vm.push(len([]rune(v)))
+			vm.push(NewInt(len([]rune(v))))
 
 		case ObjectValue:
-			vm.push(len(v))
+			vm.push(NewInt(len(v)))
 
 		case BufferValue:
-			vm.push(len(v.Bytes))
+			vm.push(NewInt(len(v.Bytes)))
 
 		case *BufferValue:
-			vm.push(len(v.Bytes))
+			vm.push(NewInt(len(v.Bytes)))
 
 		default:
 			vm.fatalError(ErrorType, "cannot get length of %s", TypeName(value))
@@ -2963,9 +3265,9 @@ func (vm *VM) step() bool {
 
 		args := vm.popArgs(info.ArgCount)
 
-		callee := vm.pop()
+		callee := vm.popFast()
 
-		switch v := callee.(type) {
+		switch v := callee.Value.(type) {
 		case FunctionValue:
 			result := vm.callFunctionValue(v, args)
 			vm.push(result)
@@ -2994,7 +3296,22 @@ func (vm *VM) step() bool {
 		right := vm.popFast()
 		left := vm.popFast()
 
-		switch l := left.(type) {
+		if left.IsInt && right.IsInt {
+			if right.AsInt == 0 {
+				vm.fatalError(ErrorRuntime, "cannot modulo by zero")
+			}
+			vm.push(NewInt(left.AsInt % right.AsInt))
+			break
+		}
+
+		var leftVal any
+		if left.IsInt {
+			leftVal = left.AsInt
+		} else {
+			leftVal = left.Value
+		}
+
+		switch l := leftVal.(type) {
 		case int:
 			r := asInt(right)
 
@@ -3002,7 +3319,7 @@ func (vm *VM) step() bool {
 				vm.fatalError(ErrorRuntime, "cannot modulo by zero")
 			}
 
-			vm.push(l % r)
+			vm.push(NewInt(l % r))
 
 		case int64:
 			r := int64(asInt(right))
@@ -3011,7 +3328,7 @@ func (vm *VM) step() bool {
 				vm.fatalError(ErrorRuntime, "cannot modulo by zero")
 			}
 
-			vm.push(l % r)
+			vm.push(NewNative(l % r))
 
 		case float32:
 			r := asFloat64(right)
@@ -3020,7 +3337,7 @@ func (vm *VM) step() bool {
 				vm.fatalError(ErrorRuntime, "cannot modulo by zero")
 			}
 
-			vm.push(math.Mod(float64(l), r))
+			vm.push(NewNative(math.Mod(float64(l), r)))
 
 		case float64:
 			r := asFloat64(right)
@@ -3029,7 +3346,7 @@ func (vm *VM) step() bool {
 				vm.fatalError(ErrorRuntime, "cannot modulo by zero")
 			}
 
-			vm.push(math.Mod(l, r))
+			vm.push(NewNative(math.Mod(l, r)))
 
 		default:
 			vm.fatalError(ErrorType, "cannot modulo %s and %s", TypeName(left), TypeName(right))
@@ -3047,19 +3364,31 @@ func (vm *VM) step() bool {
 
 		copy(elements, vm.stack[start:vm.top])
 		for i := start; i < vm.top; i++ {
-			vm.stack[i] = nil
+			vm.stack[i] = Value{}
 		}
 		vm.top = start
 
-		vm.push(&ArrayValue{Elements: elements})
+		vm.push(NewNative(&ArrayValue{Elements: elements}))
 
 	case OP_INDEX:
 		indexValue := vm.popFast()
 		objectValue := vm.popFast()
 
-		switch obj := objectValue.(type) {
+		var rawObj any
+		if objectValue.IsInt {
+			rawObj = objectValue.AsInt
+		} else {
+			rawObj = objectValue.Value
+		}
+
+		switch obj := rawObj.(type) {
 		case *ArrayValue:
-			index := asInt(indexValue)
+			var index int
+			if indexValue.IsInt {
+				index = indexValue.AsInt
+			} else {
+				index = asInt(indexValue)
+			}
 
 			if index < 0 || index >= len(obj.Elements) {
 				vm.fatalError(ErrorRuntime, "array index out of range: %d", index)
@@ -3068,11 +3397,16 @@ func (vm *VM) step() bool {
 			vm.push(obj.Elements[index])
 
 		case ObjectValue:
-			key := indexValue
+			var key string
+			if indexValue.IsInt {
+				key = intToString(indexValue.AsInt)
+			} else {
+				key = valueToString(indexValue)
+			}
 
 			value, exists := obj[key]
 			if !exists {
-				obj[key] = UndefinedValue{}
+				obj[key] = NewUndefined()
 				value = obj[key]
 			}
 
@@ -3087,9 +3421,21 @@ func (vm *VM) step() bool {
 		indexValue := vm.popFast()
 		objectValue := vm.popFast()
 
-		switch obj := objectValue.(type) {
+		var rawObj any
+		if objectValue.IsInt {
+			rawObj = objectValue.AsInt
+		} else {
+			rawObj = objectValue.Value
+		}
+
+		switch obj := rawObj.(type) {
 		case *ArrayValue:
-			index := asInt(indexValue)
+			var index int
+			if indexValue.IsInt {
+				index = indexValue.AsInt
+			} else {
+				index = asInt(indexValue)
+			}
 
 			if index < 0 || index >= len(obj.Elements) {
 				vm.fatalError(ErrorRuntime, "array index out of range: %d", index)
@@ -3098,9 +3444,15 @@ func (vm *VM) step() bool {
 			obj.Elements[index] = value
 
 		case ObjectValue:
-			key := indexValue
+			var key string
+			if indexValue.IsInt {
+				key = intToString(indexValue.AsInt)
+			} else {
+				key = valueToString(indexValue)
+			}
+
 			if className, isClass := obj["__class"]; isClass {
-				vm.runtimeError(ErrorRuntime, "cannot modify class '%s' by index operator.", className)
+				vm.runtimeError(ErrorRuntime, "cannot modify class '%s' by index operator.", className.Value)
 			}
 			obj[key] = value
 
@@ -3112,9 +3464,9 @@ func (vm *VM) step() bool {
 		var returnValue Value
 
 		if vm.top == 0 {
-			returnValue = UndefinedValue{}
+			returnValue = NewUndefined()
 		} else {
-			returnValue = vm.pop()
+			returnValue = vm.popFast()
 		}
 
 		if len(vm.frames) == 0 {
@@ -3123,18 +3475,7 @@ func (vm *VM) step() bool {
 		}
 
 		if len(vm.deferHandlers) > 0 {
-			currentDepth := len(vm.frames)
-
-			for i := len(vm.deferHandlers) - 1; i >= 0; i-- {
-				handler := vm.deferHandlers[i]
-
-				if handler.FrameDepth < currentDepth {
-					break
-				}
-				vm.deferHandlers = vm.deferHandlers[:i]
-
-				vm.callFunctionValue(handler.Function, nil)
-			}
+			vm.runDefersAboveDepth(len(vm.frames) - 1)
 		}
 
 		frame := vm.frames[len(vm.frames)-1]
@@ -3159,18 +3500,18 @@ func (vm *VM) step() bool {
 		}
 
 	case OP_THROW:
-		value := vm.pop()
+		value := vm.popFast()
 		vm.throwValue(value)
 
 	case OP_POP:
-		vm.pop()
+		vm.popFast()
 
 	case OP_INTERPOLATE:
 		info := instr.Value.(InterpolateInfo)
 
 		if info.ExprCount == 1 {
 			value := vm.popFast()
-			vm.push(info.Parts[0] + valueToString(value) + info.Parts[1])
+			vm.push(NewNative(info.Parts[0] + valueToString(value) + info.Parts[1]))
 			break
 		}
 
@@ -3185,13 +3526,13 @@ func (vm *VM) step() bool {
 		for i := 0; i < info.ExprCount; i++ {
 			builder.WriteString(info.Parts[i])
 			builder.WriteString(valueToString(vm.stack[start+i]))
-			vm.stack[start+i] = nil
+			vm.stack[start+i] = Value{}
 		}
 
 		vm.top = start
 		builder.WriteString(info.Parts[len(info.Parts)-1])
 
-		vm.push(builder.String())
+		vm.push(NewNative(builder.String()))
 
 	case OP_OBJECT:
 		info := instr.Value.(ObjectInfo)
@@ -3205,7 +3546,7 @@ func (vm *VM) step() bool {
 
 		for i, fieldInfo := range info.Names {
 			if fieldInfo.Copy {
-				obj, ok := vm.stack[start+i].(ObjectValue)
+				obj, ok := vm.stack[start+i].Value.(ObjectValue)
 
 				if !ok {
 					vm.fatalError(ErrorType, "expected an object to copy with {...%s}, but got %s", fieldInfo.Name, TypeName(vm.stack[start+i]))
@@ -3215,15 +3556,15 @@ func (vm *VM) step() bool {
 			} else {
 				object[fieldInfo.Name] = vm.stack[start+i]
 			}
-			vm.stack[start+i] = nil
+			vm.stack[start+i] = Value{}
 		}
 		vm.top = start
 
-		vm.push(object)
+		vm.push(NewNative(object))
 
 	case OP_NOT:
 		value := vm.popFast()
-		vm.push(!isTruthy(value))
+		vm.push(NewNative(!isTruthy(value)))
 
 	case OP_GET_PROPERTY_LOCAL:
 		info := instr.Value.(PropertyLocalInfo)
@@ -3234,14 +3575,14 @@ func (vm *VM) step() bool {
 		info := instr.Value.(PropertyLocalAssignInfo)
 		frame := vm.frames[len(vm.frames)-1]
 		objectValue := frameLocalValue(frame, info.ObjectSlot, "OP_ADD_PROPERTY_LOCAL_LOCAL")
-		object, ok := objectValue.(ObjectValue)
+		object, ok := objectValue.Value.(ObjectValue)
 		if !ok {
 			vm.fatalError(ErrorType, "expected object, got %s", TypeName(objectValue))
 		}
 
 		_, isClass := object["__class"]
 		if isClass {
-			constFields := object["__constFields"].(map[string]bool)
+			constFields, _ := object["__constFields"].Value.(map[string]bool)
 			if _, isConstant := constFields[info.Name]; isConstant {
 				vm.fatalError(ErrorRuntime, "cannot assign to constant field: %s", info.Name)
 			}
@@ -3250,7 +3591,7 @@ func (vm *VM) step() bool {
 			}
 		}
 
-		current := propertyValue(vm, object, info.Name)
+		current := propertyValue(vm, NewNative(object), info.Name)
 		source := frameLocalValue(frame, info.SourceSlot, "OP_ADD_PROPERTY_LOCAL_LOCAL")
 		object[info.Name] = addValues(current, source)
 
@@ -3273,7 +3614,7 @@ func writeServerResponse(w http.ResponseWriter, value any, responseType HttpResp
 	switch responseType {
 	case HttpJson:
 		w.Header().Set("Content-Type", "application/json")
-		jsonValue := valueToJSONCompatible(value)
+		jsonValue := valueToJSONCompatible(ToValue(value))
 		bytes, _ := json.Marshal(jsonValue)
 		fmt.Fprint(w, string(bytes))
 
@@ -3290,7 +3631,14 @@ func (vm *VM) callNamespaceMethod(ns NamespaceValue, method string, args []Value
 		vm.fatalError(ErrorName, "namespace %s has no member: %s", ns.Name, method)
 	}
 
-	switch v := value.(type) {
+	var rawVal any
+	if value.IsInt {
+		rawVal = value.AsInt
+	} else {
+		rawVal = value.Value
+	}
+
+	switch v := rawVal.(type) {
 	case FunctionValue:
 		result := vm.callFunctionValue(v, args)
 		vm.push(result)
@@ -3316,7 +3664,7 @@ func (vm *VM) findEmbeddedMethod(object ObjectValue, method string) (ObjectValue
 		return nil, FunctionValue{}, false
 	}
 
-	className, ok := classNameValue.(string)
+	className, ok := classNameValue.Value.(string)
 	if !ok {
 		return nil, FunctionValue{}, false
 	}
@@ -3332,14 +3680,13 @@ func (vm *VM) findEmbeddedMethod(object ObjectValue, method string) (ObjectValue
 			continue
 		}
 
-		embeddedObject, ok := fieldValue.(ObjectValue)
+		embeddedObject, ok := fieldValue.Value.(ObjectValue)
 		if !ok {
 			continue
 		}
 
 		methodValue, exists := embeddedObject[method]
 		if !exists {
-			// optional: recursive embedding
 			if receiver, fn, ok := vm.findEmbeddedMethod(embeddedObject, method); ok {
 				return receiver, fn, true
 			}
@@ -3347,7 +3694,7 @@ func (vm *VM) findEmbeddedMethod(object ObjectValue, method string) (ObjectValue
 			continue
 		}
 
-		fnValue, ok := methodValue.(FunctionValue)
+		fnValue, ok := methodValue.Value.(FunctionValue)
 		if !ok {
 			continue
 		}
@@ -3359,7 +3706,14 @@ func (vm *VM) findEmbeddedMethod(object ObjectValue, method string) (ObjectValue
 }
 
 func (vm *VM) callZeroArgNativeMethod(method string, objectValue Value) bool {
-	switch value := objectValue.(type) {
+	var rawVal any
+	if objectValue.IsInt {
+		rawVal = objectValue.AsInt
+	} else {
+		rawVal = objectValue.Value
+	}
+
+	switch value := rawVal.(type) {
 	case *ArrayValue:
 		vm.callArrayMethod(value, method, []Value{})
 		return true
@@ -3374,7 +3728,14 @@ func (vm *VM) callZeroArgNativeMethod(method string, objectValue Value) bool {
 }
 
 func (vm *VM) callOneArgNativeMethod(method string, objectValue Value, arg Value) bool {
-	switch value := objectValue.(type) {
+	var rawVal any
+	if objectValue.IsInt {
+		rawVal = objectValue.AsInt
+	} else {
+		rawVal = objectValue.Value
+	}
+
+	switch value := rawVal.(type) {
 	case *ArrayValue:
 		vm.callArrayMethod(value, method, []Value{arg})
 		return true
@@ -3386,7 +3747,14 @@ func (vm *VM) callOneArgNativeMethod(method string, objectValue Value, arg Value
 }
 
 func (vm *VM) callTwoArgNativeMethod(method string, objectValue Value, arg0 Value, arg1 Value) bool {
-	switch value := objectValue.(type) {
+	var rawVal any
+	if objectValue.IsInt {
+		rawVal = objectValue.AsInt
+	} else {
+		rawVal = objectValue.Value
+	}
+
+	switch value := rawVal.(type) {
 	case *ArrayValue:
 		vm.callArrayMethod(value, method, []Value{arg0, arg1})
 		return true
@@ -3398,7 +3766,14 @@ func (vm *VM) callTwoArgNativeMethod(method string, objectValue Value, arg0 Valu
 }
 
 func (vm *VM) callStdObjectFast1(method string, objectValue Value, arg0 Value) bool {
-	module, ok := objectValue.(*StandardModuleValue)
+	var rawVal any
+	if objectValue.IsInt {
+		rawVal = objectValue.AsInt
+	} else {
+		rawVal = objectValue.Value
+	}
+
+	module, ok := rawVal.(*StandardModuleValue)
 	if !ok || module.Name != "object" {
 		return false
 	}
@@ -3407,17 +3782,31 @@ func (vm *VM) callStdObjectFast1(method string, objectValue Value, arg0 Value) b
 		return false
 	}
 
-	obj, ok := arg0.(ObjectValue)
+	var rawArg any
+	if arg0.IsInt {
+		rawArg = arg0.AsInt
+	} else {
+		rawArg = arg0.Value
+	}
+
+	obj, ok := rawArg.(ObjectValue)
 	if !ok {
 		vm.fatalError(ErrorType, "object.length argument 1 expected object, got %s", TypeName(arg0))
 		return true
 	}
-	vm.push(len(obj))
+	vm.push(NewInt(len(obj)))
 	return true
 }
 
 func (vm *VM) callStdObjectFast2(method string, objectValue Value, arg0 Value, arg1 Value) bool {
-	module, ok := objectValue.(*StandardModuleValue)
+	var rawVal any
+	if objectValue.IsInt {
+		rawVal = objectValue.AsInt
+	} else {
+		rawVal = objectValue.Value
+	}
+
+	module, ok := rawVal.(*StandardModuleValue)
 	if !ok || module.Name != "object" {
 		return false
 	}
@@ -3426,12 +3815,27 @@ func (vm *VM) callStdObjectFast2(method string, objectValue Value, arg0 Value, a
 		return false
 	}
 
-	obj, ok := arg0.(ObjectValue)
+	var rawArg0 any
+	if arg0.IsInt {
+		rawArg0 = arg0.AsInt
+	} else {
+		rawArg0 = arg0.Value
+	}
+
+	obj, ok := rawArg0.(ObjectValue)
 	if !ok {
 		vm.fatalError(ErrorType, "object.get argument 1 expected object, got %s", TypeName(arg0))
 		return true
 	}
-	key, ok := arg1.(string)
+
+	var rawArg1 any
+	if arg1.IsInt {
+		rawArg1 = arg1.AsInt
+	} else {
+		rawArg1 = arg1.Value
+	}
+
+	key, ok := rawArg1.(string)
 	if !ok {
 		vm.fatalError(ErrorType, "object.get argument 2 expected string, got %s", TypeName(arg1))
 		return true
@@ -3441,7 +3845,14 @@ func (vm *VM) callStdObjectFast2(method string, objectValue Value, arg0 Value, a
 }
 
 func (vm *VM) callStdObjectFast3(method string, objectValue Value, arg0 Value, arg1 Value, arg2 Value) bool {
-	module, ok := objectValue.(*StandardModuleValue)
+	var rawVal any
+	if objectValue.IsInt {
+		rawVal = objectValue.AsInt
+	} else {
+		rawVal = objectValue.Value
+	}
+
+	module, ok := rawVal.(*StandardModuleValue)
 	if !ok || module.Name != "object" {
 		return false
 	}
@@ -3450,23 +3861,45 @@ func (vm *VM) callStdObjectFast3(method string, objectValue Value, arg0 Value, a
 		return false
 	}
 
-	obj, ok := arg0.(ObjectValue)
+	var rawArg0 any
+	if arg0.IsInt {
+		rawArg0 = arg0.AsInt
+	} else {
+		rawArg0 = arg0.Value
+	}
+
+	obj, ok := rawArg0.(ObjectValue)
 	if !ok {
 		vm.fatalError(ErrorType, "object.set argument 1 expected object, got %s", TypeName(arg0))
 		return true
 	}
-	key, ok := arg1.(string)
+
+	var rawArg1 any
+	if arg1.IsInt {
+		rawArg1 = arg1.AsInt
+	} else {
+		rawArg1 = arg1.Value
+	}
+
+	key, ok := rawArg1.(string)
 	if !ok {
 		vm.fatalError(ErrorType, "object.set argument 2 expected string, got %s", TypeName(arg1))
 		return true
 	}
 	obj[key] = arg2
-	vm.push(UndefinedValue{})
+	vm.push(NewUndefined())
 	return true
 }
 
 func (vm *VM) callStdObjectFast(method string, objectValue Value, args ...Value) bool {
-	module, ok := objectValue.(*StandardModuleValue)
+	var rawVal any
+	if objectValue.IsInt {
+		rawVal = objectValue.AsInt
+	} else {
+		rawVal = objectValue.Value
+	}
+
+	module, ok := rawVal.(*StandardModuleValue)
 	if !ok || module.Name != "object" {
 		return false
 	}
@@ -3476,12 +3909,28 @@ func (vm *VM) callStdObjectFast(method string, objectValue Value, args ...Value)
 		if len(args) != 2 {
 			return false
 		}
-		obj, ok := args[0].(ObjectValue)
+
+		var rawArg0 any
+		if args[0].IsInt {
+			rawArg0 = args[0].AsInt
+		} else {
+			rawArg0 = args[0].Value
+		}
+
+		obj, ok := rawArg0.(ObjectValue)
 		if !ok {
 			vm.fatalError(ErrorType, "object.get argument 1 expected object, got %s", TypeName(args[0]))
 			return true
 		}
-		key, ok := args[1].(string)
+
+		var rawArg1 any
+		if args[1].IsInt {
+			rawArg1 = args[1].AsInt
+		} else {
+			rawArg1 = args[1].Value
+		}
+
+		key, ok := rawArg1.(string)
 		if !ok {
 			vm.fatalError(ErrorType, "object.get argument 2 expected string, got %s", TypeName(args[1]))
 			return true
@@ -3493,30 +3942,54 @@ func (vm *VM) callStdObjectFast(method string, objectValue Value, args ...Value)
 		if len(args) != 3 {
 			return false
 		}
-		obj, ok := args[0].(ObjectValue)
+
+		var rawArg0 any
+		if args[0].IsInt {
+			rawArg0 = args[0].AsInt
+		} else {
+			rawArg0 = args[0].Value
+		}
+
+		obj, ok := rawArg0.(ObjectValue)
 		if !ok {
 			vm.fatalError(ErrorType, "object.set argument 1 expected object, got %s", TypeName(args[0]))
 			return true
 		}
-		key, ok := args[1].(string)
+
+		var rawArg1 any
+		if args[1].IsInt {
+			rawArg1 = args[1].AsInt
+		} else {
+			rawArg1 = args[1].Value
+		}
+
+		key, ok := rawArg1.(string)
 		if !ok {
 			vm.runtimeError(ErrorType, "object.set argument 2 expected string, got %s", TypeName(args[1]))
 			return true
 		}
 		obj[key] = args[2]
-		vm.push(UndefinedValue{})
+		vm.push(NewUndefined())
 		return true
 
 	case "length":
 		if len(args) != 1 {
 			return false
 		}
-		obj, ok := args[0].(ObjectValue)
+
+		var rawArg0 any
+		if args[0].IsInt {
+			rawArg0 = args[0].AsInt
+		} else {
+			rawArg0 = args[0].Value
+		}
+
+		obj, ok := rawArg0.(ObjectValue)
 		if !ok {
 			vm.fatalError(ErrorType, "object.length argument 1 expected object, got %s", TypeName(args[0]))
 			return true
 		}
-		vm.push(len(obj))
+		vm.push(NewInt(len(obj)))
 		return true
 	}
 
@@ -3526,7 +3999,7 @@ func (vm *VM) callStdObjectFast(method string, objectValue Value, args ...Value)
 func (vm *VM) callMethodFast(method string, argCount int) {
 	switch argCount {
 	case 0:
-		objectValue := vm.pop()
+		objectValue := vm.popFast()
 		if vm.callZeroArgNativeMethod(method, objectValue) {
 			return
 		}
@@ -3534,8 +4007,8 @@ func (vm *VM) callMethodFast(method string, argCount int) {
 		return
 
 	case 1:
-		arg0 := vm.pop()
-		objectValue := vm.pop()
+		arg0 := vm.popFast()
+		objectValue := vm.popFast()
 		if vm.callStdObjectFast1(method, objectValue, arg0) {
 			return
 		}
@@ -3546,9 +4019,9 @@ func (vm *VM) callMethodFast(method string, argCount int) {
 		return
 
 	case 2:
-		arg1 := vm.pop()
-		arg0 := vm.pop()
-		objectValue := vm.pop()
+		arg1 := vm.popFast()
+		arg0 := vm.popFast()
+		objectValue := vm.popFast()
 		if vm.callStdObjectFast2(method, objectValue, arg0, arg1) {
 			return
 		}
@@ -3559,10 +4032,10 @@ func (vm *VM) callMethodFast(method string, argCount int) {
 		return
 
 	case 3:
-		arg2 := vm.pop()
-		arg1 := vm.pop()
-		arg0 := vm.pop()
-		objectValue := vm.pop()
+		arg2 := vm.popFast()
+		arg1 := vm.popFast()
+		arg0 := vm.popFast()
+		objectValue := vm.popFast()
 		if vm.callStdObjectFast3(method, objectValue, arg0, arg1, arg2) {
 			return
 		}
@@ -3571,7 +4044,7 @@ func (vm *VM) callMethodFast(method string, argCount int) {
 
 	default:
 		args := vm.popArgs(argCount)
-		objectValue := vm.pop()
+		objectValue := vm.popFast()
 		vm.callMethodResolved(method, objectValue, args)
 		return
 	}
@@ -3579,11 +4052,18 @@ func (vm *VM) callMethodFast(method string, argCount int) {
 
 func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value) {
 	if method == "toString" {
-		vm.push(valueToString(objectValue))
+		vm.push(NewNative(valueToString(objectValue)))
 		return
 	}
 
-	switch val := objectValue.(type) {
+	var rawVal any
+	if objectValue.IsInt {
+		rawVal = objectValue.AsInt
+	} else {
+		rawVal = objectValue.Value
+	}
+
+	switch val := rawVal.(type) {
 	case NamespaceValue:
 		vm.callNamespaceMethod(val, method, args)
 		return
@@ -3651,7 +4131,7 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 		return
 	}
 
-	object, ok := objectValue.(ObjectValue)
+	object, ok := rawVal.(ObjectValue)
 	if !ok {
 		vm.fatalError(ErrorType, "expected object, got %s", TypeName(objectValue))
 	}
@@ -3665,7 +4145,7 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 	if exists {
 		var ok bool
 
-		fnValue, ok = methodValue.(FunctionValue)
+		fnValue, ok = methodValue.Value.(FunctionValue)
 		if !ok {
 			vm.fatalError(ErrorType, "property %s is not callable", method)
 		}
@@ -3727,7 +4207,7 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 	frame := vm.getFrame(fn)
 	frame.methodClass = ownerClass
 
-	setCellValue(frame.locals[0], receiver)
+	setCellValue(frame.locals[0], NewNative(receiver))
 	frame.constants[0] = true
 
 	if isVariadic {
@@ -3780,7 +4260,7 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 			rest.Elements = append(rest.Elements, arg)
 		}
 
-		setCellValue(frame.locals[restSlot], rest)
+		setCellValue(frame.locals[restSlot], NewNative(rest))
 		frame.constants[restSlot] = false
 		frame.localTypes[restSlot] = TypeHint{
 			Name: "array",
@@ -3828,7 +4308,7 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 			}
 		}()
 
-		vm.push(task)
+		vm.push(NewNative(task))
 
 		return
 	}
@@ -3864,10 +4344,10 @@ func (vm *VM) runNativeApp(app *NativeAppValue) {
 	}
 
 	for i, arg := range commandArgs {
-		tinyArgs.Elements[i] = arg
+		tinyArgs.Elements[i] = NewNative(arg)
 	}
 
-	vm.callFunctionValue(fn, []Value{tinyArgs})
+	vm.callFunctionValue(fn, []Value{NewNative(tinyArgs)})
 }
 
 func (vm *VM) setIP(value int) {
@@ -3919,7 +4399,17 @@ func (vm *VM) callClass(class Class, argCount int) {
 }
 
 func (vm *VM) pushNativeFrame(name string) func() {
-	instr := vm.currentInstr
+	var instr Instruction
+	if len(vm.frames) == 0 {
+		if vm.ip-1 >= 0 && vm.ip-1 < len(vm.mainInstructions) {
+			instr = vm.mainInstructions[vm.ip-1]
+		}
+	} else {
+		frame := vm.frames[len(vm.frames)-1]
+		if frame.ip-1 >= 0 && frame.ip-1 < len(frame.instructions) {
+			instr = frame.instructions[frame.ip-1]
+		}
+	}
 
 	vm.nativeFrames = append(vm.nativeFrames, NativeCallFrame{
 		Name:   name,
@@ -3970,7 +4460,6 @@ func (vm *VM) fetchInstruction() Instruction {
 		}
 
 		instr := instructions[ip]
-		vm.currentInstr = instr
 		vm.ip = ip + 1
 		return instr
 	}
@@ -3984,7 +4473,6 @@ func (vm *VM) fetchInstruction() Instruction {
 	}
 
 	instr := instructions[ip]
-	vm.currentInstr = instr
 	frame.ip = ip + 1
 	return instr
 }
@@ -4009,7 +4497,7 @@ func (vm *VM) popArgs(count int) []Value {
 	copy(args, vm.stack[start:vm.top])
 
 	for i := start; i < vm.top; i++ {
-		vm.stack[i] = nil
+		vm.stack[i] = Value{}
 	}
 
 	vm.top = start
@@ -4035,24 +4523,40 @@ func (vm *VM) pop() Value {
 
 	vm.top--
 	val := vm.stack[vm.top]
+	vm.stack[vm.top] = Value{}
 
 	return val
 }
 
 func (vm *VM) handleUnderflow() {
+	lastFunctionName := "<main>"
+	lastInstructionIndex := vm.ip - 1
+	var lastInstruction Instruction
+
+	if len(vm.frames) > 0 {
+		frame := vm.frames[len(vm.frames)-1]
+		lastFunctionName = frame.function.Name
+		lastInstructionIndex = frame.ip - 1
+		if lastInstructionIndex >= 0 && lastInstructionIndex < len(frame.instructions) {
+			lastInstruction = frame.instructions[lastInstructionIndex]
+		}
+	} else if lastInstructionIndex >= 0 && lastInstructionIndex < len(vm.mainInstructions) {
+		lastInstruction = vm.mainInstructions[lastInstructionIndex]
+	}
+
 	vm.fatalError(
 		ErrorInternal,
 		"stack underflow at function=%s ip=%d op=%v value=%#v",
-		vm.lastFunctionName,
-		vm.lastInstructionIndex,
-		vm.lastInstruction.Op.String(),
-		vm.lastInstruction.Value,
+		lastFunctionName,
+		lastInstructionIndex,
+		lastInstruction.Op.String(),
+		lastInstruction.Value,
 	)
 }
 
 func (vm *VM) popFast() Value {
 	vm.top--
 	val := vm.stack[vm.top]
-	vm.stack[vm.top] = nil
+	vm.stack[vm.top] = Value{}
 	return val
 }

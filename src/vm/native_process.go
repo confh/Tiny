@@ -80,13 +80,13 @@ func (vm *VM) callProcessMethod(process *NativeProcessValue, method string, args
 
 func processPid(vm *VM, process *NativeProcessValue, args []Value) {
 	expectArgs(vm, "process.pid", args, 0)
-	vm.push(process.Cmd.Process.Pid)
+	vm.push(NewInt(process.Cmd.Process.Pid))
 }
 
 func processWait(vm *VM, process *NativeProcessValue, args []Value) {
 	expectArgs(vm, "process.wait", args, 0)
 	process.Cmd.Wait()
-	vm.push(UndefinedValue{})
+	vm.push(NewUndefined())
 }
 
 func processKill(vm *VM, process *NativeProcessValue, args []Value) {
@@ -96,7 +96,7 @@ func processKill(vm *VM, process *NativeProcessValue, args []Value) {
 		vm.runtimeError(ErrorInternal, "could not kill process: %d", process.Cmd.Process.Pid)
 	}
 	process.Running = false
-	vm.push(UndefinedValue{})
+	vm.push(NewUndefined())
 }
 
 func processKillTree(vm *VM, process *NativeProcessValue, args []Value) {
@@ -110,7 +110,7 @@ func processKillTree(vm *VM, process *NativeProcessValue, args []Value) {
 		vm.runtimeError(ErrorInternal, "process.killTree is not supported on %s", runtime.GOOS)
 	}
 	process.Running = false
-	vm.push(UndefinedValue{})
+	vm.push(NewUndefined())
 }
 
 func processInterrupt(vm *VM, process *NativeProcessValue, args []Value) {
@@ -124,12 +124,12 @@ func processInterrupt(vm *VM, process *NativeProcessValue, args []Value) {
 		vm.runtimeError(ErrorInternal, "process.killTree is not supported on %s", runtime.GOOS)
 	}
 	process.Running = false
-	vm.push(UndefinedValue{})
+	vm.push(NewUndefined())
 }
 
 func processIsRunning(vm *VM, process *NativeProcessValue, args []Value) {
 	expectArgs(vm, "process.isRunning", args, 0)
-	vm.push(process.Running)
+	vm.push(NewNative(process.Running))
 }
 
 func processSignal(vm *VM, process *NativeProcessValue, args []Value) {
@@ -156,5 +156,5 @@ func processSignal(vm *VM, process *NativeProcessValue, args []Value) {
 	case "kill":
 		_ = process.Cmd.Process.Signal(os.Kill)
 	}
-	vm.push(UndefinedValue{})
+	vm.push(NewUndefined())
 }

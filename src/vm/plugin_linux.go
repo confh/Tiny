@@ -48,7 +48,7 @@ func (vm *VM) callPluginModule(method string, argCount int) {
 		name := asString(vm.pop(), vm)
 
 		if slices.Contains(AvailablePlugins, name) {
-			vm.push(&StandardModuleValue{Name: name})
+			vm.push(NewNative(&StandardModuleValue{Name: name}))
 			return
 		}
 
@@ -98,12 +98,12 @@ func (vm *VM) callPluginModule(method string, argCount int) {
 		}
 		nativePluginFuncs.Unlock()
 
-		vm.push(&NativePluginValue{
+		vm.push(NewNative(&NativePluginValue{
 			Path:   path,
 			Handle: unsafe.Pointer(handle),
 			Call:   callPtr,
 			Free:   freePtr,
-		})
+		}))
 
 	default:
 		vm.fatalError(ErrorName, "unknown Plugin function: %s", method)

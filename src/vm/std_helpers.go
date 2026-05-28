@@ -60,7 +60,7 @@ func argString(vm *VM, fnName string, args []Value, index int) string {
 		vm.runtimeError(ErrorRuntime, "%s missing argument %d", fnName, index)
 	}
 
-	str, ok := args[index].(string)
+	str, ok := args[index].Value.(string)
 	if !ok {
 		vm.runtimeError(
 			ErrorType,
@@ -79,7 +79,7 @@ func argFn(vm *VM, fnName string, args []Value, index int) FunctionValue {
 		vm.runtimeError(ErrorRuntime, "%s missing argument %d", fnName, index)
 	}
 
-	fn, ok := args[index].(FunctionValue)
+	fn, ok := args[index].Value.(FunctionValue)
 	if !ok {
 		vm.runtimeError(
 			ErrorType,
@@ -98,7 +98,7 @@ func argBool(vm *VM, fnName string, args []Value, index int) bool {
 		vm.runtimeError(ErrorRuntime, "%s missing argument %d", fnName, index)
 	}
 
-	str, ok := args[index].(bool)
+	str, ok := args[index].Value.(bool)
 	if !ok {
 		vm.runtimeError(
 			ErrorType,
@@ -122,7 +122,7 @@ func argArray(vm *VM, fnName string, args []Value, index int) *ArrayValue {
 		)
 	}
 
-	array, ok := args[index].(*ArrayValue)
+	array, ok := args[index].Value.(*ArrayValue)
 	if !ok {
 		vm.runtimeError(
 			ErrorType,
@@ -146,7 +146,7 @@ func argObject(vm *VM, fnName string, args []Value, index int) ObjectValue {
 		)
 	}
 
-	object, ok := args[index].(ObjectValue)
+	object, ok := args[index].Value.(ObjectValue)
 	if !ok {
 		vm.runtimeError(
 			ErrorType,
@@ -165,8 +165,7 @@ func argInt(vm *VM, fnName string, args []Value, index int) int {
 		vm.runtimeError(ErrorRuntime, "%s missing argument %d", fnName, index)
 	}
 
-	value, ok := args[index].(int)
-	if !ok {
+	if !args[index].IsInt {
 		vm.runtimeError(
 			ErrorType,
 			"%s argument %d expected number, got %s",
@@ -176,7 +175,7 @@ func argInt(vm *VM, fnName string, args []Value, index int) int {
 		)
 	}
 
-	return value
+	return args[index].AsInt
 }
 
 func argFloat64(vm *VM, fnName string, args []Value, index int) float64 {
@@ -184,7 +183,7 @@ func argFloat64(vm *VM, fnName string, args []Value, index int) float64 {
 		vm.runtimeError(ErrorRuntime, "%s missing argument %d", fnName, index)
 	}
 
-	value, ok := args[index].(float64)
+	value, ok := args[index].Value.(float64)
 	if !ok {
 		vm.runtimeError(
 			ErrorType,

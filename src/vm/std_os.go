@@ -46,11 +46,11 @@ func (vm *VM) callStdOS(method string, args []Value) {
 func osName(vm *VM, args []Value) {
 	dontExpectArgs(vm, "os.name", args)
 
-	vm.push(runtime.GOOS)
+	vm.push(NewNative(runtime.GOOS))
 }
 
 func osArch(vm *VM, args []Value) {
 	dontExpectArgs(vm, "os.arch", args)
 
-	vm.push(runtime.GOARCH)
+	vm.push(NewNative(runtime.GOARCH))
 }

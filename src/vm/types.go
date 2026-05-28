@@ -52,15 +52,19 @@ func checkSingleTypeHint(value Value, hint string) bool {
 		return true
 
 	case "number":
-		switch value.(type) {
-		case int, int64, float64, float32, uint64:
+		if value.IsInt {
+			return true
+		}
+
+		switch value.Value.(type) {
+		case float64, float32, uint64:
 			return true
 		default:
 			return false
 		}
 
 	case "string":
-		switch value.(type) {
+		switch value.Value.(type) {
 		case string:
 			return true
 		default:
@@ -68,7 +72,7 @@ func checkSingleTypeHint(value Value, hint string) bool {
 		}
 
 	case "bool":
-		switch value.(type) {
+		switch value.Value.(type) {
 		case bool:
 			return true
 		default:
@@ -76,7 +80,7 @@ func checkSingleTypeHint(value Value, hint string) bool {
 		}
 
 	case "array":
-		switch value.(type) {
+		switch value.Value.(type) {
 		case ArrayValue, *ArrayValue:
 			return true
 		default:
@@ -84,7 +88,7 @@ func checkSingleTypeHint(value Value, hint string) bool {
 		}
 
 	case "object":
-		switch value.(type) {
+		switch value.Value.(type) {
 		case ObjectValue:
 			return true
 		default:
@@ -92,7 +96,7 @@ func checkSingleTypeHint(value Value, hint string) bool {
 		}
 
 	case "function":
-		switch value.(type) {
+		switch value.Value.(type) {
 		case FunctionValue, *FunctionValue:
 			return true
 		default:
@@ -100,16 +104,16 @@ func checkSingleTypeHint(value Value, hint string) bool {
 		}
 
 	case "null":
-		return value == nil || TypeName(value) == "null"
+		return !value.IsInt && (value.Value == nil || TypeName(value) == "null")
 
 	case "undefined":
 		return TypeName(value) == "undefined"
 
 	default:
-		if obj, ok := value.(ObjectValue); ok {
+		if obj, ok := value.Value.(ObjectValue); ok {
 			classValue, exists := obj["__class"]
 			if exists {
-				className, ok := classValue.(string)
+				className, ok := classValue.Value.(string)
 				if ok && className == hint {
 					return true
 				}

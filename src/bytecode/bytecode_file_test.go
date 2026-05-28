@@ -21,7 +21,7 @@ func TestBytecodeRoundTripPreservesFunctionMetadata(t *testing.T) {
 			Name:       "answer",
 			ReturnType: vm.TypeHint{Name: "number"},
 			Params: []vm.Param{
-				{Name: "fallback", TypeHint: vm.TypeHint{Name: "number"}, HasDefault: true, DefaultValue: 42},
+				{Name: "fallback", TypeHint: vm.TypeHint{Name: "number"}, HasDefault: true, DefaultValue: vm.NewInt(42)},
 			},
 			LocalCount: 1,
 			Instructions: []vm.Instruction{
@@ -38,7 +38,7 @@ func TestBytecodeRoundTripPreservesFunctionMetadata(t *testing.T) {
 		"User": {
 			Name: "User",
 			Fields: []vm.ClassField{
-				{Name: "name", Value: "Tiny", TypeHint: vm.TypeHint{Name: "string"}, Constant: true, Private: true},
+				{Name: "name", Value: vm.NewNative("Tiny"), TypeHint: vm.TypeHint{Name: "string"}, Constant: true, Private: true},
 			},
 			Methods:        map[string]string{"label": "User.label"},
 			PrivateMethods: map[string]bool{"secret": true},
@@ -57,7 +57,7 @@ func TestBytecodeRoundTripPreservesFunctionMetadata(t *testing.T) {
 		t.Fatalf("function metadata did not round trip: %#v", fn)
 	}
 
-	if len(fn.Params) != 1 || !fn.Params[0].HasDefault || fn.Params[0].DefaultValue != 42 {
+	if len(fn.Params) != 1 || !fn.Params[0].HasDefault || fn.Params[0].DefaultValue.AsInt != 42 {
 		t.Fatalf("param metadata did not round trip: %#v", fn.Params)
 	}
 
@@ -125,8 +125,8 @@ func TestEncodeDecodeNamespaceValue(t *testing.T) {
 	original := vm.NamespaceValue{
 		Name: "Report",
 		Members: map[string]vm.Value{
-			"status": vm.NamespaceMemberRef{GlobalName: "Report.status"},
-			"count":  3,
+			"status": vm.NewNative(vm.NamespaceMemberRef{GlobalName: "Report.status"}),
+			"count":  vm.NewInt(3),
 		},
 	}
 
@@ -135,7 +135,7 @@ func TestEncodeDecodeNamespaceValue(t *testing.T) {
 		t.Fatalf("expected NamespaceValue, got %T", decoded)
 	}
 
-	if decoded.Name != original.Name || decoded.Members["count"] != 3 {
+	if decoded.Name != original.Name || decoded.Members["count"].AsInt != 3 {
 		t.Fatalf("namespace did not round trip: %#v", decoded)
 	}
 }

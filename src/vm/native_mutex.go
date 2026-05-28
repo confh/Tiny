@@ -44,7 +44,7 @@ func mutexLock(vm *VM, mutex *NativeMutexValue, args []Value) {
 
 	mutex.Lock()
 
-	vm.push(UndefinedValue{})
+	vm.push(NewUndefined())
 }
 
 func mutexUnlock(vm *VM, mutex *NativeMutexValue, args []Value) {
@@ -52,5 +52,5 @@ func mutexUnlock(vm *VM, mutex *NativeMutexValue, args []Value) {
 
 	mutex.Unlock()
 
-	vm.push(UndefinedValue{})
+	vm.push(NewUndefined())
 }

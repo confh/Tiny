@@ -79,36 +79,32 @@ func (vm *VM) callStdJson(method string, args []Value) {
 func stdJsonStringify(vm *VM, args []Value) {
 	expectArgs(vm, "json.stringify", args, 1)
 
-	switch value := args[0].(type) {
+	switch value := args[0].Value.(type) {
 	case ObjectValue, ArrayValue, *ArrayValue:
-		jsonValue := valueToJSONCompatible(value)
+		jsonValue := valueToJSONCompatible(ToValue(value))
 		bytes, err := json.Marshal(jsonValue)
 		if err != nil {
 			vm.fatalError(ErrorRuntime, "failed to convert value to JSON: %v", err)
 		}
-
-		vm.push(string(bytes))
-
+		vm.push(NewNative(string(bytes)))
 	default:
-		vm.fatalError(ErrorType, "json.stringify expected an array or an object, got %s", TypeName(value))
+		vm.fatalError(ErrorType, "json.stringify expected an array or an object, got %s", TypeName(ToValue(value)))
 	}
 }
 
 func stdJsonPretty(vm *VM, args []Value) {
 	expectArgs(vm, "json.pretty", args, 1)
 
-	switch value := args[0].(type) {
+	switch value := args[0].Value.(type) {
 	case ObjectValue, ArrayValue, *ArrayValue:
-		jsonValue := valueToJSONCompatible(value)
+		jsonValue := valueToJSONCompatible(ToValue(value))
 		bytes, err := json.MarshalIndent(jsonValue, "", "  ")
 		if err != nil {
 			vm.fatalError(ErrorRuntime, "failed to convert value to JSON: %v", err)
 		}
-
-		vm.push(string(bytes))
-
+		vm.push(NewNative(string(bytes)))
 	default:
-		vm.fatalError(ErrorType, "json.pretty expected an array or an object, got %s", TypeName(value))
+		vm.fatalError(ErrorType, "json.pretty expected an array or an object, got %s", TypeName(ToValue(value)))
 	}
 }
 
@@ -122,6 +118,8 @@ func stdJsonParse(vm *VM, args []Value) {
 	err := json.Unmarshal([]byte(stringified), &result)
 	if err != nil {
 		vm.runtimeError(ErrorRuntime, "invalid JSON: %v", err)
+		vm.push(NewNull())
+		return
 	}
 	vm.push(jsonToTinyValue(result))
 }
@@ -134,12 +132,16 @@ func stdJsonReadFile(vm *VM, args []Value) {
 	data, err := os.ReadFile(fileName)
 	if err != nil {
 		vm.runtimeError(ErrorRuntime, "error reading file: %s", err)
+		vm.push(NewNull())
+		return
 	}
 
 	var result any
 	err = json.Unmarshal([]byte(data), &result)
 	if err != nil {
 		vm.runtimeError(ErrorRuntime, "could not parse file '%s' as json", fileName)
+		vm.push(NewNull())
+		return
 	}
 
 	vm.push(jsonToTinyValue(result))
@@ -149,7 +151,7 @@ func stdJsonWriteFile(vm *VM, args []Value) {
 	expectArgs(vm, "json.writeFile", args, 2)
 
 	value := argObject(vm, "json.writeFile", args, 0)
-	jsonValue := valueToJSONCompatible(value)
+	jsonValue := valueToJSONCompatible(NewNative(value))
 	bytes, err := json.MarshalIndent(jsonValue, "", "  ")
 	fileName := argString(vm, "json.writeFile", args, 1)
 
@@ -157,6 +159,5 @@ func stdJsonWriteFile(vm *VM, args []Value) {
 	if err != nil {
 		vm.runtimeError(ErrorRuntime, "error writing json file: %s", err)
 	}
-
-	vm.push(UndefinedValue{})
+	vm.push(NewUndefined())
 }

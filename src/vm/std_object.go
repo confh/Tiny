@@ -119,7 +119,12 @@ func objectGet(vm *VM, args []Value) {
 	obj := argObject(vm, "object.get", args, 0)
 	key := argString(vm, "object.get", args, 1)
 
-	vm.push(obj[key])
+	val, ok := obj[key]
+	if ok {
+		vm.push(val)
+	} else {
+		vm.push(NewUndefined())
+	}
 }
 
 func objectSet(vm *VM, args []Value) {
@@ -131,7 +136,7 @@ func objectSet(vm *VM, args []Value) {
 
 	obj[key] = value
 
-	vm.push(UndefinedValue{})
+	vm.push(NewUndefined())
 }
 
 func objectHas(vm *VM, args []Value) {
@@ -141,7 +146,7 @@ func objectHas(vm *VM, args []Value) {
 	key := argString(vm, "object.has", args, 1)
 
 	_, found := obj[key]
-	vm.push(found)
+	vm.push(NewNative(found))
 }
 
 func objectDelete(vm *VM, args []Value) {
@@ -154,7 +159,7 @@ func objectDelete(vm *VM, args []Value) {
 	if found {
 		delete(obj, key)
 	}
-	vm.push(found)
+	vm.push(NewNative(found))
 }
 
 func objectKeys(vm *VM, args []Value) {
@@ -164,9 +169,9 @@ func objectKeys(vm *VM, args []Value) {
 
 	keys := make([]Value, 0, len(obj))
 	for k := range obj {
-		keys = append(keys, k)
+		keys = append(keys, NewNative(k))
 	}
-	vm.push(&ArrayValue{Elements: keys})
+	vm.push(NewNative(&ArrayValue{Elements: keys}))
 }
 
 func objectValues(vm *VM, args []Value) {
@@ -178,7 +183,7 @@ func objectValues(vm *VM, args []Value) {
 	for _, v := range obj {
 		values = append(values, v)
 	}
-	vm.push(&ArrayValue{Elements: values})
+	vm.push(NewNative(&ArrayValue{Elements: values}))
 }
 
 func objectEnteries(vm *VM, args []Value) {
@@ -188,17 +193,17 @@ func objectEnteries(vm *VM, args []Value) {
 
 	entries := make([]Value, 0, len(obj))
 	for k, v := range obj {
-		entry := &ArrayValue{Elements: []Value{k, v}}
+		entry := NewNative(&ArrayValue{Elements: []Value{NewNative(k), v}})
 		entries = append(entries, entry)
 	}
-	vm.push(&ArrayValue{Elements: entries})
+	vm.push(NewNative(&ArrayValue{Elements: entries}))
 }
 
 func objectLength(vm *VM, args []Value) {
 	expectArgs(vm, "object.length", args, 1)
 
 	obj := argObject(vm, "object.length", args, 0)
-	vm.push(len(obj))
+	vm.push(NewInt(len(obj)))
 }
 
 func objectClear(vm *VM, args []Value) {
@@ -208,5 +213,5 @@ func objectClear(vm *VM, args []Value) {
 	for k := range obj {
 		delete(obj, k)
 	}
-	vm.push(UndefinedValue{})
+	vm.push(NewUndefined())
 }

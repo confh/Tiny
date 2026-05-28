@@ -70,36 +70,36 @@ func stdArrayRange(vm *VM, args []Value) {
 	}
 
 	for i := 0; i < capacity; i++ {
-		array.Elements[i] = min + i
+		array.Elements[i] = NewInt(min + i)
 	}
 
-	vm.push(array)
+	vm.push(NewNative(array))
 }
 
 func stdArrayIsArray(vm *VM, args []Value) {
 	expectArgs(vm, "array.isArray", args, 1)
 
-	_, ok := args[0].(*ArrayValue)
-	vm.push(ok)
+	_, ok := args[0].Value.(*ArrayValue)
+	vm.push(NewNative(ok))
 }
 
 func stdArrayFrom(vm *VM, args []Value) {
 	expectArgs(vm, "array.from", args, 1)
 
-	switch v := args[0].(type) {
+	switch v := args[0].Value.(type) {
 	case string:
 		strArr := make([]Value, 0, len(v))
 		for _, r := range v {
-			strArr = append(strArr, string(r))
+			strArr = append(strArr, NewNative(string(r)))
 		}
-		vm.push(&ArrayValue{Elements: strArr})
+		vm.push(NewNative(&ArrayValue{Elements: strArr}))
 
 	case *ArrayValue:
 		dst := make([]Value, len(v.Elements))
 		copy(dst, v.Elements)
-		vm.push(&ArrayValue{Elements: dst})
+		vm.push(NewNative(&ArrayValue{Elements: dst}))
 
 	default:
-		vm.runtimeError(ErrorType, "type %s cannot be turned into an array", TypeName(v))
+		vm.runtimeError(ErrorType, "type %s cannot be turned into an array", TypeName(ToValue(v)))
 	}
 }

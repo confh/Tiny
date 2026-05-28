@@ -88,7 +88,7 @@ fn greet(name, prefix = "Hello") {
 		t.Fatalf("expected 2 params, got %d", len(fn.Params))
 	}
 
-	if !fn.Params[1].HasDefault || fn.Params[1].DefaultValue != "Hello" {
+	if !fn.Params[1].HasDefault || fn.Params[1].DefaultValue.Value != "Hello" {
 		t.Fatalf("expected second param default value, got %#v", fn.Params[1])
 	}
 }

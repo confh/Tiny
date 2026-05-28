@@ -555,7 +555,7 @@ func (p *Parser) parseStatement() Stmt {
 		return nil
 	}
 
-	if p.current.Type == TOKEN_IDENT && p.current.Literal == "lock" && p.next.Type == TOKEN_LPAREN {
+	if p.current.Type == TOKEN_IDENT && p.current.Literal == "lock" && p.next.Type == TOKEN_IDENT {
 		return p.parseLockStatement()
 	}
 
@@ -1069,8 +1069,6 @@ func (p *Parser) parseLockStatement() Stmt {
 	column := p.current.Column
 	p.expect(TOKEN_IDENT)
 
-	p.expect(TOKEN_LPAREN)
-
 	if p.current.Type != TOKEN_IDENT {
 		LangErrorAt(
 			ErrorSyntax,
@@ -1082,8 +1080,6 @@ func (p *Parser) parseLockStatement() Stmt {
 		)
 	}
 	value := p.parseExpression()
-
-	p.expect(TOKEN_RPAREN)
 
 	block := p.parseBlock()
 
@@ -1378,7 +1374,7 @@ func (p *Parser) parseDefaultParamValue() Value {
 	case TOKEN_STRING:
 		value := p.current.Literal
 		p.advance()
-		return value
+		return NewNative(value)
 
 	case TOKEN_NUMBER:
 		text := p.current.Literal
@@ -1389,7 +1385,7 @@ func (p *Parser) parseDefaultParamValue() Value {
 			if err != nil {
 				LangError(ErrorSyntax, "invalid number default: %s", text)
 			}
-			return number
+			return NewNative(number)
 		}
 
 		number, err := strconv.Atoi(text)
@@ -1397,23 +1393,23 @@ func (p *Parser) parseDefaultParamValue() Value {
 			LangError(ErrorSyntax, "invalid number default: %s", text)
 		}
 
-		return number
+		return NewInt(number)
 
 	case TOKEN_TRUE:
 		p.advance()
-		return true
+		return NewNative(true)
 
 	case TOKEN_FALSE:
 		p.advance()
-		return false
+		return NewNative(false)
 
 	case TOKEN_NULL:
 		p.advance()
-		return NullValue{}
+		return NewNull()
 
 	case TOKEN_UNDEFINED:
 		p.advance()
-		return UndefinedValue{}
+		return NewUndefined()
 
 	case TOKEN_MINUS:
 		p.advance()
@@ -1430,7 +1426,7 @@ func (p *Parser) parseDefaultParamValue() Value {
 			if err != nil {
 				LangError(ErrorSyntax, "invalid number default: -%s", text)
 			}
-			return -number
+			return NewNative(-number)
 		}
 
 		number, err := strconv.Atoi(text)
@@ -1438,14 +1434,14 @@ func (p *Parser) parseDefaultParamValue() Value {
 			LangError(ErrorSyntax, "invalid number default: -%s", text)
 		}
 
-		return -number
+		return NewInt(-number)
 
 	default:
 		LangError(
 			ErrorSyntax,
 			"default arguments currently only support constant values",
 		)
-		return UndefinedValue{}
+		return NewUndefined()
 	}
 }
 
@@ -1619,7 +1615,7 @@ func (p *Parser) parseParameterList() []Param {
 
 		if nullable {
 			param.HasDefault = true
-			param.DefaultValue = UndefinedValue{}
+			param.DefaultValue = NewUndefined()
 		}
 
 		if p.current.Type == TOKEN_ASSIGN {
@@ -1743,18 +1739,18 @@ func (vm *VM) applyDefaultArgs(fn Function, args []Value, paramOffset int, calla
 }
 
 func cloneDefaultValue(value Value) Value {
-	switch v := value.(type) {
+	switch v := value.Value.(type) {
 	case *ArrayValue:
 		copied := make([]Value, len(v.Elements))
 		copy(copied, v.Elements)
-		return &ArrayValue{Elements: copied}
+		return NewNative(&ArrayValue{Elements: copied})
 
 	case ObjectValue:
 		copied := ObjectValue{}
 		for key, item := range v {
 			copied[key] = item
 		}
-		return copied
+		return NewNative(copied)
 
 	default:
 		return value
@@ -2418,10 +2414,9 @@ func (p *Parser) parseEnumStatement() Stmt {
 					LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "the 'iota' keyword can only be used for the first member of an enum.")
 				}
 				iotaEnum = true
-				// Add field for iota usage
 				members = append(members, EnumField{
 					Name:  name,
-					Value: NumberExpr{Value: 0}, // Value will be overwritten after the loop if iotaEnum
+					Value: NumberExpr{Value: 0},
 				})
 				p.advance()
 			} else {
@@ -2446,7 +2441,7 @@ func (p *Parser) parseEnumStatement() Stmt {
 							LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "all enum members must have the same type.")
 
 						}
-						break // exit immediately after the first pair
+						break
 					}
 				}
 
@@ -2462,7 +2457,7 @@ func (p *Parser) parseEnumStatement() Stmt {
 					if !p.compareTwoConst(v.Value, StringExpr{Value: name}) {
 						LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "all enum members must have the same type.")
 					}
-					break // exit immediately after the first pair
+					break
 				}
 			}
 
@@ -2500,7 +2495,6 @@ func (p *Parser) parseEnumStatement() Stmt {
 
 	p.expect(TOKEN_RBRACE)
 
-	// Optional semicolon support:
 	if p.current.Type == TOKEN_SEMI {
 		p.advance()
 	}

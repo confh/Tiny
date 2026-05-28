@@ -143,19 +143,19 @@ func (vm *VM) callArrayMethod(array *ArrayValue, method string, args []Value) {
 
 func arrayLength(vm *VM, array *ArrayValue, args []Value) {
 	expectArgs(vm, "array.length", args, 0)
-	vm.push(len(array.Elements))
+	vm.push(NewInt(len(array.Elements)))
 }
 
 func arrayPush(vm *VM, array *ArrayValue, args []Value) {
 	expectArgs(vm, "array.push", args, 1)
 	array.Elements = append(array.Elements, args[0])
-	vm.push(array)
+	vm.push(NewNative(array))
 }
 
 func arrayPop(vm *VM, array *ArrayValue, args []Value) {
 	expectArgs(vm, "array.pop", args, 0)
 	if len(array.Elements) == 0 {
-		vm.push(UndefinedValue{})
+		vm.push(NewUndefined())
 		return
 	}
 	last := array.Elements[len(array.Elements)-1]
@@ -181,13 +181,13 @@ func arraySet(vm *VM, array *ArrayValue, args []Value) {
 		return
 	}
 	array.Elements[index] = args[1]
-	vm.push(array)
+	vm.push(NewNative(array))
 }
 
 func arrayContains(vm *VM, array *ArrayValue, args []Value) {
 	expectArgs(vm, "array.contains", args, 1)
 	element := args[0]
-	vm.push(slices.Contains(array.Elements, element))
+	vm.push(NewNative(slices.Contains(array.Elements, element)))
 }
 
 func arrayJoin(vm *VM, array *ArrayValue, args []Value) {
@@ -200,68 +200,65 @@ func arrayJoin(vm *VM, array *ArrayValue, args []Value) {
 			sb.WriteString(separator)
 		}
 	}
-	vm.push(sb.String())
+	vm.push(NewNative(sb.String()))
 }
 
 func arrayReverse(vm *VM, array *ArrayValue, args []Value) {
 	expectArgs(vm, "array.reverse", args, 0)
 	slices.Reverse(array.Elements)
-	vm.push(array.Elements)
+	vm.push(NewNative(array))
 }
 
 func arrayMap(vm *VM, array *ArrayValue, args []Value) {
 	expectArgs(vm, "array.map", args, 1)
-	fn, ok := args[0].(FunctionValue)
-	if !ok {
-		vm.runtimeError(ErrorType, "array.map expects function, got %s", TypeName(args[0]))
-		return
-	}
+	fn := argFn(vm, "array.map", args, 0)
 	mappedArray := &ArrayValue{
 		Elements: make([]Value, 0, len(array.Elements)),
 	}
+
+	mapArgs := make([]Value, 2)
+
 	for i, v := range array.Elements {
-		result := vm.callFunctionValue(fn, []Value{i, v})
+		mapArgs[0] = NewInt(i)
+		mapArgs[1] = v
+
+		result := vm.callFunctionValue(fn, mapArgs)
 		mappedArray.Elements = append(mappedArray.Elements, result)
 	}
-	vm.push(mappedArray)
+	vm.push(NewNative(mappedArray))
 }
 
 func arrayForEach(vm *VM, array *ArrayValue, args []Value) {
 	expectArgs(vm, "array.forEach", args, 1)
-	fn, ok := args[0].(FunctionValue)
-	if !ok {
-		vm.runtimeError(ErrorType, "array.forEach expects function, got %s", TypeName(args[0]))
-		return
-	}
+	fn := argFn(vm, "array.forEach", args, 0)
+
 	for i, v := range array.Elements {
-		vm.callFunctionValue(fn, []Value{i, v})
+		vm.callFunctionValue(fn, []Value{NewInt(i), v})
 	}
-	vm.push(true)
+	vm.push(NewNative(true))
 }
 
 func arrayFilter(vm *VM, array *ArrayValue, args []Value) {
 	expectArgs(vm, "array.filter", args, 1)
-	fn, ok := args[0].(FunctionValue)
-	if !ok {
-		vm.runtimeError(ErrorType, "array.filter expects function, got %s", TypeName(args[0]))
-		return
-	}
+	fn := argFn(vm, "array.filter", args, 0)
+
 	filteredArray := &ArrayValue{
 		Elements: make([]Value, 0, len(array.Elements)),
 	}
 	for i, v := range array.Elements {
-		result := vm.callFunctionValue(fn, []Value{i, v})
+		result := vm.callFunctionValue(fn, []Value{NewInt(i), v})
 		if isTruthy(result) {
 			filteredArray.Elements = append(filteredArray.Elements, v)
 		}
 	}
-	vm.push(filteredArray)
+	vm.push(NewNative(filteredArray))
 }
 
 func arrayClear(vm *VM, array *ArrayValue, args []Value) {
-	dontExpectArgs(vm, "array.clear", args)
+	expectArgs(vm, "array.clear", args, 0)
+	clear(array.Elements)
 	array.Elements = array.Elements[:0]
-	vm.push(true)
+	vm.push(NewNative(true))
 }
 
 func arrayRemove(vm *VM, array *ArrayValue, args []Value) {
@@ -282,5 +279,5 @@ func arrayRemove(vm *VM, array *ArrayValue, args []Value) {
 
 	array.Elements = slices.Delete(array.Elements, index, index+1)
 
-	vm.push(true)
+	vm.push(NewNative(true))
 }

@@ -41,18 +41,15 @@ func (vm *VM) callNativeAppMethod(app *NativeAppValue, method string, args []Val
 
 func appCommand(vm *VM, app *NativeAppValue, args []Value) {
 	expectArgs(vm, "app.command", args, 2)
-	name := asString(args[0], vm)
-	fn, ok := args[1].(FunctionValue)
-	if !ok {
-		vm.runtimeError(ErrorType, "app.command expects function callback")
-		return
-	}
+	name := argString(vm, "app.command", args, 0)
+	fn := argFn(vm, "app.command", args, 1)
+
 	app.Commands[name] = fn
-	vm.push(app)
+	vm.push(NewNative(app))
 }
 
 func appRun(vm *VM, app *NativeAppValue, args []Value) {
 	expectArgs(vm, "app.run", args, 0)
 	vm.runNativeApp(app)
-	vm.push(UndefinedValue{})
+	vm.push(NewUndefined())
 }

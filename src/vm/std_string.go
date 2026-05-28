@@ -81,21 +81,21 @@ func stdStringNewBuilder(vm *VM, args []Value) {
 	dontExpectArgs(vm, "string.newBuilder", args)
 
 	sb := &strings.Builder{}
-	vm.push(&NativeStringBuilderValue{
+	vm.push(NewNative(&NativeStringBuilderValue{
 		Builder: sb,
-	})
+	}))
 }
 
 func stdStringIsDigit(vm *VM, args []Value) {
 	expectArgs(vm, "string.isDigit", args, 1)
 
 	value := argString(vm, "string.isDigit", args, 0)
-	vm.push(isDigit(value))
+	vm.push(NewNative(isDigit(value)))
 }
 
 func stdStringRandom(vm *VM, args []Value) {
 	expectArgs(vm, "string.random", args, 1)
 
 	length := argInt(vm, "string.random", args, 0)
-	vm.push(generateRandomString(length))
+	vm.push(NewNative(generateRandomString(length)))
 }

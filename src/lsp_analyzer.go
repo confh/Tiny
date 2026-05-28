@@ -91,8 +91,6 @@ var normalCallRegex = regexp.MustCompile(`(?m)^([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
 var classEmbedRegex = regexp.MustCompile(`(?m)\bembed\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:;|\r?$)`)
 var returnRegex = regexp.MustCompile(`(?m)return\s+(.+?)(?:;|\r?$)`)
 var fileImportRegex = regexp.MustCompile(`(?m)import\s+"([^"]+)"(?:\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?\s*(?:;|\r?$)`)
-var exportLineRegex = regexp.MustCompile(`(?m)^\s*export\s+`)
-var memberAccessRegex = regexp.MustCompile(`(?m)\b([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\b`)
 var catchVarRegex = regexp.MustCompile(`(?m)\bcatch\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{`)
 var enumLineRegex = regexp.MustCompile(`(?m)^(?:export\s+)?enum\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{([^}]*)\}`)
 var exportedEnumBlockRegex = regexp.MustCompile(`(?s)\bexport\s+enum\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{(.*?)\}`)
@@ -171,70 +169,6 @@ func scanCatchVariables(scope *Scope, text string, pos Position, uri string) {
 			SourceURI: uri,
 		})
 	}
-}
-
-func checkUndefinedMethodOnLine(scope *Scope, rawLine string, lineIndex int) []map[string]any {
-	diagnostics := []map[string]any{}
-	code := stripStringsAndComments(rawLine)
-
-	matches := memberAccessRegex.FindAllStringSubmatchIndex(code, -1)
-
-	for _, match := range matches {
-		receiver := code[match[2]:match[3]]
-		member := code[match[4]:match[5]]
-
-		// Ignore this.field for now. It needs current-class tracking.
-		if receiver == "this" {
-			receiverSym, ok := scope.Resolve("this")
-			if !ok {
-				diagnostics = append(diagnostics, makeRangeDiagnostic(
-					lineIndex,
-					match[2],
-					match[3],
-					2,
-					"undefined variable: this",
-				))
-				continue
-			}
-
-			if memberExistsOnSymbol(scope, receiverSym, member) {
-				continue
-			}
-
-			diagnostics = append(diagnostics, makeRangeDiagnostic(
-				lineIndex,
-				match[4],
-				match[5],
-				2,
-				"undefined method or property: this."+member,
-			))
-
-			continue
-		}
-
-		receiverSym, ok := scope.Resolve(receiver)
-		if !ok {
-			continue
-		}
-
-		if !shouldCheckMemberAccess(receiverSym.Type) {
-			continue
-		}
-
-		if memberExistsOnSymbol(scope, receiverSym, member) {
-			continue
-		}
-
-		diagnostics = append(diagnostics, makeRangeDiagnostic(
-			lineIndex,
-			match[4],
-			match[5],
-			2,
-			"undefined method or property: "+receiver+"."+member,
-		))
-	}
-
-	return diagnostics
 }
 
 func resolveClassSymbol(scope *Scope, className string) (SymbolInfo, bool) {
@@ -353,37 +287,6 @@ func memberExistsOnSymbol(scope *Scope, sym SymbolInfo, member string) bool {
 	return false
 }
 
-var identifierRegex = regexp.MustCompile(`\b[A-Za-z_][A-Za-z0-9_]*\b`)
-
-func checkUndefinedVariablesOnLine(scope *Scope, rawLine string, lineIndex int) []map[string]any {
-	diagnostics := []map[string]any{}
-	code := stripStringsAndComments(rawLine)
-
-	matches := identifierRegex.FindAllStringIndex(code, -1)
-
-	for _, match := range matches {
-		name := code[match[0]:match[1]]
-
-		if shouldIgnoreIdentifierInSemanticCheck(code, name, match[0], match[1]) {
-			continue
-		}
-
-		if _, ok := scope.Resolve(name); ok {
-			continue
-		}
-
-		diagnostics = append(diagnostics, makeRangeDiagnostic(
-			lineIndex,
-			match[0],
-			match[1],
-			2,
-			"undefined variable: "+name,
-		))
-	}
-
-	return diagnostics
-}
-
 func shouldCheckMemberAccess(receiverType string) bool {
 	receiverType = strings.TrimSpace(receiverType)
 
@@ -391,8 +294,6 @@ func shouldCheckMemberAccess(receiverType string) bool {
 		return false
 	}
 
-	// Dynamic/loose values should not create fake property warnings.
-	// Classes/std/native/error are still checked by memberExistsByType.
 	if receiverType == "any" ||
 		receiverType == "unknown" ||
 		receiverType == "object" ||
@@ -414,73 +315,6 @@ func shouldCheckMemberAccess(receiverType string) bool {
 	}
 
 	return true
-}
-
-func shouldIgnoreIdentifierInSemanticCheck(code string, name string, start int, end int) bool {
-	if tinyKeywords[name] || name == "_" {
-		return true
-	}
-
-	switch name {
-	case "true", "false", "null", "undefined":
-		return true
-	case "string", "number", "bool", "object", "array", "any":
-		return true
-	}
-
-	trimmed := strings.TrimSpace(code)
-
-	// declarations
-	declLine := strings.TrimSpace(trimmed)
-
-	if strings.HasPrefix(declLine, "private ") {
-		declLine = strings.TrimSpace(strings.TrimPrefix(declLine, "private "))
-	}
-
-	if strings.HasPrefix(declLine, "public ") {
-		declLine = strings.TrimSpace(strings.TrimPrefix(declLine, "public "))
-	}
-
-	if strings.HasPrefix(declLine, "let "+name) ||
-		strings.HasPrefix(declLine, "const "+name) ||
-		strings.HasPrefix(declLine, "fn "+name) ||
-		strings.HasPrefix(declLine, "class "+name) ||
-		strings.HasPrefix(declLine, "field "+name) {
-		return true
-	}
-	// Ignore property/member names after dot: obj.name
-	if start > 0 && code[start-1] == '.' {
-		return true
-	}
-
-	// Ignore receiver member access member name with spaces: obj . name
-	i := start - 1
-	for i >= 0 && (code[i] == ' ' || code[i] == '\t') {
-		i--
-	}
-	if i >= 0 && code[i] == '.' {
-		return true
-	}
-
-	// Ignore object literal keys: { name: "confis" }
-	j := end
-	for j < len(code) && (code[j] == ' ' || code[j] == '\t') {
-		j++
-	}
-	if j < len(code) && code[j] == ':' {
-		return true
-	}
-
-	// Ignore type hints: name: string
-	i = start - 1
-	for i >= 0 && (code[i] == ' ' || code[i] == '\t') {
-		i--
-	}
-	if i >= 0 && code[i] == ':' {
-		return true
-	}
-
-	return false
 }
 
 func makeRangeDiagnostic(line int, start int, end int, severity int, message string) map[string]any {
@@ -629,8 +463,6 @@ func fallbackScopeAtPosition(uri string, text string, pos Position) *Scope {
 		maxLine = 0
 	}
 
-	// Pass 1: cheap one-line functions/classes so constructors/calls are known early.
-	// Scan class names, but don't leak class methods as global functions.
 	classBlocks := findBlocks(text, "class")
 
 	for lineIndex := 0; lineIndex <= maxLine; lineIndex++ {
@@ -639,20 +471,17 @@ func fallbackScopeAtPosition(uri string, text string, pos Position) *Scope {
 			continue
 		}
 
-		// Always scan classes and Enums.
 		scanEnumLine(scope, line, lineIndex+1, uri)
 		scanClassLine(scope, line, lineIndex+1, uri)
 
 		lineOffset := offsetAtLine(text, lineIndex+1)
 		insideClass := blockInsideAny(lineOffset, classBlocks)
 
-		// Only scan functions if this line is NOT inside a class.
 		if !insideClass {
 			scanFunctionLine(scope, line, lineIndex+1, uri)
 		}
 	}
 
-	// Pass 2: full blocks. This overwrites cheap symbols with params/methods/return types.
 	scanFullEnums(scope, text, maxLine, uri)
 	scanFullClasses(scope, text, maxLine, uri)
 	scanFullFunctions(scope, text, maxLine, uri)
@@ -660,7 +489,6 @@ func fallbackScopeAtPosition(uri string, text string, pos Position) *Scope {
 	scanInlineAnonymousFunctionParams(scope, text, pos, uri)
 	scanCatchVariables(scope, text, pos, uri)
 
-	// Pass 3: variables after functions/classes/imports are known.
 	for lineIndex := 0; lineIndex <= maxLine; lineIndex++ {
 		line := cleanLine(lines[lineIndex])
 		if line == "" {
@@ -674,8 +502,6 @@ func fallbackScopeAtPosition(uri string, text string, pos Position) *Scope {
 		}
 	}
 
-	// Add parameters from the function/method/anonymous function that contains the cursor.
-	// This makes params autocomplete inside function bodies.
 	currentFunction := functionBlockAtLine(text, pos.Line)
 	if currentFunction != nil {
 		for _, param := range parseFunctionParams(currentFunction.ParamsText) {
@@ -749,7 +575,6 @@ func scanEnumLine(scope *Scope, line string, lineNumber int, uri string) {
 			continue
 		}
 
-		// If later you support `A = 10`, strip assignment.
 		if strings.Contains(name, "=") {
 			name = strings.TrimSpace(strings.SplitN(name, "=", 2)[0])
 		}
@@ -963,10 +788,6 @@ func scanClassFields(scope *Scope, classBody string, uri string, baseLine int) m
 		isPrivate := false
 		isConst := false
 
-		// Remove modifiers after "field".
-		// Keep looping so this works:
-		// field private const name = "x"
-		// field const private name = "x"
 		for {
 			if strings.HasPrefix(line, "public ") {
 				line = strings.TrimSpace(strings.TrimPrefix(line, "public "))
@@ -988,9 +809,6 @@ func scanClassFields(scope *Scope, classBody string, uri string, baseLine int) m
 			break
 		}
 
-		// Support fields without default:
-		// field name: string
-		// Turn it into a fake assignment for variableLineRegex.
 		fakeLine := "let " + line
 		if !strings.Contains(fakeLine, "=") {
 			fakeLine = strings.TrimSuffix(fakeLine, ";") + " = undefined"
@@ -1034,12 +852,7 @@ func scanClassFields(scope *Scope, classBody string, uri string, baseLine int) m
 	return fields
 }
 
-func isPrivateMethodBlock(header string) bool {
-	return strings.Contains(header, "private fn ")
-}
-
 func scanFullClasses(scope *Scope, text string, maxLine int, uri string) {
-	// Two passes let embed work even if classes appear later.
 	classBlocks := findBlocks(text, "class")
 
 	for _, block := range classBlocks {
@@ -1118,10 +931,6 @@ func blockInsideAny(offset int, blocks []blockInfo) bool {
 		}
 	}
 	return false
-}
-
-func collectEmbeddedMethods(scope *Scope, classBody string, methods map[string]SymbolInfo) {
-	collectEmbeddedSymbolsFromBody(scope, classBody, map[string]SymbolInfo{}, methods, "", 1)
 }
 
 func collectEmbeddedSymbolsFromBody(scope *Scope, classBody string, fields map[string]SymbolInfo, methods map[string]SymbolInfo, uri string, baseLine int) {
@@ -1303,7 +1112,6 @@ func parseFunctionLikeBlockAt(text string, start int, kind string) (blockInfo, b
 			i--
 		}
 		if i >= 4 && text[i-4:i+1] == "async" {
-			// verify word boundary
 			if i-5 < 0 || !isIdentByte(text[i-5]) {
 				isAsync = true
 			}
@@ -1988,7 +1796,7 @@ var lspImportExportCache = map[string]lspImportCacheEntry{}
 func invalidateLSPImportCacheForURI(uri string) {
 	path := filepath.Clean(uriToPath(uri))
 	delete(lspImportExportCache, path)
-	// Imports can be chained, so keep invalidation simple and correct.
+
 	for key := range lspImportExportCache {
 		delete(lspImportExportCache, key)
 	}
@@ -2034,7 +1842,6 @@ func loadTinyFileExports(path string, visited map[string]bool) map[string]Symbol
 
 	collectExportsFromAST(scope, text, exports, uri)
 
-	// Fallback scanners keep completion useful while imported files are being typed.
 	scanExportedEnums(scope, text, exports, uri)
 	scanExportedClasses(scope, text, exports, uri)
 	scanExportedFunctions(scope, text, exports, uri)
@@ -2734,7 +2541,6 @@ func memberExprAtPosition(text string, pos Position) (string, string, bool) {
 		return "", "", false
 	}
 
-	// Support safe access: obj?.name
 	if i > 0 && line[i-1] == '?' {
 		i--
 	}
@@ -2765,117 +2571,6 @@ func memberExprAtPosition(text string, pos Position) (string, string, bool) {
 
 func isIdentChar(ch byte) bool {
 	return isIdentByte(ch)
-}
-
-// Parser-backed analysis is still kept for diagnostics/future upgrades, but editor scope uses fallback scanning.
-func analyzeTiny(uri string, text string) AnalysisResult {
-	stmts, diagnostics := parseTinyForLSP(uri, text)
-
-	global := NewScope(nil)
-
-	result := AnalysisResult{
-		GlobalScope: global,
-		Imports:     parseStdImports(text),
-	}
-
-	if len(diagnostics) > 0 {
-		for alias, module := range result.Imports {
-			global.Define(SymbolInfo{
-				Name:      alias,
-				Kind:      SymbolStd,
-				Type:      "std:" + module,
-				Detail:    "std module " + module,
-				SourceURI: uri,
-			})
-		}
-		return result
-	}
-
-	for _, stmt := range stmts {
-		analyzeTopLevelStmt(result, global, stmt)
-	}
-
-	return result
-}
-
-func analyzeTopLevelStmt(result AnalysisResult, scope *Scope, stmt Stmt) {
-	switch s := stmt.(type) {
-	case ImportStmt:
-		if s.Std {
-			alias := s.Path
-			if s.Alias != "" {
-				alias = s.Alias
-			}
-
-			scope.Define(SymbolInfo{
-				Name:   alias,
-				Kind:   SymbolStd,
-				Type:   "std:" + s.Path,
-				Detail: "std module " + s.Path,
-			})
-		}
-
-	case FunctionStmt:
-		scope.Define(SymbolInfo{
-			Name:    s.Name,
-			Kind:    SymbolFunction,
-			Type:    "function",
-			Detail:  "fn " + s.Name,
-			Params:  paramsFromAST(scope, s.Params),
-			Returns: normalizeLSPType(scope, typeHintName(s.ReturnType, "any")),
-		})
-
-	case ClassStmt:
-		scope.Define(SymbolInfo{
-			Name:    s.Name,
-			Kind:    SymbolClass,
-			Type:    "class:" + s.Name,
-			Detail:  "class " + s.Name,
-			Methods: map[string]SymbolInfo{},
-		})
-
-	case VariableStmt:
-		scope.Define(SymbolInfo{
-			Name:   s.Name,
-			Kind:   SymbolVariable,
-			Type:   inferExprType(scope, s.Value),
-			Detail: "variable " + s.Name,
-		})
-
-	case FieldStmt:
-		scope.Define(SymbolInfo{
-			Name:   s.Name,
-			Kind:   SymbolVariable,
-			Type:   inferExprType(scope, s.Value),
-			Detail: "field " + s.Name,
-		})
-
-	case EnumStmt:
-		scope.Define(enumSymbolFromStmt(s, ""))
-	}
-}
-
-func paramsFromAST(scope *Scope, params []Param) []StdArg {
-	args := []StdArg{}
-
-	for _, param := range params {
-		typ := typeHintName(param.TypeHint, "any")
-
-		if param.Variadic {
-			typ = "array"
-		} else {
-			typ = normalizeLSPType(scope, typ)
-		}
-
-		args = append(args, StdArg{
-			Name:     param.Name,
-			Type:     typ,
-			Optional: param.HasDefault,
-			Variadic: param.Variadic,
-		})
-	}
-
-	return args
 }
 
 func typeHintName(hint TypeHint, fallback string) string {
@@ -3237,10 +2932,6 @@ func getHover(uri string, text string, pos Position) any {
 	return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "**" + sym.Name + "**\n\nType: `" + sym.Type + "`\n\n" + sym.Detail}}
 }
 
-// =====================
-// AST-based semantic diagnostics
-// =====================
-
 type astSemanticAnalyzer struct {
 	uri          string
 	root         *Scope
@@ -3266,8 +2957,6 @@ func semanticDiagnosticsFromAST(uri string, text string) []map[string]any {
 
 	scanFileImportsIntoScope(root, uri, text)
 
-	// Load current-file enum symbols before AST diagnostics so enum member access
-	// like PostStatus.Published works even before the AST enum support is perfect.
 	for i, rawLine := range strings.Split(text, "\n") {
 		scanEnumLine(root, cleanLine(rawLine), i+1, uri)
 	}
@@ -3487,10 +3176,6 @@ func (a *astSemanticAnalyzer) predeclareStatements(stmts []Stmt) {
 				}
 			}
 
-			// Non-std imports are already loaded by scanFileImportsIntoScope(root, ...).
-			// Do NOT overwrite namespace imports like:
-			// import "user.tiny" as models;
-			// because that destroys models.User for diagnostics.
 			if existing, ok := a.root.Resolve(alias); ok {
 				existing.Line = s.Line
 				existing.Column = s.Column
@@ -3510,7 +3195,6 @@ func (a *astSemanticAnalyzer) predeclareStatements(stmts []Stmt) {
 			a.root.Define(a.classSymbol(s))
 
 		case VariableStmt:
-			// Define early as unknown so forward-ish references don't explode while typing.
 			a.root.Define(SymbolInfo{Name: s.Name, Kind: SymbolVariable, Type: "unknown", Detail: "variable " + s.Name, Line: s.Line, Column: s.Column, SourceURI: a.uri})
 
 		case EnumStmt:
@@ -3584,7 +3268,6 @@ func (a *astSemanticAnalyzer) visitStatements(stmts []Stmt) {
 func (a *astSemanticAnalyzer) visitStmt(stmt Stmt) {
 	switch s := stmt.(type) {
 	case ImportStmt:
-		// Already declared in prepass.
 
 	case VariableStmt:
 		a.validateTypeHint(s.TypeHint, s.Line, s.Column)
@@ -3596,7 +3279,6 @@ func (a *astSemanticAnalyzer) visitStmt(stmt Stmt) {
 		a.define(SymbolInfo{Name: s.Name, Kind: SymbolVariable, Type: typ, Detail: "variable " + s.Name, Line: s.Line, Column: s.Column, SourceURI: a.uri, Fields: fields})
 
 	case FieldStmt:
-		// Class fields are handled by classSymbol. Top-level field is treated like a variable if parser allows it.
 		a.validateTypeHint(s.TypeHint, s.Line, s.Column)
 		typ := typeHintName(s.TypeHint, "any")
 		if typ == "any" {
@@ -3950,7 +3632,6 @@ func (a *astSemanticAnalyzer) inferExprType(expr Expr) string {
 		return filteredLeft + " | " + rightType
 
 	case PropertyExpr:
-		// Special case: namespace property access like models.User
 		if ident, ok := e.Object.(IdentExpr); ok {
 			if sym, exists := a.resolve(ident.Name); exists && sym.Kind == SymbolNamespace {
 				memberSym, ok := sym.Members[e.Name]
@@ -4022,7 +3703,6 @@ func (a *astSemanticAnalyzer) inferExprType(expr Expr) string {
 		return a.inferExprType(e.Callee)
 
 	case MemberCallExpr:
-		// Special case: namespace member call like models.User()
 		if ident, ok := e.Object.(IdentExpr); ok {
 			if sym, exists := a.resolve(ident.Name); exists && sym.Kind == SymbolNamespace {
 				memberSym, ok := sym.Members[e.Method]
@@ -4222,15 +3902,9 @@ func (a *astSemanticAnalyzer) checkArgumentCount(name string, got int, params []
 }
 
 func (a *astSemanticAnalyzer) checkMember(object Expr, member string, line int, column int) {
-	// If this is a named variable, use the full symbol, not just its type.
-	// That lets object literals keep known fields like:
-	// let user = { name: "Tiny", score: 10 };
-	// user.score
 	if ident, ok := object.(IdentExpr); ok {
 		if sym, exists := a.resolve(ident.Name); exists {
 			if sym.Type == "object" {
-				// Dynamic objects are allowed. If fields are known, accept them.
-				// If fields are not known or member is missing, don't warn because Tiny objects are dynamic.
 				return
 			}
 

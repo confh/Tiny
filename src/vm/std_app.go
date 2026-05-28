@@ -39,8 +39,8 @@ func stdAppNew(vm *VM, args []Value) {
 
 	name := argString(vm, "app.new", args, 0)
 
-	vm.push(&NativeAppValue{
+	vm.push(NewNative(&NativeAppValue{
 		Name:     name,
 		Commands: map[string]FunctionValue{},
-	})
+	}))
 }

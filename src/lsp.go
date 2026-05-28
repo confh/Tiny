@@ -179,6 +179,7 @@ var tinyKeywords = map[string]bool{
 	"continue": true,
 	"try":      true,
 	"catch":    true,
+	"lock":     true,
 	"finally":  true,
 	"throw":    true,
 	"defer":    true,
@@ -1762,32 +1763,6 @@ var lspLogFile *os.File
 // 	lspLogFile.Sync()
 // }
 
-func makeLSPDiagnostic(line int, column int, severity int, message string) map[string]any {
-	if line < 0 {
-		line = 0
-	}
-
-	if column < 0 {
-		column = 0
-	}
-
-	return map[string]any{
-		"range": map[string]any{
-			"start": map[string]any{
-				"line":      line,
-				"character": column,
-			},
-			"end": map[string]any{
-				"line":      line,
-				"character": column + 1,
-			},
-		},
-		"severity": severity,
-		"message":  message,
-		"source":   "tiny",
-	}
-}
-
 func classBlockAtLine(text string, lineIndex int) *blockInfo {
 	offset := offsetAtLine(text, lineIndex+1)
 
@@ -2061,6 +2036,7 @@ func scopeCompletions(scope *Scope, uri string, text string, hasParens bool) []C
 		snippetCompletion("spawn", "spawn task", "spawn fn() {\n    $0\n}"),
 		snippetCompletion("defer", "defer statement", "defer fn() {\n    $0\n}"),
 		{Label: "await ", Kind: 14, Detail: "await statement"},
+		{Label: "lock ", Kind: 14, Detail: "lock statement"},
 		{Label: "typeof", Kind: 14, Detail: "type operator"},
 		{Label: "instanceof", Kind: 14, Detail: "instance check"},
 		{Label: "true", Kind: 14, Detail: "boolean literal"},

@@ -74,14 +74,14 @@ func stdIOPrintln(vm *VM, args []Value) {
 		fmt.Print(valueToString(arg))
 	}
 	fmt.Println()
-	vm.push(UndefinedValue{})
+	vm.push(NewUndefined())
 }
 
 func stdIOPrint(vm *VM, args []Value) {
 	for _, arg := range args {
 		fmt.Print(valueToString(arg))
 	}
-	vm.push(UndefinedValue{})
+	vm.push(NewUndefined())
 }
 
 func stdIOInput(vm *VM, args []Value) {
@@ -92,7 +92,7 @@ func stdIOInput(vm *VM, args []Value) {
 	fmt.Print(prompt)
 	input, _ := reader.ReadString('\n')
 	input = strings.TrimSpace(input)
-	vm.push(input)
+	vm.push(NewNative(input))
 }
 
 func stdIOReadLine(vm *VM, args []Value) {
@@ -101,5 +101,5 @@ func stdIOReadLine(vm *VM, args []Value) {
 	reader := bufio.NewReader(os.Stdin)
 	line, _ := reader.ReadString('\n')
 	line = strings.TrimRight(line, "\r\n")
-	vm.push(line)
+	vm.push(NewNative(line))
 }

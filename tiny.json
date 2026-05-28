@@ -4,5 +4,5 @@
   "scripts": {
     "std": "tiny src/scripts/new_std_module.tiny"
   },
-  "version": "0.1.3"
+  "version": "0.1.4"
 }

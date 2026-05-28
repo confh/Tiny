@@ -35,7 +35,7 @@ func (vm *VM) callPluginModule(method string, argCount int) {
 		name := asString(vm.pop(), vm)
 
 		if slices.Contains(AvailablePlugins, name) {
-			vm.push(&StandardModuleValue{Name: name})
+			vm.push(NewNative(&StandardModuleValue{Name: name}))
 		} else {
 			vm.fatalError(ErrorName, "unknown standard module: %s", name)
 		}
@@ -64,11 +64,11 @@ func (vm *VM) callPluginModule(method string, argCount int) {
 			vm.fatalError(ErrorRuntime, "plugin missing TinyPluginFree: %v", err)
 		}
 
-		vm.push(&NativePluginValue{
+		vm.push(NewNative(&NativePluginValue{
 			Path: path,
 			Call: callProc.Addr(),
 			Free: freeProc.Addr(),
-		})
+		}))
 
 	default:
 		vm.fatalError(ErrorName, "unknown Plugin function: %s", method)
