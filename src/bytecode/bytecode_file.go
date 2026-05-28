@@ -2,7 +2,6 @@ package bytecode
 
 import (
 	"bytes"
-	"fmt"
 	"os"
 
 	json "github.com/goccy/go-json"
@@ -175,8 +174,6 @@ func SaveBytecodeToBytes(main []Instruction, functions map[string]Function, clas
 	}
 
 	for name, fn := range functions {
-		fmt.Println(fn.Async)
-		fmt.Println("Data")
 		file.Functions[name] = SerializableFunction{
 			ID:           fn.ID,
 			Name:         fn.Name,
