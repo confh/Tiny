@@ -149,13 +149,19 @@ tiny dist src/main.tiny -o release/app
 You can write and execute lightweight HTTP services natively:
 
 ```javascript
-import std "io";
 import std "http";
+import std "io";
 
-let server = http.server("8080");
-server.get("/hello", fn(req, res) {
-    res.write("Hello from Tiny!");
+const port = 8080
+
+let server = http.server(port);
+
+server.get("/hello", fn(req) {
+    return http.text("Hello from Tiny!")
 });
+
+io.println(`Starting server on port ${port}`)
+server.start()
 ```
 
 <p align="center">
