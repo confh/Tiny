@@ -3610,7 +3610,7 @@ func (vm *VM) step() bool {
 	return false
 }
 
-func writeServerResponse(w http.ResponseWriter, value any, responseType HttpResponseType) {
+func writeServerResponse(w http.ResponseWriter, value Value, responseType HttpResponseType) {
 	switch responseType {
 	case HttpJson:
 		w.Header().Set("Content-Type", "application/json")
@@ -3619,7 +3619,7 @@ func writeServerResponse(w http.ResponseWriter, value any, responseType HttpResp
 		fmt.Fprint(w, string(bytes))
 
 	case HttpText:
-		stringValue, _ := value.(string)
+		stringValue, _ := value.Value.(string)
 		trimmed := strings.TrimSpace(stringValue)
 		fmt.Fprint(w, trimmed)
 	}

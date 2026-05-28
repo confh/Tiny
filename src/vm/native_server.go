@@ -178,7 +178,7 @@ func serverStart(vm *VM, server *NativeServerValue, args []Value) {
 
 		switch h := handler.Value.(type) {
 		case string:
-			writeServerResponse(w, h, HttpText)
+			writeServerResponse(w, NewNative(h), HttpText)
 		case FunctionValue:
 			bodyBytes, err := io.ReadAll(r.Body)
 			if err != nil {
