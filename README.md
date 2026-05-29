@@ -23,6 +23,7 @@ Tiny sits in the "sweet spot" between a quick bash script and a complex Go progr
 ## Features
 
 * Dynamically typed with optional static type hints
+* Structural interfaces for defining object shapes
 * Compiles to bytecode (.tbc) and runs on a custom VM
 * Case-sensitive syntax
 * In-place bytecode optimizations (fusing common loop and variable operations)
@@ -35,19 +36,37 @@ Tiny sits in the "sweet spot" between a quick bash script and a complex Go progr
   * `http` (built-in client and server)
   * `math` (math operations and matrix multiplication)
   * `desktop` (CGO-free mouse, keyboard, and clipboard automation)
+  * `test` (integrated unit testing framework)
   * `process`, `regex`, `time`, `net`, `sync`
 
 ## VS Code Support
 
-Tiny has a built-in Language Server (LSP) to provide a modern development workflow. You can install the official VS Code extension for syntax highlighting, autocomplete, and diagnostics.
+Tiny has a built-in Language Server (LSP) to provide a modern development workflow. You can install the official VS Code extension for syntax highlighting, autocomplete, and diagnostics. The LSP supports advanced static analysis features such as type narrowing, which refines variable types after conditional checks.
 
 <p align="center">
   <img src="examples/extension.png" alt="VS Code Extension" width="500">
 </p>
 
-You can download the extension here: [Tiny for Visual Studio Code](https://github.com/confh/TinyVsCode/releases/latest)
+The extension can be downloaded by searching for "Tiny" in the VS Code extension marketplace.
 
 ## Quick Start (Language Tour)
+
+### Structural Interfaces
+Tiny uses structural typing. Objects are validated against interfaces based on their shape without explicit implementation.
+```js
+import std "io";
+
+interface Task {
+    title: string
+    done: bool
+}
+
+fn complete(t: Task) {
+    io.println(`Completing: ${t.title}`);
+}
+
+complete({ title: "Write Documentation", done: false });
+```
 
 ### Classes and Methods
 ```js
@@ -65,17 +84,15 @@ let g = Greeter("Welcome");
 io.println(g.greet("Tiny"));
 ```
 
-### JSON and File IO
+### Unit Testing
+The built-in `test` module provides a standard way to verify logic.
 ```js
-import std "io";
-import std "fs";
-import std "json";
+import std "test";
 
-let data = { user: "David", score: 100 };
-fs.writeFile("save.json", json.pretty(data));
-
-let loaded = json.parse(fs.readFile("save.json"));
-io.println(`User: ${loaded.user}`);
+test.run("math operations", fn() {
+    test.assert(1 + 1 == 2, "basic addition");
+    test.equal(10 * 2, 20, "multiplication check");
+});
 ```
 
 ### Async Tasks
@@ -119,7 +136,7 @@ cd tiny
 
 Tiny compiles source files into a custom binary bytecode instruction stream (`.tbc`) before running them. The VM uses several optimizations to keep things fast:
 
-* **Fast Local Access:** Local variables are resolved by the compiler and indexed as flat numeric slots inside the call frames.
+* **Fast Slot-Based Access:** Both local and global variables are resolved by the compiler and indexed as flat numeric slots inside call frames and global storage, eliminating expensive string-map lookups during execution.
 * **Instruction Fusing:** The optimizer passes over the bytecode and fuses common sequences (like `OP_LOAD_LOCAL` followed by `OP_INC` and `OP_ASSIGN`) into single, optimized opcodes like `OP_INC_LOCAL`.
 * **Constant Folding:** Static math expressions (like `1 + 2 * 3`) are evaluated by the compiler during codegen rather than at runtime.
 * **Go GC Integration:** Tiny values are directly backed by Go's concurrent garbage collector, so memory is handled automatically.
@@ -139,34 +156,20 @@ tiny pack src/main.tiny -o mytool
   <img src="examples/packing.gif" alt="Tiny Packing">
 </p>
 
+### Static Asset Embedding
+The `embedstr` and `embedbin` keywords allow you to include external assets directly in the compiled bytecode.
+```js
+embedstr "./config.json" const config
+embedbin "./icon.png" const iconBytes
+
+// Assets are bundled into the .tbc or packed executable
+```
+
 ### Distribution Folder (`tiny dist`)
 If your project uses **Native Plugins** (DLLs/SOs), `tiny dist` is the answer. It packs the executable *and* automatically gathers all linked plugins into a clean `dist/` folder.
 ```bash
 tiny dist src/main.tiny -o release/app
 ```
-
-### Native HTTP Server
-You can write and execute lightweight HTTP services natively:
-
-```javascript
-import std "http";
-import std "io";
-
-const port = 8080
-
-let server = http.server(port);
-
-server.get("/hello", fn(req) {
-    return http.text("Hello from Tiny!")
-});
-
-io.println(`Starting server on port ${port}`)
-server.start()
-```
-
-<p align="center">
-  <img src="examples/http_server.gif" alt="HTTP Server">
-</p>
 
 ---
 

@@ -131,7 +131,7 @@ func packProgramToOutput(program Program, outFile string, target string) {
 
 	bytecodeBytes := SaveBytecodeToBytes(mainInstructions, functions, classes, interfaces, globalIndex, false)
 
-	runtimeBytes := getEmbeddedRuntimeForTarget()
+	runtimeBytes := getEmbeddedRuntimeForTarget(target)
 
 	err := writePackedExecutable(outFile, runtimeBytes, bytecodeBytes)
 	if err != nil {
