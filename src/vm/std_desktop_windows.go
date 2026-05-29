@@ -277,11 +277,23 @@ func desktopKeyboardHotKey(vm *VM, args []Value) {
 func desktopKeyboardType(vm *VM, args []Value) {
 	expectArgs(vm, "desktop.type", args, 1)
 	text := argString(vm, "desktop.type", args, 0)
+
 	client := getMakcClient(vm)
 	if client == nil {
 		return
 	}
-	client.Keyboard.TypeText(context.Background(), text)
+
+	ctx := context.Background()
+
+	for _, char := range text {
+		err := client.Keyboard.TypeText(ctx, string(char))
+		if err != nil {
+			vm.runtimeError(ErrorRuntime, "error while typing text: %s", err)
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
 	vm.push(NewUndefined())
 }
 

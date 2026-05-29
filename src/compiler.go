@@ -2,8 +2,10 @@ package main
 
 import (
 	"maps"
+	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	. "language.com/src/tinyerrors"
 	. "language.com/src/vm"
@@ -40,7 +42,9 @@ type LoopContext struct {
 type Compiler struct {
 	mainInstructions       []Instruction
 	functions              map[string]Function
+	interfaces             map[string]Interface
 	classes                map[string]Class
+	usedFunctions          map[string]bool
 	loopStack              []LoopContext
 	anonymousFunctionCount int
 	declaredFunctions      map[string]bool
@@ -61,10 +65,15 @@ type Compiler struct {
 
 	matchTempID int
 
-	currentNamespaceVariables map[string]string
-	currentNamespaceClasses   map[string]string
-	currentNamespaceFunctions map[string]string
-	currentNamespaceEnums     map[string]string
+	currentNamespaceVariables  map[string]string
+	currentNamespaceClasses    map[string]string
+	currentNamespaceFunctions  map[string]string
+	currentNamespaceEnums      map[string]string
+	currentNamespaceInterfaces map[string]string
+	currentNamespaceEmbeds     map[string]string
+
+	currentReturnType   TypeHint
+	currentFunctionName string
 
 	inMethod bool
 
@@ -82,6 +91,7 @@ type Compiler struct {
 	scopeID int
 
 	localCount      int
+	globalIndexes   map[string]int
 	globalConstants map[string]bool
 }
 
@@ -319,10 +329,13 @@ func NewCompiler() *Compiler {
 	c := &Compiler{
 		mainInstructions:       []Instruction{},
 		functions:              map[string]Function{},
+		interfaces:             map[string]Interface{},
 		classes:                map[string]Class{},
+		usedFunctions:          map[string]bool{},
 		loopStack:              []LoopContext{},
 		localCount:             0,
 		globalConstants:        map[string]bool{},
+		globalIndexes:          map[string]int{},
 		anonymousFunctionCount: 0,
 		functionIDs:            map[string]int{},
 		declaredFunctions:      map[string]bool{},
@@ -443,6 +456,17 @@ func (c *Compiler) compileFunctionLiteral(stmt FunctionStmt) {
 	c.outerBindings = outerBindings
 	c.currentCaptures = map[string]CapturedVar{}
 
+	oldReturnType := c.currentReturnType
+	oldFunctionName := c.currentFunctionName
+
+	c.currentReturnType = stmt.ReturnType
+	c.currentFunctionName = stmt.Name
+
+	defer func() {
+		c.currentReturnType = oldReturnType
+		c.currentFunctionName = oldFunctionName
+	}()
+
 	c.beginScope()
 
 	for _, param := range stmt.Params {
@@ -484,7 +508,8 @@ func (c *Compiler) compileFunctionLiteral(stmt FunctionStmt) {
 	c.outerBindings = oldOuterBindings
 	c.currentCaptures = oldCurrentCaptures
 
-	// IMPORTANT: leave closure on stack.
+	c.usedFunctions[compiledName] = true
+
 	c.emit(OP_CLOSURE, ClosureInfo{
 		Name:     compiledName,
 		Captures: captures,
@@ -508,7 +533,7 @@ func (c *Compiler) compileNestedFunction(stmt FunctionStmt) {
 		})
 	} else {
 		c.emit(OP_STORE_GLOBAL, VariableInfo{
-			Name:     binding.Name,
+			Slot:     binding.Slot,
 			Constant: true,
 		})
 	}
@@ -538,17 +563,34 @@ func (c *Compiler) declareVariable(name string, constant bool) Binding {
 
 	globalName := name
 
-	// Top-level variables keep their real name.
-	// Block/global variables get a hidden internal name.
 	if len(c.scopes) > 1 {
 		globalName = "__scope_" + strconv.Itoa(c.scopeID) + "_" + name
 		c.scopeID++
 	}
 
+	if c.globalIndexes == nil {
+		c.globalIndexes = map[string]int{}
+	}
+	if c.interfaces == nil {
+		c.interfaces = map[string]Interface{}
+	}
+	if c.functions == nil {
+		c.functions = map[string]Function{}
+	}
+	if c.functionIDs == nil {
+		c.functionIDs = map[string]int{}
+	}
+
+	slot, exists := c.globalIndexes[globalName]
+	if !exists {
+		slot = len(c.globalConstants)
+		c.globalIndexes[globalName] = slot
+	}
+
 	binding := Binding{
 		Kind:     BindingGlobal,
 		Name:     globalName,
-		Slot:     -1,
+		Slot:     slot,
 		Constant: constant,
 	}
 
@@ -578,7 +620,7 @@ func (c *Compiler) compileScopedBlock(body []Stmt) {
 	c.endScope()
 }
 
-func (c *Compiler) CompileProgram(program Program) ([]Instruction, map[string]Function, map[string]Class) {
+func (c *Compiler) CompileProgram(program Program) ([]Instruction, map[string]Function, map[string]Class, map[string]Interface, map[string]int) {
 	c.predeclareFunctions(program.Statements)
 
 	for _, stmt := range program.Statements {
@@ -587,7 +629,14 @@ func (c *Compiler) CompileProgram(program Program) ([]Instruction, map[string]Fu
 
 	c.emit(OP_HALT, nil)
 
-	return c.mainInstructions, c.functions, c.classes
+	// remove unused functions
+	for v := range c.functions {
+		if _, ok := c.usedFunctions[v]; !ok {
+			delete(c.functions, v)
+		}
+	}
+
+	return c.mainInstructions, c.functions, c.classes, c.interfaces, c.globalIndexes
 }
 
 func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
@@ -606,12 +655,16 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 	oldNamespaceVariables := c.currentNamespaceVariables
 	oldNamespaceClasses := c.currentNamespaceClasses
 	oldNamespaceEnums := c.currentNamespaceEnums
+	oldNamespaceInterfaces := c.currentNamespaceInterfaces
+	oldNamespaceEmbeds := c.currentNamespaceEmbeds
 	oldIsCompilingNamespace := c.isCompilingNamespace
 
 	namespaceFunctions := map[string]string{}
 	namespaceVariables := map[string]string{}
 	namespaceClasses := map[string]string{}
 	namespaceEnums := map[string]string{}
+	namespaceInterfaces := map[string]string{}
+	namespaceEmbeds := map[string]string{}
 	members := map[string]Value{}
 
 	// 1. Nested namespaces first
@@ -735,6 +788,46 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		}
 	}
 
+	// 5. Collect interfaces
+	for _, raw := range stmt.Statements {
+		inner, exported := unwrapExport(raw)
+
+		interfaceStmt, ok := inner.(InterfaceStmt)
+		if !ok {
+			continue
+		}
+
+		fullName := stmt.Name + "." + interfaceStmt.Name
+
+		namespaceInterfaces[interfaceStmt.Name] = fullName
+
+		if !hasExplicitExports || exported {
+			members[interfaceStmt.Name] = NewNative(NamespaceMemberRef{
+				GlobalName: fullName,
+			})
+		}
+	}
+
+	// 6. Collect embeds
+	for _, raw := range stmt.Statements {
+		inner, exported := unwrapExport(raw)
+
+		embedStmt, ok := inner.(EmbedStmt)
+		if !ok {
+			continue
+		}
+
+		fullName := stmt.Name + "." + embedStmt.Name
+
+		namespaceEmbeds[embedStmt.Name] = fullName
+
+		if !hasExplicitExports || exported {
+			members[embedStmt.Name] = NewNative(NamespaceMemberRef{
+				GlobalName: fullName,
+			})
+		}
+	}
+
 	for _, raw := range stmt.Statements {
 		inner, _ := unwrapExport(raw)
 
@@ -772,9 +865,12 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 			})
 		}
 
+		// --- DECLARED AND PASSED SLOT ---
+		binding := c.declareVariable(fullName, true)
 		c.emit(OP_STORE_GLOBAL, VariableInfo{
 			Name:     fullName,
 			Constant: true,
+			Slot:     binding.Slot,
 		})
 
 		c.globalConstants[fullName] = true
@@ -785,6 +881,8 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 	c.currentNamespaceVariables = namespaceVariables
 	c.currentNamespaceClasses = namespaceClasses
 	c.currentNamespaceEnums = namespaceEnums
+	c.currentNamespaceInterfaces = namespaceInterfaces
+	c.currentNamespaceEmbeds = namespaceEmbeds
 	c.isCompilingNamespace = true
 
 	// 6. Compile enums as hidden globals FIRST.
@@ -801,18 +899,20 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		obj := ObjectValue{}
 
 		for _, member := range enumStmt.Members {
-			if _, exists := obj[member]; exists {
-				c.fatalError(ErrorName, "duplicate enum member %s.%s", enumStmt.Name, member)
+			if _, exists := obj[member.Name]; exists {
+				c.fatalError(ErrorName, "duplicate enum member %s.%s", enumStmt.Name, member.Name)
 			}
 
-			obj[member] = NewNative(member)
+			obj[member.Name] = c.evalConstantExpr(member.Value, "enum member must be constant.")
 		}
 
 		c.emit(OP_CONST, obj)
 
+		binding := c.declareVariable(fullName, true)
 		c.emit(OP_STORE_GLOBAL, VariableInfo{
 			Name:     fullName,
 			Constant: true,
+			Slot:     binding.Slot,
 		})
 
 		c.globalConstants[fullName] = true
@@ -831,10 +931,13 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 
 		c.compileExpr(v.Value)
 
+		// --- DECLARED AND PASSED SLOT ---
+		binding := c.declareVariable(fullName, v.Constant)
 		c.emit(OP_STORE_GLOBAL, VariableInfo{
 			Name:     fullName,
 			Constant: v.Constant,
 			TypeHint: v.TypeHint,
+			Slot:     binding.Slot,
 		})
 
 		c.globalConstants[fullName] = v.Constant
@@ -881,10 +984,53 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		c.compileFunction(namespacedFn)
 	}
 
+	// 10. Compile interfaces
+	for _, raw := range stmt.Statements {
+		inner, _ := unwrapExport(raw)
+
+		interfaceStmt, ok := inner.(InterfaceStmt)
+		if !ok {
+			continue
+		}
+
+		fullName := stmt.Name + "." + interfaceStmt.Name
+
+		namespacedInterface := InterfaceStmt{
+			Name:   fullName,
+			Fields: interfaceStmt.Fields,
+		}
+
+		c.compileInterfaceStatement(namespacedInterface)
+	}
+
+	// 11. Compile embeds
+	for _, raw := range stmt.Statements {
+		inner, _ := unwrapExport(raw)
+
+		embedStmt, ok := inner.(EmbedStmt)
+		if !ok {
+			continue
+		}
+
+		fullName := stmt.Name + "." + embedStmt.Name
+
+		namespacedEmbed := EmbedStmt{
+			Kind:             embedStmt.Kind,
+			Name:             fullName,
+			EmbeddedFilePath: embedStmt.EmbeddedFilePath,
+			Constant:         embedStmt.Constant,
+			TypeHint:         embedStmt.TypeHint,
+		}
+
+		c.compileEmbedStatement(namespacedEmbed)
+	}
+
 	c.currentNamespaceFunctions = oldNamespaceFunctions
 	c.currentNamespaceVariables = oldNamespaceVariables
 	c.currentNamespaceClasses = oldNamespaceClasses
 	c.currentNamespaceEnums = oldNamespaceEnums
+	c.currentNamespaceInterfaces = oldNamespaceInterfaces
+	c.currentNamespaceEmbeds = oldNamespaceEmbeds
 	c.isCompilingNamespace = oldIsCompilingNamespace
 
 	// 10. Create namespace object.
@@ -905,6 +1051,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		c.emit(OP_STORE_GLOBAL, VariableInfo{
 			Name:     binding.Name,
 			Constant: true,
+			Slot:     binding.Slot,
 		})
 	}
 }
@@ -929,7 +1076,7 @@ func (c *Compiler) compileMatchStatement(stmt MatchStmt) {
 		})
 	} else {
 		c.emit(OP_STORE_GLOBAL, VariableInfo{
-			Name:     tempBinding.Name,
+			Slot:     tempBinding.Slot,
 			Constant: true,
 		})
 	}
@@ -941,7 +1088,10 @@ func (c *Compiler) compileMatchStatement(stmt MatchStmt) {
 		if tempBinding.Kind == BindingLocal {
 			c.emit(OP_LOAD_LOCAL, tempBinding.Slot)
 		} else {
-			c.emit(OP_LOAD_GLOBAL, tempBinding.Name)
+			c.emit(OP_LOAD_GLOBAL, VariableInfo{
+				Name: tempBinding.Name,
+				Slot: tempBinding.Slot,
+			})
 		}
 
 		// load case value
@@ -987,6 +1137,7 @@ func (c *Compiler) emitStoreBinding(binding Binding, name string, constant bool,
 		Name:     binding.Name,
 		Constant: constant,
 		TypeHint: typeHint,
+		Slot:     binding.Slot,
 	})
 }
 
@@ -996,7 +1147,10 @@ func (c *Compiler) emitLoadBinding(binding Binding) {
 		return
 	}
 
-	c.emit(OP_LOAD_GLOBAL, binding.Name)
+	c.emit(OP_LOAD_GLOBAL, VariableInfo{
+		Name: binding.Name,
+		Slot: binding.Slot,
+	})
 }
 
 func (c *Compiler) emitAssignBinding(binding Binding) {
@@ -1005,7 +1159,10 @@ func (c *Compiler) emitAssignBinding(binding Binding) {
 		return
 	}
 
-	c.emit(OP_ASSIGN_GLOBAL, binding.Name)
+	c.emit(OP_ASSIGN_GLOBAL, VariableInfo{
+		Name: binding.Name,
+		Slot: binding.Slot,
+	})
 }
 
 func (c *Compiler) compileForInStatement(stmt ForInStmt) {
@@ -1106,6 +1263,7 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 				Name:     binding.Name,
 				Constant: s.Constant,
 				TypeHint: s.TypeHint,
+				Slot:     binding.Slot,
 			})
 		}
 
@@ -1205,7 +1363,10 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 			if binding.Kind == BindingLocal {
 				c.emit(OP_ASSIGN_LOCAL, binding.Slot)
 			} else {
-				c.emit(OP_ASSIGN_GLOBAL, binding.Name)
+				c.emit(OP_ASSIGN_GLOBAL, VariableInfo{
+					Name: binding.Name,
+					Slot: binding.Slot,
+				})
 			}
 			return
 		}
@@ -1242,7 +1403,10 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 
 		if c.currentNamespaceVariables != nil {
 			if fullName, exists := c.currentNamespaceVariables[s.Name]; exists {
-				c.emit(OP_ASSIGN_GLOBAL, fullName)
+				c.emit(OP_ASSIGN_GLOBAL, VariableInfo{
+					Name: fullName,
+					Slot: c.globalIndexes[fullName],
+				})
 				return
 			}
 		}
@@ -1251,7 +1415,7 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 			LangErrorAt(ErrorName, c.currentFile, c.currentLine, c.currentColumn, "undefined variable in namespace: %s", s.Name)
 		}
 
-		c.emit(OP_ASSIGN_GLOBAL, s.Name)
+		c.emit(OP_ASSIGN_GLOBAL, c.globalIndexes[s.Name])
 
 	case IndexAssignStmt:
 		c.compileExpr(s.Object)
@@ -1287,6 +1451,20 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 
 	case ReturnStmt:
 		c.setLocation(s.File, s.Line, s.Column)
+
+		if !c.currentReturnType.IsEmpty() && c.currentReturnType.Name != "any" {
+			returnedType := "undefined"
+			if s.HasValue {
+				returnedType = c.inferCompileTimeType(s.Value)
+			}
+
+			if returnedType != "any" {
+				if !c.compareCompileTimeTypes(returnedType, c.currentReturnType.Name) {
+					c.fatalError(ErrorType, "cannot return %s from function '%s' (expected %s)", returnedType, c.currentFunctionName, c.currentReturnType.Name)
+				}
+			}
+		}
+
 		if s.HasValue {
 			c.compileExpr(s.Value)
 		} else {
@@ -1317,6 +1495,14 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 		c.setLocation(s.File, s.Line, s.Column)
 		c.compileIfStatement(s)
 
+	case InterfaceStmt:
+		c.setLocation(s.File, s.Line, s.Column)
+		c.compileInterfaceStatement(s)
+
+	case EmbedStmt:
+		c.setLocation(s.File, s.Line, s.Column)
+		c.compileEmbedStatement(s)
+
 	case LockStmt:
 		c.setLocation(s.File, s.Line, s.Column)
 		c.compileLockStmt(s)
@@ -1343,8 +1529,11 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 	case FieldStmt:
 		return
 
+	case ExportStmt:
+		c.compileStatement(s.Inner)
+
 	default:
-		c.fatalError(ErrorInternal, "unknown statement")
+		c.fatalError(ErrorInternal, "unknown statement: %T", stmt)
 	}
 }
 
@@ -1377,6 +1566,7 @@ func (c *Compiler) compileEnum(stmt EnumStmt) {
 		c.emit(OP_STORE_GLOBAL, VariableInfo{
 			Name:     binding.Name,
 			Constant: true,
+			Slot:     binding.Slot,
 		})
 	}
 }
@@ -1404,6 +1594,7 @@ func (c *Compiler) storeImportedAlias(name string, constant bool) {
 	c.emit(OP_STORE_GLOBAL, VariableInfo{
 		Name:     binding.Name,
 		Constant: constant,
+		Slot:     binding.Slot,
 	})
 }
 
@@ -1490,6 +1681,7 @@ func (c *Compiler) compileTryCatchStatement(stmt TryCatchStmt) {
 	} else {
 		info.IsLocal = false
 		info.Name = binding.Name
+		info.Slot = binding.Slot // <-- ADD THIS LINE! [22]
 	}
 
 	info.CatchIP = catchStart
@@ -1668,6 +1860,10 @@ func (c *Compiler) compileClass(stmt ClassStmt) {
 		c.fatalError(ErrorName, "class already defined: %s", stmt.Name)
 	}
 
+	if interfaceName, exists := c.interfaces[stmt.Name]; exists {
+		c.fatalError(ErrorName, "class %s has the same name as interface %s", stmt.Name, interfaceName.Name)
+	}
+
 	methods := map[string]string{}
 	privateMethods := map[string]bool{}
 	fields := []ClassField{}
@@ -1679,6 +1875,8 @@ func (c *Compiler) compileClass(stmt ClassStmt) {
 		if method.Private {
 			privateMethods[method.Name] = true
 		}
+
+		c.usedFunctions[compiledName] = true
 
 		classMethod := FunctionStmt{
 			Name:    method.Name,
@@ -1702,7 +1900,7 @@ func (c *Compiler) compileClass(stmt ClassStmt) {
 
 		fields = append(fields, classField)
 
-		if !CheckTypeHint(c.evalConstantExpr(field.Value, "class field default must be constant."), field.TypeHint) {
+		if ok, _ := CheckTypeHint(c.evalConstantExpr(field.Value, "class field default must be constant."), field.TypeHint, c.interfaces); !ok {
 			c.fatalError(
 				ErrorType,
 				"field %s in class '%s' expected %s, got %s",
@@ -1808,6 +2006,56 @@ func (c *Compiler) compileLockStmt(stmt LockStmt) {
 	c.emit(OP_UNLOCK_MUTEX, nil)
 }
 
+func (c *Compiler) compileEmbedStatement(stmt EmbedStmt) {
+	content, err := os.ReadFile(stmt.EmbeddedFilePath)
+	if err != nil {
+		c.fatalError(ErrorImport, "could not embed file '%s': %s", filepath.Base(stmt.EmbeddedFilePath), err)
+	}
+
+	if stmt.Kind == EmbedStr {
+		c.emit(OP_CONST, string(content))
+	} else {
+		c.emit(OP_CONST, &BufferValue{
+			Bytes: content,
+		})
+	}
+
+	binding := c.declareVariable(stmt.Name, stmt.Constant)
+
+	c.setLocation(stmt.File, stmt.Line, stmt.Column)
+
+	if binding.Kind == BindingLocal {
+		c.emit(OP_STORE_LOCAL, VariableInfo{
+			Name:     stmt.Name,
+			Slot:     binding.Slot,
+			Constant: stmt.Constant,
+			TypeHint: stmt.TypeHint,
+		})
+	} else {
+		c.emit(OP_STORE_GLOBAL, VariableInfo{
+			Name:     binding.Name,
+			Constant: stmt.Constant,
+			TypeHint: stmt.TypeHint,
+			Slot:     binding.Slot,
+		})
+	}
+}
+
+func (c *Compiler) compileInterfaceStatement(stmt InterfaceStmt) {
+	if _, exists := c.interfaces[stmt.Name]; exists {
+		c.fatalError(ErrorName, "interface already defined: %s", stmt.Name)
+	}
+
+	if className, exists := c.classes[stmt.Name]; exists {
+		c.fatalError(ErrorName, "interface %s has the same name as class %s", stmt.Name, className.Name)
+	}
+
+	c.interfaces[stmt.Name] = Interface{
+		Name:   stmt.Name,
+		Fields: stmt.Fields,
+	}
+}
+
 func (c *Compiler) compileIfStatement(stmt IfStmt) {
 	c.compileExpr(stmt.Condition)
 
@@ -1859,6 +2107,17 @@ func (c *Compiler) compileFunction(stmt FunctionStmt) {
 	c.inMethod = false
 	c.outerBindings = nil
 	c.currentCaptures = nil
+
+	oldReturnType := c.currentReturnType
+	oldFunctionName := c.currentFunctionName
+
+	c.currentReturnType = stmt.ReturnType
+	c.currentFunctionName = stmt.Name
+
+	defer func() {
+		c.currentReturnType = oldReturnType
+		c.currentFunctionName = oldFunctionName
+	}()
 
 	c.beginScope()
 
@@ -1970,6 +2229,7 @@ func (c *Compiler) emitIncrementForName(name string, intAmount int, floatAmount 
 			c.emit(OP_INC_LOCAL, info)
 		} else {
 			info.Name = binding.Name
+			info.Slot = binding.Slot
 			c.emit(OP_INC_GLOBAL, info)
 		}
 		return
@@ -2151,6 +2411,8 @@ func (c *Compiler) compileExpr(expr Expr) {
 		c.outerBindings = oldOuterBindings
 		c.currentCaptures = oldCurrentCaptures
 
+		c.usedFunctions[name] = true
+
 		c.emit(OP_CLOSURE, ClosureInfo{
 			Name:     name,
 			Captures: captures,
@@ -2247,16 +2509,21 @@ func (c *Compiler) compileExpr(expr Expr) {
 			if binding.Kind == BindingLocal {
 				c.emit(OP_LOAD_LOCAL, binding.Slot)
 			} else {
-				c.emit(OP_LOAD_GLOBAL, binding.Name)
+				c.emit(OP_LOAD_GLOBAL, VariableInfo{
+					Name: binding.Name,
+					Slot: binding.Slot,
+				})
 			}
-
 			return
 		}
 
 		// 2. Namespace symbols.
 		if c.currentNamespaceEnums != nil {
 			if fullName, exists := c.currentNamespaceEnums[e.Name]; exists {
-				c.emit(OP_LOAD_GLOBAL, fullName)
+				c.emit(OP_LOAD_GLOBAL, VariableInfo{
+					Name: fullName,
+					Slot: c.globalIndexes[fullName],
+				})
 				return
 			}
 		}
@@ -2277,7 +2544,10 @@ func (c *Compiler) compileExpr(expr Expr) {
 
 		if c.currentNamespaceVariables != nil {
 			if fullName, exists := c.currentNamespaceVariables[e.Name]; exists {
-				c.emit(OP_LOAD_GLOBAL, fullName)
+				c.emit(OP_LOAD_GLOBAL, VariableInfo{
+					Name: fullName,
+					Slot: c.globalIndexes[fullName],
+				})
 				return
 			}
 		}
@@ -2292,6 +2562,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 
 		// 4. Known global function.
 		if _, exists := c.functions[e.Name]; exists {
+			c.usedFunctions[e.Name] = true
 			c.emit(OP_CONST, FunctionValue{Name: e.Name})
 			return
 		}
@@ -2308,19 +2579,26 @@ func (c *Compiler) compileExpr(expr Expr) {
 		}
 
 		if c.declaredFunctions[e.Name] {
-			c.emit(OP_LOAD_GLOBAL, e.Name)
+			c.usedFunctions[e.Name] = true
+			c.emit(OP_CONST, FunctionValue{Name: e.Name})
 			return
 		}
 
 		// 4. classes
 		if _, ok := c.classes[e.Name]; ok {
-			c.emit(OP_LOAD_GLOBAL, e.Name)
+			c.emit(OP_LOAD_GLOBAL, VariableInfo{
+				Name: e.Name,
+				Slot: c.globalIndexes[e.Name],
+			})
 			return
 		}
 
 		// 5. known global variables/imports
 		if _, ok := c.globalConstants[e.Name]; ok {
-			c.emit(OP_LOAD_GLOBAL, e.Name)
+			c.emit(OP_LOAD_GLOBAL, VariableInfo{
+				Name: e.Name,
+				Slot: c.globalIndexes[e.Name],
+			})
 			return
 		}
 
@@ -2334,7 +2612,10 @@ func (c *Compiler) compileExpr(expr Expr) {
 		)
 
 		// 7. Fallback global
-		c.emit(OP_LOAD_GLOBAL, e.Name)
+		c.emit(OP_LOAD_GLOBAL, VariableInfo{
+			Name: e.Name,
+			Slot: c.globalIndexes[e.Name],
+		})
 		return
 
 	case BinaryExpr:
@@ -2405,9 +2686,15 @@ func (c *Compiler) compileExpr(expr Expr) {
 		}
 
 		if c.declaredFunctions[e.Name] {
+			fn := c.functions[e.Name]
+
+			c.checkCompileTimeArguments(e.Name, e.Args, fn.Params, e.Line, e.Column)
+
 			for _, arg := range e.Args {
 				c.compileExpr(arg)
 			}
+
+			c.usedFunctions[e.Name] = true
 
 			c.setLocation(e.File, e.Line, e.Column)
 
@@ -2425,6 +2712,8 @@ func (c *Compiler) compileExpr(expr Expr) {
 				for _, arg := range e.Args {
 					c.compileExpr(arg)
 				}
+
+				c.usedFunctions[fullName] = true
 
 				c.setLocation(e.File, e.Line, e.Column)
 
@@ -2482,6 +2771,8 @@ func (c *Compiler) compileExpr(expr Expr) {
 
 					c.setLocation(ident.File, ident.Line, ident.Column)
 
+					c.usedFunctions[fullName] = true
+
 					c.emit(OP_CALL_DIRECT, DirectCallInfo{
 						ID:       c.getFunctionID(fullName),
 						Name:     fullName,
@@ -2492,7 +2783,11 @@ func (c *Compiler) compileExpr(expr Expr) {
 				}
 			}
 
-			if _, exists := c.functions[ident.Name]; exists {
+			if fn, exists := c.functions[ident.Name]; exists {
+				c.checkCompileTimeArguments(ident.Name, e.Args, fn.Params, e.Line, e.Column)
+
+				c.usedFunctions[ident.Name] = true
+
 				for _, arg := range e.Args {
 					c.compileExpr(arg)
 				}
@@ -2558,6 +2853,15 @@ func (c *Compiler) compileExpr(expr Expr) {
 			c.compileExpr(arg)
 		}
 
+		ident, ok := e.Object.(IdentExpr)
+
+		if ok {
+			_, ok := c.functions[ident.Name+"."+e.Method]
+			if ok {
+				c.usedFunctions[ident.Name+"."+e.Method] = true
+			}
+		}
+
 		c.setLocation(e.File, e.Line, e.Column)
 
 		if e.Safe {
@@ -2618,6 +2922,17 @@ func (c *Compiler) compileMethod(className string, stmt FunctionStmt) {
 	c.inMethod = true
 	c.outerBindings = nil
 	c.currentCaptures = nil
+
+	oldReturnType := c.currentReturnType
+	oldFunctionName := c.currentFunctionName
+
+	c.currentReturnType = stmt.ReturnType
+	c.currentFunctionName = stmt.Name
+
+	defer func() {
+		c.currentReturnType = oldReturnType
+		c.currentFunctionName = oldFunctionName
+	}()
 
 	c.beginScope()
 
@@ -2700,4 +3015,67 @@ func (c *Compiler) patchJump(index int) {
 	target := len(*c.currentInstructions)
 	(*c.currentInstructions)[index].Value = target
 	(*c.currentInstructions)[index].IntArg = target
+}
+
+func (c *Compiler) inferCompileTimeType(expr Expr) string {
+	switch expr.(type) {
+	case StringExpr, InterpolatedStringExpr:
+		return "string"
+	case NumberExpr, FloatExpr:
+		return "number"
+	case BoolExpr:
+		return "bool"
+	case NullExpr:
+		return "null"
+	case UndefinedExpr:
+		return "undefined"
+	case ArrayExpr:
+		return "array"
+	case ObjectExpr:
+		return "object"
+	default:
+		return "any"
+	}
+}
+
+func (c *Compiler) compareCompileTimeTypes(got string, expected string) bool {
+	if expected == "any" || got == "any" {
+		return true
+	}
+
+	expectedParts := strings.Split(expected, "|")
+	for _, part := range expectedParts {
+		part = strings.TrimSpace(part)
+		if got == part {
+			return true
+		}
+
+		if part == "object" && (strings.HasPrefix(got, "class:") || strings.HasPrefix(got, "interface:") || got == "object") {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Compiler) checkCompileTimeArguments(fnName string, args []Expr, params []Param, line int, col int) {
+	for i, arg := range args {
+		if i >= len(params) {
+			break
+		}
+
+		param := params[i]
+		if param.TypeHint.IsEmpty() || param.TypeHint.Name == "any" {
+			continue
+		}
+
+		argType := c.inferCompileTimeType(arg)
+		if argType == "any" {
+			continue
+		}
+
+		if !c.compareCompileTimeTypes(argType, param.TypeHint.Name) {
+			c.setLocation(c.currentFile, line, col)
+			c.fatalError(ErrorType, "cannot pass %s to parameter '%s' of function '%s' (expected %s)", argType, param.Name, fnName, param.TypeHint.Name)
+		}
+	}
 }

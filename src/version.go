@@ -2,9 +2,9 @@ package main
 
 import "fmt"
 
-const TinyVersion = "0.1.4"
-const BytecodeCacheVersion = 13
+const TinyVersion = "0.1.5"
+const BytecodeCacheVersion = 14
 
 func versionCommand() {
-	fmt.Printf("Tiny Version: %s\n", TinyVersion)
+	fmt.Printf("Tiny Version: %s\nBytecode Version: %d\n", TinyVersion, BytecodeCacheVersion)
 }

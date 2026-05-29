@@ -36,6 +36,12 @@ var bufferNativeMetadata = NativeTypeInfo{
 			Returns:     "bool",
 			Description: "Sets the unsigned 8-bit integer at the specified offset.",
 		},
+		"string": {
+			Name:        "string",
+			Args:        []StdArg{},
+			Returns:     "string",
+			Description: "Turns the bytes into a string and returns it.",
+		},
 	},
 }
 
@@ -47,6 +53,7 @@ func init() {
 		"length": bufferLength,
 		"getU8":  bufferGetU8,
 		"setU8":  bufferSetU8,
+		"string": bufferString,
 	}
 
 	registerNativeType(bufferNativeMetadata)
@@ -120,4 +127,10 @@ func bufferSetU8(vm *VM, buffer *BufferValue, args []Value) {
 	buffer.Bytes[offset] = byte(value)
 
 	vm.push(NewNative(true))
+}
+
+func bufferString(vm *VM, buffer *BufferValue, args []Value) {
+	dontExpectArgs(vm, "buffer.string", args)
+
+	vm.push(NewNative(string(buffer.Bytes)))
 }

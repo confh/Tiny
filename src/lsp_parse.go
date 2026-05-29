@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"strings"
 
 	. "language.com/src/tinyerrors"
 	. "language.com/src/vm"
@@ -72,23 +71,4 @@ func maxInt(a int, b int) int {
 	}
 
 	return b
-}
-
-func lineEndCharacter(text string, line int, column int) int {
-	lines := strings.Split(text, "\n")
-
-	if line < 0 || line >= len(lines) {
-		return column + 1
-	}
-
-	end := column + 1
-	if end > len(lines[line]) {
-		end = len(lines[line])
-	}
-
-	if end < column {
-		end = column
-	}
-
-	return end
 }

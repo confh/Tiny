@@ -1,6 +1,8 @@
 package vm
 
 import (
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -173,7 +175,8 @@ func (p *Parser) parseTypeName() string {
 			p.current.File,
 			p.current.Line,
 			p.current.Column,
-			"expected type name",
+			"expected type name, got %s",
+			p.current.Type,
 		)
 	}
 
@@ -198,6 +201,47 @@ func (p *Parser) parseTypeName() string {
 	}
 
 	return name
+}
+
+func (p *Parser) parseTypeHint(nullable bool) TypeHint {
+	p.expect(TOKEN_COLON)
+
+	types := []string{}
+
+	for {
+		types = append(types, p.parseTypeName())
+
+		if p.current.Type != TOKEN_PIPE {
+			break
+		}
+
+		p.advance()
+	}
+
+	if len(types) == 1 {
+		if nullable {
+			types = append(types, "null")
+			types = append(types, "undefined")
+
+			return TypeHint{
+				Name:  strings.Join(types, " | "),
+				Types: types,
+			}
+		} else {
+			return TypeHint{Name: types[0]}
+		}
+
+	}
+
+	if nullable {
+		types = append(types, "null")
+		types = append(types, "undefined")
+	}
+
+	return TypeHint{
+		Name:  strings.Join(types, " | "),
+		Types: types,
+	}
 }
 
 func (p *Parser) parseOptionalTypeHint() TypeHint {
@@ -574,6 +618,12 @@ func (p *Parser) parseStatement() Stmt {
 		return p.parseAsyncStmt()
 	case TOKEN_RETURN:
 		return p.parseReturnStatement()
+	case TOKEN_INTERFACE:
+		return p.parseInterfaceStatement()
+	case TOKEN_EMBED_STR:
+		return p.parseEmbedStrStatement()
+	case TOKEN_EMBED_BIN:
+		return p.parseEmbedBinStatement()
 	case TOKEN_IF:
 		return p.parseIfStatement()
 	case TOKEN_WHILE:
@@ -694,13 +744,22 @@ func (p *Parser) parseExportStatement() Stmt {
 	case TOKEN_ENUM:
 		return ExportStmt{Inner: p.parseEnumStatement()}
 
+	case TOKEN_INTERFACE:
+		return ExportStmt{Inner: p.parseInterfaceStatement()}
+
+	case TOKEN_EMBED_STR:
+		return ExportStmt{Inner: p.parseEmbedStrStatement()}
+
+	case TOKEN_EMBED_BIN:
+		return ExportStmt{Inner: p.parseEmbedBinStatement()}
+
 	default:
 		LangErrorAt(
 			ErrorSyntax,
 			p.current.File,
 			p.current.Line,
 			p.current.Column,
-			"expected const, let, fn, class, or enum after export",
+			"expected const, let, fn, class, embedbin, embedstr, interface, or enum after export",
 		)
 	}
 
@@ -1086,6 +1145,149 @@ func (p *Parser) parseLockStatement() Stmt {
 	return LockStmt{
 		Mutex:  value,
 		Block:  block,
+		File:   file,
+		Line:   line,
+		Column: column,
+	}
+}
+
+func (p *Parser) parseEmbedStrStatement() Stmt {
+	file := p.current.File
+	line := p.current.Line
+	column := p.current.Column
+
+	p.expect(TOKEN_EMBED_STR)
+
+	pathExpr := p.parseExpression()
+
+	path, ok := pathExpr.(StringExpr)
+	if !ok {
+		LangErrorAt(ErrorSyntax, file, line, column, "embedstr expected string, got %T", pathExpr)
+	}
+
+	constant := false
+
+	switch p.current.Type {
+	case TOKEN_CONST:
+		p.advance()
+		constant = true
+	case TOKEN_LET:
+		p.advance()
+	default:
+		LangErrorAt(ErrorSyntax, file, line, column, "embedstr expected const or let after path, got %s", p.current.Type)
+	}
+
+	name := p.current.Literal
+	p.expect(TOKEN_IDENT)
+
+	combinedPath := filepath.Join(filepath.Dir(file), path.Value)
+
+	absPath, err := filepath.Abs(combinedPath)
+
+	_, err = os.Stat(absPath)
+	if err != nil {
+		LangErrorAt(ErrorSyntax, file, line, column, "could not embed file '%s': %s", filepath.Base(absPath), err)
+	}
+
+	return EmbedStmt{
+		Kind:             EmbedStr,
+		Name:             name,
+		EmbeddedFilePath: absPath,
+		Constant:         constant,
+		TypeHint:         TypeHint{Name: "string"},
+		File:             file,
+		Line:             line,
+		Column:           column,
+	}
+}
+
+func (p *Parser) parseEmbedBinStatement() Stmt {
+	file := p.current.File
+	line := p.current.Line
+	column := p.current.Column
+
+	p.expect(TOKEN_EMBED_BIN)
+
+	pathExpr := p.parseExpression()
+
+	path, ok := pathExpr.(StringExpr)
+	if !ok {
+		LangErrorAt(ErrorSyntax, file, line, column, "embedbin expected string, got %T", pathExpr)
+	}
+
+	constant := false
+
+	switch p.current.Type {
+	case TOKEN_CONST:
+		p.advance()
+		constant = true
+	case TOKEN_LET:
+		p.advance()
+	default:
+		LangErrorAt(ErrorSyntax, file, line, column, "embedbin expected const or let after path, got %s", p.current.Type)
+	}
+
+	name := p.current.Literal
+	p.expect(TOKEN_IDENT)
+
+	combinedPath := filepath.Join(filepath.Dir(file), path.Value)
+
+	absPath, err := filepath.Abs(combinedPath)
+
+	_, err = os.Stat(absPath)
+	if err != nil {
+		LangErrorAt(ErrorSyntax, file, line, column, "could not embed file '%s': %s", filepath.Base(absPath), err)
+	}
+
+	return EmbedStmt{
+		Kind:             EmbedBin,
+		Name:             name,
+		EmbeddedFilePath: absPath,
+		Constant:         constant,
+		TypeHint:         TypeHint{Name: "buffer"},
+		File:             file,
+		Line:             line,
+		Column:           column,
+	}
+}
+
+func (p *Parser) parseInterfaceStatement() Stmt {
+	file := p.current.File
+	line := p.current.Line
+	column := p.current.Column
+
+	p.expect(TOKEN_INTERFACE)
+
+	name := p.current.Literal
+	p.expect(TOKEN_IDENT)
+
+	p.expect(TOKEN_LBRACE)
+
+	fields := map[string]TypeHint{}
+
+	for p.current.Type != TOKEN_RBRACE && p.current.Type != TOKEN_EOF {
+		fieldName := p.current.Literal
+		p.expect(TOKEN_IDENT)
+
+		nullable := false
+		if p.current.Type == TOKEN_QUESTION {
+			p.advance()
+			nullable = true
+		}
+
+		typeHint := p.parseTypeHint(nullable)
+		fields[fieldName] = typeHint
+
+		if p.current.Type == TOKEN_COMMA || p.current.Type == TOKEN_SEMI {
+			p.advance()
+		}
+	}
+
+	p.expect(TOKEN_RBRACE)
+
+	return InterfaceStmt{
+		Name:   name,
+		Fields: fields,
 		File:   file,
 		Line:   line,
 		Column: column,
@@ -2233,14 +2435,8 @@ func (p *Parser) parseFunctionSignatureAndBody() ([]Param, TypeHint, []Stmt) {
 	returnType := TypeHint{}
 
 	if p.current.Type == TOKEN_COLON {
-		p.advance()
-
-		if p.current.Type != TOKEN_IDENT {
-			LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "expected return type after :")
-		}
-
-		returnType = TypeHint{Name: p.current.Literal}
-		p.advance()
+		returnType = p.parseTypeHint(false)
+		// p.advance()
 	}
 
 	body := p.parseBlock()

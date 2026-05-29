@@ -18,10 +18,12 @@ var bytecodeMagic = []byte{'T', 'B', 'C', 2}
 const bytecodeSourceLabel = "<tiny>"
 
 type BytecodeFile struct {
-	Version   int                             `json:"version"`
-	Main      []SerializableInstruction       `json:"main"`
-	Functions map[string]SerializableFunction `json:"functions"`
-	Classes   map[string]SerializableClass    `json:"classes"`
+	Version     int                              `json:"version"`
+	Main        []SerializableInstruction        `json:"main"`
+	Functions   map[string]SerializableFunction  `json:"functions"`
+	Classes     map[string]SerializableClass     `json:"classes"`
+	Interfaces  map[string]SerializableInterface `json:"interfaces"`
+	GlobalIndex map[string]int                   `json:"globalIndex"`
 }
 
 type SerializableParam struct {
@@ -43,6 +45,11 @@ type SerializableFunction struct {
 	Async        bool                      `json:"async"`
 	HasDefaults  bool                      `json:"hasDefaults"`
 	HasTypeHints bool                      `json:"hasTypeHints"`
+}
+
+type SerializableInterface struct {
+	Name   string              `json:"name"`
+	Fields map[string]TypeHint `json:"fields"`
 }
 
 type SerializableClassField struct {
@@ -135,16 +142,17 @@ func deserializeParams(params []SerializableParam) []Param {
 	return result
 }
 
-func SaveBytecode(path string, main []Instruction, functions map[string]Function, classes map[string]Class, cache bool) {
+func SaveBytecode(path string, main []Instruction, functions map[string]Function, classes map[string]Class, interfaces map[string]Interface, globalIndex map[string]int, cache bool) {
 	file := BytecodeFile{
-		Version:   BytecodeVersion,
-		Main:      serializeInstructions(main, cache),
-		Functions: map[string]SerializableFunction{},
-		Classes:   serializeClasses(classes),
+		Version:     BytecodeVersion,
+		Main:        serializeInstructions(main, cache),
+		Functions:   map[string]SerializableFunction{},
+		Interfaces:  map[string]SerializableInterface{},
+		Classes:     serializeClasses(classes),
+		GlobalIndex: globalIndex,
 	}
 
 	for name, fn := range functions {
-
 		file.Functions[name] = SerializableFunction{
 			ID:           fn.ID,
 			Name:         fn.Name,
@@ -156,6 +164,13 @@ func SaveBytecode(path string, main []Instruction, functions map[string]Function
 			HasDefaults:  fn.HasDefaults,
 			HasTypeHints: fn.HasTypeHints,
 			Async:        fn.Async,
+		}
+	}
+
+	for name, interfaceData := range interfaces {
+		file.Interfaces[name] = SerializableInterface{
+			Name:   interfaceData.Name,
+			Fields: interfaceData.Fields,
 		}
 	}
 
@@ -165,12 +180,14 @@ func SaveBytecode(path string, main []Instruction, functions map[string]Function
 	}
 }
 
-func SaveBytecodeToBytes(main []Instruction, functions map[string]Function, classes map[string]Class, cache bool) []byte {
+func SaveBytecodeToBytes(main []Instruction, functions map[string]Function, classes map[string]Class, interfaces map[string]Interface, globalIndex map[string]int, cache bool) []byte {
 	file := BytecodeFile{
-		Version:   BytecodeVersion,
-		Main:      serializeInstructions(main, cache),
-		Functions: map[string]SerializableFunction{},
-		Classes:   serializeClasses(classes),
+		Version:     BytecodeVersion,
+		Main:        serializeInstructions(main, cache),
+		Functions:   map[string]SerializableFunction{},
+		Interfaces:  map[string]SerializableInterface{},
+		Classes:     serializeClasses(classes),
+		GlobalIndex: globalIndex,
 	}
 
 	for name, fn := range functions {
@@ -188,10 +205,17 @@ func SaveBytecodeToBytes(main []Instruction, functions map[string]Function, clas
 		}
 	}
 
+	for name, interfaceData := range interfaces {
+		file.Interfaces[name] = SerializableInterface{
+			Name:   interfaceData.Name,
+			Fields: interfaceData.Fields,
+		}
+	}
+
 	return encodeBytecodeFile(file)
 }
 
-func LoadBytecode(path string) ([]Instruction, map[string]Function, map[string]Class) {
+func LoadBytecode(path string) ([]Instruction, map[string]Function, map[string]Class, map[string]Interface, map[string]int) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		LangError(ErrorRuntime, "failed to read bytecode file: %v", err)
@@ -200,7 +224,7 @@ func LoadBytecode(path string) ([]Instruction, map[string]Function, map[string]C
 	return LoadBytecodeFromBytes(data)
 }
 
-func LoadBytecodeFromBytes(data []byte) ([]Instruction, map[string]Function, map[string]Class) {
+func LoadBytecodeFromBytes(data []byte) ([]Instruction, map[string]Function, map[string]Class, map[string]Interface, map[string]int) {
 	var file BytecodeFile
 
 	decodeBytecodeFile(data, &file)
@@ -212,6 +236,7 @@ func LoadBytecodeFromBytes(data []byte) ([]Instruction, map[string]Function, map
 	main := deserializeInstructions(file.Main)
 
 	functions := map[string]Function{}
+	interfaces := map[string]Interface{}
 
 	for name, fn := range file.Functions {
 		functions[name] = Function{
@@ -228,7 +253,14 @@ func LoadBytecodeFromBytes(data []byte) ([]Instruction, map[string]Function, map
 		}
 	}
 
-	return main, functions, deserializeClasses(file.Classes)
+	for name, interfaceData := range file.Interfaces {
+		interfaces[name] = Interface{
+			Name:   interfaceData.Name,
+			Fields: interfaceData.Fields,
+		}
+	}
+
+	return main, functions, deserializeClasses(file.Classes), interfaces, file.GlobalIndex
 }
 
 func encodeBytecodeFile(file BytecodeFile) []byte {
@@ -388,7 +420,8 @@ func EncodeValue(value any) EncodedValue {
 		return EncodedValue{Type: "float", Data: v}
 
 	case string:
-		return EncodedValue{Type: "string", Data: v}
+		obfuscated := xor([]byte(v), 0x5A)
+		return EncodedValue{Type: "string", Data: obfuscated}
 
 	case bool:
 		return EncodedValue{Type: "bool", Data: v}
@@ -553,6 +586,13 @@ func EncodeValue(value any) EncodedValue {
 			Data: v,
 		}
 
+	case *BufferValue:
+		obfuscatedBytes := xor(v.Bytes, 0x5A)
+		return EncodedValue{
+			Type: "bufferValue",
+			Data: BufferValue{Bytes: obfuscatedBytes},
+		}
+
 	case ObjectValue:
 		members := map[string]EncodedValue{}
 
@@ -586,7 +626,11 @@ func DecodeValue(value EncodedValue) any {
 		return toFloat64(value.Data)
 
 	case "string":
-		return value.Data.(string)
+		var obfuscated []byte
+		decodeInto(value.Data, &obfuscated)
+
+		original := xor(obfuscated, 0x5A)
+		return string(original)
 
 	case "bool":
 		return value.Data.(bool)
@@ -695,6 +739,13 @@ func DecodeValue(value EncodedValue) any {
 		var result *ArrayValue
 		decodeInto(value.Data, &result)
 		return result
+
+	case "bufferValue":
+		var result BufferValue
+		decodeInto(value.Data, &result)
+
+		result.Bytes = xor(result.Bytes, 0x5A)
+		return &result
 
 	case "arrayLocalMulConst":
 		var result ArrayLocalMulConstInfo
@@ -830,4 +881,12 @@ func toFloat64(value any) float64 {
 
 	LangError(ErrorRuntime, "expected bytecode number, got %T", value)
 	return 0
+}
+
+func xor(data []byte, key byte) []byte {
+	result := make([]byte, len(data))
+	for i := range data {
+		result[i] = data[i] ^ key
+	}
+	return result
 }

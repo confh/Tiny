@@ -15,7 +15,7 @@ var stdIOMetadata = StdModuleInfo{
 		"print": {
 			Name: "print",
 			Args: []StdArg{
-				{Name: "value", Type: "any", Optional: true},
+				{Name: "value", Type: "any", Variadic: true},
 			},
 			Returns:     "bool",
 			Description: "Prints a value.",
@@ -23,7 +23,7 @@ var stdIOMetadata = StdModuleInfo{
 		"println": {
 			Name: "println",
 			Args: []StdArg{
-				{Name: "value", Type: "any", Optional: true},
+				{Name: "value", Type: "any", Variadic: true},
 			},
 			Returns:     "bool",
 			Description: "Prints a value with a newline.",

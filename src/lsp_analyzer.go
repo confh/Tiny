@@ -1,10 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -17,6 +19,7 @@ const (
 	SymbolVariable  SymbolKind = "variable"
 	SymbolFunction  SymbolKind = "function"
 	SymbolClass     SymbolKind = "class"
+	SymbolInterface SymbolKind = "interface"
 	SymbolStd       SymbolKind = "std"
 	SymbolNamespace SymbolKind = "namespace"
 	SymbolField     SymbolKind = "field"
@@ -94,6 +97,11 @@ var fileImportRegex = regexp.MustCompile(`(?m)import\s+"([^"]+)"(?:\s+as\s+([A-Z
 var catchVarRegex = regexp.MustCompile(`(?m)\bcatch\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{`)
 var enumLineRegex = regexp.MustCompile(`(?m)^(?:export\s+)?enum\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{([^}]*)\}`)
 var exportedEnumBlockRegex = regexp.MustCompile(`(?s)\bexport\s+enum\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{(.*?)\}`)
+var interfaceLineRegex = regexp.MustCompile(`(?m)^(?:export\s+)?interface\s+([A-Za-z_][A-Za-z0-9_]*)`)
+var interfaceFieldRegex = regexp.MustCompile(`^\s*([A-Za-z_][A-Za-z0-9_]*\??)\s*:\s*([^;\r\n]+)`)
+var embedLineRegex = regexp.MustCompile(
+	`(?m)^(embedstr|embedbin)\s+"([^"]+)"\s+(?:let|const)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:;|\r?$)`,
+)
 
 type blockInfo struct {
 	Kind       string
@@ -169,6 +177,29 @@ func scanCatchVariables(scope *Scope, text string, pos Position, uri string) {
 			SourceURI: uri,
 		})
 	}
+}
+
+func resolveInterfaceSymbol(scope *Scope, ifaceName string) (SymbolInfo, bool) {
+	ifaceName = strings.TrimSpace(ifaceName)
+
+	if strings.Contains(ifaceName, ".") {
+		parts := strings.SplitN(ifaceName, ".", 2)
+		nsName := parts[0]
+		memberName := parts[1]
+
+		ns, ok := scope.Resolve(nsName)
+		if ok && ns.Kind == SymbolNamespace {
+			member, ok := ns.Members[memberName]
+			if ok && member.Kind == SymbolInterface {
+				return member, true
+			}
+		}
+	}
+
+	if sym, ok := scope.Resolve(ifaceName); ok && sym.Kind == SymbolInterface {
+		return sym, true
+	}
+	return SymbolInfo{}, false
 }
 
 func resolveClassSymbol(scope *Scope, className string) (SymbolInfo, bool) {
@@ -343,57 +374,6 @@ func makeRangeDiagnostic(line int, start int, end int, severity int, message str
 	}
 }
 
-func stripStringsAndComments(line string) string {
-	var out strings.Builder
-
-	inString := byte(0)
-	escaped := false
-
-	for i := 0; i < len(line); i++ {
-		ch := line[i]
-
-		if inString != 0 {
-			if escaped {
-				escaped = false
-				out.WriteByte(' ')
-				continue
-			}
-
-			if ch == '\\' {
-				escaped = true
-				out.WriteByte(' ')
-				continue
-			}
-
-			if ch == inString {
-				inString = 0
-				out.WriteByte(' ')
-				continue
-			}
-
-			out.WriteByte(' ')
-			continue
-		}
-
-		if i+1 < len(line) && ch == '/' && line[i+1] == '/' {
-			for ; i < len(line); i++ {
-				out.WriteByte(' ')
-			}
-			break
-		}
-
-		if ch == '"' || ch == '\'' || ch == '`' {
-			inString = ch
-			out.WriteByte(' ')
-			continue
-		}
-
-		out.WriteByte(ch)
-	}
-
-	return out.String()
-}
-
 func uriToPath(uri string) string {
 	parsed, err := url.Parse(uri)
 	if err != nil {
@@ -473,6 +453,7 @@ func fallbackScopeAtPosition(uri string, text string, pos Position) *Scope {
 
 		scanEnumLine(scope, line, lineIndex+1, uri)
 		scanClassLine(scope, line, lineIndex+1, uri)
+		scanInterfaceLine(scope, line, lineIndex+1, uri)
 
 		lineOffset := offsetAtLine(text, lineIndex+1)
 		insideClass := blockInsideAny(lineOffset, classBlocks)
@@ -482,6 +463,7 @@ func fallbackScopeAtPosition(uri string, text string, pos Position) *Scope {
 		}
 	}
 
+	scanFullInterfaces(scope, text, maxLine, uri)
 	scanFullEnums(scope, text, maxLine, uri)
 	scanFullClasses(scope, text, maxLine, uri)
 	scanFullFunctions(scope, text, maxLine, uri)
@@ -496,6 +478,8 @@ func fallbackScopeAtPosition(uri string, text string, pos Position) *Scope {
 		}
 
 		scanVariableLine(scope, line, lineIndex+1, uri)
+		scanEmbedLine(scope, line, lineIndex+1, uri)
+
 		lineOffset := offsetAtLine(text, lineIndex+1)
 		if !blockInsideAny(lineOffset, classBlocks) {
 			scanFieldLine(scope, line, lineIndex+1, uri)
@@ -517,7 +501,115 @@ func fallbackScopeAtPosition(uri string, text string, pos Position) *Scope {
 		}
 	}
 
+	if ifLine, ok := findEnclosingIfBlock(text, pos); ok {
+		applyTypeNarrowing(scope, ifLine)
+	}
+
 	return scope
+}
+
+func findObjectTypeHintAtPosition(text string, pos Position) (string, bool) {
+	lines := strings.Split(text, "\n")
+	if pos.Line >= len(lines) {
+		return "", false
+	}
+
+	depth := 0
+
+	for i := pos.Line; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+
+		if strings.Contains(line, "}") {
+			depth--
+		}
+		if strings.Contains(line, "{") {
+			depth++
+		}
+
+		if depth > 0 && strings.Contains(line, ":") && strings.Contains(line, "=") {
+			match := regexp.MustCompile(`(?::\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*))\s*=`).FindStringSubmatch(line)
+			if match != nil {
+				return match[1], true
+			}
+		}
+	}
+	return "", false
+}
+
+func objectLiteralCompletions(scope *Scope, text string, pos Position) []CompletionItem {
+	if !isCursorInsideObjectLiteral(text, pos) {
+		return nil
+	}
+
+	typeName, ok := findObjectTypeHintAtPosition(text, pos)
+	if !ok {
+		typeName, ok = findFunctionArgumentTypeHint(scope, text, pos)
+		if !ok {
+			return nil
+		}
+	}
+
+	var sym SymbolInfo
+	var exists bool
+
+	if strings.Contains(typeName, ".") {
+		parts := strings.SplitN(typeName, ".", 2)
+		nsName := parts[0]
+		memberName := parts[1]
+
+		ns, ok := scope.Resolve(nsName)
+		if ok && ns.Kind == SymbolNamespace {
+			sym, exists = ns.Members[memberName]
+		}
+	} else {
+		sym, exists = scope.Resolve(typeName)
+	}
+
+	if !exists {
+		return nil
+	}
+
+	items := []CompletionItem{}
+
+	if sym.Kind == SymbolInterface {
+		names := make([]string, 0, len(sym.Fields))
+		for name := range sym.Fields {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+
+		for _, name := range names {
+			field := sym.Fields[name]
+			items = append(items, CompletionItem{
+				Label:            field.Name + ": ",
+				Kind:             5,
+				Detail:           "required interface field: " + field.Type,
+				InsertText:       field.Name + ": $0",
+				InsertTextFormat: 2,
+			})
+		}
+	}
+
+	if sym.Kind == SymbolClass {
+		names := make([]string, 0, len(sym.Fields))
+		for name := range sym.Fields {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+
+		for _, name := range names {
+			field := sym.Fields[name]
+			items = append(items, CompletionItem{
+				Label:            field.Name + ": ",
+				Kind:             5,
+				Detail:           "class field: " + field.Type,
+				InsertText:       field.Name + ": $0",
+				InsertTextFormat: 2,
+			})
+		}
+	}
+
+	return items
 }
 
 func cleanLine(line string) string {
@@ -625,6 +717,113 @@ func scanClassLine(scope *Scope, line string, lineNumber int, uri string) {
 	})
 }
 
+func scanInterfaceLine(scope *Scope, line string, lineNumber int, uri string) {
+	line = strings.TrimPrefix(line, "export ")
+	match := interfaceLineRegex.FindStringSubmatch(line)
+	if match == nil {
+		return
+	}
+
+	name := match[1]
+
+	scope.Define(SymbolInfo{
+		Name:      name,
+		Kind:      SymbolInterface,
+		Type:      "interface:" + name,
+		Detail:    "interface " + name,
+		Line:      lineNumber,
+		Column:    indexColumn(line, name),
+		SourceURI: uri,
+		Fields:    map[string]SymbolInfo{},
+	})
+}
+
+func scanFullInterfaces(scope *Scope, text string, maxLine int, uri string) {
+	interfaceBlocks := findBlocks(text, "interface")
+
+	for _, block := range interfaceBlocks {
+		if block.Line > maxLine+1 {
+			continue
+		}
+
+		existing, _ := scope.Resolve(block.Name)
+		existing.Name = block.Name
+		existing.Kind = SymbolInterface
+		existing.Type = "interface:" + block.Name
+		existing.Detail = "interface " + block.Name
+		existing.Line = block.Line
+		existing.Column = block.Column
+		existing.SourceURI = uri
+		if existing.Fields == nil {
+			existing.Fields = map[string]SymbolInfo{}
+		}
+		scope.Define(existing)
+	}
+
+	for _, block := range interfaceBlocks {
+		if block.Line > maxLine+1 {
+			continue
+		}
+
+		fields := scanInterfaceFields(scope, block.Body, uri, block.Line)
+
+		scope.Define(SymbolInfo{
+			Name:      block.Name,
+			Kind:      SymbolInterface,
+			Type:      "interface:" + block.Name,
+			Detail:    "interface " + block.Name,
+			Line:      block.Line,
+			Column:    block.Column,
+			SourceURI: uri,
+			Fields:    fields,
+		})
+	}
+}
+
+func scanInterfaceFields(scope *Scope, body string, uri string, baseLine int) map[string]SymbolInfo {
+	fields := map[string]SymbolInfo{}
+	lines := strings.Split(body, "\n")
+
+	for i, raw := range lines {
+		line := cleanLine(raw)
+		if line == "" {
+			continue
+		}
+
+		match := interfaceFieldRegex.FindStringSubmatch(line)
+		if match == nil {
+			continue
+		}
+
+		rawName := match[1]
+		typeHint := strings.TrimSpace(match[2])
+
+		isOptional := strings.HasSuffix(rawName, "?")
+		name := strings.TrimSuffix(rawName, "?")
+
+		typ := "any"
+		if typeHint != "" {
+			typ = normalizeLSPType(scope, typeHint)
+		}
+
+		if isOptional {
+			typ = appendNullableLSPType(typ)
+		}
+
+		fields[name] = SymbolInfo{
+			Name:      name,
+			Kind:      SymbolField,
+			Type:      typ,
+			Detail:    "interface field " + name,
+			Line:      baseLine + i,
+			Column:    indexColumn(raw, name),
+			SourceURI: uri,
+		}
+	}
+
+	return fields
+}
+
 func scanFullEnums(scope *Scope, text string, maxLine int, uri string) {
 	for _, block := range findBlocks(text, "enum") {
 		if block.Line-1 > maxLine {
@@ -701,6 +900,32 @@ func scanFieldLine(scope *Scope, line string, lineNumber int, uri string) {
 		Column:    indexColumn(line, name),
 		SourceURI: uri,
 		Fields:    fields,
+	})
+}
+
+func scanEmbedLine(scope *Scope, line string, lineNumber int, uri string) {
+	line = strings.TrimPrefix(line, "export ")
+	match := embedLineRegex.FindStringSubmatch(line)
+	if match == nil {
+		return
+	}
+
+	kind := match[1]
+	name := match[3]
+
+	typ := "string"
+	if kind == "embedbin" {
+		typ = "buffer"
+	}
+
+	scope.Define(SymbolInfo{
+		Name:      name,
+		Kind:      SymbolVariable,
+		Type:      typ,
+		Detail:    kind + " " + name,
+		Line:      lineNumber,
+		Column:    indexColumn(line, name),
+		SourceURI: uri,
 	})
 }
 
@@ -1771,6 +1996,7 @@ func parseFunctionParams(paramsText string) []StdArg {
 			Name:     name,
 			Type:     typ,
 			Optional: nullable,
+			Variadic: isVariadic,
 		})
 	}
 
@@ -1799,6 +2025,30 @@ func invalidateLSPImportCacheForURI(uri string) {
 
 	for key := range lspImportExportCache {
 		delete(lspImportExportCache, key)
+	}
+}
+
+func scanExportedInterfaces(scope *Scope, text string, exports map[string]SymbolInfo, uri string) {
+	for _, block := range findBlocks(text, "interface") {
+		if !hasExportBefore(text, block.Start) {
+			continue
+		}
+
+		fields := scanInterfaceFields(scope, block.Body, uri, block.Line)
+
+		sym := SymbolInfo{
+			Name:      block.Name,
+			Kind:      SymbolInterface,
+			Type:      "interface:" + block.Name,
+			Detail:    "export interface " + block.Name,
+			Line:      block.Line,
+			Column:    block.Column,
+			SourceURI: uri,
+			Fields:    fields,
+		}
+
+		exports[block.Name] = sym
+		scope.Define(sym)
 	}
 }
 
@@ -1845,12 +2095,14 @@ func loadTinyFileExports(path string, visited map[string]bool) map[string]Symbol
 	scanExportedEnums(scope, text, exports, uri)
 	scanExportedClasses(scope, text, exports, uri)
 	scanExportedFunctions(scope, text, exports, uri)
+	scanExportedInterfaces(scope, text, exports, uri)
 
 	for _, sym := range exports {
 		scope.Define(sym)
 	}
 
 	scanExportedVariables(scope, text, exports, uri)
+	scanExportedEmbeds(scope, text, exports, uri)
 
 	lspImportExportCache[cacheKey] = lspImportCacheEntry{
 		text:    text,
@@ -1891,8 +2143,33 @@ func collectExportsFromAST(scope *Scope, text string, exports map[string]SymbolI
 
 		switch s := stmt.(type) {
 		case ClassStmt:
-			sym := classSymbolFromStmt(scope, s, uri)
+			sym := classSymbolFromStmt(scope, s, uri, text)
 			exports[sym.Name] = sym
+			scope.Define(sym)
+
+		case InterfaceStmt:
+			sym := SymbolInfo{
+				Name:      s.Name,
+				Kind:      SymbolInterface,
+				Type:      "interface:" + s.Name,
+				Detail:    "interface " + s.Name,
+				Line:      s.Line,
+				Column:    s.Column,
+				SourceURI: uri,
+				Fields:    map[string]SymbolInfo{},
+			}
+
+			for fieldName, fieldHint := range s.Fields {
+				sym.Fields[fieldName] = SymbolInfo{
+					Name:      fieldName,
+					Kind:      SymbolField,
+					Type:      normalizeLSPType(scope, fieldHint.Name),
+					Detail:    "interface field " + fieldName,
+					Line:      s.Line,
+					SourceURI: uri,
+				}
+			}
+			exports[s.Name] = sym
 			scope.Define(sym)
 
 		case EnumStmt:
@@ -1915,13 +2192,33 @@ func collectExportsFromAST(scope *Scope, text string, exports map[string]SymbolI
 			exports[s.Name] = sym
 			scope.Define(sym)
 
+		case EmbedStmt:
+			typ := s.TypeHint.Name
+			if typ == "" {
+				typ = "string"
+			}
+			sym := SymbolInfo{
+				Name:      s.Name,
+				Kind:      SymbolVariable,
+				Type:      typ,
+				Detail:    "export variable " + s.Name,
+				Line:      s.Line,
+				Column:    s.Column,
+				SourceURI: uri,
+			}
+			exports[s.Name] = sym
+			scope.Define(sym)
+
 		case VariableStmt:
 			typ := "unknown"
 			fields := map[string]SymbolInfo(nil)
 			if !s.TypeHint.IsEmpty() {
 				typ = normalizeLSPType(scope, s.TypeHint.Name)
 			} else {
-				typ = inferExprType(scope, s.Value)
+				analyzer := &astSemanticAnalyzer{uri: uri, text: text, root: scope, scope: scope}
+
+				typ = analyzer.inferExprType(s.Value)
+
 				if typ == "object" {
 					fields = inferObjectFieldsFromText(scope, "", uri, s.Line)
 				}
@@ -1943,12 +2240,14 @@ func collectExportsFromAST(scope *Scope, text string, exports map[string]SymbolI
 	}
 }
 
-func classSymbolFromStmt(scope *Scope, cls ClassStmt, uri string) SymbolInfo {
+func classSymbolFromStmt(scope *Scope, cls ClassStmt, uri string, text string) SymbolInfo {
 	fields := map[string]SymbolInfo{}
 	for _, f := range cls.Fields {
 		typ := typeHintName(f.TypeHint, "any")
 		if typ == "any" && f.Value != nil {
-			typ = inferExprType(scope, f.Value)
+			analyzer := &astSemanticAnalyzer{uri: uri, text: text, root: scope, scope: scope}
+
+			typ = analyzer.inferExprType(f.Value)
 		} else {
 			typ = normalizeLSPType(scope, typ)
 		}
@@ -2352,6 +2651,44 @@ func scanExportedClasses(scope *Scope, text string, exports map[string]SymbolInf
 	}
 }
 
+func scanExportedEmbeds(scope *Scope, text string, exports map[string]SymbolInfo, uri string) {
+	lines := strings.Split(text, "\n")
+
+	for i, rawLine := range lines {
+		line := cleanLine(rawLine)
+		if !strings.HasPrefix(line, "export ") {
+			continue
+		}
+
+		withoutExport := strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		match := embedLineRegex.FindStringSubmatch(withoutExport)
+		if match == nil {
+			continue
+		}
+
+		kind := match[1]
+		name := match[3]
+
+		typ := "string"
+		if kind == "embedbin" {
+			typ = "buffer"
+		}
+
+		sym := SymbolInfo{
+			Name:      name,
+			Kind:      SymbolVariable,
+			Type:      typ,
+			Detail:    "export " + kind + " " + name,
+			Line:      i + 1,
+			Column:    indexColumn(line, name),
+			SourceURI: uri,
+		}
+
+		exports[name] = sym
+		scope.Define(sym)
+	}
+}
+
 func scanExportedVariables(scope *Scope, text string, exports map[string]SymbolInfo, uri string) {
 	lines := strings.Split(text, "\n")
 
@@ -2612,177 +2949,6 @@ func inferTernaryTypeFromText(scope *Scope, expr string) string {
 	return "any"
 }
 
-func inferExprType(scope *Scope, expr Expr) string {
-	switch e := expr.(type) {
-	case StringExpr:
-		return "string"
-	case NumberExpr:
-		return "number"
-	case BoolExpr:
-		return "bool"
-	case ArrayExpr:
-		return "array"
-	case ObjectExpr:
-		return "object"
-	case NullExpr:
-		return "null"
-	case TernaryExpr:
-		thenType := inferExprType(scope, e.ThenExpr)
-		elseType := inferExprType(scope, e.ElseExpr)
-
-		if thenType == elseType {
-			return thenType
-		}
-
-		if thenType == "unknown" {
-			return elseType
-		}
-
-		if elseType == "unknown" {
-			return thenType
-		}
-
-		return "any"
-	case BinaryExpr:
-		switch e.Op {
-		case TOKEN_EQ, TOKEN_NEQ, TOKEN_LT, TOKEN_GT, TOKEN_LTE, TOKEN_GTE, TOKEN_AND, TOKEN_OR, TOKEN_INSTANCEOF, TOKEN_IN:
-			return "bool"
-		case TOKEN_PLUS_ASSIGN, TOKEN_MINUS, TOKEN_STAR, TOKEN_SLASH, TOKEN_PERCENT:
-			left := inferExprType(scope, e.Left)
-			right := inferExprType(scope, e.Right)
-
-			if e.Op == TOKEN_PLUS && (left == "string" || right == "string") {
-				return "string"
-			}
-
-			return "number"
-		default:
-			return "unknown"
-		}
-	case IdentExpr:
-		if sym, ok := scope.Resolve(e.Name); ok {
-			return sym.Type
-		}
-		return "unknown"
-
-	case NullishCoalescingExpr:
-		leftType := inferExprType(scope, e.Left)
-		rightType := inferExprType(scope, e.Right)
-
-		if leftType == "unknown" {
-			if rightType == "unknown" {
-				return "unknown"
-			}
-			return rightType + " | unknown"
-		}
-
-		if rightType == "unknown" {
-			return leftType
-		}
-
-		// Filter out nullish types from left side
-		parts := splitUnionType(leftType)
-		newParts := []string{}
-		for _, p := range parts {
-			if !isNullishLSPType(p) {
-				newParts = append(newParts, p)
-			}
-		}
-
-		if len(newParts) == 0 {
-			return rightType
-		}
-
-		filteredLeft := strings.Join(newParts, " | ")
-		if filteredLeft == rightType {
-			return rightType
-		}
-
-		return filteredLeft + " | " + rightType
-	case CallValueExpr:
-		for _, arg := range e.Args {
-			inferExprType(scope, arg)
-		}
-
-		switch callee := e.Callee.(type) {
-		case IdentExpr:
-			if sym, ok := scope.Resolve(callee.Name); ok {
-				if sym.Kind == SymbolClass {
-					return "class:" + sym.Name
-				}
-
-				if sym.Kind == SymbolFunction {
-					return firstNonEmpty(sym.Returns, "any")
-				}
-
-				return sym.Type
-			}
-
-		case PropertyExpr:
-			objType := inferExprType(scope, callee.Object)
-
-			// namespace call: models.User()
-			if ident, ok := callee.Object.(IdentExpr); ok {
-				if ns, exists := scope.Resolve(ident.Name); exists && ns.Kind == SymbolNamespace {
-					memberSym, ok := ns.Members[callee.Name]
-					if !ok {
-						return "unknown"
-					}
-
-					if memberSym.Kind == SymbolClass {
-						return "class:" + ident.Name + "." + memberSym.Name
-					}
-
-					if memberSym.Kind == SymbolFunction {
-						return firstNonEmpty(memberSym.Returns, "any")
-					}
-
-					return memberSym.Type
-				}
-			}
-
-			return inferMemberCallTypeFromParts(scope, objType, callee.Name)
-		}
-
-		calleeType := inferExprType(scope, e.Callee)
-		return calleeType
-	case MemberCallExpr:
-		return inferMemberCallTypeFromParts(scope, inferExprType(scope, e.Object), e.Method)
-	default:
-		return "unknown"
-	}
-}
-
-func inferMemberCallTypeFromParts(scope *Scope, receiverType string, method string) string {
-	if strings.HasPrefix(receiverType, "task:") && method == "await" {
-		return strings.TrimPrefix(receiverType, "task:")
-	}
-
-	if strings.HasPrefix(receiverType, "std:") {
-		module := strings.TrimPrefix(receiverType, "std:")
-		if info, ok := GetStdModuleInfo(module); ok {
-			if methodInfo, ok := info.Methods[method]; ok {
-				return methodInfo.Returns
-			}
-		}
-	}
-
-	if strings.HasPrefix(receiverType, "class:") {
-		className := strings.TrimPrefix(receiverType, "class:")
-		if classSym, ok := resolveClassSymbol(scope, className); ok {
-			if methodSym, ok := classSym.Methods[method]; ok {
-				return firstNonEmpty(methodSym.Returns, "any")
-			}
-		}
-	}
-
-	if methodInfo, ok := GetNativeMethodInfo(receiverType, method); ok {
-		return methodInfo.Returns
-	}
-
-	return ""
-}
-
 var inlineAnonFnRegex = regexp.MustCompile(`fn\s*\(([^)]*)\)\s*\{`)
 
 func scanInlineAnonymousFunctionParams(scope *Scope, text string, pos Position, uri string) {
@@ -2843,6 +3009,11 @@ func isPrivateSymbol(sym SymbolInfo) bool {
 }
 
 func getHover(uri string, text string, pos Position) any {
+	line := getLine(text, pos.Line)
+	if isPositionInStringOrComment(line, pos.Character) {
+		return nil
+	}
+
 	word := wordAtPosition(text, pos)
 
 	if word == "" || tinyKeywords[word] {
@@ -2885,6 +3056,17 @@ func getHover(uri string, text string, pos Position) any {
 			}
 
 			if fieldSym, ok := classSym.Fields[member]; ok {
+				return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "**" + receiver + "." + fieldSym.Name + "**\n\nType: `" + fieldSym.Type + "`\n\n" + fieldSym.Detail}}
+			}
+		}
+
+		if strings.HasPrefix(receiverType, "interface:") {
+			ifaceName := strings.TrimPrefix(receiverType, "interface:")
+			ifaceSym, ok := resolveInterfaceSymbol(scope, ifaceName)
+			if !ok {
+				return nil
+			}
+			if fieldSym, ok := ifaceSym.Fields[member]; ok {
 				return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "**" + receiver + "." + fieldSym.Name + "**\n\nType: `" + fieldSym.Type + "`\n\n" + fieldSym.Detail}}
 			}
 		}
@@ -2933,15 +3115,17 @@ func getHover(uri string, text string, pos Position) any {
 }
 
 type astSemanticAnalyzer struct {
-	uri          string
-	root         *Scope
-	scope        *Scope
-	diagnostics  []map[string]any
-	currentClass string
+	uri               string
+	text              string
+	root              *Scope
+	scope             *Scope
+	diagnostics       []map[string]any
+	currentClass      string
+	currentReturnType string
 }
 
 func semanticDiagnosticsFromAST(uri string, text string) []map[string]any {
-	statements, parseDiagnostics := parseTinyForLSP(uri, text)
+	statements, parseDiagnostics := parseTinyForLSP(URIToPath(uri), text)
 	if len(parseDiagnostics) > 0 || statements == nil {
 		return []map[string]any{}
 	}
@@ -2961,7 +3145,7 @@ func semanticDiagnosticsFromAST(uri string, text string) []map[string]any {
 		scanEnumLine(root, cleanLine(rawLine), i+1, uri)
 	}
 
-	a := &astSemanticAnalyzer{uri: uri, root: root, scope: root}
+	a := &astSemanticAnalyzer{uri: uri, text: text, root: root, scope: root}
 	a.predeclareStatements(statements)
 	a.visitStatements(statements)
 	a.addUnusedSymbolDiagnostics(text, statements)
@@ -2993,13 +3177,85 @@ func (a *astSemanticAnalyzer) resolve(name string) (SymbolInfo, bool) {
 }
 
 func (a *astSemanticAnalyzer) addDiagnostic(line int, column int, message string) {
-	if line <= 0 {
-		line = 1
+	name := extractNameFromMessage(message)
+
+	validPosition := false
+	if line > 0 && column > 0 && name != "" {
+		lineIndex := line - 1
+		colIndex := column - 1
+		lineText := getLine(a.text, lineIndex)
+
+		if colIndex >= 0 && colIndex+len(name) <= len(lineText) {
+			if lineText[colIndex:colIndex+len(name)] == name {
+				validPosition = true // Position is correct!
+			}
+		}
+	} else if line > 0 && column > 0 && name == "" {
+		validPosition = true
 	}
-	if column <= 0 {
-		column = 1
+
+	if !validPosition && name != "" {
+		line, column = findWordFirstOccurrence(a.text, name)
 	}
-	a.diagnostics = append(a.diagnostics, makeRangeDiagnostic(line-1, column-1, column, 2, message))
+
+	if line <= 0 || column <= 0 {
+		return
+	}
+
+	lineIndex := line - 1
+	colIndex := column - 1
+
+	lineText := getLine(a.text, lineIndex)
+	wordLen := wordLengthAtColumn(lineText, colIndex)
+
+	a.diagnostics = append(a.diagnostics, makeRangeDiagnostic(
+		lineIndex,
+		colIndex,
+		colIndex+wordLen,
+		2, // Warning severity
+		message,
+	))
+}
+
+func (a *astSemanticAnalyzer) addError(line int, column int, message string) {
+	name := extractNameFromMessage(message)
+
+	validPosition := false
+	if line > 0 && column > 0 && name != "" {
+		lineIndex := line - 1
+		colIndex := column - 1
+		lineText := getLine(a.text, lineIndex)
+
+		if colIndex >= 0 && colIndex+len(name) <= len(lineText) {
+			if lineText[colIndex:colIndex+len(name)] == name {
+				validPosition = true
+			}
+		}
+	} else if line > 0 && column > 0 && name == "" {
+		validPosition = true
+	}
+
+	if !validPosition && name != "" {
+		line, column = findWordFirstOccurrence(a.text, name)
+	}
+
+	if line <= 0 || column <= 0 {
+		return
+	}
+
+	lineIndex := line - 1
+	colIndex := column - 1
+
+	lineText := getLine(a.text, lineIndex)
+	wordLen := wordLengthAtColumn(lineText, colIndex)
+
+	a.diagnostics = append(a.diagnostics, makeRangeDiagnostic(
+		lineIndex,
+		colIndex,
+		colIndex+wordLen,
+		1,
+		message,
+	))
 }
 
 type unusedSymbolDecl struct {
@@ -3026,10 +3282,14 @@ func (a *astSemanticAnalyzer) addUnusedSymbolDiagnostics(text string, statements
 			if line <= 0 || col <= 0 {
 				line, col = firstIdentifierPosition(text, decl.name)
 			}
+
+			lineText := getLine(text, line-1)
+			realCol := findIdentifierColumn(lineText, decl.name, col)
+
 			a.diagnostics = append(a.diagnostics, makeRangeDiagnostic(
 				line-1,
-				col-1,
-				col-1+len(decl.name),
+				realCol-1,
+				realCol-1+len(decl.name),
 				2,
 				"unused "+decl.kind+": "+decl.name,
 			))
@@ -3138,6 +3398,7 @@ func stdArgsFromParams(scope *Scope, params []Param) []StdArg {
 			Name:     name,
 			Type:     typ,
 			Optional: p.HasDefault,
+			Variadic: p.Variadic,
 		})
 	}
 
@@ -3189,16 +3450,49 @@ func (a *astSemanticAnalyzer) predeclareStatements(stmts []Stmt) {
 			})
 
 		case FunctionStmt:
+			a.checkNamingConflict(s.Name, s.Line, s.Column)
 			a.root.Define(SymbolInfo{Name: s.Name, Kind: SymbolFunction, Type: "function", Detail: "fn " + s.Name, Line: s.Line, Column: s.Column, SourceURI: a.uri, Params: stdArgsFromParams(a.scope, s.Params), Returns: returnTypeNameScoped(a.root, s.ReturnType)})
 
 		case ClassStmt:
+			a.checkNamingConflict(s.Name, s.Line, s.Column)
 			a.root.Define(a.classSymbol(s))
 
 		case VariableStmt:
+			a.checkNamingConflict(s.Name, s.Line, s.Column)
 			a.root.Define(SymbolInfo{Name: s.Name, Kind: SymbolVariable, Type: "unknown", Detail: "variable " + s.Name, Line: s.Line, Column: s.Column, SourceURI: a.uri})
 
 		case EnumStmt:
+			a.checkNamingConflict(s.Name, s.Line, s.Column)
 			a.root.Define(enumSymbolFromStmt(s, a.uri))
+
+		case EmbedStmt:
+			a.checkNamingConflict(s.Name, s.Line, s.Column)
+			a.root.Define(SymbolInfo{Name: s.Name, Kind: SymbolVariable, Type: s.TypeHint.Name, Detail: "variable " + s.Name, Line: s.Line, Column: s.Column, SourceURI: a.uri})
+
+		case InterfaceStmt:
+			a.checkNamingConflict(s.Name, s.Line, s.Column)
+			sym := SymbolInfo{
+				Name:      s.Name,
+				Kind:      SymbolInterface,
+				Type:      "interface:" + s.Name,
+				Detail:    "interface " + s.Name,
+				Line:      s.Line,
+				Column:    s.Column,
+				SourceURI: a.uri,
+				Fields:    map[string]SymbolInfo{},
+			}
+
+			for fieldName, fieldHint := range s.Fields {
+				sym.Fields[fieldName] = SymbolInfo{
+					Name:      fieldName,
+					Kind:      SymbolField,
+					Type:      normalizeLSPType(a.root, fieldHint.Name),
+					Detail:    "interface field " + fieldName,
+					Line:      s.Line,
+					SourceURI: a.uri,
+				}
+			}
+			a.root.Define(sym)
 
 		case NamespaceStmt:
 			members := map[string]SymbolInfo{}
@@ -3314,13 +3608,23 @@ func (a *astSemanticAnalyzer) visitStmt(stmt Stmt) {
 
 	case AssignStmt:
 		if _, ok := a.resolve(s.Name); !ok {
-			a.addDiagnostic(s.Line, s.Column, "undefined variable: "+s.Name)
+			a.addError(s.Line, s.Column, "undefined variable: "+s.Name)
 		}
 		a.inferExprType(s.Value)
 
 	case ReturnStmt:
 		if s.HasValue {
-			a.inferExprType(s.Value)
+			returnedType := a.inferExprType(s.Value)
+
+			if a.currentReturnType != "" && a.currentReturnType != "any" {
+				if !a.compareLSPTypes(returnedType, a.currentReturnType) {
+					a.addDiagnostic(s.Line, s.Column, fmt.Sprintf("cannot return type '%s' from this function (expected '%s')", returnedType, a.currentReturnType))
+				}
+			}
+		} else {
+			if a.currentReturnType != "" && a.currentReturnType != "any" && a.currentReturnType != "undefined" && a.currentReturnType != "void" {
+				a.addDiagnostic(s.Line, s.Column, fmt.Sprintf("cannot return empty value from this function (expected '%s')", a.currentReturnType))
+			}
 		}
 
 	case IfStmt:
@@ -3401,6 +3705,9 @@ func (a *astSemanticAnalyzer) visitStmt(stmt Stmt) {
 }
 
 func (a *astSemanticAnalyzer) visitFunction(fn FunctionStmt) {
+	oldReturn := a.currentReturnType
+	a.currentReturnType = returnTypeNameScoped(a.root, fn.ReturnType)
+
 	a.pushScope()
 	for _, p := range fn.Params {
 		a.validateTypeHint(p.TypeHint, fn.Line, fn.Column)
@@ -3411,11 +3718,17 @@ func (a *astSemanticAnalyzer) visitFunction(fn FunctionStmt) {
 	}
 	a.visitStatements(fn.Body)
 	a.popScope()
+
+	a.currentReturnType = oldReturn
 }
 
 func (a *astSemanticAnalyzer) visitMethod(className string, fn FunctionStmt) {
 	oldClass := a.currentClass
 	a.currentClass = className
+
+	oldReturn := a.currentReturnType
+	a.currentReturnType = returnTypeNameScoped(a.root, fn.ReturnType)
+
 	a.pushScope()
 	a.define(SymbolInfo{Name: "this", Kind: SymbolVariable, Type: "class:" + className, Detail: "current class instance", Line: fn.Line, Column: fn.Column, SourceURI: a.uri})
 	for _, p := range fn.Params {
@@ -3430,6 +3743,7 @@ func (a *astSemanticAnalyzer) visitMethod(className string, fn FunctionStmt) {
 	a.visitStatements(fn.Body)
 	a.popScope()
 	a.currentClass = oldClass
+	a.currentReturnType = oldReturn
 }
 
 func (a *astSemanticAnalyzer) validateTypeHint(hint TypeHint, line int, column int) {
@@ -3451,12 +3765,12 @@ func (a *astSemanticAnalyzer) typeNameExists(typ string) bool {
 	}
 
 	switch typ {
-	case "string", "number", "bool", "object", "array", "any", "void", "null", "undefined", "function", "error":
+	case "string", "number", "bool", "object", "array", "any", "null", "undefined", "function", "error":
 		return true
 	}
 
 	if sym, ok := a.root.Resolve(typ); ok {
-		return sym.Kind == SymbolClass || sym.Kind == SymbolEnum || sym.Kind == SymbolNamespace
+		return sym.Kind == SymbolClass || sym.Kind == SymbolEnum || sym.Kind == SymbolNamespace || sym.Kind == SymbolInterface
 	}
 
 	if strings.Contains(typ, ".") {
@@ -3467,7 +3781,7 @@ func (a *astSemanticAnalyzer) typeNameExists(typ string) bool {
 		}
 
 		member, ok := ns.Members[parts[1]]
-		return ok && (member.Kind == SymbolClass || member.Kind == SymbolEnum)
+		return ok && (member.Kind == SymbolClass || member.Kind == SymbolEnum || member.Kind == SymbolInterface)
 	}
 
 	return false
@@ -3531,6 +3845,8 @@ func normalizeLSPType(scope *Scope, typ string) string {
 		switch sym.Kind {
 		case SymbolClass:
 			return "class:" + typ
+		case SymbolInterface:
+			return "interface:" + typ
 		case SymbolEnum:
 			return "enum:" + typ
 		}
@@ -3548,6 +3864,8 @@ func normalizeLSPType(scope *Scope, typ string) string {
 				switch member.Kind {
 				case SymbolClass:
 					return "class:" + typ
+				case SymbolInterface:
+					return "interface:" + typ
 				case SymbolEnum:
 					return "enum:" + typ
 				}
@@ -3587,7 +3905,7 @@ func (a *astSemanticAnalyzer) inferExprType(expr Expr) string {
 			return sym.Type
 		}
 		if !tinyKeywords[e.Name] && e.Name != "_" {
-			a.addDiagnostic(e.Line, e.Column, "undefined variable: "+e.Name)
+			a.addError(e.Line, e.Column, "undefined variable: "+e.Name)
 		}
 		return "unknown"
 	case ThisExpr:
@@ -3668,6 +3986,9 @@ func (a *astSemanticAnalyzer) inferExprType(expr Expr) string {
 				}
 
 				if sym.Kind == SymbolFunction {
+					a.checkArgumentCount(callee.Name, len(e.Args), sym.Params, e.Line, e.Column)
+					a.checkArgumentTypes(callee.Name, e.Args, sym.Params, e.Line, e.Column)
+
 					return firstNonEmpty(sym.Returns, "any")
 				}
 
@@ -3724,7 +4045,10 @@ func (a *astSemanticAnalyzer) inferExprType(expr Expr) string {
 				}
 
 				if memberSym.Kind == SymbolFunction {
+
 					a.checkArgumentCount(ident.Name+"."+e.Method, len(e.Args), memberSym.Params, e.Line, e.Column)
+					a.checkArgumentTypes(ident.Name+"."+e.Method, e.Args, memberSym.Params, e.Line, e.Column)
+
 					if memberSym.Returns != "" {
 						return memberSym.Returns
 					}
@@ -3761,6 +4085,9 @@ func (a *astSemanticAnalyzer) inferExprType(expr Expr) string {
 			}
 			if sym.Kind == SymbolFunction {
 				a.checkArgumentCount(e.Name, len(e.Args), sym.Params, e.Line, e.Column)
+
+				a.checkArgumentTypes(e.Name, e.Args, sym.Params, e.Line, e.Column)
+
 				if sym.Returns != "" {
 					return sym.Returns
 				}
@@ -3768,7 +4095,7 @@ func (a *astSemanticAnalyzer) inferExprType(expr Expr) string {
 			}
 			return sym.Type
 		}
-		a.addDiagnostic(e.Line, e.Column, "undefined variable: "+e.Name)
+		a.addError(e.Line, e.Column, "undefined variable: "+e.Name)
 		return "unknown"
 	case FunctionExpr:
 		a.pushScope()
@@ -3873,32 +4200,30 @@ func (a *astSemanticAnalyzer) checkKnownMemberArgumentCount(receiverType string,
 }
 
 func (a *astSemanticAnalyzer) checkArgumentCount(name string, got int, params []StdArg, line int, column int) {
-	if line <= 0 {
-		return
-	}
-
 	required := 0
 	variadic := false
+	if len(params) > 0 && params[len(params)-1].Variadic {
+		variadic = true
+	}
 	for _, param := range params {
-		if !param.Optional {
+		if !param.Optional && !param.Variadic {
 			required++
 		}
-
-		if param.Variadic {
-			variadic = true
-		}
 	}
-
-	if variadic || (got >= required && got <= len(params)) {
+	if variadic {
+		if got < required {
+			expected := strconv.Itoa(required) + "+"
+			a.addError(line, column, "wrong argument count for "+name+": expected "+expected+", got "+strconv.Itoa(got))
+		}
 		return
 	}
-
-	expected := strconv.Itoa(len(params))
-	if required != len(params) {
-		expected = strconv.Itoa(required) + "-" + strconv.Itoa(len(params))
+	if got < required || got > len(params) {
+		expected := strconv.Itoa(len(params))
+		if required != len(params) {
+			expected = strconv.Itoa(required) + "-" + strconv.Itoa(len(params))
+		}
+		a.addError(line, column, "wrong argument count for "+name+": expected "+expected+", got "+strconv.Itoa(got))
 	}
-
-	a.addDiagnostic(line, column, "wrong argument count for "+name+": expected "+expected+", got "+strconv.Itoa(got))
 }
 
 func (a *astSemanticAnalyzer) checkMember(object Expr, member string, line int, column int) {
@@ -4015,6 +4340,16 @@ func (a *astSemanticAnalyzer) memberExistsByType(typ string, member string) bool
 		return member == "await"
 	}
 
+	if strings.HasPrefix(typ, "interface:") {
+		ifaceName := strings.TrimPrefix(typ, "interface:")
+		ifaceSym, ok := resolveInterfaceSymbol(a.root, ifaceName)
+		if !ok {
+			return false
+		}
+		_, ok = ifaceSym.Fields[member]
+		return ok
+	}
+
 	if strings.HasPrefix(typ, "enum:") {
 		enumName := strings.TrimPrefix(typ, "enum:")
 		enumSym, ok := resolveEnumSymbol(a.root, enumName)
@@ -4109,6 +4444,18 @@ func (a *astSemanticAnalyzer) memberType(typ string, member string) string {
 		}
 	}
 
+	if strings.HasPrefix(typ, "interface:") {
+		ifaceName := strings.TrimPrefix(typ, "interface:")
+		ifaceSym, ok := resolveInterfaceSymbol(a.root, ifaceName)
+		if !ok {
+			return "unknown"
+		}
+		if fieldSym, ok := ifaceSym.Fields[member]; ok {
+			return firstNonEmpty(fieldSym.Type, "any")
+		}
+		return "unknown"
+	}
+
 	if strings.HasPrefix(typ, "enum:") {
 		return "number"
 	}
@@ -4169,4 +4516,357 @@ func (a *astSemanticAnalyzer) memberType(typ string, member string) string {
 	}
 
 	return "unknown"
+}
+
+func findEnclosingIfBlock(text string, pos Position) (string, bool) {
+	lines := strings.Split(text, "\n")
+	if pos.Line >= len(lines) {
+		return "", false
+	}
+
+	depth := 0
+	for i := pos.Line; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+
+		if strings.HasPrefix(line, "//") || line == "" {
+			continue
+		}
+
+		if strings.Contains(line, "}") {
+			depth--
+		}
+		if strings.Contains(line, "{") {
+			depth++
+		}
+
+		if depth > 0 && strings.HasPrefix(line, "if ") {
+			return line, true
+		}
+	}
+	return "", false
+}
+
+var nullCheckRegex = regexp.MustCompile(`if\s+([A-Za-z_][A-Za-z0-9_]*)\s*!=\s*(null|undefined)`)
+var typeOfRegex = regexp.MustCompile("if\\s+typeof\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*==\\s*[\"'\u0060](string|number|bool|object|array)[\"'\u0060]")
+
+func applyTypeNarrowing(scope *Scope, ifLine string) {
+	if match := nullCheckRegex.FindStringSubmatch(ifLine); match != nil {
+		name := match[1]
+		if sym, ok := scope.Resolve(name); ok {
+			parts := splitUnionType(sym.Type)
+			newParts := []string{}
+			for _, part := range parts {
+				if part != "null" && part != "undefined" {
+					newParts = append(newParts, part)
+				}
+			}
+			if len(newParts) > 0 {
+				sym.Type = strings.Join(newParts, " | ")
+				scope.Define(sym)
+			}
+		}
+		return
+	}
+
+	if match := typeOfRegex.FindStringSubmatch(ifLine); match != nil {
+		name := match[1]
+		narrowedType := match[2]
+		if sym, ok := scope.Resolve(name); ok {
+			sym.Type = narrowedType
+			scope.Define(sym)
+		}
+		return
+	}
+}
+
+func isPositionInStringOrComment(line string, charIndex int) bool {
+	inString := byte(0)
+	escaped := false
+	for i := 0; i < len(line) && i < charIndex; i++ {
+		ch := line[i]
+		if inString != 0 {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == inString {
+				inString = 0
+			}
+			continue
+		}
+		if i+1 < len(line) && ch == '/' && line[i+1] == '/' {
+			return true
+		}
+		if ch == '"' || ch == '\'' || ch == '`' {
+			inString = ch
+		}
+	}
+	return inString != 0
+}
+
+func findFunctionArgumentTypeHint(scope *Scope, text string, pos Position) (string, bool) {
+	ctx, ok := callContextAtPosition(text, pos)
+	if !ok {
+		return "", false
+	}
+
+	var sym SymbolInfo
+	var exists bool
+
+	if ctx.IsMember {
+		_, receiverType, hasReceiver := resolveReceiverPath(scope, text, pos, ctx.Receiver)
+		if !hasReceiver {
+			return "", false
+		}
+
+		sym, _, exists = resolveMemberFromStaticType(scope, receiverType, ctx.Method)
+	} else {
+		if strings.Contains(ctx.Name, ".") {
+			parts := strings.SplitN(ctx.Name, ".", 2)
+			nsName := parts[0]
+			memberName := parts[1]
+
+			ns, ok := scope.Resolve(nsName)
+			if ok && ns.Kind == SymbolNamespace {
+				sym, exists = ns.Members[memberName]
+			}
+		} else {
+			sym, exists = scope.Resolve(ctx.Name)
+		}
+	}
+
+	if !exists || sym.Kind != SymbolFunction {
+		return "", false
+	}
+
+	if ctx.ArgIndex < 0 || ctx.ArgIndex >= len(sym.Params) {
+		return "", false
+	}
+
+	param := sym.Params[ctx.ArgIndex]
+
+	if param.Type != "" {
+		typ := param.Type
+		typ = strings.TrimPrefix(typ, "interface:")
+		typ = strings.TrimPrefix(typ, "class:")
+		return typ, true
+	}
+
+	return "", false
+}
+
+func wordLengthAtColumn(line string, col int) int {
+	if col < 0 || col >= len(line) {
+		return 1
+	}
+	end := col
+
+	for end < len(line) && isIdentChar(line[end]) {
+		end++
+	}
+	if end == col {
+		return 1
+	}
+	return end - col
+}
+
+func findIdentifierColumn(line string, name string, fallback int) int {
+	if name == "" {
+		return fallback
+	}
+	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
+	match := re.FindStringIndex(line)
+	if match != nil {
+		return match[0] + 1
+	}
+	return fallback
+}
+
+func isCursorInsideObjectLiteral(text string, pos Position) bool {
+	lines := strings.Split(text, "\n")
+	if pos.Line >= len(lines) {
+		return false
+	}
+
+	depth := 0
+
+	for i := pos.Line; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+
+		if strings.Contains(line, "}") {
+			depth--
+		}
+		if strings.Contains(line, "{") {
+			depth++
+		}
+
+		if depth > 0 {
+			if strings.Contains(line, "fn ") ||
+				strings.Contains(line, "class ") ||
+				strings.Contains(line, "if ") ||
+				strings.Contains(line, "while ") ||
+				strings.Contains(line, "for ") ||
+				strings.Contains(line, "catch ") {
+				return false
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func (a *astSemanticAnalyzer) compareLSPTypes(got string, expected string) bool {
+	if expected == "any" || got == "any" || expected == "unknown" || got == "unknown" {
+		return true
+	}
+
+	expectedParts := splitUnionType(expected)
+	for _, part := range expectedParts {
+		part = strings.TrimSpace(part)
+		if got == part {
+			return true
+		}
+		if part == "object" && (strings.HasPrefix(got, "class:") || strings.HasPrefix(got, "interface:") || got == "object") {
+			return true
+		}
+
+		if strings.HasPrefix(part, "interface:") && got == "object" {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *astSemanticAnalyzer) checkArgumentTypes(name string, args []Expr, params []StdArg, line int, column int) {
+	for i, arg := range args {
+		var param StdArg
+		if i < len(params) {
+			param = params[i]
+		} else if len(params) > 0 && params[len(params)-1].Variadic {
+			param = params[len(params)-1]
+		} else {
+			break
+		}
+
+		if param.Variadic {
+			continue
+		}
+
+		if param.Type == "" || param.Type == "any" {
+			continue
+		}
+
+		argType := a.inferExprType(arg)
+		if argType == "any" || argType == "unknown" {
+			continue
+		}
+
+		if !a.compareLSPTypes(argType, param.Type) {
+			a.addError(line, column, fmt.Sprintf("cannot pass type '%s' to parameter '%s' of function '%s' (expected '%s')", argType, param.Name, name, param.Type))
+		}
+	}
+}
+
+func extractNameFromMessage(msg string) string {
+	msg = strings.TrimSpace(msg)
+
+	if strings.HasPrefix(msg, "undefined variable: ") {
+		return strings.TrimPrefix(msg, "undefined variable: ")
+	}
+
+	if strings.HasPrefix(msg, "unknown type: ") {
+		return strings.TrimPrefix(msg, "unknown type: ")
+	}
+
+	if strings.HasPrefix(msg, "wrong argument count for ") {
+		trimmed := strings.TrimPrefix(msg, "wrong argument count for ")
+		if idx := strings.Index(trimmed, ":"); idx >= 0 {
+			trimmed = trimmed[:idx]
+		}
+		trimmed = strings.TrimSpace(trimmed)
+		if dot := strings.LastIndex(trimmed, "."); dot != -1 {
+			return trimmed[dot+1:]
+		}
+		return trimmed
+	}
+
+	if strings.Contains(msg, " of function '") {
+		parts := strings.Split(msg, " of function '")
+		if len(parts) > 1 {
+			trimmed := parts[1]
+			if idx := strings.Index(trimmed, "'"); idx >= 0 {
+				fnName := trimmed[:idx]
+				if dot := strings.LastIndex(fnName, "."); dot != -1 {
+					return fnName[dot+1:]
+				}
+				return fnName
+			}
+		}
+	}
+
+	return ""
+}
+
+func findWordFirstOccurrence(text string, word string) (int, int) {
+	if word == "" {
+		return 1, 1
+	}
+	lines := strings.Split(text, "\n")
+
+	for lineIdx, line := range lines {
+		code := strings.TrimSpace(stripLineComment(line))
+
+		if strings.HasPrefix(code, "fn ") ||
+			strings.HasPrefix(code, "class ") ||
+			strings.HasPrefix(code, "interface ") ||
+			strings.Contains(code, "export fn ") ||
+			strings.Contains(code, "export class ") ||
+			strings.Contains(code, "export interface ") {
+			continue
+		}
+
+		re := regexp.MustCompile(`\b` + regexp.QuoteMeta(word) + `\b`)
+		match := re.FindStringIndex(code)
+		if match != nil {
+			return lineIdx + 1, match[0] + 1
+		}
+	}
+
+	for lineIdx, line := range lines {
+		code := stripLineComment(line)
+		re := regexp.MustCompile(`\b` + regexp.QuoteMeta(word) + `\b`)
+		match := re.FindStringIndex(code)
+		if match != nil {
+			return lineIdx + 1, match[0] + 1
+		}
+	}
+
+	return 1, 1
+}
+
+func (a *astSemanticAnalyzer) checkNamingConflict(name string, line int, col int) bool {
+	if strings.TrimSpace(name) == "" || name == "_" {
+		return false
+	}
+
+	if existing, exists := a.resolve(name); exists {
+		if existing.Line == line && existing.SourceURI == a.uri {
+			return false
+		}
+
+		var detail string
+		if existing.Kind == SymbolStd {
+			detail = "imported standard library module"
+		} else {
+			detail = fmt.Sprintf("existing %s (defined at line %d)", existing.Kind, existing.Line)
+		}
+
+		a.addError(line, col, fmt.Sprintf("identifier '%s' conflicts with an %s", name, detail))
+		return true
+	}
+	return false
 }

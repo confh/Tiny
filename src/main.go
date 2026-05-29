@@ -150,7 +150,7 @@ func deleteTinyCacheContent(entryFile string) {
 }
 
 func runBytecodeFile(path string) {
-	mainBytecode, functions, classes := LoadBytecode(path)
+	mainBytecode, functions, classes, interfaces, globalIndex := LoadBytecode(path)
 
 	mainBytecode = OptimizeBytecode(mainBytecode)
 
@@ -159,7 +159,7 @@ func runBytecodeFile(path string) {
 		functions[name] = fn
 	}
 
-	vm := NewVM(mainBytecode, functions, classes)
+	vm := NewVM(mainBytecode, functions, classes, interfaces, globalIndex)
 	vm.SetCLIArgs(getScriptArgs())
 	vm.Run()
 }
@@ -168,7 +168,7 @@ func saveBytecodeFile(entryFile string, outFile string, cache bool) {
 	program := LoadProgram(entryFile)
 
 	compiler := NewCompiler()
-	mainBytecode, functions, classes := compiler.CompileProgram(program)
+	mainBytecode, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
 
 	mainBytecode = OptimizeBytecode(mainBytecode)
 
@@ -177,14 +177,14 @@ func saveBytecodeFile(entryFile string, outFile string, cache bool) {
 		functions[name] = fn
 	}
 
-	SaveBytecode(outFile, mainBytecode, functions, classes, cache)
+	SaveBytecode(outFile, mainBytecode, functions, classes, interfaces, globalIndex, cache)
 }
 
 func compileAndRun(entryFile string, cliArgs []string) {
 	program := LoadProgram(entryFile)
 
 	compiler := NewCompiler()
-	mainBytecode, functions, classes := compiler.CompileProgram(program)
+	mainBytecode, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
 
 	mainBytecode = OptimizeBytecode(mainBytecode)
 
@@ -193,7 +193,7 @@ func compileAndRun(entryFile string, cliArgs []string) {
 		functions[name] = fn
 	}
 
-	vm := NewVM(mainBytecode, functions, classes)
+	vm := NewVM(mainBytecode, functions, classes, interfaces, globalIndex)
 	vm.SetCLIArgs(cliArgs)
 	vm.Run()
 }

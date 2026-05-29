@@ -286,13 +286,13 @@ func float64SliceToBytes(data []float64) []byte {
 
 func stdMathToFloat(vm *VM, args []Value) {
 	expectArgs(vm, "math.toFloat", args, 1)
-	val := asFloat(args[0])
+	val := asFloat(args[0], vm)
 	vm.push(NewNative(val))
 }
 
 func stdMathToInt(vm *VM, args []Value) {
 	expectArgs(vm, "math.toInt", args, 1)
-	val := int(asFloat(args[0]))
+	val := int(asFloat(args[0], vm))
 	vm.push(NewInt(val))
 }
 

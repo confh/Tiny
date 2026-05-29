@@ -46,7 +46,16 @@ func TestBytecodeRoundTripPreservesFunctionMetadata(t *testing.T) {
 		},
 	}
 
-	_, loadedFunctions, loadedClasses := LoadBytecodeFromBytes(SaveBytecodeToBytes(main, functions, classes, true))
+	interfaces := map[string]vm.Interface{
+		"Test": {
+			Name: "Test",
+			Fields: map[string]vm.TypeHint{
+				"testData": vm.TypeHint{Name: "string"},
+			},
+		},
+	}
+
+	_, loadedFunctions, loadedClasses, loadedInterfaces, _ := LoadBytecodeFromBytes(SaveBytecodeToBytes(main, functions, classes, interfaces, nil, true))
 
 	// if len(loadedMain) != len(main) || loadedMain[0].File != bytecodeSourceLabel || loadedMain[0].Line != 1 {
 	// 	t.Fatalf("main instructions did not round trip: %#v", loadedMain)
@@ -65,10 +74,15 @@ func TestBytecodeRoundTripPreservesFunctionMetadata(t *testing.T) {
 	if class.Name != "User" || !class.Fields[0].Constant || !class.Fields[0].Private {
 		t.Fatalf("class metadata did not round trip: %#v", class)
 	}
+
+	interfaceData := loadedInterfaces["Test"]
+	if interfaceData.Name != "Test" || interfaceData.Fields["testData"].Name != "string" {
+		t.Fatalf("interface metadata did not round trip: %#v", class)
+	}
 }
 
 func TestSaveBytecodeToBytesUsesBinaryFormat(t *testing.T) {
-	data := SaveBytecodeToBytes([]vm.Instruction{{Op: vm.OP_HALT}}, nil, nil, false)
+	data := SaveBytecodeToBytes([]vm.Instruction{{Op: vm.OP_HALT}}, nil, nil, nil, nil, false)
 
 	if !bytes.HasPrefix(data, bytecodeMagic) {
 		t.Fatalf("bytecode missing binary magic header: %q", data[:min(len(data), len(bytecodeMagic))])
@@ -83,7 +97,7 @@ func TestSaveBytecodeToBytesHidesSourcePaths(t *testing.T) {
 	sourcePath := `C:\Users\confis\Desktop\Programming\Go\compiler\core.tiny`
 	data := SaveBytecodeToBytes([]vm.Instruction{
 		{Op: vm.OP_HALT, File: sourcePath, Line: 12, Column: 3},
-	}, nil, nil, false)
+	}, nil, nil, nil, nil, false)
 
 	if bytes.Contains(data, []byte(sourcePath)) {
 		t.Fatal("bytecode leaked absolute source path")
@@ -112,12 +126,12 @@ func TestLoadBytecodeFromBytesSupportsLegacyJSON(t *testing.T) {
 		t.Fatalf("marshal legacy bytecode: %v", err)
 	}
 
-	main, functions, classes := LoadBytecodeFromBytes(data)
+	main, functions, classes, interfaces, _ := LoadBytecodeFromBytes(data)
 	if len(main) != 1 || main[0].Op != vm.OP_HALT {
 		t.Fatalf("legacy main did not load: %#v", main)
 	}
-	if len(functions) != 0 || len(classes) != 0 {
-		t.Fatalf("legacy maps did not load: functions=%#v classes=%#v", functions, classes)
+	if len(functions) != 0 || len(classes) != 0 || len(interfaces) != 0 {
+		t.Fatalf("legacy maps did not load: functions=%#v classes=%#v interfaces=%#v", functions, classes, interfaces)
 	}
 }
 

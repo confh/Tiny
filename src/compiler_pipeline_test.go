@@ -24,16 +24,16 @@ type tinyRunResult struct {
 func runTinyFile(t *testing.T, path string, args ...string) tinyRunResult {
 	t.Helper()
 
-	mainInstructions, functions, classes := compileTinyFile(t, path)
-	return runTinyBytecode(t, mainInstructions, functions, classes, args...)
+	mainInstructions, functions, classes, interfaces, globalIndex := compileTinyFile(t, path)
+	return runTinyBytecode(t, mainInstructions, functions, classes, interfaces, globalIndex, args...)
 }
 
-func compileTinyFile(t *testing.T, path string) ([]vm.Instruction, map[string]vm.Function, map[string]vm.Class) {
+func compileTinyFile(t *testing.T, path string) ([]vm.Instruction, map[string]vm.Function, map[string]vm.Class, map[string]vm.Interface, map[string]int) {
 	t.Helper()
 
 	program := LoadProgram(path)
 	compiler := NewCompiler()
-	mainInstructions, functions, classes := compiler.CompileProgram(program)
+	mainInstructions, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
 
 	mainInstructions = vm.OptimizeBytecode(mainInstructions)
 	for name, fn := range functions {
@@ -41,7 +41,7 @@ func compileTinyFile(t *testing.T, path string) ([]vm.Instruction, map[string]vm
 		functions[name] = fn
 	}
 
-	return mainInstructions, functions, classes
+	return mainInstructions, functions, classes, interfaces, globalIndex
 }
 
 func runTinyBytecode(
@@ -49,6 +49,8 @@ func runTinyBytecode(
 	mainInstructions []vm.Instruction,
 	functions map[string]vm.Function,
 	classes map[string]vm.Class,
+	interfaces map[string]vm.Interface,
+	globalIndex map[string]int,
 	args ...string,
 ) tinyRunResult {
 	t.Helper()
@@ -71,7 +73,7 @@ func runTinyBytecode(
 			panicValue = recover()
 		}()
 
-		tinyVM := vm.NewVM(mainInstructions, functions, classes)
+		tinyVM := vm.NewVM(mainInstructions, functions, classes, interfaces, globalIndex)
 		tinyVM.SetCLIArgs(args)
 		tinyVM.Run()
 	}()
@@ -217,12 +219,12 @@ func TestTinyPipelineTypeHintErrors(t *testing.T) {
 }
 
 func TestTinyPipelineBytecodeRoundTrip(t *testing.T) {
-	mainInstructions, functions, classes := compileTinyFile(t, fixturePath("arithmetic.tiny"))
+	mainInstructions, functions, classes, interfaces, globalIndex := compileTinyFile(t, fixturePath("arithmetic.tiny"))
 
-	data := bytecode.SaveBytecodeToBytes(mainInstructions, functions, classes, false)
-	loadedMain, loadedFunctions, loadedClasses := bytecode.LoadBytecodeFromBytes(data)
+	data := bytecode.SaveBytecodeToBytes(mainInstructions, functions, classes, interfaces, globalIndex, false)
+	loadedMain, loadedFunctions, loadedClasses, loadedInterfaces, _ := bytecode.LoadBytecodeFromBytes(data)
 
-	out := requireTinySuccess(t, runTinyBytecode(t, loadedMain, loadedFunctions, loadedClasses))
+	out := requireTinySuccess(t, runTinyBytecode(t, loadedMain, loadedFunctions, loadedClasses, loadedInterfaces, globalIndex))
 
 	const want = "7\nhello Tiny v1\nstring\n"
 	if out != want {

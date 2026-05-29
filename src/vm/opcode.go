@@ -322,6 +322,11 @@ type Class struct {
 	PrivateMethods map[string]bool
 }
 
+type Interface struct {
+	Name   string
+	Fields map[string]TypeHint
+}
+
 type ClassField struct {
 	Constant bool
 	Name     string

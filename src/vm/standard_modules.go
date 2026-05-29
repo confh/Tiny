@@ -66,6 +66,9 @@ func (vm *VM) callStandardModule(module string, method string, args []Value) {
 	case "sync":
 		vm.callStdSync(method, args)
 
+	case "test":
+		vm.callStdTest(method, args)
+
 	default:
 		vm.fatalError(ErrorName, "unknown standard module: %s", module)
 	}

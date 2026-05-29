@@ -10,7 +10,7 @@ var stdAppMetadata = StdModuleInfo{
 			Args: []StdArg{
 				{Name: "name", Type: "string", Optional: false},
 			},
-			Returns:     "App",
+			Returns:     "app",
 			Description: "Creates a new app object.",
 		},
 	},

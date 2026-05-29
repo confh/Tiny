@@ -21,4 +21,5 @@ var AvailablePlugins = []string{
 	"object",
 	"desktop",
 	"sync",
+	"test",
 }

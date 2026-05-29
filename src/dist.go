@@ -121,7 +121,7 @@ func packProgramToOutput(program Program, outFile string, target string) {
 	target = normalizeTarget(target)
 
 	compiler := NewCompiler()
-	mainInstructions, functions, classes := compiler.CompileProgram(program)
+	mainInstructions, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
 	mainInstructions = OptimizeBytecode(mainInstructions)
 
 	for name, fn := range functions {
@@ -129,9 +129,9 @@ func packProgramToOutput(program Program, outFile string, target string) {
 		functions[name] = fn
 	}
 
-	bytecodeBytes := SaveBytecodeToBytes(mainInstructions, functions, classes, false)
+	bytecodeBytes := SaveBytecodeToBytes(mainInstructions, functions, classes, interfaces, globalIndex, false)
 
-	runtimeBytes := getEmbeddedRuntimeForTarget(target)
+	runtimeBytes := getEmbeddedRuntimeForTarget()
 
 	err := writePackedExecutable(outFile, runtimeBytes, bytecodeBytes)
 	if err != nil {

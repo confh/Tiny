@@ -1,5 +1,12 @@
 package vm
 
+type EmbedType = byte
+
+const (
+	EmbedStr EmbedType = iota
+	EmbedBin
+)
+
 type Stmt interface {
 	stmtNode()
 }
@@ -363,6 +370,29 @@ type ThrowStmt struct {
 func (s ThrowStmt) stmtNode() {}
 
 func (s ExprStmt) stmtNode() {}
+
+type InterfaceStmt struct {
+	Name   string
+	Fields map[string]TypeHint
+	File   string
+	Line   int
+	Column int
+}
+
+func (s InterfaceStmt) stmtNode() {}
+
+type EmbedStmt struct {
+	Kind             EmbedType
+	Name             string
+	EmbeddedFilePath string
+	Constant         bool
+	TypeHint         TypeHint
+	File             string
+	Line             int
+	Column           int
+}
+
+func (s EmbedStmt) stmtNode() {}
 
 type IndexAssignStmt struct {
 	Object Expr

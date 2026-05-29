@@ -189,6 +189,12 @@ func (l *Lexer) scanToken() Token {
 			tok.Type = TOKEN_ASYNC
 		case "await":
 			tok.Type = TOKEN_AWAIT
+		case "interface":
+			tok.Type = TOKEN_INTERFACE
+		case "embedstr":
+			tok.Type = TOKEN_EMBED_STR
+		case "embedbin":
+			tok.Type = TOKEN_EMBED_BIN
 		default:
 			tok.Type = TOKEN_IDENT
 		}

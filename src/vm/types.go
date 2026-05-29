@@ -1,6 +1,10 @@
 package vm
 
-import "strings"
+import (
+	"fmt"
+	"slices"
+	"strings"
+)
 
 type TypeHint struct {
 	Name  string   `json:"name"`
@@ -32,93 +36,130 @@ func (t TypeHint) String() string {
 	return strings.Join(types, " | ")
 }
 
-func CheckTypeHint(value Value, hint TypeHint) bool {
+func CheckTypeHint(value Value, hint TypeHint, interfaces map[string]Interface) (bool, string) {
 	if hint.IsEmpty() || hint.Name == "any" {
-		return true
+		return true, ""
 	}
 
+	var lastReason string
 	for _, typ := range hint.AllTypes() {
-		if checkSingleTypeHint(value, typ) {
-			return true
+		ok, reason := checkSingleTypeHint(value, typ, interfaces)
+		if ok {
+			return true, ""
 		}
+		lastReason = reason
 	}
 
-	return false
+	return false, lastReason
 }
 
-func checkSingleTypeHint(value Value, hint string) bool {
+func checkSingleTypeHint(value Value, hint string, interfaces map[string]Interface) (bool, string) {
 	switch hint {
 	case "any":
-		return true
+		return true, ""
 
 	case "number":
 		if value.IsInt {
-			return true
+			return true, ""
 		}
-
 		switch value.Value.(type) {
 		case float64, float32, uint64:
-			return true
+			return true, ""
 		default:
-			return false
+			return false, ""
 		}
 
 	case "string":
 		switch value.Value.(type) {
 		case string:
-			return true
+			return true, ""
 		default:
-			return false
+			return false, ""
 		}
 
 	case "bool":
 		switch value.Value.(type) {
 		case bool:
-			return true
+			return true, ""
 		default:
-			return false
+			return false, ""
 		}
 
 	case "array":
 		switch value.Value.(type) {
 		case ArrayValue, *ArrayValue:
-			return true
+			return true, ""
 		default:
-			return false
+			return false, ""
 		}
 
 	case "object":
 		switch value.Value.(type) {
 		case ObjectValue:
-			return true
+			return true, ""
 		default:
-			return false
+			return false, ""
 		}
 
 	case "function":
 		switch value.Value.(type) {
 		case FunctionValue, *FunctionValue:
-			return true
+			return true, ""
 		default:
-			return false
+			return false, ""
 		}
 
 	case "null":
-		return !value.IsInt && (value.Value == nil || TypeName(value) == "null")
+		if !value.IsInt && (value.Value == nil || TypeName(value) == "null") {
+			return true, ""
+		}
+		return false, ""
 
 	case "undefined":
-		return TypeName(value) == "undefined"
+		if TypeName(value) == "undefined" {
+			return true, ""
+		}
+		return false, ""
 
 	default:
+		if iface, exists := interfaces[hint]; exists {
+			obj, ok := value.Value.(ObjectValue)
+			if !ok {
+				return false, ": expected object to match interface '" + hint + "'"
+			}
+
+			for fieldName, expectedHint := range iface.Fields {
+				required := false
+				if slices.Contains(expectedHint.Types, "undefined") {
+					required = true
+				}
+
+				val, hasField := obj[fieldName]
+				if !required && !hasField {
+					return false, fmt.Sprintf(" (missing field '%s')", fieldName)
+				}
+
+				if ok, subReason := CheckTypeHint(val, expectedHint, interfaces); !ok {
+					return false, fmt.Sprintf(" (field '%s' type mismatch%s)", fieldName, subReason)
+				}
+			}
+
+			return true, ""
+		}
+
 		if obj, ok := value.Value.(ObjectValue); ok {
 			classValue, exists := obj["__class"]
 			if exists {
 				className, ok := classValue.Value.(string)
 				if ok && className == hint {
-					return true
+					return true, ""
 				}
 			}
 		}
-		return TypeName(value) == hint
+
+		if TypeName(value) == hint {
+			return true, ""
+		}
+		return false, ""
 	}
 }

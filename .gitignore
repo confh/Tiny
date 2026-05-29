@@ -1,7 +1,8 @@
 *.tiny
 !counter.tiny
 !main.tiny
-release.md
+# release.md
+release notes
 !new_std_module.tiny
 !src/testdata/tiny/*.tiny
 !src/testdata/tiny/errors/*.tiny

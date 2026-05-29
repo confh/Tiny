@@ -3,6 +3,7 @@ package vm
 type TokenType string
 
 const (
+	// End of file and basic types
 	TOKEN_EOF             TokenType = "EOF"
 	TOKEN_IDENT           TokenType = "IDENT"
 	TOKEN_NUMBER          TokenType = "NUMBER"
@@ -14,73 +15,83 @@ const (
 	TOKEN_NULL            TokenType = "NULL"
 	TOKEN_UNDEFINED       TokenType = "UNDEFINED"
 
-	TOKEN_IMPORT  TokenType = "IMPORT"
-	TOKEN_LET     TokenType = "LET"
-	TOKEN_FIELD   TokenType = "FIELD"
-	TOKEN_CONST   TokenType = "CONST"
-	TOKEN_FN      TokenType = "FN"
-	TOKEN_RETURN  TokenType = "RETURN"
-	TOKEN_THROW   TokenType = "THROW"
-	TOKEN_CLASS   TokenType = "CLASS"
-	TOKEN_PRIVATE TokenType = "PRIVATE"
-	TOKEN_PUBLIC  TokenType = "PUBLIC"
+	// Declarations and keywords
+	TOKEN_IMPORT    TokenType = "IMPORT"
+	TOKEN_EXPORT    TokenType = "EXPORT"
+	TOKEN_LET       TokenType = "LET"
+	TOKEN_CONST     TokenType = "CONST"
+	TOKEN_FIELD     TokenType = "FIELD"
+	TOKEN_FN        TokenType = "FN"
+	TOKEN_RETURN    TokenType = "RETURN"
+	TOKEN_THROW     TokenType = "THROW"
+	TOKEN_CLASS     TokenType = "CLASS"
+	TOKEN_PRIVATE   TokenType = "PRIVATE"
+	TOKEN_PUBLIC    TokenType = "PUBLIC"
+	TOKEN_INTERFACE TokenType = "INTERFACE"
+	TOKEN_ENUM      TokenType = "ENUM"
+	TOKEN_IOTA      TokenType = "IOTA"
+	TOKEN_DEFER     TokenType = "DEFER"
 
-	TOKEN_ENUM TokenType = "ENUM"
-
-	TOKEN_TRY     TokenType = "TRY"
-	TOKEN_CATCH   TokenType = "CATCH"
-	TOKEN_FINALLY TokenType = "FINALLY"
-
-	TOKEN_IF   TokenType = "IF"
-	TOKEN_ELSE TokenType = "ELSE"
-
-	TOKEN_WHILE TokenType = "WHILE"
-	TOKEN_FOR   TokenType = "FOR"
-	TOKEN_IN    TokenType = "in"
-
+	// Control flow
+	TOKEN_IF       TokenType = "IF"
+	TOKEN_ELSE     TokenType = "ELSE"
+	TOKEN_WHILE    TokenType = "WHILE"
+	TOKEN_FOR      TokenType = "FOR"
+	TOKEN_IN       TokenType = "in"
+	TOKEN_TRY      TokenType = "TRY"
+	TOKEN_CATCH    TokenType = "CATCH"
+	TOKEN_FINALLY  TokenType = "FINALLY"
 	TOKEN_BREAK    TokenType = "BREAK"
 	TOKEN_CONTINUE TokenType = "CONTINUE"
+	TOKEN_MATCH    TokenType = "MATCH"
 
-	TOKEN_EXPORT TokenType = "EXPORT"
-
-	TOKEN_AND TokenType = "AND"
-	TOKEN_OR  TokenType = "OR"
-
-	TOKEN_MATCH TokenType = "MATCH"
-
-	TOKEN_TYPEOF TokenType = "TYPEOF"
-	TOKEN_SPAWN  TokenType = "SPAWN"
-	TOKEN_ASYNC  TokenType = "ASYNC"
-	TOKEN_AWAIT  TokenType = "AWAIT"
-
-	TOKEN_EMBED      TokenType = "EMBED"
+	// Logic and comparison
+	TOKEN_AND        TokenType = "AND"
+	TOKEN_OR         TokenType = "OR"
+	TOKEN_TYPEOF     TokenType = "TYPEOF"
 	TOKEN_INSTANCEOF TokenType = "INSTANCEOF"
+	TOKEN_BANG       TokenType = "!"
 
-	TOKEN_IOTA  TokenType = "IOTA"
-	TOKEN_DEFER TokenType = "DEFER"
+	// Async/concurrency
+	TOKEN_SPAWN TokenType = "SPAWN"
+	TOKEN_ASYNC TokenType = "ASYNC"
+	TOKEN_AWAIT TokenType = "AWAIT"
 
-	TOKEN_BANG           TokenType = "!"
-	TOKEN_ASSIGN         TokenType = "="
-	TOKEN_PLUS           TokenType = "+"
-	TOKEN_INCREMENT      TokenType = "++"
-	TOKEN_DECREMENT      TokenType = "--"
+	// Operators
+	TOKEN_ASSIGN  TokenType = "="
+	TOKEN_PLUS    TokenType = "+"
+	TOKEN_MINUS   TokenType = "-"
+	TOKEN_STAR    TokenType = "*"
+	TOKEN_SLASH   TokenType = "/"
+	TOKEN_PERCENT TokenType = "%"
+
+	// Compound assignment
 	TOKEN_PLUS_ASSIGN    TokenType = "+="
 	TOKEN_MINUS_ASSIGN   TokenType = "-="
 	TOKEN_STAR_ASSIGN    TokenType = "*="
 	TOKEN_SLASH_ASSIGN   TokenType = "/="
-	TOKEN_MINUS          TokenType = "-"
-	TOKEN_STAR           TokenType = "*"
-	TOKEN_SLASH          TokenType = "/"
-	TOKEN_EQ             TokenType = "=="
-	TOKEN_NEQ            TokenType = "!="
-	TOKEN_LT             TokenType = "<"
-	TOKEN_GT             TokenType = ">"
-	TOKEN_LTE            TokenType = "<="
-	TOKEN_GTE            TokenType = ">="
-	TOKEN_PERCENT        TokenType = "%"
 	TOKEN_PERCENT_ASSIGN TokenType = "%="
 
-	TOKEN_QUESTION TokenType = "?"
+	// Increment/Decrement
+	TOKEN_INCREMENT TokenType = "++"
+	TOKEN_DECREMENT TokenType = "--"
+
+	// Comparison operators
+	TOKEN_EQ  TokenType = "=="
+	TOKEN_NEQ TokenType = "!="
+	TOKEN_LT  TokenType = "<"
+	TOKEN_LTE TokenType = "<="
+	TOKEN_GT  TokenType = ">"
+	TOKEN_GTE TokenType = ">="
+
+	// Other operators
+	TOKEN_QUESTION          TokenType = "?"
+	TOKEN_DOT_DOT_DOT       TokenType = "..."
+	TOKEN_QUESTION_DOT      TokenType = "?."
+	TOKEN_QUESTION_QUESTION TokenType = "??"
+	TOKEN_PIPE              TokenType = "|"
+
+	// Grouping & punctuation
 	TOKEN_LPAREN   TokenType = "("
 	TOKEN_RPAREN   TokenType = ")"
 	TOKEN_LBRACKET TokenType = "["
@@ -91,11 +102,11 @@ const (
 	TOKEN_SEMI     TokenType = ";"
 	TOKEN_DOT      TokenType = "."
 	TOKEN_COLON    TokenType = ":"
-	TOKEN_PIPE     TokenType = "|"
 
-	TOKEN_DOT_DOT_DOT       TokenType = "..."
-	TOKEN_QUESTION_DOT      TokenType = "?."
-	TOKEN_QUESTION_QUESTION TokenType = "??"
+	// Special
+	TOKEN_EMBED     TokenType = "EMBED"
+	TOKEN_EMBED_STR TokenType = "EMBEDSTR"
+	TOKEN_EMBED_BIN TokenType = "EMBEDBIN"
 )
 
 type Token struct {

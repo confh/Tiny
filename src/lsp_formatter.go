@@ -432,11 +432,11 @@ func writeSpaceAfter(out *strings.Builder, runes []rune, nextIndex int) {
 }
 
 func lastRune(s string) rune {
-	var last rune
-	for _, ch := range s {
-		last = ch
+	if s == "" {
+		return 0
 	}
-	return last
+	runes := []rune(s)
+	return runes[len(runes)-1]
 }
 
 func cleanupTinySpaces(code string) string {
@@ -444,6 +444,10 @@ func cleanupTinySpaces(code string) string {
 	code = normalizePunctuationOutsideStrings(code)
 
 	return strings.TrimSpace(code)
+}
+
+func isIdentifierPart(ch rune) bool {
+	return ch == '_' || unicode.IsLetter(ch) || unicode.IsDigit(ch)
 }
 
 func normalizePunctuationOutsideStrings(code string) string {
@@ -487,7 +491,25 @@ func normalizePunctuationOutsideStrings(code string) string {
 
 		switch ch {
 		case '(':
+			// FIX: Keep the space after keywords like if, while, for, match, lock, catch
+			s := out.String()
+			trimmed := strings.TrimRightFunc(s, unicode.IsSpace)
+			needsSpace := false
+			keywords := []string{"if", "while", "for", "match", "catch", "lock"}
+			for _, kw := range keywords {
+				if strings.HasSuffix(trimmed, kw) {
+					wordStart := len(trimmed) - len(kw)
+					if wordStart == 0 || !isIdentifierPart(rune(trimmed[wordStart-1])) {
+						needsSpace = true
+						break
+					}
+				}
+			}
+
 			trimTrailingSpaces(&out)
+			if needsSpace {
+				out.WriteRune(' ')
+			}
 			out.WriteRune(ch)
 			i = skipSpacesAfter(runes, i)
 			continue
@@ -505,13 +527,21 @@ func normalizePunctuationOutsideStrings(code string) string {
 
 		case '{':
 			trimTrailingSpaces(&out)
+
+			if out.Len() > 0 {
+				last := lastRune(out.String())
+				if last != '{' && last != '(' && last != '[' && last != ' ' {
+					out.WriteRune(' ')
+				}
+			}
+
 			out.WriteRune(ch)
 
 			if i+1 < len(runes) && !unicode.IsSpace(runes[i+1]) && runes[i+1] != '}' {
 				out.WriteRune(' ')
 			}
 
-			i = skipExtraSpacesAfterOne(&out, runes, i)
+			i = skipExtraSpacesAfterOne(runes, i)
 			continue
 
 		case '}':
@@ -570,7 +600,7 @@ func skipSpacesAfter(runes []rune, index int) int {
 	return index
 }
 
-func skipExtraSpacesAfterOne(out *strings.Builder, runes []rune, index int) int {
+func skipExtraSpacesAfterOne(runes []rune, index int) int {
 	if index+1 >= len(runes) || !unicode.IsSpace(runes[index+1]) {
 		return index
 	}
@@ -602,14 +632,22 @@ func shouldWriteSpaceAfterPunctuation(runes []rune, nextIndex int) bool {
 
 func trimTrailingSpaces(out *strings.Builder) {
 	s := out.String()
-	trimmed := strings.TrimRightFunc(s, unicode.IsSpace)
+	if len(s) == 0 {
+		return
+	}
 
-	if len(trimmed) == len(s) {
+	runes := []rune(s)
+	n := len(runes)
+	for n > 0 && unicode.IsSpace(runes[n-1]) {
+		n--
+	}
+
+	if n == len(runes) {
 		return
 	}
 
 	out.Reset()
-	out.WriteString(trimmed)
+	out.WriteString(string(runes[:n]))
 }
 
 func collapseSpacesOutsideStrings(code string) string {

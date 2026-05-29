@@ -260,7 +260,7 @@ func isString(value Value) bool {
 	}
 }
 
-func asFloat(value Value) float64 {
+func asFloat(value Value, vm *VM) float64 {
 	if value.IsInt {
 		return float64(value.AsInt)
 	}
@@ -293,12 +293,12 @@ func asFloat(value Value) float64 {
 	case string:
 		f, err := strconv.ParseFloat(v, 64)
 		if err != nil {
-			LangError(ErrorType, "cannot parse string '%s' as float: %v", v, err)
+			vm.runtimeError(ErrorType, "cannot parse string '%s' as float: %v", v, err)
 			return 0
 		}
 		return f
 	default:
-		LangError(ErrorType, "expected number, got %s", TypeName(value))
+		vm.runtimeError(ErrorType, "expected number, got %s", TypeName(value))
 		return 0
 	}
 }

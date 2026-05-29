@@ -55,6 +55,7 @@ type VM struct {
 	mainInstructions []Instruction
 	functions        map[string]Function
 	classes          map[string]Class
+	interfaces       map[string]Interface
 	framePool        []*Frame
 	functionList     []Function
 
@@ -79,7 +80,8 @@ type VM struct {
 	ip int
 
 	stack           []Value
-	globals         map[string]Value
+	globals         []Value
+	globalNames     map[string]int
 	globalConstants map[string]bool
 
 	frames []*Frame
@@ -103,23 +105,6 @@ func intToString(n int) string {
 }
 
 func int64ToString(n int64) string {
-	if n == 0 {
-		return "0"
-	}
-
-	var buf [20]byte
-	i := len(buf)
-
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + (n % 10))
-		n /= 10
-	}
-
-	return string(buf[i:])
-}
-
-func bigIntToString(n int64) string {
 	if n == 0 {
 		return "0"
 	}
@@ -163,16 +148,18 @@ func isClass(value ObjectValue) bool {
 	return exists
 }
 
-func NewVM(mainInstructions []Instruction, functions map[string]Function, classes map[string]Class) *VM {
+func NewVM(mainInstructions []Instruction, functions map[string]Function, classes map[string]Class, interfaces map[string]Interface, globalIndex map[string]int) *VM {
 	mainInstructions, functions, functionList := normalizeFunctionIDs(mainInstructions, functions)
 
 	return &VM{
 		start:            time.Now().UnixMilli(),
 		mainInstructions: mainInstructions,
 		functions:        functions,
+		interfaces:       interfaces,
 		functionList:     functionList,
 		classes:          classes,
-		globals:          map[string]Value{},
+		globals:          make([]Value, 0, 256),
+		globalNames:      map[string]int{},
 		globalConstants:  map[string]bool{},
 		mu:               sync.Mutex{},
 		cliArgs:          []string{},
@@ -352,6 +339,7 @@ func (vm *VM) CloneForTask() *VM {
 		tryHandlers: []TryHandler{},
 
 		globals:         vm.globals,
+		globalNames:     vm.globalNames,
 		globalConstants: vm.globalConstants,
 		globalTypes:     vm.globalTypes,
 
@@ -420,7 +408,7 @@ func cloneValue(value Value) Value {
 		bytes := make([]byte, len(v.Bytes))
 		copy(bytes, v.Bytes)
 
-		return NewNative(BufferValue{
+		return NewNative(&BufferValue{
 			Bytes: bytes,
 		})
 
@@ -497,19 +485,19 @@ func propertyValue(vm *VM, objectValue Value, name string) Value {
 
 func resolveNamespaceValue(vm *VM, value Value) Value {
 	if ref, ok := value.Value.(NamespaceMemberRef); ok {
-		actual, exists := vm.globals[ref.GlobalName]
+		slot, exists := vm.globalNames[ref.GlobalName]
 		if !exists {
 			vm.fatalError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
 		}
-		return actual
+		return vm.globals[slot]
 	}
 
 	if ref, ok := value.Value.(*NamespaceMemberRef); ok {
-		actual, exists := vm.globals[ref.GlobalName]
+		slot, exists := vm.globalNames[ref.GlobalName]
 		if !exists {
 			vm.fatalError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
 		}
-		return actual
+		return vm.globals[slot]
 	}
 
 	return value
@@ -634,6 +622,45 @@ func addValues(left Value, right Value) Value {
 	return Value{}
 }
 
+func (vm *VM) getGlobalByName(name string) (Value, bool) {
+	slot, exists := vm.globalNames[name]
+	if !exists {
+		return Value{}, false
+	}
+
+	return vm.globals[slot], true
+}
+
+func (vm *VM) setGlobal(slot int, value Value) {
+	if slot >= len(vm.globals) {
+		newSize := slot + 1
+
+		if newSize < len(vm.globals)*2 {
+			newSize = len(vm.globals) * 2
+		}
+		newGlobals := make([]Value, newSize)
+		copy(newGlobals, vm.globals)
+		vm.globals = newGlobals
+	}
+	vm.globals[slot] = value
+}
+
+func (vm *VM) getGlobal(slot int) Value {
+	if slot < 0 || slot >= len(vm.globals) {
+		return NewUndefined()
+	}
+	return vm.globals[slot]
+}
+
+func (vm *VM) setGlobalByName(name string, value Value) {
+	slot, exists := vm.globalNames[name]
+	if !exists {
+		return
+	}
+
+	vm.globals[slot] = value
+}
+
 func (vm *VM) canAccessField(object ObjectValue, field string) bool {
 	className, isClass := object["__class"]
 	if !isClass {
@@ -675,14 +702,14 @@ func (vm *VM) getProperty(objectValue Value, name string, safe bool) Value {
 		}
 
 		if ref, ok := value.Value.(NamespaceMemberRef); ok {
-			actual, exists := vm.globals[ref.GlobalName]
+			slot, exists := vm.globalNames[ref.GlobalName]
 			if !exists {
 				if safe {
 					return NewUndefined()
 				}
 				vm.nameError("undefined namespace global: %s", ref.GlobalName)
 			}
-			return actual
+			return vm.globals[slot]
 		}
 
 		return value
@@ -698,14 +725,14 @@ func (vm *VM) getProperty(objectValue Value, name string, safe bool) Value {
 		}
 
 		if ref, ok := value.Value.(NamespaceMemberRef); ok {
-			actual, exists := vm.globals[ref.GlobalName]
+			slot, exists := vm.globalNames[ref.GlobalName]
 			if !exists {
 				if safe {
 					return NewUndefined()
 				}
 				vm.nameError("undefined namespace global: %s", ref.GlobalName)
 			}
-			return actual
+			return vm.globals[slot]
 		}
 
 		return value
@@ -1024,15 +1051,18 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 			arg := vm.stack[start+i]
 			param := fn.Params[i]
 
-			if fn.HasTypeHints && !param.TypeHint.IsEmpty() && !CheckTypeHint(arg, param.TypeHint) {
-				vm.fatalError(
-					ErrorType,
-					"function %s parameter %s expected %s, got %s",
-					fn.Name,
-					param.Name,
-					param.TypeHint.String(),
-					TypeName(arg),
-				)
+			if fn.HasTypeHints && !param.TypeHint.IsEmpty() {
+				if ok, reason := CheckTypeHint(arg, param.TypeHint, vm.interfaces); !ok {
+					vm.fatalError(
+						ErrorType,
+						"function %s parameter %s expected %s, got %s%s",
+						fn.Name,
+						param.Name,
+						param.TypeHint.String(),
+						TypeName(arg),
+						reason,
+					)
+				}
 			}
 
 			setCellValue(frame.locals[i], arg)
@@ -1042,7 +1072,6 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 			vm.stack[start+i] = Value{}
 		}
 
-		// Rest param gets remaining args as array
 		restParam := fn.Params[fixedCount]
 		rest := &ArrayValue{
 			Elements: make([]Value, 0, argCount-fixedCount),
@@ -1051,15 +1080,18 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 		for i := fixedCount; i < argCount; i++ {
 			arg := vm.stack[start+i]
 
-			if fn.HasTypeHints && !restParam.TypeHint.IsEmpty() && !CheckTypeHint(arg, restParam.TypeHint) {
-				vm.fatalError(
-					ErrorType,
-					"function %s rest parameter %s expected %s, got %s",
-					fn.Name,
-					restParam.Name,
-					restParam.TypeHint.String(),
-					TypeName(arg),
-				)
+			if fn.HasTypeHints && !restParam.TypeHint.IsEmpty() {
+				if ok, reason := CheckTypeHint(arg, restParam.TypeHint, vm.interfaces); !ok {
+					vm.fatalError(
+						ErrorType,
+						"function %s rest parameter %s expected %s, got %s%s",
+						fn.Name,
+						restParam.Name,
+						restParam.TypeHint.String(),
+						TypeName(arg),
+						reason,
+					)
+				}
 			}
 
 			rest.Elements = append(rest.Elements, arg)
@@ -1080,15 +1112,18 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 			arg := vm.stack[start+i]
 			param := fn.Params[i]
 
-			if !param.TypeHint.IsEmpty() && !CheckTypeHint(arg, param.TypeHint) {
-				vm.fatalError(
-					ErrorType,
-					"function %s parameter %s expected %s, got %s",
-					fn.Name,
-					param.Name,
-					param.TypeHint.String(),
-					TypeName(arg),
-				)
+			if !param.TypeHint.IsEmpty() {
+				if ok, reason := CheckTypeHint(arg, param.TypeHint, vm.interfaces); !ok {
+					vm.fatalError(
+						ErrorType,
+						"function %s parameter %s expected %s, got %s%s",
+						fn.Name,
+						param.Name,
+						param.TypeHint.String(),
+						TypeName(arg),
+						reason,
+					)
+				}
 			}
 
 			setCellValue(frame.locals[i], arg)
@@ -1176,7 +1211,7 @@ func (vm *VM) throwValue(value Value) {
 		setCellValue(frame.locals[handler.Slot], NewNative(errorObject))
 		frame.constants[handler.Slot] = false
 	} else {
-		vm.globals[handler.Name] = NewNative(errorObject)
+		vm.setGlobal(handler.Slot, NewNative(errorObject))
 		vm.globalConstants[handler.Name] = false
 	}
 
@@ -1296,15 +1331,18 @@ func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []Value) {
 		for i, arg := range args {
 			param := fn.Params[i]
 
-			if fn.HasTypeHints && !param.TypeHint.IsEmpty() && !CheckTypeHint(arg, param.TypeHint) {
-				vm.fatalError(
-					ErrorType,
-					"function %s parameter %s expected %s, got %s",
-					fn.Name,
-					param.Name,
-					param.TypeHint.String(),
-					TypeName(arg),
-				)
+			if fn.HasTypeHints && !param.TypeHint.IsEmpty() {
+				if ok, reason := CheckTypeHint(arg, param.TypeHint, vm.interfaces); !ok {
+					vm.fatalError(
+						ErrorType,
+						"function %s parameter %s expected %s, got %s%s",
+						fn.Name,
+						param.Name,
+						param.TypeHint.String(),
+						TypeName(arg),
+						reason,
+					)
+				}
 			}
 
 			setCellValue(frame.locals[i], arg)
@@ -1352,15 +1390,18 @@ func (vm *VM) callFunctionDirect(fn Function, args []Value) {
 	for i, arg := range args {
 		param := fn.Params[i]
 
-		if fn.HasTypeHints && !param.TypeHint.IsEmpty() && !CheckTypeHint(arg, param.TypeHint) {
-			vm.fatalError(
-				ErrorType,
-				"function %s parameter %s expected %s, got %s",
-				fn.Name,
-				param.Name,
-				param.TypeHint.String(),
-				TypeName(arg),
-			)
+		if fn.HasTypeHints && !param.TypeHint.IsEmpty() {
+			if ok, reason := CheckTypeHint(arg, param.TypeHint, vm.interfaces); !ok {
+				vm.fatalError(
+					ErrorType,
+					"function %s parameter %s expected %s, got %s%s",
+					fn.Name,
+					param.Name,
+					param.TypeHint.String(),
+					TypeName(arg),
+					reason,
+				)
+			}
 		}
 
 		setCellValue(frame.locals[i], arg)
@@ -2268,8 +2309,7 @@ func (vm *VM) step() bool {
 		default:
 			wrapped = NewNative(v)
 		}
-		vm.stack[vm.top] = wrapped
-		vm.top++
+		vm.push(wrapped)
 
 	case OP_SET_PROPERTY:
 		name := instr.Value.(string)
@@ -2325,25 +2365,20 @@ func (vm *VM) step() bool {
 		vm.push(vm.getProperty(objectValue, name, true))
 
 	case OP_LOAD_GLOBAL:
-		var name string
+		var slot int
+		if info, ok := instr.Value.(VariableInfo); ok {
+			slot = info.Slot
+		} else if name, ok := instr.Value.(string); ok {
+			var exists bool
 
-		switch operand := instr.Value.(type) {
-		case string:
-			name = operand
+			slot, exists = vm.globalNames[name]
 
-		case VariableInfo:
-			name = operand.Name
-
-		default:
-			vm.runtimeError(ErrorRuntime, "OP_LOAD_GLOBAL expected string or VariableInfo, got %v", instr)
+			if !exists {
+				vm.fatalError(ErrorName, "undefined global variable: %s", name)
+			}
 		}
 
-		value, ok := vm.globals[name]
-		if !ok {
-			vm.fatalError(ErrorName, "undefined global variable: %s", name)
-		}
-
-		vm.push(value)
+		vm.push(vm.getGlobal(slot))
 
 	case OP_SETUP_TRY:
 		info := instr.Value.(TryInfo)
@@ -2367,18 +2402,26 @@ func (vm *VM) step() bool {
 		info := instr.Value.(VariableInfo)
 		value := vm.popFast()
 
-		if !CheckTypeHint(value, info.TypeHint) {
+		if ok, reason := CheckTypeHint(value, info.TypeHint, vm.interfaces); !ok {
 			vm.fatalError(
 				ErrorType,
-				"variable %s expected %s, got %s",
+				"variable %s expected %s, got %s%s",
 				info.Name,
 				info.TypeHint.Name,
 				TypeName(value),
+				reason,
 			)
 		}
 
 		vm.mu.Lock()
-		vm.globals[info.Name] = value
+
+		if vm.globalNames == nil {
+			vm.globalNames = map[string]int{}
+		}
+		vm.globalNames[info.Name] = info.Slot
+
+		vm.setGlobal(info.Slot, value)
+
 		vm.globalConstants[info.Name] = info.Constant
 		vm.globalTypes[info.Name] = info.TypeHint
 		vm.mu.Unlock()
@@ -2412,54 +2455,50 @@ func (vm *VM) step() bool {
 	case OP_LOAD_LOCAL_0:
 		frame := vm.frames[len(vm.frames)-1]
 		cell := frame.locals[0]
-		if cell.IsInt {
-			vm.stack[vm.top] = NewInt(cell.Int)
-		} else {
-			if cell == nil {
-				vm.fatalError(ErrorInternal, "local slot is nil: function=%s slot=0 locals=%d", frame.function.Name, len(frame.locals))
-			}
-			vm.stack[vm.top] = cell.Value
+		if cell == nil {
+			vm.fatalError(ErrorInternal, "local slot is nil: function=%s slot=0 locals=%d", frame.function.Name, len(frame.locals))
 		}
-		vm.top++
+		if cell.IsInt {
+			vm.push(NewInt(cell.Int))
+		} else {
+			vm.push(cell.Value)
+		}
 
 	case OP_LOAD_LOCAL_1:
 		frame := vm.frames[len(vm.frames)-1]
 		cell := frame.locals[1]
 		if cell.IsInt {
-			vm.stack[vm.top] = NewInt(cell.Int)
+			vm.push(NewInt(cell.Int))
 		} else {
 			if cell == nil {
 				vm.fatalError(ErrorInternal, "local slot is nil: function=%s slot=1 locals=%d", frame.function.Name, len(frame.locals))
 			}
-			vm.stack[vm.top] = cell.Value
+			vm.push(cell.Value)
 		}
-		vm.top++
 
 	case OP_LOAD_LOCAL_2:
 		frame := vm.frames[len(vm.frames)-1]
 		cell := frame.locals[2]
 		if cell.IsInt {
-			vm.stack[vm.top] = NewInt(cell.Int)
+			vm.push(NewInt(cell.Int))
 		} else {
 			if cell == nil {
 				vm.fatalError(ErrorInternal, "local slot is nil: function=%s slot=2 locals=%d", frame.function.Name, len(frame.locals))
 			}
-			vm.stack[vm.top] = cell.Value
+			vm.push(cell.Value)
 		}
-		vm.top++
 
 	case OP_LOAD_LOCAL_3:
 		frame := vm.frames[len(vm.frames)-1]
 		cell := frame.locals[3]
 		if cell.IsInt {
-			vm.stack[vm.top] = NewInt(cell.Int)
+			vm.push(NewInt(cell.Int))
 		} else {
 			if cell == nil {
 				vm.fatalError(ErrorInternal, "local slot is nil: function=%s slot=3 locals=%d", frame.function.Name, len(frame.locals))
 			}
-			vm.stack[vm.top] = cell.Value
+			vm.push(cell.Value)
 		}
-		vm.top++
 
 	case OP_STORE_LOCAL:
 		info := instr.Value.(VariableInfo)
@@ -2471,14 +2510,17 @@ func (vm *VM) step() bool {
 			vm.fatalError(ErrorInternal, "local slot out of range: %d", info.Slot)
 		}
 
-		if !info.TypeHint.IsEmpty() && !CheckTypeHint(value, info.TypeHint) {
-			vm.fatalError(
-				ErrorType,
-				"variable %s expected %s, got %s",
-				info.Name,
-				info.TypeHint.Name,
-				TypeName(value),
-			)
+		if !info.TypeHint.IsEmpty() {
+			if ok, reason := CheckTypeHint(value, info.TypeHint, vm.interfaces); !ok {
+				vm.fatalError(
+					ErrorType,
+					"variable %s expected %s, got %s%s",
+					info.Name,
+					info.TypeHint.Name,
+					TypeName(value),
+					reason,
+				)
+			}
 		}
 
 		frame.locals[info.Slot] = &Cell{}
@@ -2487,8 +2529,24 @@ func (vm *VM) step() bool {
 		frame.localTypes[info.Slot] = info.TypeHint
 
 	case OP_ASSIGN_GLOBAL:
-		name := instr.Value.(string)
 		value := vm.popFast()
+
+		var slot int
+		var name string
+
+		if info, ok := instr.Value.(VariableInfo); ok {
+			slot = info.Slot
+			name = info.Name
+		} else if s, ok := instr.Value.(string); ok {
+			name = s
+			var exists bool
+			slot, exists = vm.globalNames[name]
+			if !exists {
+				vm.fatalError(ErrorName, "undefined global variable: %s", name)
+			}
+		} else {
+			vm.fatalError(ErrorInternal, "unexpected type for OP_ASSIGN_GLOBAL: %T", instr.Value)
+		}
 
 		if vm.globalConstants[name] {
 			vm.fatalError(ErrorConst, "cannot assign to constant global")
@@ -2496,18 +2554,21 @@ func (vm *VM) step() bool {
 
 		hint := vm.globalTypes[name]
 
-		if !hint.IsEmpty() && !CheckTypeHint(value, hint) {
-			vm.fatalError(
-				ErrorType,
-				"global %s expected %s, got %s",
-				name,
-				hint.Name,
-				TypeName(value),
-			)
+		if !hint.IsEmpty() {
+			if ok, reason := CheckTypeHint(value, hint, vm.interfaces); !ok {
+				vm.fatalError(
+					ErrorType,
+					"global %s expected %s, got %s%s",
+					name,
+					hint.Name,
+					TypeName(value),
+					reason,
+				)
+			}
 		}
 
 		vm.mu.Lock()
-		vm.globals[name] = value
+		vm.setGlobal(slot, value)
 		vm.mu.Unlock()
 
 	case OP_INC_LOCAL:
@@ -2664,7 +2725,7 @@ func (vm *VM) step() bool {
 			vm.fatalError(ErrorConst, "cannot increment constant global")
 		}
 
-		value, exists := vm.globals[name]
+		value, exists := vm.getGlobalByName(name)
 		if !exists {
 			vm.fatalError(ErrorName, "undefined global variable: %s", name)
 		}
@@ -2680,16 +2741,16 @@ func (vm *VM) step() bool {
 		switch v := rawVal.(type) {
 		case int:
 			if isFloat {
-				vm.globals[name] = NewNative(float64(v) + floatAmount)
+				vm.setGlobalByName(name, NewNative(float64(v)+floatAmount))
 			} else {
-				vm.globals[name] = NewInt(v + intAmount)
+				vm.setGlobalByName(name, NewInt(v+intAmount))
 			}
 
 		case float64:
 			if isFloat {
-				vm.globals[name] = NewNative(v + floatAmount)
+				vm.setGlobalByName(name, NewNative(v+floatAmount))
 			} else {
-				vm.globals[name] = NewNative(v + float64(intAmount))
+				vm.setGlobalByName(name, NewNative(v+float64(intAmount)))
 			}
 
 		default:
@@ -2719,7 +2780,7 @@ func (vm *VM) step() bool {
 			vm.fatalError(ErrorConst, "cannot decrement constant global")
 		}
 
-		value, exists := vm.globals[name]
+		value, exists := vm.getGlobalByName(name)
 		if !exists {
 			vm.fatalError(ErrorName, "undefined global variable: %s", name)
 		}
@@ -2735,16 +2796,16 @@ func (vm *VM) step() bool {
 		switch v := rawVal.(type) {
 		case int:
 			if isFloat {
-				vm.globals[name] = NewNative(float64(v) - floatAmount)
+				vm.setGlobalByName(name, NewNative(float64(v)-floatAmount))
 			} else {
-				vm.globals[name] = NewInt(v - intAmount)
+				vm.setGlobalByName(name, NewInt(v-intAmount))
 			}
 
 		case float64:
 			if isFloat {
-				vm.globals[name] = NewNative(v - floatAmount)
+				vm.setGlobalByName(name, NewNative(v-floatAmount))
 			} else {
-				vm.globals[name] = NewNative(v - float64(intAmount))
+				vm.setGlobalByName(name, NewNative(v-float64(intAmount)))
 			}
 
 		default:
@@ -2784,13 +2845,16 @@ func (vm *VM) step() bool {
 
 		hint := frame.localTypes[slot]
 
-		if !hint.IsEmpty() && !CheckTypeHint(value, hint) {
-			vm.fatalError(
-				ErrorType,
-				"local variable expected %s, got %s",
-				hint.Name,
-				TypeName(value),
-			)
+		if !hint.IsEmpty() {
+			if ok, reason := CheckTypeHint(value, hint, vm.interfaces); !ok {
+				vm.fatalError(
+					ErrorType,
+					"local variable expected %s, got %s%s",
+					hint.Name,
+					TypeName(value),
+					reason,
+				)
+			}
 		}
 
 		setCellValue(frame.locals[slot], value)
@@ -2838,12 +2902,12 @@ func (vm *VM) step() bool {
 		}
 
 		if _, ok := leftVal.(float64); ok {
-			vm.push(NewNative(asFloat(left) - asFloat(right)))
+			vm.push(NewNative(asFloat(left, vm) - asFloat(right, vm)))
 			break
 		}
 
 		if _, ok := rightVal.(float64); ok {
-			vm.push(NewNative(asFloat(left) - asFloat(right)))
+			vm.push(NewNative(asFloat(left, vm) - asFloat(right, vm)))
 			break
 		}
 
@@ -2897,12 +2961,12 @@ func (vm *VM) step() bool {
 		}
 
 		if _, ok := leftVal.(float64); ok {
-			vm.push(NewNative(asFloat(left) * asFloat(right)))
+			vm.push(NewNative(asFloat(left, vm) * asFloat(right, vm)))
 			break
 		}
 
 		if _, ok := rightVal.(float64); ok {
-			vm.push(NewNative(asFloat(left) * asFloat(right)))
+			vm.push(NewNative(asFloat(left, vm) * asFloat(right, vm)))
 			break
 		}
 
@@ -2959,12 +3023,12 @@ func (vm *VM) step() bool {
 		}
 
 		if _, ok := leftVal.(float64); ok {
-			vm.push(NewNative(asFloat(left) / asFloat(right)))
+			vm.push(NewNative(asFloat(left, vm) / asFloat(right, vm)))
 			break
 		}
 
 		if _, ok := rightVal.(float64); ok {
-			vm.push(NewNative(asFloat(left) / asFloat(right)))
+			vm.push(NewNative(asFloat(left, vm) / asFloat(right, vm)))
 			break
 		}
 
@@ -3065,7 +3129,7 @@ func (vm *VM) step() bool {
 			vm.fatalError(ErrorType, "cannot compare %s and %s", TypeName(left), TypeName(right))
 		}
 
-		vm.push(NewNative(asFloat(left) > asFloat(right)))
+		vm.push(NewNative(asFloat(left, vm) > asFloat(right, vm)))
 
 	case OP_LTE:
 		right := vm.popFast()
@@ -3080,7 +3144,7 @@ func (vm *VM) step() bool {
 			vm.fatalError(ErrorType, "cannot compare %s and %s", TypeName(left), TypeName(right))
 		}
 
-		vm.push(NewNative(asFloat(left) <= asFloat(right)))
+		vm.push(NewNative(asFloat(left, vm) <= asFloat(right, vm)))
 
 	case OP_GTE:
 		right := vm.popFast()
@@ -3095,7 +3159,7 @@ func (vm *VM) step() bool {
 			vm.fatalError(ErrorType, "cannot compare %s and %s", TypeName(left), TypeName(right))
 		}
 
-		vm.push(NewNative(asFloat(left) >= asFloat(right)))
+		vm.push(NewNative(asFloat(left, vm) >= asFloat(right, vm)))
 
 	case OP_AND:
 		right := vm.popFast()
@@ -3391,7 +3455,8 @@ func (vm *VM) step() bool {
 			}
 
 			if index < 0 || index >= len(obj.Elements) {
-				vm.fatalError(ErrorRuntime, "array index out of range: %d", index)
+				vm.runtimeError(ErrorRuntime, "array index out of range: %d", index)
+				return false
 			}
 
 			vm.push(obj.Elements[index])
@@ -3481,14 +3546,17 @@ func (vm *VM) step() bool {
 		frame := vm.frames[len(vm.frames)-1]
 		vm.frames = vm.frames[:len(vm.frames)-1]
 
-		if !frame.function.ReturnType.IsEmpty() && !CheckTypeHint(returnValue, frame.function.ReturnType) {
-			vm.fatalError(
-				ErrorType,
-				"function %s should return %s, got %s",
-				frame.function.Name,
-				frame.function.ReturnType.Name,
-				TypeName(returnValue),
-			)
+		if !frame.function.ReturnType.IsEmpty() {
+			if ok, reason := CheckTypeHint(returnValue, frame.function.ReturnType, vm.interfaces); !ok {
+				vm.fatalError(
+					ErrorType,
+					"function %s should return %s, got %s%s",
+					frame.function.Name,
+					frame.function.ReturnType.Name,
+					TypeName(returnValue),
+					reason,
+				)
+			}
 		}
 
 		vm.releaseFrame(frame)
@@ -4219,15 +4287,18 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 			param := fn.Params[paramIndex]
 			arg := args[i]
 
-			if fn.HasTypeHints && !param.TypeHint.IsEmpty() && !CheckTypeHint(arg, param.TypeHint) {
-				vm.fatalError(
-					ErrorType,
-					"method %s parameter %s expected %s, got %s",
-					method,
-					param.Name,
-					param.TypeHint.String(),
-					TypeName(arg),
-				)
+			if fn.HasTypeHints && !param.TypeHint.IsEmpty() {
+				if ok, reason := CheckTypeHint(arg, param.TypeHint, vm.interfaces); !ok {
+					vm.fatalError(
+						ErrorType,
+						"method %s parameter %s expected %s, got %s%s",
+						method,
+						param.Name,
+						param.TypeHint.String(),
+						TypeName(arg),
+						reason,
+					)
+				}
 			}
 
 			setCellValue(frame.locals[paramIndex], arg)
@@ -4246,15 +4317,18 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 		for i := fixedCount; i < len(args); i++ {
 			arg := args[i]
 
-			if fn.HasTypeHints && !restParam.TypeHint.IsEmpty() && !CheckTypeHint(arg, restParam.TypeHint) {
-				vm.fatalError(
-					ErrorType,
-					"method %s rest parameter %s expected %s, got %s",
-					method,
-					restParam.Name,
-					restParam.TypeHint.String(),
-					TypeName(arg),
-				)
+			if fn.HasTypeHints && !restParam.TypeHint.IsEmpty() {
+				if ok, reason := CheckTypeHint(arg, restParam.TypeHint, vm.interfaces); !ok {
+					vm.fatalError(
+						ErrorType,
+						"method %s rest parameter %s expected %s, got %s%s",
+						method,
+						restParam.Name,
+						restParam.TypeHint.String(),
+						TypeName(arg),
+						reason,
+					)
+				}
 			}
 
 			rest.Elements = append(rest.Elements, arg)
@@ -4270,15 +4344,18 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 			paramIndex := paramOffset + i
 			param := fn.Params[paramIndex]
 
-			if fn.HasTypeHints && !param.TypeHint.IsEmpty() && !CheckTypeHint(arg, param.TypeHint) {
-				vm.fatalError(
-					ErrorType,
-					"method %s parameter %s expected %s, got %s",
-					method,
-					param.Name,
-					param.TypeHint.String(),
-					TypeName(arg),
-				)
+			if fn.HasTypeHints && !param.TypeHint.IsEmpty() {
+				if ok, reason := CheckTypeHint(arg, param.TypeHint, vm.interfaces); !ok {
+					vm.fatalError(
+						ErrorType,
+						"method %s parameter %s expected %s, got %s%s",
+						method,
+						param.Name,
+						param.TypeHint.String(),
+						TypeName(arg),
+						reason,
+					)
+				}
 			}
 
 			setCellValue(frame.locals[paramIndex], arg)
@@ -4374,15 +4451,18 @@ func (vm *VM) callFunction(name string, argCount int) {
 	for i, arg := range args {
 		param := fn.Params[i]
 
-		if !param.TypeHint.IsEmpty() && !CheckTypeHint(arg, param.TypeHint) {
-			vm.fatalError(
-				ErrorType,
-				"function %s parameter %s expected %s, got %s",
-				fn.Name,
-				param.Name,
-				param.TypeHint.String(),
-				TypeName(arg),
-			)
+		if !param.TypeHint.IsEmpty() {
+			if ok, reason := CheckTypeHint(arg, param.TypeHint, vm.interfaces); !ok {
+				vm.fatalError(
+					ErrorType,
+					"function %s parameter %s expected %s, got %s%s",
+					fn.Name,
+					param.Name,
+					param.TypeHint.String(),
+					TypeName(arg),
+					reason,
+				)
+			}
 		}
 
 		setCellValue(frame.locals[i], arg)

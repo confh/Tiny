@@ -14,7 +14,7 @@ var appNativeMetadata = NativeTypeInfo{
 		"run": {
 			Name:        "run",
 			Args:        []StdArg{},
-			Returns:     "void",
+			Returns:     "undefined",
 			Description: "Runs the app with command-line arguments.",
 		},
 	},
