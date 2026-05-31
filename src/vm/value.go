@@ -12,7 +12,7 @@ import (
 	"strings"
 	"sync"
 
-	webview "github.com/jchv/go-webview2"
+	webview "github.com/jchv/go-webview-selector"
 
 	. "language.com/src/tinyerrors"
 )

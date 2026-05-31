@@ -148,7 +148,7 @@ func fileExists(path string) bool {
 	return err == nil && !info.IsDir()
 }
 
-func (vm *VM) callNativePlugin(plugin *NativePluginValue, method string, args []Value) {
+func (vm *VM) callNativePlugin(plugin *NativePluginValue, method string, args []TinyValue) {
 	nativePluginFuncs.RLock()
 	fns, ok := nativePluginFuncs.byCallPtr[plugin.Call]
 	nativePluginFuncs.RUnlock()
