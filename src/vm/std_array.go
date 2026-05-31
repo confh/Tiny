@@ -6,47 +6,19 @@ import (
 
 var stdArrayMetadata = StdModuleInfo{
 	Name: "array",
-	Methods: map[string]StdMethodInfo{
-		"range": {
-			Name: "range",
-			Args: []StdArg{
-				{Name: "min", Type: "int", Optional: false},
-				{Name: "max", Type: "int", Optional: false},
-			},
-			Returns:     "array",
-			Description: "Creates an array containing all integers from min to max (inclusive).",
-		},
-		"isArray": {
-			Name: "isArray",
-			Args: []StdArg{
-				{Name: "value", Type: "any", Optional: false},
-			},
-			Returns:     "bool",
-			Description: "Returns true if value is an array.",
-		},
-		"from": {
-			Name: "from",
-			Args: []StdArg{
-				{Name: "value", Type: "any", Optional: false},
-			},
-			Returns:     "array",
-			Description: "Converts a string or array-like value into an Array.",
-		},
-	},
 }
 
 var stdArrayMethods map[string]StdModuleFunc
 
 func init() {
 	stdArrayMethods = map[string]StdModuleFunc{
-		"range":   stdArrayRange,
-		"isArray": stdArrayIsArray,
-		"from":    stdArrayFrom,
+		"range": stdArrayRange,
+		"from":  stdArrayFrom,
 	}
 	registerStdModule(stdArrayMetadata)
 }
 
-func (vm *VM) callStdArray(method string, args []Value) {
+func (vm *VM) callStdArray(method string, args []TinyValue) {
 	fn, ok := stdArrayMethods[method]
 	if !ok {
 		vm.runtimeError(ErrorName, "unknown array function: %s", method)
@@ -55,7 +27,7 @@ func (vm *VM) callStdArray(method string, args []Value) {
 	fn(vm, args)
 }
 
-func stdArrayRange(vm *VM, args []Value) {
+func stdArrayRange(vm *VM, args []TinyValue) {
 	expectArgs(vm, "array.range", args, 2)
 
 	min := argInt(vm, "array.range", args, 0)
@@ -66,7 +38,7 @@ func stdArrayRange(vm *VM, args []Value) {
 		capacity = max - min + 1
 	}
 	array := &ArrayValue{
-		Elements: make([]Value, capacity),
+		Elements: make([]TinyValue, capacity),
 	}
 
 	for i := 0; i < capacity; i++ {
@@ -76,26 +48,19 @@ func stdArrayRange(vm *VM, args []Value) {
 	vm.push(NewNative(array))
 }
 
-func stdArrayIsArray(vm *VM, args []Value) {
-	expectArgs(vm, "array.isArray", args, 1)
-
-	_, ok := args[0].Value.(*ArrayValue)
-	vm.push(NewNative(ok))
-}
-
-func stdArrayFrom(vm *VM, args []Value) {
+func stdArrayFrom(vm *VM, args []TinyValue) {
 	expectArgs(vm, "array.from", args, 1)
 
 	switch v := args[0].Value.(type) {
 	case string:
-		strArr := make([]Value, 0, len(v))
+		strArr := make([]TinyValue, 0, len(v))
 		for _, r := range v {
 			strArr = append(strArr, NewNative(string(r)))
 		}
 		vm.push(NewNative(&ArrayValue{Elements: strArr}))
 
 	case *ArrayValue:
-		dst := make([]Value, len(v.Elements))
+		dst := make([]TinyValue, len(v.Elements))
 		copy(dst, v.Elements)
 		vm.push(NewNative(&ArrayValue{Elements: dst}))
 

@@ -1,0 +1,3 @@
+export fn alloc(size: number, fill: number): buffer {}
+export fn fromString(text: string): buffer {}
+export fn fromArray(text: string): buffer {}

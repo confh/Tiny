@@ -9,93 +9,12 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
+func (v *NativeFileValue) TinyTypeName() string {
+	return "fs.File"
+}
+
 var stdFsMetadata = StdModuleInfo{
 	Name: "fs",
-	Methods: map[string]StdMethodInfo{
-		"open": {
-			Name: "open",
-			Args: []StdArg{
-				{Name: "path", Type: "string", Optional: false},
-			},
-			Returns:     "file",
-			Description: "Opens a file and returns a file object.",
-		},
-		"readFile": {
-			Name: "readFile",
-			Args: []StdArg{
-				{Name: "fileName", Type: "string", Optional: false},
-			},
-			Returns:     "string",
-			Description: "Reads an entire file and returns its contents as a string.",
-		},
-		"writeFile": {
-			Name: "writeFile",
-			Args: []StdArg{
-				{Name: "fileName", Type: "string", Optional: false},
-				{Name: "data", Type: "string", Optional: false},
-			},
-			Returns:     "bool",
-			Description: "Writes the provided string to a file, returning true if successful.",
-		},
-		"writeBytes": {
-			Name: "writeBytes",
-			Args: []StdArg{
-				{Name: "fileName", Type: "string", Optional: false},
-				{Name: "buffer", Type: "buffer", Optional: false},
-			},
-			Returns:     "bool",
-			Description: "Writes the buffer's bytes to a file, returning true if successful.",
-		},
-		"exists": {
-			Name: "exists",
-			Args: []StdArg{
-				{Name: "fileName", Type: "string", Optional: false},
-			},
-			Returns:     "bool",
-			Description: "Returns true if the file (or directory) exists, false otherwise.",
-		},
-		"readDir": {
-			Name: "readDir",
-			Args: []StdArg{
-				{Name: "dirName", Type: "string", Optional: false},
-			},
-			Returns:     "array",
-			Description: "Returns an array of filenames in the given directory.",
-		},
-		"mkDir": {
-			Name: "mkDir",
-			Args: []StdArg{
-				{Name: "dirName", Type: "string", Optional: false},
-			},
-			Returns:     "null",
-			Description: "Creates a new directory.",
-		},
-		"stat": {
-			Name: "stat",
-			Args: []StdArg{
-				{Name: "path", Type: "string", Optional: false},
-			},
-			Returns:     "object",
-			Description: "Returns file statistics (name, size, isDir, modTime) for the given path.",
-		},
-		"copy": {
-			Name: "copy",
-			Args: []StdArg{
-				{Name: "src", Type: "string", Optional: false},
-				{Name: "dst", Type: "string", Optional: false},
-			},
-			Returns:     "null",
-			Description: "Copies a file from src to dst.",
-		},
-		"remove": {
-			Name: "remove",
-			Args: []StdArg{
-				{Name: "path", Type: "string", Optional: false},
-			},
-			Returns:     "null",
-			Description: "Removes a file or directory at the given path.",
-		},
-	},
 }
 
 var stdFsMethods map[string]StdModuleFunc
@@ -116,7 +35,7 @@ func init() {
 	registerStdModule(stdFsMetadata)
 }
 
-func (vm *VM) callStdFs(method string, args []Value) {
+func (vm *VM) callStdFs(method string, args []TinyValue) {
 	fn, ok := stdFsMethods[method]
 	if !ok {
 		vm.runtimeError(ErrorName, "unknown fs function: %s", method)
@@ -125,7 +44,7 @@ func (vm *VM) callStdFs(method string, args []Value) {
 	fn(vm, args)
 }
 
-func stdFsOpen(vm *VM, args []Value) {
+func stdFsOpen(vm *VM, args []TinyValue) {
 	expectArgs(vm, "fs.open", args, 1)
 
 	path := argString(vm, "fs.open", args, 0)
@@ -139,7 +58,7 @@ func stdFsOpen(vm *VM, args []Value) {
 	}))
 }
 
-func stdFsReadFile(vm *VM, args []Value) {
+func stdFsReadFile(vm *VM, args []TinyValue) {
 	expectArgs(vm, "fs.readFile", args, 1)
 
 	fileName := argString(vm, "fs.readFile", args, 0)
@@ -150,7 +69,7 @@ func stdFsReadFile(vm *VM, args []Value) {
 	vm.push(NewNative(string(data)))
 }
 
-func stdFsWriteFile(vm *VM, args []Value) {
+func stdFsWriteFile(vm *VM, args []TinyValue) {
 	expectArgs(vm, "fs.writeFile", args, 2)
 
 	fileName := argString(vm, "fs.writeFile", args, 0)
@@ -162,7 +81,7 @@ func stdFsWriteFile(vm *VM, args []Value) {
 	vm.push(NewNative(true))
 }
 
-func stdFsWriteBytes(vm *VM, args []Value) {
+func stdFsWriteBytes(vm *VM, args []TinyValue) {
 	expectArgs(vm, "fs.writeBytes", args, 2)
 
 	fileName := argString(vm, "fs.writeBytes", args, 0)
@@ -174,7 +93,7 @@ func stdFsWriteBytes(vm *VM, args []Value) {
 	vm.push(NewNative(true))
 }
 
-func stdFsExists(vm *VM, args []Value) {
+func stdFsExists(vm *VM, args []TinyValue) {
 	expectArgs(vm, "fs.exists", args, 1)
 
 	fileName := argString(vm, "fs.exists", args, 0)
@@ -188,7 +107,7 @@ func stdFsExists(vm *VM, args []Value) {
 	}
 }
 
-func stdFsReadDir(vm *VM, args []Value) {
+func stdFsReadDir(vm *VM, args []TinyValue) {
 	expectArgs(vm, "fs.readDir", args, 1)
 
 	dirName := argString(vm, "fs.readDir", args, 0)
@@ -197,7 +116,7 @@ func stdFsReadDir(vm *VM, args []Value) {
 		vm.runtimeError(ErrorRuntime, "error reading directory: %s", err)
 	}
 	fileNames := &ArrayValue{
-		Elements: []Value{},
+		Elements: []TinyValue{},
 	}
 	for _, file := range files {
 		fileNames.Elements = append(fileNames.Elements, NewNative(file.Name()))
@@ -205,7 +124,7 @@ func stdFsReadDir(vm *VM, args []Value) {
 	vm.push(NewNative(fileNames))
 }
 
-func stdFsMkDir(vm *VM, args []Value) {
+func stdFsMkDir(vm *VM, args []TinyValue) {
 	expectArgs(vm, "fs.mkDir", args, 1)
 
 	dirName := argString(vm, "fs.mkDir", args, 0)
@@ -217,7 +136,7 @@ func stdFsMkDir(vm *VM, args []Value) {
 	vm.push(NewNull())
 }
 
-func stdFsStat(vm *VM, args []Value) {
+func stdFsStat(vm *VM, args []TinyValue) {
 	expectArgs(vm, "fs.stat", args, 1)
 
 	path := argString(vm, "fs.stat", args, 0)
@@ -234,7 +153,7 @@ func stdFsStat(vm *VM, args []Value) {
 	}))
 }
 
-func stdFsCopy(vm *VM, args []Value) {
+func stdFsCopy(vm *VM, args []TinyValue) {
 	expectArgs(vm, "fs.copy", args, 2)
 
 	src := argString(vm, "fs.copy", args, 0)
@@ -308,7 +227,7 @@ func stdFsCopy(vm *VM, args []Value) {
 	vm.push(NewInt(int(n)))
 }
 
-func stdFsRemove(vm *VM, args []Value) {
+func stdFsRemove(vm *VM, args []TinyValue) {
 	expectArgs(vm, "fs.remove", args, 1)
 
 	path := argString(vm, "fs.remove", args, 0)

@@ -6,66 +6,21 @@ import (
 	"strconv"
 	"strings"
 
-	json "github.com/goccy/go-json"
 	. "language.com/src/tinyerrors"
 )
-
-var serverNativeMetadata = NativeTypeInfo{
-	Name: "server",
-	Methods: map[string]StdMethodInfo{
-		"getPrettyJSON": {
-			Name:        "getPrettyJSON",
-			Args:        []StdArg{{Name: "path", Type: "string"}, {Name: "value", Type: "any"}},
-			Returns:     "void",
-			Description: "Register a GET route that responds with pretty-printed JSON.",
-		},
-		"getJSON": {
-			Name:        "getJSON",
-			Args:        []StdArg{{Name: "path", Type: "string"}, {Name: "value", Type: "any"}},
-			Returns:     "void",
-			Description: "Register a GET route that responds with minified JSON.",
-		},
-		"get": {
-			Name:        "get",
-			Args:        []StdArg{{Name: "path", Type: "string"}, {Name: "handler", Type: "string|function"}},
-			Returns:     "void",
-			Description: "Register a GET route. Handler can be a string or a function.",
-		},
-		"post": {
-			Name:        "post",
-			Args:        []StdArg{{Name: "path", Type: "string"}, {Name: "handler", Type: "string|function"}},
-			Returns:     "void",
-			Description: "Register a POST route. Handler can be a string or a function.",
-		},
-		"stop": {
-			Name:        "stop",
-			Returns:     "bool",
-			Description: "Stops the server.",
-		},
-		"start": {
-			Name:        "start",
-			Args:        []StdArg{{Name: "async", Type: "bool", Optional: true}},
-			Returns:     "void",
-			Description: "Starts the server. Pass 'true' to run asynchronously.",
-		},
-	},
-}
 
 var serverMethods map[string]NativeModuleFunc[*NativeServerValue]
 
 func init() {
 	serverMethods = map[string]NativeModuleFunc[*NativeServerValue]{
-		"getPrettyJSON": serverGetPrettyJSON,
-		"getJSON":       serverGetJSON,
-		"get":           serverGet,
-		"post":          serverPost,
-		"stop":          serverStop,
-		"start":         serverStart,
+		"get":   serverGet,
+		"post":  serverPost,
+		"stop":  serverStop,
+		"start": serverStart,
 	}
-	registerNativeType(serverNativeMetadata)
 }
 
-func (vm *VM) callServerMethod(server *NativeServerValue, method string, args []Value) {
+func (vm *VM) callServerMethod(server *NativeServerValue, method string, args []TinyValue) {
 	fn, ok := serverMethods[method]
 	if !ok {
 		vm.fatalError(ErrorName, "unknown server method: %s", method)
@@ -74,33 +29,7 @@ func (vm *VM) callServerMethod(server *NativeServerValue, method string, args []
 	fn(vm, server, args)
 }
 
-func serverGetPrettyJSON(vm *VM, server *NativeServerValue, args []Value) {
-	expectArgs(vm, "server.getPrettyJSON", args, 2)
-	path := argString(vm, "server.getPrettyJSON", args, 0)
-	jsonValue := valueToJSONCompatible(args[1])
-	bytes, err := json.MarshalIndent(jsonValue, "", "  ")
-	if err != nil {
-		vm.runtimeError(ErrorRuntime, "failed to convert value to JSON: %v", err)
-		return
-	}
-	server.GetRoutes[path] = NewNative(string(bytes))
-	vm.push(NewNull())
-}
-
-func serverGetJSON(vm *VM, server *NativeServerValue, args []Value) {
-	expectArgs(vm, "server.getJSON", args, 2)
-	path := argString(vm, "server.getJSON", args, 0)
-	jsonValue := valueToJSONCompatible(args[1])
-	bytes, err := json.Marshal(jsonValue)
-	if err != nil {
-		vm.runtimeError(ErrorRuntime, "failed to convert value to JSON: %v", err)
-		return
-	}
-	server.GetRoutes[path] = NewNative(string(bytes))
-	vm.push(NewNull())
-}
-
-func serverGet(vm *VM, server *NativeServerValue, args []Value) {
+func serverGet(vm *VM, server *NativeServerValue, args []TinyValue) {
 	expectArgs(vm, "server.get", args, 2)
 	path := argString(vm, "server.get", args, 0)
 	handler := args[1]
@@ -116,7 +45,7 @@ func serverGet(vm *VM, server *NativeServerValue, args []Value) {
 	vm.push(NewNull())
 }
 
-func serverPost(vm *VM, server *NativeServerValue, args []Value) {
+func serverPost(vm *VM, server *NativeServerValue, args []TinyValue) {
 	expectArgs(vm, "server.post", args, 2)
 	path := argString(vm, "server.post", args, 0)
 	handler := args[1]
@@ -132,13 +61,13 @@ func serverPost(vm *VM, server *NativeServerValue, args []Value) {
 	vm.push(NewNull())
 }
 
-func serverStop(vm *VM, server *NativeServerValue, args []Value) {
+func serverStop(vm *VM, server *NativeServerValue, args []TinyValue) {
 	expectArgs(vm, "server.stop", args, 0)
 	server.closed = true
 	vm.push(NewNative(true))
 }
 
-func serverStart(vm *VM, server *NativeServerValue, args []Value) {
+func serverStart(vm *VM, server *NativeServerValue, args []TinyValue) {
 	if len(args) > 1 {
 		vm.runtimeError(ErrorRuntime, "server.start expects 0 or 1 argument")
 		return
@@ -157,7 +86,7 @@ func serverStart(vm *VM, server *NativeServerValue, args []Value) {
 			return
 		}
 
-		var handler Value
+		var handler TinyValue
 		var params ObjectValue
 		var found bool
 
@@ -219,12 +148,12 @@ func serverStart(vm *VM, server *NativeServerValue, args []Value) {
 			vm.mu.Lock()
 			defer vm.mu.Unlock()
 
-			var result Value
+			var result TinyValue
 			if async {
 				requestVM := vm.CloneForTask()
-				result = requestVM.callFunctionValue(h, []Value{reqObj})
+				result = requestVM.callFunctionValue(h, []TinyValue{reqObj})
 			} else {
-				result = vm.callFunctionValue(h, []Value{reqObj})
+				result = vm.callFunctionValue(h, []TinyValue{reqObj})
 			}
 
 			httpResponseObject, ok := result.Value.(NativeHttpResponseValue)
@@ -302,7 +231,7 @@ func matchRoute(pattern string, actualPath string) (bool, ObjectValue) {
 	return true, params
 }
 
-func findRoute(routes map[string]Value, actualPath string) (Value, ObjectValue, bool) {
+func findRoute(routes map[string]TinyValue, actualPath string) (TinyValue, ObjectValue, bool) {
 	// exact match
 	if handler, ok := routes[actualPath]; ok {
 		return handler, ObjectValue{}, true

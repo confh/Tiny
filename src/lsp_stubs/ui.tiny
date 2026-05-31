@@ -1,0 +1,10 @@
+class WebView {
+  fn setTitle(title: string): null {}
+  fn setSize(width: number, height: number): null {}
+  fn setHtml(html: string): null {}
+  fn navigate(url: string): null {}
+  fn run(): null {}
+  fn callback(name: string, func: function): null {}
+}
+
+export fn new(debug?: bool): WebView {}

@@ -10,90 +10,12 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
+func (v *NativeProcessValue) TinyTypeName() string {
+	return "process.Process"
+}
+
 var stdProcessMetadata = StdModuleInfo{
 	Name: "process",
-	Methods: map[string]StdMethodInfo{
-		"args": {
-			Name:        "args",
-			Args:        []StdArg{},
-			Returns:     "array",
-			Description: "Returns an array of command-line arguments with which the process was started.",
-		},
-		"exit": {
-			Name:        "exit",
-			Args:        []StdArg{{Name: "code", Type: "int", Optional: false}},
-			Returns:     "Never",
-			Description: "Ends the process with the specified exit code.",
-		},
-		"close": {
-			Name:        "close",
-			Args:        []StdArg{},
-			Returns:     "Never",
-			Description: "Ends the process with exit code 0.",
-		},
-		"cwd": {
-			Name:        "cwd",
-			Args:        []StdArg{},
-			Returns:     "string",
-			Description: "Returns the current working directory of the process.",
-		},
-		"getEnv": {
-			Name:        "getEnv",
-			Args:        []StdArg{{Name: "key", Type: "string", Optional: false}},
-			Returns:     "string",
-			Description: "Gets the value of an environment variable.",
-		},
-		"setEnv": {
-			Name: "setEnv",
-			Args: []StdArg{
-				{Name: "key", Type: "string", Optional: false},
-				{Name: "value", Type: "string", Optional: false},
-			},
-			Returns:     "void",
-			Description: "Sets the value of an environment variable.",
-		},
-		"unsetEnv": {
-			Name:        "unsetEnv",
-			Args:        []StdArg{{Name: "key", Type: "string", Optional: false}},
-			Returns:     "void",
-			Description: "Removes an environment variable.",
-		},
-		"halt": {
-			Name:        "halt",
-			Args:        []StdArg{},
-			Returns:     "void",
-			Description: "Pauses execution and waits for Enter (console halt for debugging).",
-		},
-		"run": {
-			Name: "run",
-			Args: []StdArg{
-				{Name: "command", Type: "string", Optional: false},
-				{Name: "args", Type: "array", Optional: true},
-				{Name: "options", Type: "object", Optional: true},
-			},
-			Returns:     "object",
-			Description: "Runs a command synchronously, optionally in a different directory and with stdio capture.",
-		},
-		"shell": {
-			Name: "shell",
-			Args: []StdArg{
-				{Name: "command", Type: "string", Optional: false},
-				{Name: "options", Type: "object", Optional: true},
-			},
-			Returns:     "object",
-			Description: "Runs a shell command (platform-dependent).",
-		},
-		"start": {
-			Name: "start",
-			Args: []StdArg{
-				{Name: "command", Type: "string", Optional: false},
-				{Name: "args", Type: "array", Optional: true},
-				{Name: "options", Type: "object", Optional: true},
-			},
-			Returns:     "Process",
-			Description: "Spawns a new process asynchronously.",
-		},
-	},
 }
 
 var stdProcessMethods map[string]StdModuleFunc
@@ -115,7 +37,7 @@ func init() {
 	registerStdModule(stdProcessMetadata)
 }
 
-func (vm *VM) callStdProcess(method string, args []Value) {
+func (vm *VM) callStdProcess(method string, args []TinyValue) {
 	fn, ok := stdProcessMethods[method]
 	if !ok {
 		vm.runtimeError(ErrorName, "unknown process function: %s", method)
@@ -124,30 +46,30 @@ func (vm *VM) callStdProcess(method string, args []Value) {
 	fn(vm, args)
 }
 
-func processArgs(vm *VM, args []Value) {
+func processArgs(vm *VM, args []TinyValue) {
 	expectArgs(vm, "process.args", args, 0)
 
-	argsArray := &ArrayValue{Elements: make([]Value, 0, len(vm.cliArgs))}
+	argsArray := &ArrayValue{Elements: make([]TinyValue, 0, len(vm.cliArgs))}
 	for _, v := range vm.cliArgs {
 		argsArray.Elements = append(argsArray.Elements, NewNative(v))
 	}
 	vm.push(NewNative(argsArray))
 }
 
-func processExit(vm *VM, args []Value) {
+func processExit(vm *VM, args []TinyValue) {
 	expectArgs(vm, "process.exit", args, 1)
 
 	value := argInt(vm, "process.exit", args, 0)
 	os.Exit(value)
 }
 
-func processClose(vm *VM, args []Value) {
+func processClose(vm *VM, args []TinyValue) {
 	expectArgs(vm, "process.close", args, 0)
 
 	os.Exit(0)
 }
 
-func processCwd(vm *VM, args []Value) {
+func processCwd(vm *VM, args []TinyValue) {
 	expectArgs(vm, "process.cwd", args, 0)
 
 	root, err := os.Getwd()
@@ -158,14 +80,14 @@ func processCwd(vm *VM, args []Value) {
 	vm.push(NewNative(root))
 }
 
-func processGetEnv(vm *VM, args []Value) {
+func processGetEnv(vm *VM, args []TinyValue) {
 	expectArgs(vm, "process.getEnv", args, 1)
 
 	value := argString(vm, "process.getEnv", args, 0)
 	vm.push(NewNative(os.Getenv(value)))
 }
 
-func processSetEnv(vm *VM, args []Value) {
+func processSetEnv(vm *VM, args []TinyValue) {
 	expectArgs(vm, "process.setEnv", args, 2)
 
 	key := argString(vm, "process.setEnv", args, 0)
@@ -173,14 +95,14 @@ func processSetEnv(vm *VM, args []Value) {
 	os.Setenv(key, value)
 }
 
-func processUnsetEnv(vm *VM, args []Value) {
+func processUnsetEnv(vm *VM, args []TinyValue) {
 	expectArgs(vm, "process.unsetEnv", args, 1)
 
 	key := argString(vm, "process.unsetEnv", args, 0)
 	os.Unsetenv(key)
 }
 
-func processHalt(vm *VM, args []Value) {
+func processHalt(vm *VM, args []TinyValue) {
 	expectArgs(vm, "process.halt", args, 0)
 
 	fmt.Println("Press Enter to exit...")
@@ -189,7 +111,7 @@ func processHalt(vm *VM, args []Value) {
 	vm.push(NewNull())
 }
 
-func processRun(vm *VM, args []Value) {
+func processRun(vm *VM, args []TinyValue) {
 	expectArgsRange(vm, "process.run", args, 1, 3)
 
 	commandName := argString(vm, "process.run", args, 0)
@@ -259,7 +181,7 @@ func processRun(vm *VM, args []Value) {
 	}))
 }
 
-func processShell(vm *VM, args []Value) {
+func processShell(vm *VM, args []TinyValue) {
 	expectArgsRange(vm, "process.shell", args, 1, 2)
 
 	commandName := argString(vm, "process.shell", args, 0)
@@ -329,7 +251,7 @@ func processShell(vm *VM, args []Value) {
 	}))
 }
 
-func processStart(vm *VM, args []Value) {
+func processStart(vm *VM, args []TinyValue) {
 	expectArgsRange(vm, "process.start", args, 1, 3)
 
 	commandName := argString(vm, "process.start", args, 0)

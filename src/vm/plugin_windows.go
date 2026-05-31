@@ -116,7 +116,7 @@ func fileExists(path string) bool {
 	return err == nil && !info.IsDir()
 }
 
-func (vm *VM) callNativePlugin(plugin *NativePluginValue, method string, args []Value) {
+func (vm *VM) callNativePlugin(plugin *NativePluginValue, method string, args []TinyValue) {
 	jsonArgs := make([]any, len(args))
 
 	for i, arg := range args {

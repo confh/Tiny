@@ -1,0 +1,6 @@
+export fn clear() {}
+export fn print(...value: any): bool {}
+export fn println(...value: any): bool {}
+export fn input(prompt?: string): string {}
+export fn readLine(): string {}
+export fn readKey(): string {}

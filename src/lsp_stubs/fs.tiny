@@ -1,0 +1,15 @@
+class File {
+    fn read(size: number): string { }
+    fn close(): bool { }
+}
+
+export fn open(path: string): File {}
+export fn readFile(fileName: string): string {}
+export fn writeFile(fileName: string, data: string): bool {}
+export fn writeBytes(fileName: string, buffer: buffer): bool {}
+export fn exists(fileName: string): bool {}
+export fn readDir(dirName: string): array {}
+export fn mkDir(dirName: string): null {}
+export fn stat(path: string): object {}
+export fn copy(src: string, dst: string): null {}
+export fn remove(path: string): null {}

@@ -1,0 +1,6 @@
+export fn lockThread(): null {}
+export fn unlockThread(): null {}
+export fn onFatal(callback: function): null {}
+export fn clearFatalHandler(): null {}
+export fn memoryStats(): object {}
+export fn gc(): null {}

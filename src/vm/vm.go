@@ -51,7 +51,9 @@ type Frame struct {
 	localTypes   []TypeHint
 	methodClass  string
 
-	returnOverride    Value
+	lockedMutexes []*NativeMutexValue
+
+	returnOverride    TinyValue
 	hasReturnOverride bool
 	hasEscapedLocals  bool
 }
@@ -81,12 +83,12 @@ type VM struct {
 	tryHandlers   []TryHandler
 	deferHandlers []DeferHandler
 
-	mu sync.Mutex
+	mu *sync.RWMutex
 
 	ip int
 
-	stack           []Value
-	globals         []Value
+	stack           []TinyValue
+	globals         *[]TinyValue
 	globalNames     map[string]int
 	globalConstants map[string]bool
 
@@ -95,6 +97,7 @@ type VM struct {
 	wazeroRuntime wazero.Runtime
 	wazeroCtx     context.Context
 	wasmModule    api.Module
+	wasmMu        *sync.Mutex
 }
 
 func intToString(n int) string {
@@ -161,6 +164,8 @@ func isClass(value ObjectValue) bool {
 func NewVM(mainInstructions []Instruction, functions map[string]Function, classes map[string]Class, interfaces map[string]Interface, globalIndex map[string]int) *VM {
 	mainInstructions, functions, functionList := normalizeFunctionIDs(mainInstructions, functions)
 
+	globalsSlice := make([]TinyValue, 0, 256)
+
 	return &VM{
 		start:            time.Now().UnixMilli(),
 		mainInstructions: mainInstructions,
@@ -168,17 +173,18 @@ func NewVM(mainInstructions []Instruction, functions map[string]Function, classe
 		interfaces:       interfaces,
 		functionList:     functionList,
 		classes:          classes,
-		globals:          make([]Value, 0, 256),
+		globals:          &globalsSlice,
 		globalNames:      map[string]int{},
 		globalConstants:  map[string]bool{},
-		mu:               sync.Mutex{},
+		mu:               &sync.RWMutex{},
 		cliArgs:          []string{},
 		globalTypes:      map[string]TypeHint{},
 		top:              0,
-		stack:            make([]Value, 1024),
+		stack:            make([]TinyValue, 1024),
 		framePool:        make([]*Frame, 0, 1024),
 		frames:           []*Frame{},
 		wazeroCtx:        context.Background(),
+		wasmMu:           &sync.Mutex{},
 	}
 }
 
@@ -307,7 +313,7 @@ func (vm *VM) getFrame(fn Function) *Frame {
 	frame.ip = 0
 	frame.instructions = fn.Instructions
 	frame.methodClass = ""
-	frame.returnOverride = Value{}
+	frame.returnOverride = TinyValue{}
 	frame.hasReturnOverride = false
 	frame.hasEscapedLocals = false
 
@@ -326,7 +332,7 @@ func (vm *VM) releaseFrame(frame *Frame) {
 
 	for i := range frame.locals {
 		if frame.locals[i] != nil {
-			setCellValue(frame.locals[i], Value{})
+			setCellValue(frame.locals[i], TinyValue{})
 		}
 	}
 
@@ -344,7 +350,7 @@ func (vm *VM) CloneForTask() *VM {
 		classes:          vm.classes,
 		functionList:     vm.functionList,
 
-		stack:       make([]Value, 256),
+		stack:       make([]TinyValue, 256),
 		framePool:   make([]*Frame, 0, 256),
 		frames:      []*Frame{},
 		tryHandlers: []TryHandler{},
@@ -354,15 +360,18 @@ func (vm *VM) CloneForTask() *VM {
 		globalConstants: vm.globalConstants,
 		globalTypes:     vm.globalTypes,
 
+		mu: vm.mu,
+
 		cliArgs: vm.cliArgs,
 
 		wazeroRuntime: vm.wazeroRuntime,
 		wazeroCtx:     vm.wazeroCtx,
 		wasmModule:    vm.wasmModule,
+		wasmMu:        vm.wasmMu,
 	}
 }
 
-func cloneValue(value Value) Value {
+func cloneValue(value TinyValue) TinyValue {
 	var raw any
 	if value.IsInt {
 		raw = value.AsInt
@@ -391,7 +400,7 @@ func cloneValue(value Value) Value {
 
 	case *ArrayValue:
 		copyArr := &ArrayValue{
-			Elements: make([]Value, len(v.Elements)),
+			Elements: make([]TinyValue, len(v.Elements)),
 		}
 
 		for i, val := range v.Elements {
@@ -402,7 +411,7 @@ func cloneValue(value Value) Value {
 
 	case ArrayValue:
 		copyArr := ArrayValue{
-			Elements: make([]Value, len(v.Elements)),
+			Elements: make([]TinyValue, len(v.Elements)),
 		}
 
 		for i, val := range v.Elements {
@@ -432,17 +441,17 @@ func cloneValue(value Value) Value {
 	}
 }
 
-func cellValue(cell *Cell) Value {
+func cellValue(cell *Cell) TinyValue {
 	if cell.IsInt {
 		return NewInt(cell.Int)
 	}
 	return cell.Value
 }
 
-func setCellValue(cell *Cell, value Value) {
+func setCellValue(cell *Cell, value TinyValue) {
 	if value.IsInt {
 		cell.Int = value.AsInt
-		cell.Value = Value{}
+		cell.Value = TinyValue{}
 		cell.IsInt = true
 	} else {
 		cell.Value = value
@@ -451,7 +460,7 @@ func setCellValue(cell *Cell, value Value) {
 	}
 }
 
-func frameLocalValue(frame *Frame, slot int, op string) Value {
+func frameLocalValue(frame *Frame, slot int, op string) TinyValue {
 	if slot < 0 || slot >= len(frame.locals) {
 		LangError(ErrorInternal, "local slot out of range in %s", op)
 	}
@@ -464,7 +473,7 @@ func frameLocalValue(frame *Frame, slot int, op string) Value {
 	return cellValue(cell)
 }
 
-func propertyValue(vm *VM, objectValue Value, name string) Value {
+func propertyValue(vm *VM, objectValue TinyValue, name string) TinyValue {
 	if object, ok := objectValue.Value.(ObjectValue); ok {
 		if !vm.canAccessField(object, name) {
 			vm.fatalError(ErrorRuntime, "cannot access private field: %s", name)
@@ -498,13 +507,13 @@ func propertyValue(vm *VM, objectValue Value, name string) Value {
 	return NewNull()
 }
 
-func resolveNamespaceValue(vm *VM, value Value) Value {
+func resolveNamespaceValue(vm *VM, value TinyValue) TinyValue {
 	if ref, ok := value.Value.(NamespaceMemberRef); ok {
 		slot, exists := vm.globalNames[ref.GlobalName]
 		if !exists {
 			vm.fatalError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
 		}
-		return vm.globals[slot]
+		return vm.getGlobal(slot)
 	}
 
 	if ref, ok := value.Value.(*NamespaceMemberRef); ok {
@@ -512,13 +521,13 @@ func resolveNamespaceValue(vm *VM, value Value) Value {
 		if !exists {
 			vm.fatalError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
 		}
-		return vm.globals[slot]
+		return vm.getGlobal(slot)
 	}
 
 	return value
 }
 
-func multiplyByInt(value Value, factor int) Value {
+func multiplyByInt(value TinyValue, factor int) TinyValue {
 	if value.IsInt {
 		return NewInt(value.AsInt * factor)
 	}
@@ -530,11 +539,11 @@ func multiplyByInt(value Value, factor int) Value {
 		return NewNative(v * float32(factor))
 	default:
 		LangError(ErrorType, "cannot multiply %s and number", TypeName(value))
-		return Value{}
+		return TinyValue{}
 	}
 }
 
-func addValues(left Value, right Value) Value {
+func addValues(left TinyValue, right TinyValue) TinyValue {
 	var leftVal any
 	if left.IsInt {
 		leftVal = left.AsInt
@@ -634,50 +643,40 @@ func addValues(left Value, right Value) Value {
 		LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
 	}
 
-	return Value{}
+	return TinyValue{}
 }
 
-func (vm *VM) getGlobalByName(name string) (Value, bool) {
-	slot, exists := vm.globalNames[name]
-	if !exists {
-		return Value{}, false
-	}
-
-	return vm.globals[slot], true
-}
-
-func (vm *VM) setGlobalUnlocked(slot int, value Value) {
-	if slot >= len(vm.globals) {
+func (vm *VM) setGlobalUnlocked(slot int, value TinyValue) {
+	if slot >= len(*vm.globals) {
 		newSize := slot + 1
-		if newSize < len(vm.globals)*2 {
-			newSize = len(vm.globals) * 2
+		if newSize < len(*vm.globals)*2 {
+			newSize = len(*vm.globals) * 2
 		}
-		newGlobals := make([]Value, newSize)
-		copy(newGlobals, vm.globals)
-		vm.globals = newGlobals
+		newGlobals := make([]TinyValue, newSize)
+		copy(newGlobals, *vm.globals)
+		*vm.globals = newGlobals
 	}
-	vm.globals[slot] = value
+	(*vm.globals)[slot] = value
 }
 
-func (vm *VM) setGlobal(slot int, value Value) {
-	if slot < len(vm.globals) {
-		vm.globals[slot] = value
-		return
-	}
+func (vm *VM) getGlobal(slot int) TinyValue {
+	vm.mu.RLock()
+	defer vm.mu.RUnlock()
 
-	vm.mu.Lock()
-	vm.setGlobalUnlocked(slot, value)
-	vm.mu.Unlock()
-}
-
-func (vm *VM) getGlobal(slot int) Value {
-	if slot < 0 || slot >= len(vm.globals) {
+	if slot < 0 || slot >= len(*vm.globals) {
 		return NewNull()
 	}
-	return vm.globals[slot]
+	return (*vm.globals)[slot]
 }
 
-func (vm *VM) setGlobalByName(name string, value Value) {
+func (vm *VM) setGlobal(slot int, value TinyValue) {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
+
+	vm.setGlobalUnlocked(slot, value)
+}
+
+func (vm *VM) setGlobalByName(name string, value TinyValue) {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
 	if vm.globalNames == nil {
@@ -717,7 +716,7 @@ func (vm *VM) canAccessMethod(object ObjectValue, method string) bool {
 	return true
 }
 
-func (vm *VM) getProperty(objectValue Value, name string, safe bool) Value {
+func (vm *VM) getProperty(objectValue TinyValue, name string, safe bool) TinyValue {
 	if safe && isNullish(objectValue) {
 		return NewNull()
 	}
@@ -739,7 +738,7 @@ func (vm *VM) getProperty(objectValue Value, name string, safe bool) Value {
 				}
 				vm.nameError("undefined namespace global: %s", ref.GlobalName)
 			}
-			return vm.globals[slot]
+			return vm.getGlobal(slot)
 		}
 
 		return value
@@ -762,7 +761,7 @@ func (vm *VM) getProperty(objectValue Value, name string, safe bool) Value {
 				}
 				vm.nameError("undefined namespace global: %s", ref.GlobalName)
 			}
-			return vm.globals[slot]
+			return vm.getGlobal(slot)
 		}
 
 		return value
@@ -787,7 +786,7 @@ func (vm *VM) getProperty(objectValue Value, name string, safe bool) Value {
 	return value
 }
 
-func (vm *VM) callClassWithArgs(class Class, args []Value) {
+func (vm *VM) callClassWithArgs(class Class, args []TinyValue) {
 	object := ObjectValue{
 		"__class":          NewNative(class.Name),
 		"__constFields":    NewNative(map[string]bool{}),
@@ -868,7 +867,7 @@ func (vm *VM) callClassWithArgs(class Class, args []Value) {
 	vm.push(NewNative(object))
 }
 
-func (vm *VM) callClassByName(name string, args []Value) {
+func (vm *VM) callClassByName(name string, args []TinyValue) {
 	class, exists := vm.classes[name]
 	if !exists {
 		vm.fatalError(ErrorName, "undefined class: %s", name)
@@ -988,7 +987,7 @@ func (vm *VM) runtimeError(kind ErrorKind, format string, args ...any) {
 	vm.throwValue(NewNative(errObj))
 }
 
-func (vm *VM) isInstanceOf(value Value, className string) bool {
+func (vm *VM) isInstanceOf(value TinyValue, className string) bool {
 	object, ok := value.Value.(ObjectValue)
 	if !ok {
 		return false
@@ -1099,12 +1098,12 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 			frame.constants[i] = false
 			frame.localTypes[i] = param.TypeHint
 
-			vm.stack[start+i] = Value{}
+			vm.stack[start+i] = TinyValue{}
 		}
 
 		restParam := fn.Params[fixedCount]
 		rest := &ArrayValue{
-			Elements: make([]Value, 0, argCount-fixedCount),
+			Elements: make([]TinyValue, 0, argCount-fixedCount),
 		}
 
 		for i := fixedCount; i < argCount; i++ {
@@ -1125,7 +1124,7 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 			}
 
 			rest.Elements = append(rest.Elements, arg)
-			vm.stack[start+i] = Value{}
+			vm.stack[start+i] = TinyValue{}
 		}
 
 		setCellValue(frame.locals[fixedCount], NewNative(rest))
@@ -1160,14 +1159,14 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 			frame.constants[i] = false
 			frame.localTypes[i] = param.TypeHint
 
-			vm.stack[start+i] = Value{}
+			vm.stack[start+i] = TinyValue{}
 		}
 	} else {
 		for i := 0; i < argCount; i++ {
 			setCellValue(frame.locals[i], vm.stack[start+i])
 			frame.constants[i] = false
 
-			vm.stack[start+i] = Value{}
+			vm.stack[start+i] = TinyValue{}
 		}
 	}
 
@@ -1175,7 +1174,7 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 	vm.frames = append(vm.frames, frame)
 }
 
-func isNullish(value Value) bool {
+func isNullish(value TinyValue) bool {
 	if value.IsInt {
 		return false
 	}
@@ -1187,7 +1186,7 @@ func isNullish(value Value) bool {
 	}
 }
 
-func (vm *VM) throwValue(value Value) {
+func (vm *VM) throwValue(value TinyValue) {
 	errorObject := makeErrorObject(value)
 
 	if len(vm.tryHandlers) == 0 {
@@ -1224,6 +1223,10 @@ func (vm *VM) throwValue(value Value) {
 	vm.runDefersAboveDepth(handler.FrameDepth)
 
 	for len(vm.frames) > handler.FrameDepth {
+		frame := vm.frames[len(vm.frames)-1]
+		for _, m := range frame.lockedMutexes {
+			m.Unlock()
+		}
 		vm.frames = vm.frames[:len(vm.frames)-1]
 	}
 
@@ -1252,7 +1255,7 @@ func (vm *VM) throwValue(value Value) {
 	}
 }
 
-func makeErrorObject(value Value) ObjectValue {
+func makeErrorObject(value TinyValue) ObjectValue {
 	var raw any
 	if value.IsInt {
 		raw = value.AsInt
@@ -1290,12 +1293,16 @@ func makeErrorObject(value Value) ObjectValue {
 	}
 }
 
-func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []Value) {
+func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []TinyValue) {
 	if vm.wasmModule != nil {
 		sanitizedName := strings.ReplaceAll(fnValue.Name, ".", "_")
 		fn := vm.wasmModule.ExportedFunction(sanitizedName)
 		if fn != nil {
-			vm.executeNativeWasmCall(fn, args)
+			returnType := "string"
+			if v, ok := vm.functions[fnValue.Name]; ok {
+				returnType = v.ReturnType.Name
+			}
+			vm.executeNativeWasmCall(fn, args, returnType)
 			return
 		}
 	}
@@ -1357,7 +1364,7 @@ func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []Value) {
 		}
 
 		rest := &ArrayValue{
-			Elements: make([]Value, 0, len(args)-fixedCount),
+			Elements: make([]TinyValue, 0, len(args)-fixedCount),
 		}
 
 		for i := fixedCount; i < len(args); i++ {
@@ -1393,7 +1400,7 @@ func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []Value) {
 	vm.frames = append(vm.frames, frame)
 }
 
-func (vm *VM) runFunctionToCompletion(fn Function, args []Value) Value {
+func (vm *VM) runFunctionToCompletion(fn Function, args []TinyValue) TinyValue {
 	vm.callFunctionDirect(fn, args)
 
 	targetDepth := len(vm.frames) - 1
@@ -1407,7 +1414,7 @@ func (vm *VM) runFunctionToCompletion(fn Function, args []Value) Value {
 	return vm.pop()
 }
 
-func (vm *VM) runFrameToCompletion(frame *Frame) Value {
+func (vm *VM) runFrameToCompletion(frame *Frame) TinyValue {
 	vm.frames = append(vm.frames, frame)
 
 	targetDepth := len(vm.frames) - 1
@@ -1421,7 +1428,7 @@ func (vm *VM) runFrameToCompletion(frame *Frame) Value {
 	return vm.pop()
 }
 
-func (vm *VM) callFunctionDirect(fn Function, args []Value) {
+func (vm *VM) callFunctionDirect(fn Function, args []TinyValue) {
 	args = vm.applyDefaultArgs(fn, args, 0, "function "+fn.Name)
 
 	frame := vm.getFrame(fn)
@@ -1451,7 +1458,7 @@ func (vm *VM) callFunctionDirect(fn Function, args []Value) {
 	vm.frames = append(vm.frames, frame)
 }
 
-func (vm *VM) callFunctionValue(fnValue FunctionValue, args []Value) Value {
+func (vm *VM) callFunctionValue(fnValue FunctionValue, args []TinyValue) TinyValue {
 	frameDepthBefore := len(vm.frames)
 	stackDepthBefore := vm.top
 
@@ -1536,7 +1543,8 @@ func (vm *VM) step() bool {
 			vm.fatalError(ErrorName, "undefined native function: %s", info.Name)
 		}
 
-		vm.executeNativeWasmCall(fn, args)
+		vm.executeNativeWasmCall(fn, args, info.ReturnType)
+
 	case OP_ADD_LOCAL_LOCAL_STORE:
 		info := instr.Value.(AddLocalLocalStoreInfo)
 		frame := vm.frames[len(vm.frames)-1]
@@ -2106,7 +2114,7 @@ func (vm *VM) step() bool {
 
 		for i := start; i < vm.top; i++ {
 			builder.WriteString(valueToString(vm.stack[i]))
-			vm.stack[i] = Value{}
+			vm.stack[i] = TinyValue{}
 		}
 
 		vm.top = start
@@ -2211,20 +2219,29 @@ func (vm *VM) step() bool {
 	case OP_AWAIT:
 		value := vm.popFast()
 
-		task, ok := value.Value.(*NativeTaskValue)
+		if task, ok := value.Value.(*NativeTaskValue); ok {
+			result := <-task.Done
 
-		if !ok {
+			if result.Error != nil {
+				panic(result.Error)
+			}
+
+			vm.push(result.Value)
+		} else if array, ok := value.Value.(*ArrayValue); ok {
+			for _, e := range array.Elements {
+				task, ok := e.Value.(*NativeTaskValue)
+
+				if ok {
+					result := <-task.Done
+					if result.Error != nil {
+						panic(result.Error)
+					}
+				}
+			}
 			vm.push(value)
-			break
+		} else {
+			vm.push(value)
 		}
-
-		result := <-task.Done
-
-		if result.Error != nil {
-			panic(result.Error)
-		}
-
-		vm.push(result.Value)
 
 	case OP_LOCK_MUTEX:
 		value := vm.popFast()
@@ -2235,6 +2252,11 @@ func (vm *VM) step() bool {
 		}
 
 		mutex.Lock()
+
+		if len(vm.frames) > 0 {
+			frame := vm.frames[len(vm.frames)-1]
+			frame.lockedMutexes = append(frame.lockedMutexes, mutex)
+		}
 
 		vm.push(NewNull())
 
@@ -2247,6 +2269,16 @@ func (vm *VM) step() bool {
 		}
 
 		mutex.Unlock()
+
+		if len(vm.frames) > 0 {
+			frame := vm.frames[len(vm.frames)-1]
+			for i, m := range frame.lockedMutexes {
+				if m == mutex {
+					frame.lockedMutexes = append(frame.lockedMutexes[:i], frame.lockedMutexes[i+1:]...)
+					break
+				}
+			}
+		}
 
 		vm.push(NewNull())
 
@@ -2273,6 +2305,7 @@ func (vm *VM) step() bool {
 
 	case OP_SPAWN:
 		value := vm.popFast()
+		args := vm.popArgs(instr.Value.(int))
 
 		fn, ok := value.Value.(FunctionValue)
 		if !ok {
@@ -2294,7 +2327,7 @@ func (vm *VM) step() bool {
 				}
 			}()
 
-			result := taskVM.callFunctionValue(fn, []Value{})
+			result := taskVM.callFunctionValue(fn, args)
 
 			task.Done <- TaskResult{
 				Value: result,
@@ -2595,6 +2628,8 @@ func (vm *VM) step() bool {
 		var slot int
 		var name string
 
+		vm.mu.RLock()
+
 		if info, ok := instr.Value.(VariableInfo); ok {
 			slot = info.Slot
 			name = info.Name
@@ -2603,6 +2638,7 @@ func (vm *VM) step() bool {
 			var exists bool
 			slot, exists = vm.globalNames[name]
 			if !exists {
+				vm.mu.RUnlock()
 				vm.fatalError(ErrorName, "undefined global variable: %s", name)
 			}
 		} else {
@@ -2614,6 +2650,7 @@ func (vm *VM) step() bool {
 		}
 
 		hint := vm.globalTypes[name]
+		vm.mu.RUnlock()
 
 		if !hint.IsEmpty() {
 			if ok, reason := CheckTypeHint(value, hint, vm.interfaces); !ok {
@@ -2790,7 +2827,12 @@ func (vm *VM) step() bool {
 			vm.fatalError(ErrorName, "undefined global variable: %s", name)
 		}
 
-		value := vm.globals[slot]
+		if slot < 0 || slot >= len(*vm.globals) {
+			vm.mu.Unlock()
+			vm.fatalError(ErrorName, "undefined global variable: %s", name)
+		}
+
+		value := (*vm.globals)[slot]
 		var rawVal any
 		if value.IsInt {
 			rawVal = value.AsInt
@@ -2848,7 +2890,12 @@ func (vm *VM) step() bool {
 			vm.fatalError(ErrorName, "undefined global variable: %s", name)
 		}
 
-		value := vm.globals[slot]
+		if slot < 0 || slot >= len(*vm.globals) {
+			vm.mu.Unlock()
+			vm.fatalError(ErrorName, "undefined global variable: %s", name)
+		}
+
+		value := (*vm.globals)[slot]
 		var rawVal any
 		if value.IsInt {
 			rawVal = value.AsInt
@@ -3277,7 +3324,7 @@ func (vm *VM) step() bool {
 		if vm.callOneArgNativeMethod(info.Method, objectValue, arg) {
 			break
 		}
-		vm.callMethodResolved(info.Method, objectValue, []Value{arg})
+		vm.callMethodResolved(info.Method, objectValue, []TinyValue{arg})
 
 	case OP_ARRAY_LEN_LOCAL:
 		info := instr.Value.(ArrayLocalCallInfo)
@@ -3313,7 +3360,7 @@ func (vm *VM) step() bool {
 			vm.push(array.Elements[index])
 			break
 		}
-		vm.callMethodResolved("get", arrayValue, []Value{indexValue})
+		vm.callMethodResolved("get", arrayValue, []TinyValue{indexValue})
 
 	case OP_ARRAY_PUSH_LOCAL:
 		info := instr.Value.(ArrayLocalCallInfo)
@@ -3326,7 +3373,7 @@ func (vm *VM) step() bool {
 			vm.push(arrayValue)
 			break
 		}
-		vm.callMethodResolved("push", arrayValue, []Value{value})
+		vm.callMethodResolved("push", arrayValue, []TinyValue{value})
 
 	case OP_ARRAY_PUSH_LOCAL_MUL_CONST:
 		info := instr.Value.(ArrayLocalMulConstInfo)
@@ -3339,7 +3386,7 @@ func (vm *VM) step() bool {
 			vm.push(arrayValue)
 			break
 		}
-		vm.callMethodResolved("push", arrayValue, []Value{arg})
+		vm.callMethodResolved("push", arrayValue, []TinyValue{arg})
 
 	case OP_LEN:
 		value := vm.popFast()
@@ -3423,7 +3470,16 @@ func (vm *VM) step() bool {
 			vm.fatalError(ErrorType, "spread operator expects array, got %s", TypeName(arrayValue))
 		}
 
-		result := vm.callFunctionValue(callee.Value.(FunctionValue), array.Elements)
+		var result TinyValue
+		switch v := callee.Value.(type) {
+		case FunctionValue:
+			result = vm.callFunctionValue(v, array.Elements)
+		case *FunctionValue:
+			result = vm.callFunctionValue(*v, array.Elements)
+		default:
+			vm.fatalError(ErrorType, "expected function in spread call, got %s", TypeName(callee))
+		}
+
 		vm.push(result)
 
 	case OP_BUILTIN_CALL:
@@ -3497,12 +3553,12 @@ func (vm *VM) step() bool {
 			vm.handleUnderflow()
 		}
 
-		elements := make([]Value, info.Count)
+		elements := make([]TinyValue, info.Count)
 		start := vm.top - info.Count
 
 		copy(elements, vm.stack[start:vm.top])
 		for i := start; i < vm.top; i++ {
-			vm.stack[i] = Value{}
+			vm.stack[i] = TinyValue{}
 		}
 		vm.top = start
 
@@ -3600,7 +3656,7 @@ func (vm *VM) step() bool {
 		}
 
 	case OP_RETURN:
-		var returnValue Value
+		var returnValue TinyValue
 
 		if vm.top == 0 {
 			returnValue = NewNull()
@@ -3668,7 +3724,7 @@ func (vm *VM) step() bool {
 		for i := 0; i < info.ExprCount; i++ {
 			builder.WriteString(info.Parts[i])
 			builder.WriteString(valueToString(vm.stack[start+i]))
-			vm.stack[start+i] = Value{}
+			vm.stack[start+i] = TinyValue{}
 		}
 
 		vm.top = start
@@ -3698,7 +3754,7 @@ func (vm *VM) step() bool {
 			} else {
 				object[fieldInfo.Name] = vm.stack[start+i]
 			}
-			vm.stack[start+i] = Value{}
+			vm.stack[start+i] = TinyValue{}
 		}
 		vm.top = start
 
@@ -3752,7 +3808,7 @@ func (vm *VM) step() bool {
 	return false
 }
 
-func writeServerResponse(w http.ResponseWriter, value Value, responseType HttpResponseType) {
+func writeServerResponse(w http.ResponseWriter, value TinyValue, responseType HttpResponseType) {
 	switch responseType {
 	case HttpJson:
 		w.Header().Set("Content-Type", "application/json")
@@ -3767,7 +3823,7 @@ func writeServerResponse(w http.ResponseWriter, value Value, responseType HttpRe
 	}
 }
 
-func (vm *VM) callNamespaceMethod(ns NamespaceValue, method string, args []Value) {
+func (vm *VM) callNamespaceMethod(ns NamespaceValue, method string, args []TinyValue) {
 	value, exists := ns.Members[method]
 	if !exists {
 		vm.fatalError(ErrorName, "namespace %s has no member: %s", ns.Name, method)
@@ -3847,7 +3903,7 @@ func (vm *VM) findEmbeddedMethod(object ObjectValue, method string) (ObjectValue
 	return nil, FunctionValue{}, false
 }
 
-func (vm *VM) callZeroArgNativeMethod(method string, objectValue Value) bool {
+func (vm *VM) callZeroArgNativeMethod(method string, objectValue TinyValue) bool {
 	var rawVal any
 	if objectValue.IsInt {
 		rawVal = objectValue.AsInt
@@ -3857,19 +3913,19 @@ func (vm *VM) callZeroArgNativeMethod(method string, objectValue Value) bool {
 
 	switch value := rawVal.(type) {
 	case *ArrayValue:
-		vm.callArrayMethod(value, method, []Value{})
+		vm.callArrayMethod(value, method, []TinyValue{})
 		return true
 	case string:
-		vm.callStringMethod(value, method, []Value{})
+		vm.callStringMethod(value, method, []TinyValue{})
 		return true
 	case *NativeMutexValue:
-		vm.callNativeMutexMethod(value, method, []Value{})
+		vm.callNativeMutexMethod(value, method, []TinyValue{})
 		return true
 	}
 	return false
 }
 
-func (vm *VM) callOneArgNativeMethod(method string, objectValue Value, arg Value) bool {
+func (vm *VM) callOneArgNativeMethod(method string, objectValue TinyValue, arg TinyValue) bool {
 	var rawVal any
 	if objectValue.IsInt {
 		rawVal = objectValue.AsInt
@@ -3879,16 +3935,16 @@ func (vm *VM) callOneArgNativeMethod(method string, objectValue Value, arg Value
 
 	switch value := rawVal.(type) {
 	case *ArrayValue:
-		vm.callArrayMethod(value, method, []Value{arg})
+		vm.callArrayMethod(value, method, []TinyValue{arg})
 		return true
 	case string:
-		vm.callStringMethod(value, method, []Value{arg})
+		vm.callStringMethod(value, method, []TinyValue{arg})
 		return true
 	}
 	return false
 }
 
-func (vm *VM) callTwoArgNativeMethod(method string, objectValue Value, arg0 Value, arg1 Value) bool {
+func (vm *VM) callTwoArgNativeMethod(method string, objectValue TinyValue, arg0 TinyValue, arg1 TinyValue) bool {
 	var rawVal any
 	if objectValue.IsInt {
 		rawVal = objectValue.AsInt
@@ -3898,16 +3954,16 @@ func (vm *VM) callTwoArgNativeMethod(method string, objectValue Value, arg0 Valu
 
 	switch value := rawVal.(type) {
 	case *ArrayValue:
-		vm.callArrayMethod(value, method, []Value{arg0, arg1})
+		vm.callArrayMethod(value, method, []TinyValue{arg0, arg1})
 		return true
 	case string:
-		vm.callStringMethod(value, method, []Value{arg0, arg1})
+		vm.callStringMethod(value, method, []TinyValue{arg0, arg1})
 		return true
 	}
 	return false
 }
 
-func (vm *VM) callStdObjectFast1(method string, objectValue Value, arg0 Value) bool {
+func (vm *VM) callStdObjectFast1(method string, objectValue TinyValue, arg0 TinyValue) bool {
 	var rawVal any
 	if objectValue.IsInt {
 		rawVal = objectValue.AsInt
@@ -3940,7 +3996,7 @@ func (vm *VM) callStdObjectFast1(method string, objectValue Value, arg0 Value) b
 	return true
 }
 
-func (vm *VM) callStdObjectFast2(method string, objectValue Value, arg0 Value, arg1 Value) bool {
+func (vm *VM) callStdObjectFast2(method string, objectValue TinyValue, arg0 TinyValue, arg1 TinyValue) bool {
 	var rawVal any
 	if objectValue.IsInt {
 		rawVal = objectValue.AsInt
@@ -3986,7 +4042,7 @@ func (vm *VM) callStdObjectFast2(method string, objectValue Value, arg0 Value, a
 	return true
 }
 
-func (vm *VM) callStdObjectFast3(method string, objectValue Value, arg0 Value, arg1 Value, arg2 Value) bool {
+func (vm *VM) callStdObjectFast3(method string, objectValue TinyValue, arg0 TinyValue, arg1 TinyValue, arg2 TinyValue) bool {
 	var rawVal any
 	if objectValue.IsInt {
 		rawVal = objectValue.AsInt
@@ -4033,7 +4089,7 @@ func (vm *VM) callStdObjectFast3(method string, objectValue Value, arg0 Value, a
 	return true
 }
 
-func (vm *VM) callStdObjectFast(method string, objectValue Value, args ...Value) bool {
+func (vm *VM) callStdObjectFast(method string, objectValue TinyValue, args ...TinyValue) bool {
 	var rawVal any
 	if objectValue.IsInt {
 		rawVal = objectValue.AsInt
@@ -4157,7 +4213,7 @@ func (vm *VM) callMethodFast(method string, argCount int) {
 		if vm.callOneArgNativeMethod(method, objectValue, arg0) {
 			return
 		}
-		vm.callMethodResolved(method, objectValue, []Value{arg0})
+		vm.callMethodResolved(method, objectValue, []TinyValue{arg0})
 		return
 
 	case 2:
@@ -4170,7 +4226,7 @@ func (vm *VM) callMethodFast(method string, argCount int) {
 		if vm.callTwoArgNativeMethod(method, objectValue, arg0, arg1) {
 			return
 		}
-		vm.callMethodResolved(method, objectValue, []Value{arg0, arg1})
+		vm.callMethodResolved(method, objectValue, []TinyValue{arg0, arg1})
 		return
 
 	case 3:
@@ -4181,7 +4237,7 @@ func (vm *VM) callMethodFast(method string, argCount int) {
 		if vm.callStdObjectFast3(method, objectValue, arg0, arg1, arg2) {
 			return
 		}
-		vm.callMethodResolved(method, objectValue, []Value{arg0, arg1, arg2})
+		vm.callMethodResolved(method, objectValue, []TinyValue{arg0, arg1, arg2})
 		return
 
 	default:
@@ -4192,7 +4248,7 @@ func (vm *VM) callMethodFast(method string, argCount int) {
 	}
 }
 
-func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value) {
+func (vm *VM) callMethodResolved(method string, objectValue TinyValue, args []TinyValue) {
 	if method == "toString" {
 		vm.push(NewNative(valueToString(objectValue)))
 		return
@@ -4223,6 +4279,10 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 
 	case *NativeAppValue:
 		vm.callNativeAppMethod(val, method, args)
+		return
+
+	case *NativeWebViewValue:
+		vm.callNativeWebviewMethod(val, method, args)
 		return
 
 	case *StandardModuleValue:
@@ -4385,7 +4445,7 @@ func (vm *VM) callMethodResolved(method string, objectValue Value, args []Value)
 		restParam := fn.Params[restSlot]
 
 		rest := &ArrayValue{
-			Elements: make([]Value, 0, len(args)-fixedCount),
+			Elements: make([]TinyValue, 0, len(args)-fixedCount),
 		}
 
 		for i := fixedCount; i < len(args); i++ {
@@ -4491,14 +4551,14 @@ func (vm *VM) runNativeApp(app *NativeAppValue) {
 	}
 
 	tinyArgs := &ArrayValue{
-		Elements: make([]Value, len(commandArgs)),
+		Elements: make([]TinyValue, len(commandArgs)),
 	}
 
 	for i, arg := range commandArgs {
 		tinyArgs.Elements[i] = NewNative(arg)
 	}
 
-	vm.callFunctionValue(fn, []Value{NewNative(tinyArgs)})
+	vm.callFunctionValue(fn, []TinyValue{NewNative(tinyArgs)})
 }
 
 func (vm *VM) setIP(value int) {
@@ -4639,19 +4699,19 @@ func (vm *VM) currentFrame() *Frame {
 	return vm.frames[len(vm.frames)-1]
 }
 
-func (vm *VM) popArgs(count int) []Value {
+func (vm *VM) popArgs(count int) []TinyValue {
 	if vm.top < count {
 		vm.handleUnderflow()
 	}
 
-	args := make([]Value, count)
+	args := make([]TinyValue, count)
 
 	start := vm.top - count
 
 	copy(args, vm.stack[start:vm.top])
 
 	for i := start; i < vm.top; i++ {
-		vm.stack[i] = Value{}
+		vm.stack[i] = TinyValue{}
 	}
 
 	vm.top = start
@@ -4659,9 +4719,9 @@ func (vm *VM) popArgs(count int) []Value {
 	return args
 }
 
-func (vm *VM) push(value Value) {
+func (vm *VM) push(value TinyValue) {
 	if vm.top == len(vm.stack) {
-		newStack := make([]Value, len(vm.stack)*2)
+		newStack := make([]TinyValue, len(vm.stack)*2)
 		copy(newStack, vm.stack)
 		vm.stack = newStack
 	}
@@ -4670,14 +4730,14 @@ func (vm *VM) push(value Value) {
 	vm.top++
 }
 
-func (vm *VM) pop() Value {
+func (vm *VM) pop() TinyValue {
 	if vm.top == 0 {
 		vm.handleUnderflow()
 	}
 
 	vm.top--
 	val := vm.stack[vm.top]
-	vm.stack[vm.top] = Value{}
+	vm.stack[vm.top] = TinyValue{}
 
 	return val
 }
@@ -4708,14 +4768,19 @@ func (vm *VM) handleUnderflow() {
 	)
 }
 
-func (vm *VM) popFast() Value {
+func (vm *VM) popFast() TinyValue {
 	vm.top--
 	val := vm.stack[vm.top]
-	vm.stack[vm.top] = Value{}
+	vm.stack[vm.top] = TinyValue{}
 	return val
 }
 
-func (vm *VM) executeNativeWasmCall(fn api.Function, args []Value) {
+func (vm *VM) executeNativeWasmCall(fn api.Function, args []TinyValue, returnType string) {
+	if vm.wasmMu != nil {
+		vm.wasmMu.Lock()
+		defer vm.wasmMu.Unlock()
+	}
+
 	expectedArgsParams := 0
 	for _, arg := range args {
 		var rawVal any
@@ -4734,7 +4799,9 @@ func (vm *VM) executeNativeWasmCall(fn api.Function, args []Value) {
 		}
 	}
 
-	returnsString := len(fn.Definition().ResultTypes()) == 0 && len(fn.Definition().ParamTypes()) == expectedArgsParams+1
+	returnsString := returnType == "string"
+	returnsArray := returnType == "array"
+	returnsPointer := returnsString || returnsArray
 
 	wasmParams := []uint64{}
 	var allocatedPtrs []uint64
@@ -4843,13 +4910,18 @@ func (vm *VM) executeNativeWasmCall(fn api.Function, args []Value) {
 	}
 
 	var retPtr uint64
-	if returnsString {
+	if returnsPointer {
 		malloc := vm.wasmModule.ExportedFunction("malloc")
 		if malloc == nil {
 			vm.fatalError(ErrorRuntime, "native string returns are not supported because 'malloc' is not exported")
 		}
 
-		results, err := malloc.Call(vm.wazeroCtx, 8)
+		allocSize := uint64(8)
+		if returnsArray {
+			allocSize = 12
+		}
+
+		results, err := malloc.Call(vm.wazeroCtx, allocSize)
 		if err != nil || len(results) == 0 {
 			vm.fatalError(ErrorRuntime, "failed to allocate return buffer in Wasm memory: %v", err)
 		}
@@ -4891,6 +4963,34 @@ func (vm *VM) executeNativeWasmCall(fn api.Function, args []Value) {
 				vm.fatalError(ErrorRuntime, "failed to read return string from Wasm memory")
 			}
 			vm.push(NewNative(string(strBytes)))
+		}
+	} else if returnsArray {
+		descBytes, ok := vm.wasmModule.Memory().Read(uint32(retPtr), 12)
+		if !ok {
+			vm.fatalError(ErrorRuntime, "failed to read return slice descriptor from Wasm memory")
+		}
+
+		ptr := binary.LittleEndian.Uint32(descBytes[0:4])
+		length := binary.LittleEndian.Uint32(descBytes[4:8])
+
+		if free != nil {
+			free.Call(vm.wazeroCtx, retPtr)
+		}
+
+		if length == 0 {
+			vm.push(NewNative(&ArrayValue{Elements: []TinyValue{}}))
+		} else {
+			floatBytes, ok := vm.wasmModule.Memory().Read(ptr, length*8)
+			if !ok {
+				vm.fatalError(ErrorRuntime, "failed to read return array from Wasm memory")
+			}
+
+			elements := make([]TinyValue, length)
+			for i := uint32(0); i < length; i++ {
+				bits := binary.LittleEndian.Uint64(floatBytes[i*8 : (i+1)*8])
+				elements[i] = NewNative(math.Float64frombits(bits))
+			}
+			vm.push(NewNative(&ArrayValue{Elements: elements}))
 		}
 	} else {
 		if len(results) == 0 {

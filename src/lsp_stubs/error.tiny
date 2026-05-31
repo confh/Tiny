@@ -1,0 +1,1 @@
+export fn new(kind: string, message: string): error {}

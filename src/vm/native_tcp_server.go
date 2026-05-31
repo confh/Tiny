@@ -8,28 +8,6 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
-var tcpNativeMetadata = NativeTypeInfo{
-	Name: "tcpServerObject",
-	Methods: map[string]StdMethodInfo{
-		"start": {
-			Name: "start",
-			Args: []StdArg{
-				{Name: "async", Type: "bool", Optional: true},
-			},
-			Returns:     "null",
-			Description: "Reads up to the specified number of bytes from the file.",
-		},
-		"onConnection": {
-			Name: "onConnection",
-			Args: []StdArg{
-				{Name: "callback", Type: "function"},
-			},
-			Returns:     "null",
-			Description: "Reads up to the specified number of bytes from the file.",
-		},
-	},
-}
-
 var tcpMethods map[string]NativeModuleFunc[*NativeTcpServerValue]
 
 func init() {
@@ -37,7 +15,6 @@ func init() {
 		"start":        tcpStart,
 		"onConnection": tcpOnConnection,
 	}
-	registerNativeType(tcpNativeMetadata)
 }
 
 func handleConn(vm *VM, tcp *NativeTcpServerValue, conn net.Conn) {
@@ -53,14 +30,14 @@ func handleConn(vm *VM, tcp *NativeTcpServerValue, conn net.Conn) {
 		return
 	}
 
-	vm.callFunctionValue(*tcp.ConnectionHandler, []Value{
+	vm.callFunctionValue(*tcp.ConnectionHandler, []TinyValue{
 		NewNative(&NativeTcpConnectionValue{
 			Connection: conn,
 		}),
 	})
 }
 
-func (vm *VM) callTcpServerMethod(tcp *NativeTcpServerValue, method string, args []Value) {
+func (vm *VM) callTcpServerMethod(tcp *NativeTcpServerValue, method string, args []TinyValue) {
 	fn, ok := tcpMethods[method]
 	if !ok {
 		vm.runtimeError(ErrorName, "unknown tcpServer method: %s", method)
@@ -69,7 +46,7 @@ func (vm *VM) callTcpServerMethod(tcp *NativeTcpServerValue, method string, args
 	fn(vm, tcp, args)
 }
 
-func tcpOnConnection(vm *VM, tcp *NativeTcpServerValue, args []Value) {
+func tcpOnConnection(vm *VM, tcp *NativeTcpServerValue, args []TinyValue) {
 	expectArgs(vm, "tcp.onConnection", args, 1)
 
 	callback := argFn(vm, "tcp.onConnection", args, 0)
@@ -79,7 +56,7 @@ func tcpOnConnection(vm *VM, tcp *NativeTcpServerValue, args []Value) {
 	vm.push(NewNull())
 }
 
-func tcpStart(vm *VM, tcp *NativeTcpServerValue, args []Value) {
+func tcpStart(vm *VM, tcp *NativeTcpServerValue, args []TinyValue) {
 	expectArgsRange(vm, "tcp.start", args, 0, 1)
 
 	async := false

@@ -1,0 +1,14 @@
+class TcpServer {
+    fn start(isAsync?: bool): null {}
+    fn onConnection(callback: function): null {}
+}
+
+export class TcpConnection {
+    fn readLine(): string | null {}
+    fn read(size: number): string {}
+    fn write(data: string | buffer): null {}
+    fn close(): null {}
+    fn address(): string {}
+}
+
+export fn tcpServer(host: string, port: number): TcpServer {}

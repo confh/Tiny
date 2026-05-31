@@ -27,10 +27,10 @@ func init() {
 		"command": appCommand,
 		"run":     appRun,
 	}
-	registerNativeType(appNativeMetadata)
+	// registerNativeType(appNativeMetadata)
 }
 
-func (vm *VM) callNativeAppMethod(app *NativeAppValue, method string, args []Value) {
+func (vm *VM) callNativeAppMethod(app *NativeAppValue, method string, args []TinyValue) {
 	fn, ok := appMethods[method]
 	if !ok {
 		vm.runtimeError(ErrorName, "unknown app method: %s", method)
@@ -39,7 +39,7 @@ func (vm *VM) callNativeAppMethod(app *NativeAppValue, method string, args []Val
 	fn(vm, app, args)
 }
 
-func appCommand(vm *VM, app *NativeAppValue, args []Value) {
+func appCommand(vm *VM, app *NativeAppValue, args []TinyValue) {
 	expectArgs(vm, "app.command", args, 2)
 	name := argString(vm, "app.command", args, 0)
 	fn := argFn(vm, "app.command", args, 1)
@@ -48,7 +48,7 @@ func appCommand(vm *VM, app *NativeAppValue, args []Value) {
 	vm.push(NewNative(app))
 }
 
-func appRun(vm *VM, app *NativeAppValue, args []Value) {
+func appRun(vm *VM, app *NativeAppValue, args []TinyValue) {
 	expectArgs(vm, "app.run", args, 0)
 	vm.runNativeApp(app)
 	vm.push(NewNull())

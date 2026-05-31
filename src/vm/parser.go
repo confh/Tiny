@@ -375,6 +375,25 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 				File:   p.current.File,
 			}
 
+		case IndexExpr:
+			return IndexAssignStmt{
+				Object: target.Object,
+				Index:  target.Index,
+				Value: BinaryExpr{
+					Left: target,
+					Op:   TOKEN_PLUS,
+					Right: NumberExpr{
+						Value:  1,
+						File:   p.current.File,
+						Line:   p.current.Line,
+						Column: p.current.Column,
+					},
+				},
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
+			}
+
 		default:
 			LangErrorAt(
 				ErrorSyntax,
@@ -616,7 +635,8 @@ func (p *Parser) parseStatement() Stmt {
 		return nil
 	}
 
-	if p.current.Type == TOKEN_IDENT && p.current.Literal == "lock" && p.next.Type == TOKEN_IDENT {
+	if p.current.Type == TOKEN_IDENT && p.current.Literal == "lock" &&
+		(p.next.Type == TOKEN_IDENT || p.next.Type == TOKEN_THIS || p.next.Type == TOKEN_LPAREN) {
 		return p.parseLockStatement()
 	}
 
@@ -643,6 +663,8 @@ func (p *Parser) parseStatement() Stmt {
 		return p.parseEmbedStrStatement()
 	case TOKEN_EMBED_BIN:
 		return p.parseEmbedBinStatement()
+	case TOKEN_EMBED_DIR:
+		return p.parseEmbedDirStatement()
 	case TOKEN_IF:
 		return p.parseIfStatement()
 	case TOKEN_WHILE:
@@ -772,6 +794,9 @@ func (p *Parser) parseExportStatement() Stmt {
 	case TOKEN_EMBED_BIN:
 		return ExportStmt{Inner: p.parseEmbedBinStatement()}
 
+	case TOKEN_EMBED_DIR:
+		return ExportStmt{Inner: p.parseEmbedDirStatement()}
+
 	case TOKEN_NATIVE:
 		return ExportStmt{Inner: p.parseNativeFunctionStatement()}
 
@@ -781,7 +806,7 @@ func (p *Parser) parseExportStatement() Stmt {
 			p.current.File,
 			p.current.Line,
 			p.current.Column,
-			"expected const, let, fn, class, embedbin, embedstr, native fn, interface, or enum after export",
+			"expected const, let, fn, class, embedbin, embedstr, embeddir, native fn, interface, or enum after export",
 		)
 	}
 
@@ -1148,18 +1173,9 @@ func (p *Parser) parseLockStatement() Stmt {
 	file := p.current.File
 	line := p.current.Line
 	column := p.current.Column
-	p.expect(TOKEN_IDENT)
 
-	if p.current.Type != TOKEN_IDENT {
-		LangErrorAt(
-			ErrorSyntax,
-			p.current.File,
-			p.current.Line,
-			p.current.Column,
-			"expected identifier as lock subject in lock statement, got %s",
-			p.current.Type,
-		)
-	}
+	p.advance()
+
 	value := p.parseExpression()
 
 	block := p.parseBlock()
@@ -1212,14 +1228,68 @@ func (p *Parser) parseEmbedStrStatement() Stmt {
 	}
 
 	return EmbedStmt{
-		Kind:             EmbedStr,
-		Name:             name,
-		EmbeddedFilePath: absPath,
-		Constant:         constant,
-		TypeHint:         TypeHint{Name: "string"},
-		File:             file,
-		Line:             line,
-		Column:           column,
+		Kind:         EmbedStr,
+		Name:         name,
+		EmbeddedPath: absPath,
+		Constant:     constant,
+		TypeHint:     TypeHint{Name: "string"},
+		File:         file,
+		Line:         line,
+		Column:       column,
+	}
+}
+
+func (p *Parser) parseEmbedDirStatement() Stmt {
+	file := p.current.File
+	line := p.current.Line
+	column := p.current.Column
+
+	p.expect(TOKEN_EMBED_DIR)
+
+	pathExpr := p.parseExpression()
+
+	path, ok := pathExpr.(StringExpr)
+	if !ok {
+		LangErrorAt(ErrorSyntax, file, line, column, "embeddir expected string, got %T", pathExpr)
+	}
+
+	constant := false
+
+	switch p.current.Type {
+	case TOKEN_CONST:
+		p.advance()
+		constant = true
+	case TOKEN_LET:
+		p.advance()
+	default:
+		LangErrorAt(ErrorSyntax, file, line, column, "embeddir expected const or let after path, got %s", p.current.Type)
+	}
+
+	name := p.current.Literal
+	p.expect(TOKEN_IDENT)
+
+	combinedPath := filepath.Join(filepath.Dir(file), path.Value)
+
+	absPath, err := filepath.Abs(combinedPath)
+
+	info, err := os.Stat(absPath)
+	if err != nil {
+		LangErrorAt(ErrorSyntax, file, line, column, "could not embed directory '%s': %s", filepath.Base(absPath), err)
+	}
+
+	if !info.IsDir() {
+		LangErrorAt(ErrorSyntax, file, line, column, "embeddir expected a directory path, but '%s' is a file", filepath.Base(absPath))
+	}
+
+	return EmbedStmt{
+		Kind:         EmbedDir,
+		Name:         name,
+		EmbeddedPath: absPath,
+		Constant:     constant,
+		TypeHint:     TypeHint{Name: "object"},
+		File:         file,
+		Line:         line,
+		Column:       column,
 	}
 }
 
@@ -1262,14 +1332,14 @@ func (p *Parser) parseEmbedBinStatement() Stmt {
 	}
 
 	return EmbedStmt{
-		Kind:             EmbedBin,
-		Name:             name,
-		EmbeddedFilePath: absPath,
-		Constant:         constant,
-		TypeHint:         TypeHint{Name: "buffer"},
-		File:             file,
-		Line:             line,
-		Column:           column,
+		Kind:         EmbedBin,
+		Name:         name,
+		EmbeddedPath: absPath,
+		Constant:     constant,
+		TypeHint:     TypeHint{Name: "buffer"},
+		File:         file,
+		Line:         line,
+		Column:       column,
 	}
 }
 
@@ -1364,6 +1434,9 @@ func (p *Parser) parseBlock() []Stmt {
 }
 
 func (p *Parser) parseImportStatement() Stmt {
+	file := p.current.File
+	line := p.current.Line
+	column := p.current.Column
 	p.expect(TOKEN_IMPORT)
 
 	if p.current.Type == TOKEN_IDENT && p.current.Literal == "std" {
@@ -1404,9 +1477,12 @@ func (p *Parser) parseImportStatement() Stmt {
 		p.consumeTerminator()
 
 		return ImportStmt{
-			Path:  moduleName,
-			Std:   true,
-			Alias: alias,
+			Path:   moduleName,
+			Std:    true,
+			Alias:  alias,
+			File:   file,
+			Line:   line,
+			Column: column,
 		}
 	} else if p.current.Type == TOKEN_IDENT && p.current.Literal == "plugin" {
 		p.advance()
@@ -1458,6 +1534,9 @@ func (p *Parser) parseImportStatement() Stmt {
 			Plugin: true,
 			Std:    false,
 			Alias:  alias,
+			File:   file,
+			Line:   line,
+			Column: column,
 		}
 	}
 
@@ -1500,6 +1579,9 @@ func (p *Parser) parseImportStatement() Stmt {
 		Plugin: false,
 		Std:    false,
 		Alias:  alias,
+		File:   file,
+		Line:   line,
+		Column: column,
 	}
 }
 
@@ -1509,10 +1591,11 @@ func (p *Parser) parseFieldStatement() Stmt {
 	constant := false
 	private := false
 
-	if p.current.Type == TOKEN_PRIVATE {
+	switch p.current.Type {
+	case TOKEN_PRIVATE:
 		p.expect(TOKEN_PRIVATE)
 		private = true
-	} else if p.current.Type == TOKEN_PUBLIC {
+	case TOKEN_PUBLIC:
 		p.expect(TOKEN_PUBLIC)
 	}
 
@@ -1593,7 +1676,7 @@ func (p *Parser) parseLetStatement() Stmt {
 	}
 }
 
-func (p *Parser) parseDefaultParamValue() Value {
+func (p *Parser) parseDefaultParamValue() TinyValue {
 	switch p.current.Type {
 	case TOKEN_STRING:
 		value := p.current.Literal
@@ -2001,7 +2084,7 @@ func (p *Parser) parseParameterList(enforceTypes ...bool) []Param {
 	return params
 }
 
-func (vm *VM) applyDefaultArgs(fn Function, args []Value, paramOffset int, callableName string) []Value {
+func (vm *VM) applyDefaultArgs(fn Function, args []TinyValue, paramOffset int, callableName string) []TinyValue {
 	params := fn.Params[paramOffset:]
 
 	minArgs := 0
@@ -2028,7 +2111,7 @@ func (vm *VM) applyDefaultArgs(fn Function, args []Value, paramOffset int, calla
 		)
 	}
 
-	finalArgs := make([]Value, maxArgs)
+	finalArgs := make([]TinyValue, maxArgs)
 
 	copy(finalArgs, args)
 
@@ -2045,10 +2128,10 @@ func (vm *VM) applyDefaultArgs(fn Function, args []Value, paramOffset int, calla
 	return finalArgs
 }
 
-func cloneDefaultValue(value Value) Value {
+func cloneDefaultValue(value TinyValue) TinyValue {
 	switch v := value.Value.(type) {
 	case *ArrayValue:
-		copied := make([]Value, len(v.Elements))
+		copied := make([]TinyValue, len(v.Elements))
 		copy(copied, v.Elements)
 		return NewNative(&ArrayValue{Elements: copied})
 
@@ -2596,7 +2679,11 @@ func (p *Parser) parsePrimary() Expr {
 		name := p.current.Literal
 		p.advance()
 
-		return IdentExpr{Name: name}
+		return IdentExpr{
+			Name:   name,
+			File:   p.current.File,
+			Line:   p.current.Line,
+			Column: p.current.Column}
 
 	case TOKEN_LPAREN:
 		p.advance()
@@ -3020,6 +3107,34 @@ func (p *Parser) parseUnary() Expr {
 	case TOKEN_SPAWN:
 		p.advance()
 
+		args := []Expr{}
+
+		p.expect(TOKEN_LPAREN)
+
+		for {
+			for p.current.Type == TOKEN_SEMI {
+				p.advance()
+			}
+
+			if p.current.Type == TOKEN_RPAREN {
+				break
+			}
+
+			args = append(args, p.parseExpression())
+
+			for p.current.Type == TOKEN_SEMI {
+				p.advance()
+			}
+
+			if p.current.Type != TOKEN_COMMA {
+				break
+			}
+
+			p.advance()
+		}
+
+		p.expect(TOKEN_RPAREN)
+
 		fn := p.parseUnary()
 
 		_, ok := fn.(FunctionExpr)
@@ -3035,6 +3150,7 @@ func (p *Parser) parseUnary() Expr {
 		}
 
 		return SpawnExpr{
+			Args:     args,
 			Function: fn,
 		}
 	}

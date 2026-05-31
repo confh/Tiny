@@ -4,7 +4,7 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
-func (vm *VM) callStandardModule(module string, method string, args []Value) {
+func (vm *VM) callStandardModule(module string, method string, args []TinyValue) {
 	switch module {
 	case "array":
 		vm.callStdArray(method, args)
@@ -12,7 +12,7 @@ func (vm *VM) callStandardModule(module string, method string, args []Value) {
 	case "math":
 		vm.callStdMath(method, args)
 
-	case "string":
+	case "strings":
 		vm.callStdString(method, args)
 
 	case "json":
@@ -66,8 +66,11 @@ func (vm *VM) callStandardModule(module string, method string, args []Value) {
 	case "sync":
 		vm.callStdSync(method, args)
 
-	case "test":
+	case "tests":
 		vm.callStdTest(method, args)
+
+	case "ui":
+		vm.callStdUi(method, args)
 
 	default:
 		vm.fatalError(ErrorName, "unknown standard module: %s", module)

@@ -6,85 +6,6 @@ import (
 
 var stdObjectMetadata = StdModuleInfo{
 	Name: "object",
-	Methods: map[string]StdMethodInfo{
-		"get": {
-			Name: "get",
-			Args: []StdArg{
-				{Name: "object", Type: "object"},
-				{Name: "key", Type: "string"},
-			},
-			Returns:     "any",
-			Description: "Returns the value for the given key, or null if the key is not present.",
-		},
-		"set": {
-			Name: "set",
-			Args: []StdArg{
-				{Name: "object", Type: "object"},
-				{Name: "key", Type: "string"},
-				{Name: "value", Type: "any"},
-			},
-			Returns:     "null",
-			Description: "Sets the value for the given key in the object.",
-		},
-		"has": {
-			Name: "has",
-			Args: []StdArg{
-				{Name: "object", Type: "object"},
-				{Name: "key", Type: "string"},
-			},
-			Returns:     "bool",
-			Description: "Returns true if the key exists in the object.",
-		},
-		"delete": {
-			Name: "delete",
-			Args: []StdArg{
-				{Name: "object", Type: "object"},
-				{Name: "key", Type: "string"},
-			},
-			Returns:     "bool",
-			Description: "Deletes the key from the object and returns true if the key existed, false otherwise.",
-		},
-		"keys": {
-			Name: "keys",
-			Args: []StdArg{
-				{Name: "object", Type: "object"},
-			},
-			Returns:     "array",
-			Description: "Returns an array of keys in the object.",
-		},
-		"values": {
-			Name: "values",
-			Args: []StdArg{
-				{Name: "object", Type: "object"},
-			},
-			Returns:     "array",
-			Description: "Returns an array of values in the object.",
-		},
-		"enteries": {
-			Name: "enteries",
-			Args: []StdArg{
-				{Name: "object", Type: "object"},
-			},
-			Returns:     "array",
-			Description: "Returns an array of [key, value] pairs for each entry in the object.",
-		},
-		"length": {
-			Name: "length",
-			Args: []StdArg{
-				{Name: "object", Type: "object"},
-			},
-			Returns:     "int",
-			Description: "Returns the number of keys in the object.",
-		},
-		"clear": {
-			Name: "clear",
-			Args: []StdArg{
-				{Name: "object", Type: "object"},
-			},
-			Returns:     "null",
-			Description: "Removes all keys and values from the object.",
-		},
-	},
 }
 
 var stdObjectMethods map[string]StdModuleFunc
@@ -104,7 +25,7 @@ func init() {
 	registerStdModule(stdObjectMetadata)
 }
 
-func (vm *VM) callStdObject(method string, args []Value) {
+func (vm *VM) callStdObject(method string, args []TinyValue) {
 	fn, ok := stdObjectMethods[method]
 	if !ok {
 		vm.runtimeError(ErrorName, "unknown object method: %s", method)
@@ -113,7 +34,7 @@ func (vm *VM) callStdObject(method string, args []Value) {
 	fn(vm, args)
 }
 
-func objectGet(vm *VM, args []Value) {
+func objectGet(vm *VM, args []TinyValue) {
 	expectArgs(vm, "object.get", args, 2)
 
 	obj := argObject(vm, "object.get", args, 0)
@@ -127,7 +48,7 @@ func objectGet(vm *VM, args []Value) {
 	}
 }
 
-func objectSet(vm *VM, args []Value) {
+func objectSet(vm *VM, args []TinyValue) {
 	expectArgs(vm, "object.set", args, 3)
 
 	obj := argObject(vm, "object.set", args, 0)
@@ -139,7 +60,7 @@ func objectSet(vm *VM, args []Value) {
 	vm.push(NewNull())
 }
 
-func objectHas(vm *VM, args []Value) {
+func objectHas(vm *VM, args []TinyValue) {
 	expectArgs(vm, "object.has", args, 2)
 
 	obj := argObject(vm, "object.has", args, 0)
@@ -149,7 +70,7 @@ func objectHas(vm *VM, args []Value) {
 	vm.push(NewNative(found))
 }
 
-func objectDelete(vm *VM, args []Value) {
+func objectDelete(vm *VM, args []TinyValue) {
 	expectArgs(vm, "object.delete", args, 2)
 
 	obj := argObject(vm, "object.delete", args, 0)
@@ -162,51 +83,51 @@ func objectDelete(vm *VM, args []Value) {
 	vm.push(NewNative(found))
 }
 
-func objectKeys(vm *VM, args []Value) {
+func objectKeys(vm *VM, args []TinyValue) {
 	expectArgs(vm, "object.keys", args, 1)
 
 	obj := argObject(vm, "object.keys", args, 0)
 
-	keys := make([]Value, 0, len(obj))
+	keys := make([]TinyValue, 0, len(obj))
 	for k := range obj {
 		keys = append(keys, NewNative(k))
 	}
 	vm.push(NewNative(&ArrayValue{Elements: keys}))
 }
 
-func objectValues(vm *VM, args []Value) {
+func objectValues(vm *VM, args []TinyValue) {
 	expectArgs(vm, "object.values", args, 1)
 
 	obj := argObject(vm, "object.values", args, 0)
 
-	values := make([]Value, 0, len(obj))
+	values := make([]TinyValue, 0, len(obj))
 	for _, v := range obj {
 		values = append(values, v)
 	}
 	vm.push(NewNative(&ArrayValue{Elements: values}))
 }
 
-func objectEnteries(vm *VM, args []Value) {
+func objectEnteries(vm *VM, args []TinyValue) {
 	expectArgs(vm, "object.enteries", args, 1)
 
 	obj := argObject(vm, "object.enteries", args, 0)
 
-	entries := make([]Value, 0, len(obj))
+	entries := make([]TinyValue, 0, len(obj))
 	for k, v := range obj {
-		entry := NewNative(&ArrayValue{Elements: []Value{NewNative(k), v}})
+		entry := NewNative(&ArrayValue{Elements: []TinyValue{NewNative(k), v}})
 		entries = append(entries, entry)
 	}
 	vm.push(NewNative(&ArrayValue{Elements: entries}))
 }
 
-func objectLength(vm *VM, args []Value) {
+func objectLength(vm *VM, args []TinyValue) {
 	expectArgs(vm, "object.length", args, 1)
 
 	obj := argObject(vm, "object.length", args, 0)
 	vm.push(NewInt(len(obj)))
 }
 
-func objectClear(vm *VM, args []Value) {
+func objectClear(vm *VM, args []TinyValue) {
 	expectArgs(vm, "object.clear", args, 1)
 
 	obj := argObject(vm, "object.clear", args, 0)

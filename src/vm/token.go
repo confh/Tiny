@@ -107,6 +107,7 @@ const (
 	TOKEN_EMBED     TokenType = "EMBED"
 	TOKEN_EMBED_STR TokenType = "EMBEDSTR"
 	TOKEN_EMBED_BIN TokenType = "EMBEDBIN"
+	TOKEN_EMBED_DIR TokenType = "EMBEDDIR"
 )
 
 type Token struct {

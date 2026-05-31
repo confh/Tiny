@@ -14,50 +14,6 @@ import (
 
 var stdIOMetadata = StdModuleInfo{
 	Name: "io",
-	Methods: map[string]StdMethodInfo{
-		"print": {
-			Name: "print",
-			Args: []StdArg{
-				{Name: "value", Type: "any", Variadic: true},
-			},
-			Returns:     "bool",
-			Description: "Prints a value.",
-		},
-		"println": {
-			Name: "println",
-			Args: []StdArg{
-				{Name: "value", Type: "any", Variadic: true},
-			},
-			Returns:     "bool",
-			Description: "Prints a value with a newline.",
-		},
-		"input": {
-			Name: "input",
-			Args: []StdArg{
-				{Name: "prompt", Type: "string", Optional: true},
-			},
-			Returns:     "string",
-			Description: "Reads input from the terminal.",
-		},
-		"readLine": {
-			Name:        "readLine",
-			Args:        []StdArg{},
-			Returns:     "string",
-			Description: "Reads one line of input from the terminal.",
-		},
-		"readKey": {
-			Name:        "readKey",
-			Args:        []StdArg{},
-			Returns:     "string",
-			Description: "Reads a single key press from the terminal.",
-		},
-		"clear": {
-			Name:        "clear",
-			Args:        []StdArg{},
-			Returns:     "null",
-			Description: "Clears the terminal screen.",
-		},
-	},
 }
 
 var stdIOMethods map[string]StdModuleFunc
@@ -74,7 +30,7 @@ func init() {
 	registerStdModule(stdIOMetadata)
 }
 
-func (vm *VM) callStdIO(method string, args []Value) {
+func (vm *VM) callStdIO(method string, args []TinyValue) {
 	fn, ok := stdIOMethods[method]
 	if !ok {
 		vm.runtimeError(ErrorName, "unknown io function: %s", method)
@@ -83,7 +39,7 @@ func (vm *VM) callStdIO(method string, args []Value) {
 	fn(vm, args)
 }
 
-func stdIOPrintln(vm *VM, args []Value) {
+func stdIOPrintln(vm *VM, args []TinyValue) {
 	for i, arg := range args {
 		if i > 0 {
 			fmt.Print(" ")
@@ -94,14 +50,14 @@ func stdIOPrintln(vm *VM, args []Value) {
 	vm.push(NewNull())
 }
 
-func stdIOPrint(vm *VM, args []Value) {
+func stdIOPrint(vm *VM, args []TinyValue) {
 	for _, arg := range args {
 		fmt.Print(valueToString(arg))
 	}
 	vm.push(NewNull())
 }
 
-func stdIOInput(vm *VM, args []Value) {
+func stdIOInput(vm *VM, args []TinyValue) {
 	expectArgs(vm, "io.input", args, 1)
 
 	prompt := argString(vm, "io.input", args, 0)
@@ -112,7 +68,7 @@ func stdIOInput(vm *VM, args []Value) {
 	vm.push(NewNative(input))
 }
 
-func stdIOReadLine(vm *VM, args []Value) {
+func stdIOReadLine(vm *VM, args []TinyValue) {
 	dontExpectArgs(vm, "io.readLine", args)
 
 	reader := bufio.NewReader(os.Stdin)
@@ -121,7 +77,7 @@ func stdIOReadLine(vm *VM, args []Value) {
 	vm.push(NewNative(line))
 }
 
-func stdIOReadKey(vm *VM, args []Value) {
+func stdIOReadKey(vm *VM, args []TinyValue) {
 	dontExpectArgs(vm, "io.readKey", args)
 
 	fd := uintptr(os.Stdin.Fd())
@@ -144,7 +100,7 @@ func stdIOReadKey(vm *VM, args []Value) {
 	vm.push(NewNative(string(b[0])))
 }
 
-func stdIOClearScreen(vm *VM, args []Value) {
+func stdIOClearScreen(vm *VM, args []TinyValue) {
 	dontExpectArgs(vm, "io.readKey", args)
 
 	switch v := runtime.GOOS; v {

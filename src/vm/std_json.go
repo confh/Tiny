@@ -9,49 +9,6 @@ import (
 
 var stdJsonMetadata = StdModuleInfo{
 	Name: "json",
-	Methods: map[string]StdMethodInfo{
-		"stringify": {
-			Name: "stringify",
-			Args: []StdArg{
-				{Name: "value", Type: "object | array", Optional: false},
-			},
-			Returns:     "string",
-			Description: "Serializes an object value as a JSON string.",
-		},
-		"pretty": {
-			Name: "pretty",
-			Args: []StdArg{
-				{Name: "value", Type: "object | array", Optional: false},
-			},
-			Returns:     "string",
-			Description: "Serializes an object value as a pretty-printed JSON string.",
-		},
-		"parse": {
-			Name: "parse",
-			Args: []StdArg{
-				{Name: "stringified", Type: "string", Optional: false},
-			},
-			Returns:     "object",
-			Description: "Parses a JSON string and returns the corresponding object.",
-		},
-		"readFile": {
-			Name: "readFile",
-			Args: []StdArg{
-				{Name: "fileName", Type: "string", Optional: false},
-			},
-			Returns:     "object",
-			Description: "Reads and parses a JSON file, returning its contents as an object.",
-		},
-		"writeFile": {
-			Name: "writeFile",
-			Args: []StdArg{
-				{Name: "value", Type: "object", Optional: false},
-				{Name: "fileName", Type: "string", Optional: false},
-			},
-			Returns:     "null",
-			Description: "Serializes an object value as pretty-printed JSON and writes it to a file.",
-		},
-	},
 }
 
 var stdJsonMethods map[string]StdModuleFunc
@@ -67,7 +24,7 @@ func init() {
 	registerStdModule(stdJsonMetadata)
 }
 
-func (vm *VM) callStdJson(method string, args []Value) {
+func (vm *VM) callStdJson(method string, args []TinyValue) {
 	fn, ok := stdJsonMethods[method]
 	if !ok {
 		vm.runtimeError(ErrorName, "unknown json function: %s", method)
@@ -76,7 +33,7 @@ func (vm *VM) callStdJson(method string, args []Value) {
 	fn(vm, args)
 }
 
-func stdJsonStringify(vm *VM, args []Value) {
+func stdJsonStringify(vm *VM, args []TinyValue) {
 	expectArgs(vm, "json.stringify", args, 1)
 
 	switch value := args[0].Value.(type) {
@@ -92,7 +49,7 @@ func stdJsonStringify(vm *VM, args []Value) {
 	}
 }
 
-func stdJsonPretty(vm *VM, args []Value) {
+func stdJsonPretty(vm *VM, args []TinyValue) {
 	expectArgs(vm, "json.pretty", args, 1)
 
 	switch value := args[0].Value.(type) {
@@ -108,7 +65,7 @@ func stdJsonPretty(vm *VM, args []Value) {
 	}
 }
 
-func stdJsonParse(vm *VM, args []Value) {
+func stdJsonParse(vm *VM, args []TinyValue) {
 	expectArgs(vm, "json.parse", args, 1)
 
 	stringified := argString(vm, "json.parse", args, 0)
@@ -124,7 +81,7 @@ func stdJsonParse(vm *VM, args []Value) {
 	vm.push(jsonToTinyValue(result))
 }
 
-func stdJsonReadFile(vm *VM, args []Value) {
+func stdJsonReadFile(vm *VM, args []TinyValue) {
 	expectArgs(vm, "json.readFile", args, 1)
 
 	fileName := argString(vm, "json.readFile", args, 0)
@@ -147,7 +104,7 @@ func stdJsonReadFile(vm *VM, args []Value) {
 	vm.push(jsonToTinyValue(result))
 }
 
-func stdJsonWriteFile(vm *VM, args []Value) {
+func stdJsonWriteFile(vm *VM, args []TinyValue) {
 	expectArgs(vm, "json.writeFile", args, 2)
 
 	value := argObject(vm, "json.writeFile", args, 0)

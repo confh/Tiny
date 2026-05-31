@@ -10,50 +10,6 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
-var processNativeMetadata = NativeTypeInfo{
-	Name: "process",
-	Methods: map[string]StdMethodInfo{
-		"pid": {
-			Name:        "pid",
-			Returns:     "number",
-			Description: "Returns the process PID.",
-		},
-		"wait": {
-			Name:        "wait",
-			Returns:     "void",
-			Description: "Waits for the process to exit.",
-		},
-		"kill": {
-			Name:        "kill",
-			Returns:     "void",
-			Description: "Kills the process.",
-		},
-		"killTree": {
-			Name:        "killTree",
-			Returns:     "void",
-			Description: "Kills the process and its child processes.",
-		},
-		"interrupt": {
-			Name:        "interrupt",
-			Returns:     "void",
-			Description: "Interrupts the process.",
-		},
-		"isRunning": {
-			Name:        "isRunning",
-			Returns:     "bool",
-			Description: "Returns true if the process is still running.",
-		},
-		"signal": {
-			Name: "signal",
-			Args: []StdArg{
-				{Name: "signal", Type: "string"},
-			},
-			Returns:     "void",
-			Description: "Sends a signal to the process (linux only).",
-		},
-	},
-}
-
 var processMethods map[string]NativeModuleFunc[*NativeProcessValue]
 
 func init() {
@@ -66,10 +22,9 @@ func init() {
 		"isRunning": processIsRunning,
 		"signal":    processSignal,
 	}
-	registerNativeType(processNativeMetadata)
 }
 
-func (vm *VM) callProcessMethod(process *NativeProcessValue, method string, args []Value) {
+func (vm *VM) callProcessMethod(process *NativeProcessValue, method string, args []TinyValue) {
 	fn, ok := processMethods[method]
 	if !ok {
 		vm.runtimeError(ErrorName, "unknown process method: %s", method)
@@ -78,18 +33,18 @@ func (vm *VM) callProcessMethod(process *NativeProcessValue, method string, args
 	fn(vm, process, args)
 }
 
-func processPid(vm *VM, process *NativeProcessValue, args []Value) {
+func processPid(vm *VM, process *NativeProcessValue, args []TinyValue) {
 	expectArgs(vm, "process.pid", args, 0)
 	vm.push(NewInt(process.Cmd.Process.Pid))
 }
 
-func processWait(vm *VM, process *NativeProcessValue, args []Value) {
+func processWait(vm *VM, process *NativeProcessValue, args []TinyValue) {
 	expectArgs(vm, "process.wait", args, 0)
 	process.Cmd.Wait()
 	vm.push(NewNull())
 }
 
-func processKill(vm *VM, process *NativeProcessValue, args []Value) {
+func processKill(vm *VM, process *NativeProcessValue, args []TinyValue) {
 	expectArgs(vm, "process.kill", args, 0)
 	err := process.Cmd.Process.Kill()
 	if err != nil {
@@ -99,7 +54,7 @@ func processKill(vm *VM, process *NativeProcessValue, args []Value) {
 	vm.push(NewNull())
 }
 
-func processKillTree(vm *VM, process *NativeProcessValue, args []Value) {
+func processKillTree(vm *VM, process *NativeProcessValue, args []TinyValue) {
 	expectArgs(vm, "process.killTree", args, 0)
 	switch runtime.GOOS {
 	case "windows":
@@ -113,7 +68,7 @@ func processKillTree(vm *VM, process *NativeProcessValue, args []Value) {
 	vm.push(NewNull())
 }
 
-func processInterrupt(vm *VM, process *NativeProcessValue, args []Value) {
+func processInterrupt(vm *VM, process *NativeProcessValue, args []TinyValue) {
 	expectArgs(vm, "process.interrupt", args, 0)
 	switch runtime.GOOS {
 	case "windows":
@@ -127,12 +82,12 @@ func processInterrupt(vm *VM, process *NativeProcessValue, args []Value) {
 	vm.push(NewNull())
 }
 
-func processIsRunning(vm *VM, process *NativeProcessValue, args []Value) {
+func processIsRunning(vm *VM, process *NativeProcessValue, args []TinyValue) {
 	expectArgs(vm, "process.isRunning", args, 0)
 	vm.push(NewNative(process.Running))
 }
 
-func processSignal(vm *VM, process *NativeProcessValue, args []Value) {
+func processSignal(vm *VM, process *NativeProcessValue, args []TinyValue) {
 	expectArgs(vm, "process.signal", args, 1)
 	if runtime.GOOS != "linux" {
 		vm.runtimeError(ErrorRuntime, "process.signal is only supported on linux.")

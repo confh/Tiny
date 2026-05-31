@@ -1,0 +1,4 @@
+export fn join(...paths: string): string {}
+export fn baseName(path: string): string {}
+export fn dirName(path: string): string {}
+export fn extName(path: string): string {}

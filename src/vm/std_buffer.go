@@ -8,33 +8,6 @@ import (
 
 var stdBufferMetadata = StdModuleInfo{
 	Name: "buffer",
-	Methods: map[string]StdMethodInfo{
-		"alloc": {
-			Name: "alloc",
-			Args: []StdArg{
-				{Name: "size", Type: "int", Optional: false},
-				{Name: "fill", Type: "float", Optional: false},
-			},
-			Returns:     "buffer",
-			Description: "Allocates a buffer of floats of a given size, filled with the given value.",
-		},
-		"fromString": {
-			Name: "fromString",
-			Args: []StdArg{
-				{Name: "text", Type: "string", Optional: false},
-			},
-			Returns:     "buffer",
-			Description: "Creates a buffer from a string's raw bytes.",
-		},
-		"fromArray": {
-			Name: "fromArray",
-			Args: []StdArg{
-				{Name: "array", Type: "array", Optional: false},
-			},
-			Returns:     "buffer",
-			Description: "Creates a buffer from an array of numbers, as a float64 buffer.",
-		},
-	},
 }
 
 var stdBufferMethods map[string]StdModuleFunc
@@ -48,7 +21,7 @@ func init() {
 	registerStdModule(stdBufferMetadata)
 }
 
-func (vm *VM) callStdBuffer(method string, args []Value) {
+func (vm *VM) callStdBuffer(method string, args []TinyValue) {
 	fn, ok := stdBufferMethods[method]
 	if !ok {
 		vm.runtimeError(ErrorName, "unknown buffer function: %s", method)
@@ -58,7 +31,7 @@ func (vm *VM) callStdBuffer(method string, args []Value) {
 	fn(vm, args)
 }
 
-func bufferFromString(vm *VM, args []Value) {
+func bufferFromString(vm *VM, args []TinyValue) {
 	expectArgs(vm, "buffer.fromString", args, 1)
 
 	text := argString(vm, "buffer.fromString", args, 0)
@@ -68,7 +41,7 @@ func bufferFromString(vm *VM, args []Value) {
 	}))
 }
 
-func bufferFromArray(vm *VM, args []Value) {
+func bufferFromArray(vm *VM, args []TinyValue) {
 	expectArgs(vm, "buffer.fromArray", args, 1)
 
 	array := argArray(vm, "buffer.fromArray", args, 0)
@@ -88,7 +61,7 @@ func bufferFromArray(vm *VM, args []Value) {
 	}))
 }
 
-func bufferAlloc(vm *VM, args []Value) {
+func bufferAlloc(vm *VM, args []TinyValue) {
 	expectArgs(vm, "buffer.alloc", args, 2)
 
 	totalElements := argInt(vm, "buffer.alloc", args, 0)

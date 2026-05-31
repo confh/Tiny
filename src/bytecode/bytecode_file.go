@@ -121,7 +121,7 @@ func deserializeParams(params []SerializableParam) []Param {
 		if param.HasDefault {
 			decoded := DecodeValue(param.DefaultValue)
 
-			if valStruct, ok := decoded.(Value); ok {
+			if valStruct, ok := decoded.(TinyValue); ok {
 				defaultValue = valStruct
 			} else if intVal, ok := decoded.(int); ok {
 				defaultValue = NewInt(intVal)
@@ -427,7 +427,7 @@ func EncodeValue(value any) EncodedValue {
 			Data: obfuscatedBytes,
 		}
 
-	case Value:
+	case TinyValue:
 		if v.IsInt {
 			return EncodeValue(v.AsInt)
 		}
@@ -644,7 +644,7 @@ func DecodeValue(value EncodedValue) any {
 		return original
 
 	case "value":
-		var result Value
+		var result TinyValue
 		decodeInto(value.Data, &result)
 		return result
 
@@ -824,7 +824,7 @@ func DecodeValue(value EncodedValue) any {
 		var data SerializableNamespaceValue
 		decodeInto(value.Data, &data)
 
-		members := map[string]Value{}
+		members := map[string]TinyValue{}
 
 		for name, encodedMember := range data.Members {
 			members[name] = ToValue(DecodeValue(encodedMember))

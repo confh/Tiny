@@ -1,0 +1,2 @@
+export fn matchString(input: string, pattern: string): bool {}
+export fn findString(input: string, pattern: string): string {}

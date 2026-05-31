@@ -7,25 +7,6 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
-var fileNativeMetadata = NativeTypeInfo{
-	Name: "file",
-	Methods: map[string]StdMethodInfo{
-		"read": {
-			Name: "read",
-			Args: []StdArg{
-				{Name: "size", Type: "number"},
-			},
-			Returns:     "string",
-			Description: "Reads up to the specified number of bytes from the file.",
-		},
-		"close": {
-			Name:        "close",
-			Returns:     "bool",
-			Description: "Closes the file.",
-		},
-	},
-}
-
 var fileMethods map[string]NativeModuleFunc[*NativeFileValue]
 
 func init() {
@@ -33,10 +14,9 @@ func init() {
 		"read":  fileRead,
 		"close": fileClose,
 	}
-	registerNativeType(fileNativeMetadata)
 }
 
-func (vm *VM) callFileMethod(file *NativeFileValue, method string, args []Value) {
+func (vm *VM) callFileMethod(file *NativeFileValue, method string, args []TinyValue) {
 	fn, ok := fileMethods[method]
 	if !ok {
 		vm.runtimeError(ErrorName, "unknown file method: %s", method)
@@ -45,7 +25,7 @@ func (vm *VM) callFileMethod(file *NativeFileValue, method string, args []Value)
 	fn(vm, file, args)
 }
 
-func fileRead(vm *VM, file *NativeFileValue, args []Value) {
+func fileRead(vm *VM, file *NativeFileValue, args []TinyValue) {
 	expectArgs(vm, "fs.read", args, 1)
 
 	if file.Closed {
@@ -69,7 +49,7 @@ func fileRead(vm *VM, file *NativeFileValue, args []Value) {
 	vm.push(NewNative(string(buffer[:n])))
 }
 
-func fileClose(vm *VM, file *NativeFileValue, args []Value) {
+func fileClose(vm *VM, file *NativeFileValue, args []TinyValue) {
 	expectArgs(vm, "fs.close", args, 0)
 
 	if !file.Closed {

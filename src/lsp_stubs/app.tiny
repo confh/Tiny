@@ -1,0 +1,6 @@
+class App {
+    fn command(name: string, callback: function): App {}
+    fn run(): null {}
+}
+
+export fn new(name: string): App {}

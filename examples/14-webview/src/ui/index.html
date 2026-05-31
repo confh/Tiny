@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            background: #f0f2f5;
+        }
+        h1 { color: #1a73e8; }
+        .card {
+            background: white;
+            padding: 2rem;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        button {
+            background: #1a73e8;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        button:hover { background: #1557b0; }
+        #display {
+            font-size: 2rem;
+            margin: 1rem 0;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>Tiny Desktop</h1>
+        <div id="display">0</div>
+        <button onclick="handleIncrement()">Push Me</button>
+    </div>
+
+    <script>
+        async function handleIncrement() {
+            // 'increment' is bound in main.tiny
+            const newVal = await window.increment("");
+            document.getElementById('display').innerText = newVal;
+        }
+    </script>
+</body>
+</html>

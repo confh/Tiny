@@ -1,0 +1,5 @@
+export fn sleep(ms: number): null {}
+export fn nowNs(): number {}
+export fn nowMs(): number {}
+export fn nowSec(): number {}
+export fn clock(): number {}

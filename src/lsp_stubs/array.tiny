@@ -1,0 +1,2 @@
+export fn range(min: number, max: number): array {}
+export fn from(src: array): array {}

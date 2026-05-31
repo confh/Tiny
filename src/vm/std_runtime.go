@@ -8,46 +8,6 @@ import (
 
 var stdRuntimeMetadata = StdModuleInfo{
 	Name: "runtime",
-	Methods: map[string]StdMethodInfo{
-		"lockThread": {
-			Name:        "lockThread",
-			Args:        []StdArg{},
-			Returns:     "null",
-			Description: "Locks the current goroutine to its current operating system thread.",
-		},
-		"unlockThread": {
-			Name:        "unlockThread",
-			Args:        []StdArg{},
-			Returns:     "null",
-			Description: "Unlocks the current goroutine from its operating system thread.",
-		},
-		"onFatal": {
-			Name: "onFatal",
-			Args: []StdArg{
-				{Name: "callback", Type: "function"},
-			},
-			Returns:     "null",
-			Description: "Registers a callback function to be executed when a fatal error occurs.",
-		},
-		"clearFatalHandler": {
-			Name:        "clearFatalHandler",
-			Args:        []StdArg{},
-			Returns:     "null",
-			Description: "Clears any previously registered fatal error callback.",
-		},
-		"memoryStats": {
-			Name:        "memoryStats",
-			Args:        []StdArg{},
-			Returns:     "object",
-			Description: "Returns current memory usage statistics for the Go runtime including alloc, totalAlloc, sys, and numGC.",
-		},
-		"gc": {
-			Name:        "gc",
-			Args:        []StdArg{},
-			Returns:     "null",
-			Description: "Manually triggers garbage collection.",
-		},
-	},
 }
 
 var stdRuntimeMethods map[string]StdModuleFunc
@@ -64,7 +24,7 @@ func init() {
 	registerStdModule(stdRuntimeMetadata)
 }
 
-func (vm *VM) callStdRuntime(method string, args []Value) {
+func (vm *VM) callStdRuntime(method string, args []TinyValue) {
 	fn, ok := stdRuntimeMethods[method]
 	if !ok {
 		vm.fatalError(ErrorName, "unknown runtime function: %s", method)
@@ -73,25 +33,25 @@ func (vm *VM) callStdRuntime(method string, args []Value) {
 	fn(vm, args)
 }
 
-func stdRuntimeGC(vm *VM, args []Value) {
+func stdRuntimeGC(vm *VM, args []TinyValue) {
 	dontExpectArgs(vm, "runtime.gc", args)
 	runtime.GC()
 	vm.push(NewNull())
 }
 
-func stdRuntimeLockThread(vm *VM, args []Value) {
+func stdRuntimeLockThread(vm *VM, args []TinyValue) {
 	dontExpectArgs(vm, "runtime.lockThread", args)
 	runtime.LockOSThread()
 	vm.push(NewNull())
 }
 
-func stdRuntimeUnlockThread(vm *VM, args []Value) {
+func stdRuntimeUnlockThread(vm *VM, args []TinyValue) {
 	dontExpectArgs(vm, "runtime.unlockThread", args)
 	runtime.UnlockOSThread()
 	vm.push(NewNull())
 }
 
-func stdRuntimeMemoryStats(vm *VM, args []Value) {
+func stdRuntimeMemoryStats(vm *VM, args []TinyValue) {
 	dontExpectArgs(vm, "runtime.memoryStats", args)
 
 	var m runtime.MemStats
@@ -105,7 +65,7 @@ func stdRuntimeMemoryStats(vm *VM, args []Value) {
 	}))
 }
 
-func stdRuntimeOnFatal(vm *VM, args []Value) {
+func stdRuntimeOnFatal(vm *VM, args []TinyValue) {
 	expectArgs(vm, "runtime.onFatal", args, 1)
 
 	fn := argFn(vm, "runtime.onFatal", args, 0)
@@ -125,7 +85,7 @@ func stdRuntimeOnFatal(vm *VM, args []Value) {
 				recover()
 			}()
 
-			vm.callFunctionValue(fn, []Value{errObj})
+			vm.callFunctionValue(fn, []TinyValue{errObj})
 		}()
 
 		return true
@@ -134,7 +94,7 @@ func stdRuntimeOnFatal(vm *VM, args []Value) {
 	vm.push(NewNull())
 }
 
-func stdRuntimeClearOnFatal(vm *VM, args []Value) {
+func stdRuntimeClearOnFatal(vm *VM, args []TinyValue) {
 	dontExpectArgs(vm, "runtime.clearFatalHandler", args)
 	ClearFatalHook()
 	vm.push(NewNull())

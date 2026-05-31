@@ -1,0 +1,8 @@
+class StringBuilder {
+    fn writeString(str: string): null {}
+    fn stringify(): string {}
+}
+
+export fn newBuilder(): StringBuilder {}
+export fn isDigit(input: string): bool {}
+export fn random(length: number): string {}

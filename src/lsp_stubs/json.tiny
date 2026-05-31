@@ -1,0 +1,5 @@
+export fn stringify(value: object | array): string {}
+export fn pretty(value: object | array): string {}
+export fn parse(stringified: string): object {}
+export fn readFile(fileName: string): object {}
+export fn writeFile(value: object, fileName: string): null {}

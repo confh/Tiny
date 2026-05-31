@@ -22,14 +22,6 @@ import (
 
 var std${moduleName.upper()}Metadata = StdModuleInfo{
 	Name: "${moduleName}",
-	Methods: map[string]StdMethodInfo{
-		"helloWorld": {
-			Name:        "helloWorld",
-			Args:        []StdArg{},
-			Returns:     "string",
-			Description: "Return hello world",
-		},
-	},
 }
 
 var std${moduleName.upper()}Methods map[string]StdModuleFunc
@@ -41,7 +33,7 @@ func init() {
 	registerStdModule(std${moduleName.upper()}Metadata)
 }
 
-func (vm *VM) callStd${moduleName.upper()}(method string, args []Value) {
+func (vm *VM) callStd${moduleName.upper()}(method string, args []TinyValue) {
 	fn, ok := std${moduleName.upper()}Methods[method]
 	if !ok {
 		vm.runtimeError(ErrorName, "unknown ${moduleName} function: %s", method)
@@ -51,9 +43,9 @@ func (vm *VM) callStd${moduleName.upper()}(method string, args []Value) {
 	fn(vm, args)
 }
 
-func ${moduleName}HelloWorld(vm *VM, args []Value) {
+func ${moduleName}HelloWorld(vm *VM, args []TinyValue) {
 	dontExpectArgs(vm, "${moduleName}.helloWorld", args)
 
-	vm.push("hello world")
+	vm.push(NewNative("hello world"))
 }
 `);

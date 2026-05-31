@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"embed"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -150,6 +151,9 @@ type ParameterInformation struct {
 	Label string `json:"label"`
 }
 
+//go:embed lsp_stubs/*
+var lspStubs embed.FS
+
 var tinyKeywords = map[string]bool{
 	"import": true,
 	"std":    true,
@@ -163,6 +167,7 @@ var tinyKeywords = map[string]bool{
 	"const":     true,
 	"class":     true,
 	"embed":     true,
+	"native":    true,
 	"field":     true,
 	"private":   true,
 	"public":    true,
@@ -1801,7 +1806,7 @@ func publishDiagnostics(uri string, text string) {
 	diagnostics := []map[string]any{}
 
 	for _, diagnostic := range parseDiagnostics {
-		line := diagnostic.Line - 1
+		line := diagnostic.Line
 		column := diagnostic.Column - 1
 
 		if line < 0 || column < 0 {
@@ -1834,7 +1839,7 @@ func publishDiagnostics(uri string, text string) {
 					"character": column + wordLen,
 				},
 			},
-			"severity": 1, // Error severity
+			"severity": 1,
 			"message":  diagnostic.Message,
 			"source":   "tiny",
 		})
@@ -1866,7 +1871,7 @@ func publishDiagnosticsForImportDependents(changedURI string) {
 }
 
 func dependentDocumentURIs(changedURI string) []string {
-	changedPath := filepath.Clean(uriToPath(changedURI))
+	changedPath := filepath.Clean(URIToPath(changedURI))
 	if changedPath == "." || changedPath == "" {
 		return nil
 	}
@@ -2008,6 +2013,7 @@ func scopeCompletions(scope *Scope, uri string, text string, hasParens bool) []C
 		snippetCompletion("let", "variable", "let ${1:name} = ${2:value}$0"),
 		snippetCompletion("const", "constant", "const ${1:name} = ${2:value}$0"),
 		{Label: "class", Kind: 7, Detail: "class", InsertText: "class ${1:Name} {\n    $0\n}", InsertTextFormat: 2},
+		{Label: "enum", Kind: 7, Detail: "enum", InsertText: "enum ${1:Name} {\n    $0\n}", InsertTextFormat: 2},
 		{Label: "interface", Kind: 7, Detail: "interface", InsertText: "interface ${1:Name} {\n    $0\n}", InsertTextFormat: 2},
 		{Label: "embed", Kind: 14, Detail: "embed class methods"},
 		snippetCompletion("field", "class field", "field ${1:name} = ${2:value}$0"),
@@ -2026,10 +2032,12 @@ func scopeCompletions(scope *Scope, uri string, text string, hasParens bool) []C
 		{Label: "catch", Kind: 14, Detail: "catch block"},
 		{Label: "finally", Kind: 14, Detail: "finally block"},
 		snippetCompletion("throw", "throw error", "throw ${1:error}$0"),
-		snippetCompletion("spawn", "spawn task", "spawn fn() {\n    $0\n}"),
+		snippetCompletion("spawn", "spawn task", "spawn () fn() {\n    $0\n}"),
 		snippetCompletion("defer", "defer statement", "defer fn() {\n    $0\n}"),
 		snippetCompletion("embedstr", "embedstr statement", "embedstr \"$0\" const $1"),
 		snippetCompletion("embedbin", "embedbin statement", "embedbin \"$0\" const $1"),
+		snippetCompletion("embeddir", "embeddir statement", "embeddir \"$0\" const $1"),
+		snippetCompletion("native fn", "native fn statement", "native fn ${0:Name}(): null {\n\tgo {\n$1\n\t}\n}"),
 		{Label: "await ", Kind: 14, Detail: "await statement"},
 		{Label: "lock ", Kind: 14, Detail: "lock statement"},
 		{Label: "typeof", Kind: 14, Detail: "type operator"},
@@ -2114,7 +2122,7 @@ func stdAutoImportCompletions(scope *Scope, text string) []CompletionItem {
 }
 
 func fileAutoImportCompletions(scope *Scope, uri string, text string, hasParens bool) []CompletionItem {
-	currentPath := uriToPath(uri)
+	currentPath := URIToPath(uri)
 	if currentPath == "" {
 		return nil
 	}
@@ -2357,6 +2365,18 @@ func resolveMemberFromStaticType(scope *Scope, typ string, member string) (Symbo
 		return SymbolInfo{}, "unknown", false
 	}
 
+	// --- NEW: RESOLVE FROM NAMESPACE STATIC TYPE ---
+	if strings.HasPrefix(typ, "namespace:") {
+		nsName := strings.TrimPrefix(typ, "namespace:")
+		ns, ok := scope.Resolve(nsName)
+		if ok && ns.Kind == SymbolNamespace {
+			if memberSym, ok := ns.Members[member]; ok {
+				return memberSym, staticTypeOfSymbol(member, memberSym), true
+			}
+		}
+		return SymbolInfo{}, "unknown", false
+	}
+
 	if strings.HasPrefix(typ, "interface:") {
 		ifaceName := strings.TrimPrefix(typ, "interface:")
 		ifaceSym, ok := resolveInterfaceSymbol(scope, ifaceName)
@@ -2395,18 +2415,6 @@ func resolveMemberFromStaticType(scope *Scope, typ string, member string) (Symbo
 		}
 		if memberSym, ok := enumSym.Members[member]; ok {
 			return memberSym, "number", true
-		}
-		return SymbolInfo{}, "unknown", false
-	}
-
-	if strings.HasPrefix(typ, "std:") {
-		module := strings.TrimPrefix(typ, "std:")
-		info, ok := GetStdModuleInfo(module)
-		if !ok {
-			return SymbolInfo{}, "unknown", false
-		}
-		if methodInfo, ok := info.Methods[member]; ok {
-			return SymbolInfo{Name: methodInfo.Name, Kind: SymbolFunction, Type: "function", Detail: methodInfo.Description, Params: methodInfo.Args, Returns: methodInfo.Returns}, methodInfo.Returns, true
 		}
 		return SymbolInfo{}, "unknown", false
 	}

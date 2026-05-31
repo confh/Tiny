@@ -1,0 +1,26 @@
+export enum Signal {
+    interrupt,
+    kill
+}
+
+class Process {
+    fn pid(): number {}
+    fn wait(): null {}
+    fn kill(): null {}
+    fn killTree(): null {}
+    fn interrupt(): null {}
+    fn isRunning(): bool {}
+    fn signal(signal: string): null {}
+}
+
+export fn args(): array {}
+export fn exit(code: number): null {}
+export fn close(): null {}
+export fn cwd(): string {}
+export fn getEnv(key: string): string {}
+export fn setEnv(key: string, value: string): null {}
+export fn unsetEnv(key: string): null {}
+export fn halt(): null {}
+export fn run(command: string, args?: array, options?: object): object {}
+export fn shell(command: string, options?: object): object {}
+export fn start(command: string, args?: array, options?: object): Process {}

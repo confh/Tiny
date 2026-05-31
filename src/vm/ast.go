@@ -5,6 +5,7 @@ type EmbedType = byte
 const (
 	EmbedStr EmbedType = iota
 	EmbedBin
+	EmbedDir
 )
 
 type Stmt interface {
@@ -231,6 +232,7 @@ type TypeOfExpr struct {
 func (e TypeOfExpr) exprNode() {}
 
 type SpawnExpr struct {
+	Args     []Expr
 	Function Expr
 }
 
@@ -378,14 +380,14 @@ type InterfaceStmt struct {
 func (s InterfaceStmt) stmtNode() {}
 
 type EmbedStmt struct {
-	Kind             EmbedType
-	Name             string
-	EmbeddedFilePath string
-	Constant         bool
-	TypeHint         TypeHint
-	File             string
-	Line             int
-	Column           int
+	Kind         EmbedType
+	Name         string
+	EmbeddedPath string
+	Constant     bool
+	TypeHint     TypeHint
+	File         string
+	Line         int
+	Column       int
 }
 
 func (s EmbedStmt) stmtNode() {}
@@ -402,11 +404,11 @@ type IndexAssignStmt struct {
 func (s IndexAssignStmt) stmtNode() {}
 
 type Param struct {
-	Name         string   `json:"name"`
-	TypeHint     TypeHint `json:"typeHint"`
-	HasDefault   bool     `json:"hasDefault"`
-	DefaultValue Value    `json:"-"`
-	Variadic     bool     `json:"variadic"`
+	Name         string    `json:"name"`
+	TypeHint     TypeHint  `json:"typeHint"`
+	HasDefault   bool      `json:"hasDefault"`
+	DefaultValue TinyValue `json:"-"`
+	Variadic     bool      `json:"variadic"`
 }
 
 type FunctionStmt struct {

@@ -36,7 +36,7 @@ func (t TypeHint) String() string {
 	return strings.Join(types, " | ")
 }
 
-func CheckTypeHint(value Value, hint TypeHint, interfaces map[string]Interface) (bool, string) {
+func CheckTypeHint(value TinyValue, hint TypeHint, interfaces map[string]Interface) (bool, string) {
 	if hint.IsEmpty() || hint.Name == "any" {
 		return true, ""
 	}
@@ -53,7 +53,7 @@ func CheckTypeHint(value Value, hint TypeHint, interfaces map[string]Interface) 
 	return false, lastReason
 }
 
-func checkSingleTypeHint(value Value, hint string, interfaces map[string]Interface) (bool, string) {
+func checkSingleTypeHint(value TinyValue, hint string, interfaces map[string]Interface) (bool, string) {
 	switch hint {
 	case "any":
 		return true, ""

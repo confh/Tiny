@@ -1,0 +1,6 @@
+class Mutex {
+    fn lock(): null {}
+    fn unlock(): null {}
+}
+
+export fn mutex(): Mutex {}

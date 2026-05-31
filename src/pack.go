@@ -51,6 +51,7 @@ func packCommand(args []string) {
 	entryFile := ""
 	outFile := ""
 	target := normalizeTarget("")
+	windowed := false
 
 	if len(args) == 0 {
 		config, ok := loadTinyConfig()
@@ -82,13 +83,16 @@ func packCommand(args []string) {
 			outFile = args[i+1]
 			i++
 
-		case "--target":
-			if i+1 >= len(args) {
-				LangError(ErrorRuntime, "expected target after --target")
-			}
+		// case "--target":
+		// 	if i+1 >= len(args) {
+		// 		LangError(ErrorRuntime, "expected target after --target")
+		// 	}
 
-			target = normalizeTarget(args[i+1])
-			i++
+		// 	target = normalizeTarget(args[i+1])
+		// 	i++
+
+		case "--windowed":
+			windowed = true
 
 		default:
 			LangError(ErrorRuntime, "unknown pack argument: %s", args[i])
@@ -97,7 +101,7 @@ func packCommand(args []string) {
 
 	outFile = addExtensionForTarget(outFile, target)
 
-	packToOutput(entryFile, outFile, target)
+	packToOutput(entryFile, outFile, target, windowed)
 
 	fmt.Println("Packed:", outFile)
 }
@@ -152,4 +156,32 @@ func writePackedExecutable(outFile string, runtimeBytes []byte, bytecodeBytes []
 	}
 
 	return nil
+}
+
+func PatchPESubsystemToGUI(peBytes []byte) bool {
+	if len(peBytes) < 64 {
+		return false
+	}
+
+	if peBytes[0] != 'M' || peBytes[1] != 'Z' {
+		return false
+	}
+
+	peOffset := binary.LittleEndian.Uint32(peBytes[0x3c:0x40])
+	if int(peOffset+94) > len(peBytes) {
+		return false
+	}
+
+	if peBytes[peOffset] != 'P' || peBytes[peOffset+1] != 'E' {
+		return false
+	}
+
+	subsystem := binary.LittleEndian.Uint16(peBytes[peOffset+92 : peOffset+94])
+
+	if subsystem == 3 {
+		binary.LittleEndian.PutUint16(peBytes[peOffset+92:peOffset+94], 2)
+		return true
+	}
+
+	return false
 }

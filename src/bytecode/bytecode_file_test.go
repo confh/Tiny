@@ -138,7 +138,7 @@ func TestLoadBytecodeFromBytesSupportsLegacyJSON(t *testing.T) {
 func TestEncodeDecodeNamespaceValue(t *testing.T) {
 	original := vm.NamespaceValue{
 		Name: "Report",
-		Members: map[string]vm.Value{
+		Members: map[string]vm.TinyValue{
 			"status": vm.NewNative(vm.NamespaceMemberRef{GlobalName: "Report.status"}),
 			"count":  vm.NewInt(3),
 		},

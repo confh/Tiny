@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -98,10 +97,12 @@ var catchVarRegex = regexp.MustCompile(`(?m)\bcatch\s+([A-Za-z_][A-Za-z0-9_]*)\s
 var enumLineRegex = regexp.MustCompile(`(?m)^(?:export\s+)?enum\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{([^}]*)\}`)
 var exportedEnumBlockRegex = regexp.MustCompile(`(?s)\bexport\s+enum\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{(.*?)\}`)
 var interfaceLineRegex = regexp.MustCompile(`(?m)^(?:export\s+)?interface\s+([A-Za-z_][A-Za-z0-9_]*)`)
-var interfaceFieldRegex = regexp.MustCompile(`^\s*([A-Za-z_][A-Za-z0-9_]*\??)\s*:\s*([^;\r\n]+)`)
+var interfaceFieldRegex = regexp.MustCompile(`^\s*([A-Za-z_][A-Za-z0-9_]*\??)\s*:\s*([^,;\r\n]+)`)
 var embedLineRegex = regexp.MustCompile(
-	`(?m)^(embedstr|embedbin)\s+"([^"]+)"\s+(?:let|const)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:;|\r?$)`,
+	`(?m)^(embedstr|embedbin|embeddir)\s+"([^"]+)"\s+(?:let|const)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:;|\r?$)`,
 )
+var spawnFnRegex = regexp.MustCompile(`=\s*spawn\s*(?:\([^)]*\))?\s*(?:async\s+)?fn\b`)
+var spawnPrefixRegex = regexp.MustCompile(`^spawn\s*(?:\([^)]*\))?\s*(?:async\s+)?(fn)\b`)
 
 type blockInfo struct {
 	Kind       string
@@ -199,6 +200,27 @@ func resolveInterfaceSymbol(scope *Scope, ifaceName string) (SymbolInfo, bool) {
 	if sym, ok := scope.Resolve(ifaceName); ok && sym.Kind == SymbolInterface {
 		return sym, true
 	}
+
+	for s := scope; s != nil; s = s.Parent {
+		for _, sym := range s.Symbols {
+			if sym.Kind == SymbolNamespace {
+				if member, ok := sym.Members[ifaceName]; ok && member.Kind == SymbolInterface {
+					return member, true
+				}
+			}
+		}
+	}
+
+	shortName := ifaceName
+	if idx := strings.LastIndex(ifaceName, "."); idx >= 0 {
+		shortName = ifaceName[idx+1:]
+	}
+	for _, entry := range lspImportExportCache {
+		if member, ok := entry.exports[shortName]; ok && member.Kind == SymbolInterface {
+			return member, true
+		}
+	}
+
 	return SymbolInfo{}, false
 }
 
@@ -221,6 +243,26 @@ func resolveClassSymbol(scope *Scope, className string) (SymbolInfo, bool) {
 		}
 	}
 
+	for s := scope; s != nil; s = s.Parent {
+		for _, sym := range s.Symbols {
+			if sym.Kind == SymbolNamespace {
+				if member, ok := sym.Members[className]; ok && member.Kind == SymbolClass {
+					return member, true
+				}
+			}
+		}
+	}
+
+	shortName := className
+	if idx := strings.LastIndex(className, "."); idx >= 0 {
+		shortName = className[idx+1:]
+	}
+	for _, entry := range lspImportExportCache {
+		if member, ok := entry.exports[shortName]; ok && member.Kind == SymbolClass {
+			return member, true
+		}
+	}
+
 	return SymbolInfo{}, false
 }
 
@@ -240,6 +282,26 @@ func resolveEnumSymbol(scope *Scope, enumName string) (SymbolInfo, bool) {
 			if ok && member.Kind == SymbolEnum {
 				return member, true
 			}
+		}
+	}
+
+	for s := scope; s != nil; s = s.Parent {
+		for _, sym := range s.Symbols {
+			if sym.Kind == SymbolNamespace {
+				if member, ok := sym.Members[enumName]; ok && member.Kind == SymbolEnum {
+					return member, true
+				}
+			}
+		}
+	}
+
+	shortName := enumName
+	if idx := strings.LastIndex(enumName, "."); idx >= 0 {
+		shortName = enumName[idx+1:]
+	}
+	for _, entry := range lspImportExportCache {
+		if member, ok := entry.exports[shortName]; ok && member.Kind == SymbolEnum {
+			return member, true
 		}
 	}
 
@@ -372,25 +434,6 @@ func makeRangeDiagnostic(line int, start int, end int, severity int, message str
 	}
 }
 
-func uriToPath(uri string) string {
-	parsed, err := url.Parse(uri)
-	if err != nil {
-		return uri
-	}
-
-	if parsed.Scheme != "file" {
-		return uri
-	}
-
-	path := parsed.Path
-
-	if len(path) >= 3 && path[0] == '/' && path[2] == ':' {
-		path = path[1:]
-	}
-
-	return filepath.FromSlash(path)
-}
-
 func pathToFileURI(path string) string {
 	abs, err := filepath.Abs(path)
 	if err == nil {
@@ -401,7 +444,7 @@ func pathToFileURI(path string) string {
 }
 
 func resolveImportPath(currentURI string, importPath string) string {
-	currentPath := uriToPath(currentURI)
+	currentPath := URIToPath(currentURI)
 	baseDir := filepath.Dir(currentPath)
 
 	if filepath.IsAbs(importPath) {
@@ -419,14 +462,16 @@ func fallbackScopeAtPosition(uri string, text string, pos Position) *Scope {
 	scope := NewScope(nil)
 
 	for alias, module := range parseStdImports(text) {
+		resolvedPath := "std:" + module
+		exports := loadTinyFileExports(resolvedPath, map[string]bool{})
+
 		scope.Define(SymbolInfo{
 			Name:      alias,
-			Kind:      SymbolStd,
-			Type:      "std:" + module,
+			Kind:      SymbolNamespace,
+			Type:      "namespace:" + alias,
 			Detail:    "std module " + module,
-			Line:      1,
-			Column:    1,
-			SourceURI: uri,
+			Members:   exports,
+			SourceURI: pathToFileURI(resolvedPath),
 		})
 	}
 
@@ -559,8 +604,17 @@ func objectLiteralCompletions(scope *Scope, text string, pos Position) []Complet
 		if ok && ns.Kind == SymbolNamespace {
 			sym, exists = ns.Members[memberName]
 		}
-	} else {
-		sym, exists = scope.Resolve(typeName)
+	}
+
+	// --- THE CRITICAL FIX: If namespace resolution failed, fall back to global search! ---
+	if !exists {
+		if iface, ok := resolveInterfaceSymbol(scope, typeName); ok {
+			sym = iface
+			exists = true
+		} else if class, ok := resolveClassSymbol(scope, typeName); ok {
+			sym = class
+			exists = true
+		}
 	}
 
 	if !exists {
@@ -874,6 +928,11 @@ func scanFieldLine(scope *Scope, line string, lineNumber int, uri string) {
 	}
 
 	name := match[1]
+
+	if existing, ok := scope.Resolve(name); ok && (existing.Type == "function" || strings.HasPrefix(existing.Type, "task:")) {
+		return
+	}
+
 	typeHint := match[2]
 	exprText := strings.TrimSpace(match[3])
 
@@ -884,6 +943,7 @@ func scanFieldLine(scope *Scope, line string, lineNumber int, uri string) {
 		typ = normalizeLSPType(scope, typeHint)
 	} else {
 		typ = inferExprTypeFromText(scope, exprText)
+		typ = normalizeLSPType(scope, typ)
 		if typ == "object" {
 			fields = inferObjectFieldsFromText(scope, exprText, uri, lineNumber)
 		}
@@ -914,6 +974,8 @@ func scanEmbedLine(scope *Scope, line string, lineNumber int, uri string) {
 	typ := "string"
 	if kind == "embedbin" {
 		typ = "buffer"
+	} else if kind == "embeddir" {
+		typ = "object"
 	}
 
 	scope.Define(SymbolInfo{
@@ -935,6 +997,11 @@ func scanVariableLine(scope *Scope, line string, lineNumber int, uri string) {
 	}
 
 	name := match[1]
+
+	if existing, ok := scope.Resolve(name); ok && (existing.Type == "function" || strings.HasPrefix(existing.Type, "task:")) {
+		return
+	}
+
 	typeHint := match[2]
 	exprText := strings.TrimSpace(match[3])
 
@@ -945,6 +1012,7 @@ func scanVariableLine(scope *Scope, line string, lineNumber int, uri string) {
 		typ = normalizeLSPType(scope, typeHint)
 	} else {
 		typ = inferExprTypeFromText(scope, exprText)
+		typ = normalizeLSPType(scope, typ)
 		if typ == "object" {
 			fields = inferObjectFieldsFromText(scope, exprText, uri, lineNumber)
 		}
@@ -1235,7 +1303,14 @@ func scanAnonymousFunctions(scope *Scope, text string, maxLine int, uri string) 
 	for i := 0; i <= maxLine && i < len(lines); i++ {
 		line := cleanLine(lines[i])
 
-		if !strings.Contains(line, "= spawn fn") && !strings.Contains(line, "= fn") && !strings.Contains(line, "= async fn") {
+		if !strings.Contains(line, "= fn") && !strings.Contains(line, "= async fn") && !strings.Contains(line, "= spawn") {
+			continue
+		}
+
+		isSpawn := spawnFnRegex.MatchString(line)
+		isNormalFn := strings.Contains(line, "= fn") || strings.Contains(line, "= async fn")
+
+		if !isSpawn && !isNormalFn {
 			continue
 		}
 
@@ -1259,7 +1334,7 @@ func scanAnonymousFunctions(scope *Scope, text string, maxLine int, uri string) 
 		returnType := inferReturnTypeFromBody(scope, block.Body, block.ReturnType)
 		params := normalizeStdArgs(scope, parseFunctionParams(block.ParamsText))
 
-		if strings.Contains(line, "= spawn fn") || block.IsAsync {
+		if isSpawn || block.IsAsync {
 			scope.Define(SymbolInfo{
 				Name:      name,
 				Kind:      SymbolVariable,
@@ -1587,6 +1662,14 @@ func inferExprTypeFromText(scope *Scope, expr string) string {
 	expr = strings.TrimSpace(expr)
 	expr = strings.TrimSuffix(expr, ";")
 
+	for strings.HasPrefix(expr, "(") && strings.HasSuffix(expr, ")") {
+		if findMatching(expr, 0, '(', ')') == len(expr)-1 {
+			expr = strings.TrimSpace(expr[1 : len(expr)-1])
+		} else {
+			break
+		}
+	}
+
 	if expr == "" {
 		return "unknown"
 	}
@@ -1620,8 +1703,9 @@ func inferExprTypeFromText(scope *Scope, expr string) string {
 		return "null"
 	}
 
-	if strings.HasPrefix(expr, "spawn fn") {
-		block, ok := parseFunctionLikeBlockAt(expr, strings.Index(expr, "fn"), "fn")
+	if loc := spawnPrefixRegex.FindStringSubmatchIndex(expr); loc != nil {
+		fnIndex := loc[2]
+		block, ok := parseFunctionLikeBlockAt(expr, fnIndex, "fn")
 		if ok {
 			return "task:" + inferReturnTypeFromBody(scope, block.Body, block.ReturnType)
 		}
@@ -2005,7 +2089,7 @@ type lspImportCacheEntry struct {
 var lspImportExportCache = map[string]lspImportCacheEntry{}
 
 func invalidateLSPImportCacheForURI(uri string) {
-	path := filepath.Clean(uriToPath(uri))
+	path := filepath.Clean(URIToPath(uri))
 	delete(lspImportExportCache, path)
 
 	for key := range lspImportExportCache {
@@ -2040,6 +2124,90 @@ func scanExportedInterfaces(scope *Scope, text string, exports map[string]Symbol
 func loadTinyFileExports(path string, visited map[string]bool) map[string]SymbolInfo {
 	exports := map[string]SymbolInfo{}
 
+	if strings.HasPrefix(path, "std:") {
+		uri := pathToFileURI(path)
+		text, ok := tinyFileTextForLSP(path, uri)
+		if !ok {
+			return exports
+		}
+
+		statements, _ := parseTinyForLSP(uri, text)
+		if statements == nil {
+			return exports
+		}
+
+		scope := NewScope(nil)
+		for alias, module := range parseStdImports(text) {
+			scope.Define(SymbolInfo{
+				Name: alias, Kind: SymbolStd, Type: "std:" + module,
+				Detail: "std module " + module, SourceURI: uri,
+			})
+		}
+
+		for _, raw := range statements {
+			stmt, exported := unwrapExport(raw)
+
+			switch s := stmt.(type) {
+			case InterfaceStmt:
+				detail := "interface " + s.Name
+				if !exported {
+					detail = "private " + detail
+				}
+				sym := SymbolInfo{
+					Name:      s.Name,
+					Kind:      SymbolInterface,
+					Type:      "interface:" + s.Name,
+					Detail:    detail,
+					Line:      s.Line,
+					Column:    s.Column,
+					SourceURI: uri,
+					Fields:    map[string]SymbolInfo{},
+				}
+				for fieldName, fieldHint := range s.Fields {
+					sym.Fields[fieldName] = SymbolInfo{
+						Name:      fieldName,
+						Kind:      SymbolField,
+						Type:      normalizeLSPType(scope, fieldHint.Name),
+						Detail:    "interface field " + fieldName,
+						Line:      s.Line,
+						SourceURI: uri,
+					}
+				}
+				exports[s.Name] = sym
+				scope.Define(sym)
+
+			case FunctionStmt:
+				detail := "fn " + s.Name
+				if !exported {
+					detail = "private " + detail
+				}
+				sym := SymbolInfo{
+					Name:      s.Name,
+					Kind:      SymbolFunction,
+					Type:      "function",
+					Detail:    detail,
+					Line:      s.Line,
+					Column:    s.Column,
+					SourceURI: uri,
+					Params:    stdArgsFromParams(scope, s.Params),
+					Returns:   returnTypeNameScoped(scope, s.ReturnType),
+				}
+				exports[s.Name] = sym
+				scope.Define(sym)
+
+			case ClassStmt:
+				sym := classSymbolFromStmt(scope, s, uri, text)
+				if !exported {
+					sym.Detail = "private " + sym.Detail // Tag as private!
+				}
+				exports[s.Name] = sym
+				scope.Define(sym)
+			}
+		}
+
+		return exports
+	}
+
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return exports
@@ -2064,12 +2232,16 @@ func loadTinyFileExports(path string, visited map[string]bool) map[string]Symbol
 	scope := NewScope(nil)
 
 	for alias, module := range parseStdImports(text) {
+		resolvedPath := "std:" + module
+		exports := loadTinyFileExports(resolvedPath, map[string]bool{})
+
 		scope.Define(SymbolInfo{
 			Name:      alias,
-			Kind:      SymbolStd,
-			Type:      "std:" + module,
+			Kind:      SymbolNamespace,
+			Type:      "namespace:" + alias,
 			Detail:    "std module " + module,
-			SourceURI: uri,
+			Members:   exports,
+			SourceURI: pathToFileURI(resolvedPath),
 		})
 	}
 
@@ -2122,22 +2294,26 @@ func collectExportsFromAST(scope *Scope, text string, exports map[string]SymbolI
 
 	for _, raw := range statements {
 		stmt, exported := unwrapExport(raw)
-		if !exported {
-			continue
-		}
 
 		switch s := stmt.(type) {
 		case ClassStmt:
 			sym := classSymbolFromStmt(scope, s, uri, text)
-			exports[sym.Name] = sym
+			if !exported {
+				sym.Detail = "private " + sym.Detail
+			}
+			exports[s.Name] = sym
 			scope.Define(sym)
 
 		case NativeFnStmt:
+			detail := "native fn " + s.Name
+			if !exported {
+				detail = "private " + detail
+			}
 			sym := SymbolInfo{
 				Name:      s.Name,
 				Kind:      SymbolFunction,
 				Type:      "function",
-				Detail:    "export native fn " + s.Name,
+				Detail:    detail,
 				Line:      s.Line,
 				Column:    s.Column,
 				SourceURI: uri,
@@ -2148,17 +2324,20 @@ func collectExportsFromAST(scope *Scope, text string, exports map[string]SymbolI
 			scope.Define(sym)
 
 		case InterfaceStmt:
+			detail := "interface " + s.Name
+			if !exported {
+				detail = "private " + detail
+			}
 			sym := SymbolInfo{
 				Name:      s.Name,
 				Kind:      SymbolInterface,
 				Type:      "interface:" + s.Name,
-				Detail:    "interface " + s.Name,
+				Detail:    detail,
 				Line:      s.Line,
 				Column:    s.Column,
 				SourceURI: uri,
 				Fields:    map[string]SymbolInfo{},
 			}
-
 			for fieldName, fieldHint := range s.Fields {
 				sym.Fields[fieldName] = SymbolInfo{
 					Name:      fieldName,
@@ -2174,15 +2353,22 @@ func collectExportsFromAST(scope *Scope, text string, exports map[string]SymbolI
 
 		case EnumStmt:
 			sym := enumSymbolFromStmt(s, uri)
-			exports[sym.Name] = sym
+			if !exported {
+				sym.Detail = "private " + sym.Detail
+			}
+			exports[s.Name] = sym
 			scope.Define(sym)
 
 		case FunctionStmt:
+			detail := "fn " + s.Name
+			if !exported {
+				detail = "private " + detail
+			}
 			sym := SymbolInfo{
 				Name:      s.Name,
 				Kind:      SymbolFunction,
 				Type:      "function",
-				Detail:    "export fn " + s.Name,
+				Detail:    detail,
 				Line:      s.Line,
 				Column:    s.Column,
 				SourceURI: uri,
@@ -2197,11 +2383,15 @@ func collectExportsFromAST(scope *Scope, text string, exports map[string]SymbolI
 			if typ == "" {
 				typ = "string"
 			}
+			detail := "variable " + s.Name
+			if !exported {
+				detail = "private " + detail
+			}
 			sym := SymbolInfo{
 				Name:      s.Name,
 				Kind:      SymbolVariable,
 				Type:      typ,
-				Detail:    "export variable " + s.Name,
+				Detail:    detail,
 				Line:      s.Line,
 				Column:    s.Column,
 				SourceURI: uri,
@@ -2224,11 +2414,16 @@ func collectExportsFromAST(scope *Scope, text string, exports map[string]SymbolI
 				}
 			}
 
+			detail := "variable " + s.Name
+			if !exported {
+				detail = "private " + detail
+			}
+
 			sym := SymbolInfo{
 				Name:      s.Name,
 				Kind:      SymbolVariable,
 				Type:      typ,
-				Detail:    "export variable " + s.Name,
+				Detail:    detail,
 				Line:      s.Line,
 				Column:    s.Column,
 				SourceURI: uri,
@@ -2469,13 +2664,33 @@ func classNameFromConstructorExpr(expr Expr) string {
 }
 
 func tinyFileTextForLSP(path string, uri string) (string, bool) {
+	if strings.Contains(path, "std:") || strings.Contains(uri, "std:") {
+		moduleName := ""
+		if idx := strings.Index(path, "std:"); idx >= 0 {
+			moduleName = path[idx+4:]
+		} else if idx := strings.Index(uri, "std:"); idx >= 0 {
+			moduleName = uri[idx+4:]
+		}
+
+		moduleName = strings.TrimSuffix(moduleName, ".tiny")
+		moduleName = strings.ReplaceAll(moduleName, "/", "")
+		moduleName = strings.ReplaceAll(moduleName, "\\", "")
+		moduleName = strings.TrimSpace(moduleName)
+
+		bytes, err := lspStubs.ReadFile("lsp_stubs/" + moduleName + ".tiny")
+		if err != nil {
+			return "", false
+		}
+		return string(bytes), true
+	}
+
 	if text, ok := lspDocs[uri]; ok {
 		return text, true
 	}
 
 	normalizedPath := filepath.Clean(path)
 	for openURI, text := range lspDocs {
-		if filepath.Clean(uriToPath(openURI)) == normalizedPath {
+		if filepath.Clean(URIToPath(openURI)) == normalizedPath {
 			return text, true
 		}
 	}
@@ -2672,6 +2887,8 @@ func scanExportedEmbeds(scope *Scope, text string, exports map[string]SymbolInfo
 		typ := "string"
 		if kind == "embedbin" {
 			typ = "buffer"
+		} else if kind == "embeddir" {
+			typ = "object"
 		}
 
 		sym := SymbolInfo{
@@ -2705,6 +2922,11 @@ func scanExportedVariables(scope *Scope, text string, exports map[string]SymbolI
 		}
 
 		name := match[1]
+
+		if existing, ok := scope.Resolve(name); ok && (existing.Type == "function" || strings.HasPrefix(existing.Type, "task:")) {
+			continue
+		}
+
 		typeHint := match[2]
 		expr := strings.TrimSpace(match[3])
 
@@ -2888,8 +3110,38 @@ func memberExprAtPosition(text string, pos Position) (string, string, bool) {
 		i--
 	}
 
+	parenDepth := 0
+	bracketDepth := 0
+
 	for i >= 0 {
 		ch := line[i]
+
+		if ch == ')' {
+			parenDepth++
+			i--
+			continue
+		}
+		if ch == '(' {
+			parenDepth--
+			i--
+			continue
+		}
+		if ch == ']' {
+			bracketDepth++
+			i--
+			continue
+		}
+		if ch == '[' {
+			bracketDepth--
+			i--
+			continue
+		}
+
+		if parenDepth > 0 || bracketDepth > 0 {
+			i--
+			continue
+		}
+
 		if isIdentChar(ch) || ch == '.' || ch == '?' {
 			i--
 			continue
@@ -3133,9 +3385,18 @@ func semanticDiagnosticsFromAST(uri string, text string) []map[string]any {
 	root := NewScope(nil)
 
 	for alias, module := range parseStdImports(text) {
+		resolvedPath := "std:" + module
+		exports := loadTinyFileExports(resolvedPath, map[string]bool{})
+
 		root.Define(SymbolInfo{
-			Name: alias, Kind: SymbolStd, Type: "std:" + module,
-			Detail: "std module " + module, Line: 1, Column: 1, SourceURI: uri,
+			Name:      alias,
+			Kind:      SymbolNamespace,
+			Type:      "namespace:" + alias,
+			Detail:    "std module " + module,
+			Line:      1,
+			Column:    1,
+			Members:   exports,
+			SourceURI: pathToFileURI(resolvedPath),
 		})
 	}
 
@@ -3187,7 +3448,7 @@ func (a *astSemanticAnalyzer) addDiagnostic(line int, column int, message string
 
 		if colIndex >= 0 && colIndex+len(name) <= len(lineText) {
 			if lineText[colIndex:colIndex+len(name)] == name {
-				validPosition = true // Position is correct!
+				validPosition = true
 			}
 		}
 	} else if line > 0 && column > 0 && name == "" {
@@ -3212,7 +3473,7 @@ func (a *astSemanticAnalyzer) addDiagnostic(line int, column int, message string
 		lineIndex,
 		colIndex,
 		colIndex+wordLen,
-		2, // Warning severity
+		2,
 		message,
 	))
 }
@@ -3423,10 +3684,6 @@ func (a *astSemanticAnalyzer) predeclareStatements(stmts []Stmt) {
 			}
 
 			if s.Std {
-				a.root.Define(SymbolInfo{
-					Name: alias, Kind: SymbolStd, Type: "std:" + s.Path,
-					Detail: "std module " + s.Path, Line: s.Line, Column: s.Column, SourceURI: a.uri,
-				})
 				break
 			}
 
@@ -3781,7 +4038,7 @@ func (a *astSemanticAnalyzer) typeNameExists(typ string) bool {
 	}
 
 	switch typ {
-	case "string", "number", "bool", "object", "array", "any", "null", "function", "error":
+	case "string", "number", "bool", "object", "array", "any", "null", "function", "error", "buffer":
 		return true
 	}
 
@@ -3853,7 +4110,7 @@ func normalizeLSPType(scope *Scope, typ string) string {
 	}
 
 	switch typ {
-	case "string", "number", "bool", "object", "array", "any", "null", "function", "error":
+	case "string", "number", "bool", "object", "array", "any", "null", "function", "error", "buffer":
 		return typ
 	}
 
@@ -4188,16 +4445,6 @@ func (a *astSemanticAnalyzer) checkKnownMemberArgumentCount(receiverType string,
 		return
 	}
 
-	if strings.HasPrefix(receiverType, "std:") {
-		module := strings.TrimPrefix(receiverType, "std:")
-		if info, ok := GetStdModuleInfo(module); ok {
-			if methodInfo, ok := info.Methods[method]; ok {
-				a.checkArgumentCount(module+"."+method, got, methodInfo.Args, line, column)
-			}
-		}
-		return
-	}
-
 	if strings.HasPrefix(receiverType, "class:") {
 		className := strings.TrimPrefix(receiverType, "class:")
 		if classSym, ok := resolveClassSymbol(a.root, className); ok {
@@ -4375,18 +4622,6 @@ func (a *astSemanticAnalyzer) memberExistsByType(typ string, member string) bool
 		return ok
 	}
 
-	if strings.HasPrefix(typ, "std:") {
-		module := strings.TrimPrefix(typ, "std:")
-
-		info, ok := GetStdModuleInfo(module)
-		if !ok {
-			return false
-		}
-
-		_, ok = info.Methods[member]
-		return ok
-	}
-
 	if sym, ok := resolveClassSymbol(a.root, typ); ok && sym.Kind == SymbolClass {
 		typ = "class:" + typ
 	}
@@ -4482,22 +4717,6 @@ func (a *astSemanticAnalyzer) memberType(typ string, member string) string {
 		return "unknown"
 	}
 
-	if strings.HasPrefix(typ, "std:") {
-		module := strings.TrimPrefix(typ, "std:")
-
-		info, ok := GetStdModuleInfo(module)
-		if !ok {
-			return "unknown"
-		}
-
-		method, ok := info.Methods[member]
-		if !ok {
-			return "unknown"
-		}
-
-		return method.Returns
-	}
-
 	if sym, ok := resolveClassSymbol(a.root, typ); ok && sym.Kind == SymbolClass {
 		typ = "class:" + typ
 	}
@@ -4560,7 +4779,7 @@ func findEnclosingIfBlock(text string, pos Position) (string, bool) {
 	return "", false
 }
 
-var nullCheckRegex = regexp.MustCompile(`if\s+([A-Za-z_][A-Za-z0-9_]*)\s*!=\s*(null)`)
+var nullCheckRegex = regexp.MustCompile(`if\s*\(?\s*([A-Za-z_][A-Za-z0-9_]*)\s*!=\s*(null)\s*\)?`)
 var typeOfRegex = regexp.MustCompile("if\\s+typeof\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*==\\s*[\"'\u0060](string|number|bool|object|array)[\"'\u0060]")
 
 func applyTypeNarrowing(scope *Scope, ifLine string) {
@@ -4738,21 +4957,32 @@ func (a *astSemanticAnalyzer) compareLSPTypes(got string, expected string) bool 
 		return true
 	}
 
+	gotParts := splitUnionType(got)
 	expectedParts := splitUnionType(expected)
-	for _, part := range expectedParts {
-		part = strings.TrimSpace(part)
-		if got == part {
-			return true
-		}
-		if part == "object" && (strings.HasPrefix(got, "class:") || strings.HasPrefix(got, "interface:") || got == "object") {
-			return true
-		}
 
-		if strings.HasPrefix(part, "interface:") && got == "object" {
-			return true
+	for _, g := range gotParts {
+		g = strings.TrimSpace(g)
+		matched := false
+		for _, e := range expectedParts {
+			e = strings.TrimSpace(e)
+			if g == e {
+				matched = true
+				break
+			}
+			if e == "object" && (strings.HasPrefix(g, "class:") || strings.HasPrefix(g, "interface:") || g == "object") {
+				matched = true
+				break
+			}
+			if strings.HasPrefix(e, "interface:") && g == "object" {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 func (a *astSemanticAnalyzer) checkArgumentTypes(name string, args []Expr, params []StdArg, line int, column int) {

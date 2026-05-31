@@ -2,18 +2,8 @@ package vm
 
 import . "language.com/src/tinyerrors"
 
-var stdAppMetadata = StdModuleInfo{
-	Name: "app",
-	Methods: map[string]StdMethodInfo{
-		"new": {
-			Name: "new",
-			Args: []StdArg{
-				{Name: "name", Type: "string", Optional: false},
-			},
-			Returns:     "app",
-			Description: "Creates a new app object.",
-		},
-	},
+func (v *NativeAppValue) TinyTypeName() string {
+	return "app.App"
 }
 
 var stdAppMethods map[string]StdModuleFunc
@@ -22,10 +12,9 @@ func init() {
 	stdAppMethods = map[string]StdModuleFunc{
 		"new": stdAppNew,
 	}
-	registerStdModule(stdAppMetadata)
 }
 
-func (vm *VM) callStdApp(method string, args []Value) {
+func (vm *VM) callStdApp(method string, args []TinyValue) {
 	fn, ok := stdAppMethods[method]
 	if !ok {
 		vm.runtimeError(ErrorName, "unknown app function: %s", method)
@@ -34,7 +23,7 @@ func (vm *VM) callStdApp(method string, args []Value) {
 	fn(vm, args)
 }
 
-func stdAppNew(vm *VM, args []Value) {
+func stdAppNew(vm *VM, args []TinyValue) {
 	expectArgs(vm, "app.new", args, 1)
 
 	name := argString(vm, "app.new", args, 0)

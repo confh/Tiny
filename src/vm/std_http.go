@@ -12,62 +12,12 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
+func (v *NativeServerValue) TinyTypeName() string {
+	return "http.Server"
+}
+
 var stdHttpMetadata = StdModuleInfo{
 	Name: "http",
-	Methods: map[string]StdMethodInfo{
-		"server": {
-			Name: "server",
-			Args: []StdArg{
-				{Name: "port", Type: "int", Optional: false},
-			},
-			Returns:     "server",
-			Description: "Creates a new HTTP server object on the given port.",
-		},
-		"get": {
-			Name: "get",
-			Args: []StdArg{
-				{Name: "url", Type: "string", Optional: false},
-				{Name: "options", Type: "object", Optional: true},
-			},
-			Returns:     "object",
-			Description: "Sends an HTTP GET request to the given URL with optional headers.",
-		},
-		"post": {
-			Name: "post",
-			Args: []StdArg{
-				{Name: "url", Type: "string", Optional: false},
-				{Name: "data", Type: "object", Optional: false},
-				{Name: "extra", Type: "object", Optional: true},
-			},
-			Returns:     "object",
-			Description: "Sends an HTTP POST request to the given URL with a data object and optional headers.",
-		},
-		"json": {
-			Name: "json",
-			Args: []StdArg{
-				{Name: "data", Type: "object", Optional: false},
-			},
-			Returns:     "httpResponse",
-			Description: "Creates a JSON HTTP response value with the given data.",
-		},
-		"text": {
-			Name: "text",
-			Args: []StdArg{
-				{Name: "data", Type: "string", Optional: false},
-			},
-			Returns:     "httpResponse",
-			Description: "Creates a text HTTP response value with the given string.",
-		},
-		"downloadFile": {
-			Name: "downloadFile",
-			Args: []StdArg{
-				{Name: "filePath", Type: "string", Optional: false},
-				{Name: "url", Type: "string", Optional: false},
-			},
-			Returns:     "bool",
-			Description: "Downloads a file from the given URL and saves it to the specified file path. Returns true on success, throws error on failure.",
-		},
-	},
 }
 
 var stdHttpMethods map[string]StdModuleFunc
@@ -84,7 +34,7 @@ func init() {
 	registerStdModule(stdHttpMetadata)
 }
 
-func (vm *VM) callStdHttp(method string, args []Value) {
+func (vm *VM) callStdHttp(method string, args []TinyValue) {
 	fn, ok := stdHttpMethods[method]
 	if !ok {
 		vm.runtimeError(ErrorName, "unknown http function: %s", method)
@@ -93,19 +43,19 @@ func (vm *VM) callStdHttp(method string, args []Value) {
 	fn(vm, args)
 }
 
-func stdHttpServer(vm *VM, args []Value) {
+func stdHttpServer(vm *VM, args []TinyValue) {
 	expectArgs(vm, "http.server", args, 1)
 
 	port := asInt(args[0])
 	server := &NativeServerValue{
 		Port:       port,
-		GetRoutes:  map[string]Value{},
-		PostRoutes: map[string]Value{},
+		GetRoutes:  map[string]TinyValue{},
+		PostRoutes: map[string]TinyValue{},
 	}
 	vm.push(NewNative(server))
 }
 
-func stdHttpGet(vm *VM, args []Value) {
+func stdHttpGet(vm *VM, args []TinyValue) {
 	expectArgsRange(vm, "http.get", args, 1, 2)
 
 	url := argString(vm, "http.get", args, 0)
@@ -168,7 +118,7 @@ func stdHttpGet(vm *VM, args []Value) {
 	vm.push(NewNative(result))
 }
 
-func stdHttpPost(vm *VM, args []Value) {
+func stdHttpPost(vm *VM, args []TinyValue) {
 	expectArgsRange(vm, "http.post", args, 2, 3)
 
 	url := argString(vm, "http.post", args, 0)
@@ -252,7 +202,7 @@ func stdHttpPost(vm *VM, args []Value) {
 	vm.push(NewNative(result))
 }
 
-func stdHttpJsonResponse(vm *VM, args []Value) {
+func stdHttpJsonResponse(vm *VM, args []TinyValue) {
 	expectArgs(vm, "http.json", args, 1)
 
 	jsonValue := argObject(vm, "http.json", args, 0)
@@ -263,7 +213,7 @@ func stdHttpJsonResponse(vm *VM, args []Value) {
 	}))
 }
 
-func stdHttpTextResponse(vm *VM, args []Value) {
+func stdHttpTextResponse(vm *VM, args []TinyValue) {
 	expectArgs(vm, "http.text", args, 1)
 
 	strValue := argString(vm, "http.text", args, 0)
@@ -274,7 +224,7 @@ func stdHttpTextResponse(vm *VM, args []Value) {
 	}))
 }
 
-func stdHttpDownloadFile(vm *VM, args []Value) {
+func stdHttpDownloadFile(vm *VM, args []TinyValue) {
 	expectArgs(vm, "http.downloadFile", args, 2)
 
 	path := argString(vm, "http.downloadFile", args, 0)

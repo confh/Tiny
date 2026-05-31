@@ -19,7 +19,7 @@ func init() {
 	}
 }
 
-func (vm *VM) callTcpConnMethod(tcp *NativeTcpConnectionValue, method string, args []Value) {
+func (vm *VM) callTcpConnMethod(tcp *NativeTcpConnectionValue, method string, args []TinyValue) {
 	fn, ok := tcpConnMethods[method]
 	if !ok {
 		vm.runtimeError(ErrorName, "unknown tcpConnection method: %s", method)
@@ -28,7 +28,7 @@ func (vm *VM) callTcpConnMethod(tcp *NativeTcpConnectionValue, method string, ar
 	fn(vm, tcp, args)
 }
 
-func tcpConnReadLine(vm *VM, tcp *NativeTcpConnectionValue, args []Value) {
+func tcpConnReadLine(vm *VM, tcp *NativeTcpConnectionValue, args []TinyValue) {
 	dontExpectArgs(vm, "tcp.readLine", args)
 
 	var reader *bufio.Reader
@@ -61,7 +61,7 @@ func tcpConnReadLine(vm *VM, tcp *NativeTcpConnectionValue, args []Value) {
 	vm.push(NewNative(line))
 }
 
-func tcpConnRead(vm *VM, tcp *NativeTcpConnectionValue, args []Value) {
+func tcpConnRead(vm *VM, tcp *NativeTcpConnectionValue, args []TinyValue) {
 	expectArgs(vm, "tcp.read", args, 1)
 
 	size := argInt(vm, "tcp.read", args, 0)
@@ -81,13 +81,13 @@ func tcpConnRead(vm *VM, tcp *NativeTcpConnectionValue, args []Value) {
 	vm.push(NewNative(string(buf)))
 }
 
-func tcpConnAddress(vm *VM, tcp *NativeTcpConnectionValue, args []Value) {
+func tcpConnAddress(vm *VM, tcp *NativeTcpConnectionValue, args []TinyValue) {
 	dontExpectArgs(vm, "tcp.write", args)
 
 	vm.push(NewNative(tcp.Connection.RemoteAddr().String()))
 }
 
-func tcpConnWrite(vm *VM, tcp *NativeTcpConnectionValue, args []Value) {
+func tcpConnWrite(vm *VM, tcp *NativeTcpConnectionValue, args []TinyValue) {
 	expectArgs(vm, "tcp.write", args, 1)
 
 	switch v := args[0].Value.(type) {
@@ -104,7 +104,7 @@ func tcpConnWrite(vm *VM, tcp *NativeTcpConnectionValue, args []Value) {
 	vm.push(NewNull())
 }
 
-func tcpConnClose(vm *VM, tcp *NativeTcpConnectionValue, args []Value) {
+func tcpConnClose(vm *VM, tcp *NativeTcpConnectionValue, args []TinyValue) {
 	dontExpectArgs(vm, "tcp.close", args)
 
 	tcp.Connection.Close()

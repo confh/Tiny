@@ -49,17 +49,17 @@ var bufferMethods map[string]NativeModuleFunc[*BufferValue]
 
 func init() {
 	bufferMethods = map[string]NativeModuleFunc[*BufferValue]{
-		"toHex":  bufferToHex,
-		"length": bufferLength,
-		"getU8":  bufferGetU8,
-		"setU8":  bufferSetU8,
-		"string": bufferString,
+		"toHex":     bufferToHex,
+		"length":    bufferLength,
+		"getU8":     bufferGetU8,
+		"setU8":     bufferSetU8,
+		"stringify": bufferString,
 	}
 
 	registerNativeType(bufferNativeMetadata)
 }
 
-func (vm *VM) callBufferMethod(buffer *BufferValue, method string, args []Value) {
+func (vm *VM) callBufferMethod(buffer *BufferValue, method string, args []TinyValue) {
 	fn, ok := bufferMethods[method]
 	if !ok {
 		vm.runtimeError(ErrorName, "unknown buffer method: %s", method)
@@ -69,19 +69,19 @@ func (vm *VM) callBufferMethod(buffer *BufferValue, method string, args []Value)
 	fn(vm, buffer, args)
 }
 
-func bufferToHex(vm *VM, buffer *BufferValue, args []Value) {
+func bufferToHex(vm *VM, buffer *BufferValue, args []TinyValue) {
 	expectArgs(vm, "buffer.toHex", args, 0)
 
 	vm.push(NewNative(hex.EncodeToString(buffer.Bytes)))
 }
 
-func bufferLength(vm *VM, buffer *BufferValue, args []Value) {
+func bufferLength(vm *VM, buffer *BufferValue, args []TinyValue) {
 	expectArgs(vm, "buffer.length", args, 0)
 
 	vm.push(NewInt(len(buffer.Bytes)))
 }
 
-func bufferGetU8(vm *VM, buffer *BufferValue, args []Value) {
+func bufferGetU8(vm *VM, buffer *BufferValue, args []TinyValue) {
 	expectArgs(vm, "buffer.getU8", args, 1)
 
 	offset := argInt(vm, "buffer.getU8", args, 0)
@@ -99,7 +99,7 @@ func bufferGetU8(vm *VM, buffer *BufferValue, args []Value) {
 	vm.push(NewInt(int(buffer.Bytes[offset])))
 }
 
-func bufferSetU8(vm *VM, buffer *BufferValue, args []Value) {
+func bufferSetU8(vm *VM, buffer *BufferValue, args []TinyValue) {
 	expectArgs(vm, "buffer.setU8", args, 2)
 
 	offset := argInt(vm, "buffer.setU8", args, 0)
@@ -129,8 +129,8 @@ func bufferSetU8(vm *VM, buffer *BufferValue, args []Value) {
 	vm.push(NewNative(true))
 }
 
-func bufferString(vm *VM, buffer *BufferValue, args []Value) {
-	dontExpectArgs(vm, "buffer.string", args)
+func bufferString(vm *VM, buffer *BufferValue, args []TinyValue) {
+	dontExpectArgs(vm, "buffer.stringify", args)
 
 	vm.push(NewNative(string(buffer.Bytes)))
 }

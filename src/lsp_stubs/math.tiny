@@ -1,0 +1,19 @@
+export fn toFloat(value: any): number {}
+export fn toInt(value: any): number {}
+export fn abs(value: number): number {}
+export fn pow(base: number, exponent: number): number {}
+export fn sqrt(value: number): number {}
+export fn ceil(value: number): number {}
+export fn floor(value: number): number {}
+export fn round(value: number): number {}
+export fn clamp(value: number, min: number, max: number): number {}
+export fn sin(value: number): number {}
+export fn cos(value: number): number {}
+export fn tan(value: number): number {}
+export fn radToDeg(radians: number): number {}
+export fn degToRad(degrees: number): number {}
+export fn atan2(y: number, x: number): number {}
+export fn sum(values: array): number {}
+export fn matMul(a: object, b: object): object {}
+export fn matTranspose(matrix: object): object {}
+export fn matScale(matrix: object, scalar: number): object {}

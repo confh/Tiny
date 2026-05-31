@@ -3,7 +3,7 @@ package vm
 var AvailablePlugins = []string{
 	"array",
 	"math",
-	"string",
+	"strings",
 	"json",
 	"fs",
 	"app",
@@ -21,5 +21,6 @@ var AvailablePlugins = []string{
 	"object",
 	"desktop",
 	"sync",
-	"test",
+	"tests",
+	"ui",
 }

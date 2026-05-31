@@ -5,6 +5,7 @@ release.md
 release notes
 !new_std_module.tiny
 !src/testdata/tiny/*.tiny
+!src/lsp_stubs/*.tiny
 !src/testdata/tiny/errors/*.tiny
 !src/testdata/tiny/imports/*.tiny
 *.exe

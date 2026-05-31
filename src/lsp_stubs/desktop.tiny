@@ -1,0 +1,15 @@
+export fn moveMouse(x: number, y: number): null {}
+export fn moveMouseSmooth(x: number, y: number): null {}
+export fn click(): null {}
+export fn rightClick(): null {}
+export fn doubleClick(): null {}
+export fn mouseDown(button: string): null {}
+export fn mouseUp(button: string): null {}
+export fn press(key: string): null {}
+export fn hotKey(key1: string, key2: string): null {}
+export fn type(text: string): null {}
+export fn mousePosition(): object {}
+export fn screenSize(): object {}
+export fn screenshot(filename: string): null {}
+export fn getClipboard(): string {}
+export fn setClipboard(text: string): null {}

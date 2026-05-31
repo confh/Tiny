@@ -4,25 +4,16 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
+func (v *NativeTcpConnectionValue) TinyTypeName() string {
+	return "net.TcpConnection"
+}
+
+func (v *NativeTcpServerValue) TinyTypeName() string {
+	return "net.TcpServer"
+}
+
 var stdNetMetadata = StdModuleInfo{
 	Name: "net",
-	Methods: map[string]StdMethodInfo{
-		"tcpServer": {
-			Name: "tcpServer",
-			Args: []StdArg{
-				{
-					Name: "host",
-					Type: "string",
-				},
-				{
-					Name: "port",
-					Type: "number",
-				},
-			},
-			Returns:     "tcpServerObject",
-			Description: "Creates and returns a tcpServerObject.",
-		},
-	},
 }
 
 var stdNetMethods map[string]StdModuleFunc
@@ -35,7 +26,7 @@ func init() {
 	registerStdModule(stdNetMetadata)
 }
 
-func (vm *VM) callStdNet(method string, args []Value) {
+func (vm *VM) callStdNet(method string, args []TinyValue) {
 	fn, ok := stdNetMethods[method]
 	if !ok {
 		vm.runtimeError(ErrorName, "unknown net function: %s", method)
@@ -45,7 +36,7 @@ func (vm *VM) callStdNet(method string, args []Value) {
 	fn(vm, args)
 }
 
-func netTcpServer(vm *VM, args []Value) {
+func netTcpServer(vm *VM, args []TinyValue) {
 	expectArgs(vm, "net.tcpServer", args, 2)
 
 	host := argString(vm, "net.tcpServer", args, 0)

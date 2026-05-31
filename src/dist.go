@@ -20,6 +20,7 @@ func DistCommand(args []string) {
 	target := normalizeTarget("")
 	outFile := defaultDistOutputName(entryFile, target)
 	extraPlugins := []string{}
+	windowed := false
 
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
@@ -46,6 +47,9 @@ func DistCommand(args []string) {
 
 			extraPlugins = append(extraPlugins, args[i+1])
 			i++
+
+		case "--windowed":
+			windowed = true
 
 		default:
 			LangError(ErrorRuntime, "unknown dist argument: %s", args[i])
@@ -74,7 +78,7 @@ func DistCommand(args []string) {
 
 	program = rewritePluginPathsForDist(program, target)
 
-	packProgramToOutput(program, outFile, target)
+	packProgramToOutput(program, outFile, target, windowed)
 
 	for _, pluginPath := range pluginPaths {
 		err := copyPluginToDist(pluginPath, distDir)
@@ -110,14 +114,14 @@ func defaultDistOutputName(entryFile string, target string) string {
 	return filepath.Join("dist", name)
 }
 
-func packToOutput(entryFile string, outFile string, target string) {
+func packToOutput(entryFile string, outFile string, target string, windowed bool) {
 	target = normalizeTarget(target)
 
 	program := LoadProgram(entryFile)
-	packProgramToOutput(program, outFile, target)
+	packProgramToOutput(program, outFile, target, windowed)
 }
 
-func packProgramToOutput(program Program, outFile string, target string) {
+func packProgramToOutput(program Program, outFile string, target string, windowed bool) {
 	target = normalizeTarget(target)
 
 	compiler := NewCompiler()
@@ -132,6 +136,14 @@ func packProgramToOutput(program Program, outFile string, target string) {
 	bytecodeBytes := SaveBytecodeToBytes(mainInstructions, functions, classes, interfaces, globalIndex, false)
 
 	runtimeBytes := getEmbeddedRuntimeForTarget(target)
+
+	if windowed && target == "windows-amd64" {
+		mutableRuntime := make([]byte, len(runtimeBytes))
+		copy(mutableRuntime, runtimeBytes)
+
+		PatchPESubsystemToGUI(mutableRuntime)
+		runtimeBytes = mutableRuntime
+	}
 
 	err := writePackedExecutable(outFile, runtimeBytes, bytecodeBytes)
 	if err != nil {

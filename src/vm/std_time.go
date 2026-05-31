@@ -8,38 +8,6 @@ import (
 
 var stdTimeMetadata = StdModuleInfo{
 	Name: "time",
-	Methods: map[string]StdMethodInfo{
-		"sleep": {
-			Name:        "sleep",
-			Args:        []StdArg{{Name: "ms", Type: "number", Optional: false}},
-			Returns:     "null",
-			Description: "Sleeps for the given number of milliseconds.",
-		},
-		"nowNs": {
-			Name:        "nowNs",
-			Args:        []StdArg{},
-			Returns:     "number",
-			Description: "Returns the current Unix epoch time in nanoseconds.",
-		},
-		"nowMs": {
-			Name:        "nowMs",
-			Args:        []StdArg{},
-			Returns:     "number",
-			Description: "Returns the current Unix epoch time in milliseconds.",
-		},
-		"nowSec": {
-			Name:        "nowSec",
-			Args:        []StdArg{},
-			Returns:     "number",
-			Description: "Returns the current Unix epoch time in seconds.",
-		},
-		"clock": {
-			Name:        "clock",
-			Args:        []StdArg{},
-			Returns:     "number",
-			Description: "Returns the milliseconds elapsed since VM start.",
-		},
-	},
 }
 
 var stdTimeMethods map[string]StdModuleFunc
@@ -55,7 +23,7 @@ func init() {
 	registerStdModule(stdTimeMetadata)
 }
 
-func (vm *VM) callStdTime(method string, args []Value) {
+func (vm *VM) callStdTime(method string, args []TinyValue) {
 	fn, ok := stdTimeMethods[method]
 	if !ok {
 		vm.runtimeError(ErrorName, "unknown time function: %s", method)
@@ -64,29 +32,29 @@ func (vm *VM) callStdTime(method string, args []Value) {
 	fn(vm, args)
 }
 
-func stdTimeSleep(vm *VM, args []Value) {
+func stdTimeSleep(vm *VM, args []TinyValue) {
 	expectArgs(vm, "time.sleep", args, 1)
 	ms := argInt(vm, "time.sleep", args, 0)
 	time.Sleep(time.Duration(ms) * time.Millisecond)
 	vm.push(NewNull())
 }
 
-func stdTimeNowNs(vm *VM, args []Value) {
+func stdTimeNowNs(vm *VM, args []TinyValue) {
 	dontExpectArgs(vm, "time.nowNs", args)
 	vm.push(NewInt(int(time.Now().UnixNano())))
 }
 
-func stdTimeNowMs(vm *VM, args []Value) {
+func stdTimeNowMs(vm *VM, args []TinyValue) {
 	dontExpectArgs(vm, "time.nowMs", args)
 	vm.push(NewInt(int(time.Now().UnixMilli())))
 }
 
-func stdTimeNowSec(vm *VM, args []Value) {
+func stdTimeNowSec(vm *VM, args []TinyValue) {
 	dontExpectArgs(vm, "time.nowSec", args)
 	vm.push(NewInt(int(time.Now().Unix())))
 }
 
-func stdTimeClock(vm *VM, args []Value) {
+func stdTimeClock(vm *VM, args []TinyValue) {
 	dontExpectArgs(vm, "time.clock", args)
 	vm.push(NewNative(int(time.Now().UnixMilli() - vm.start)))
 }

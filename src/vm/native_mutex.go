@@ -4,20 +4,6 @@ import . "language.com/src/tinyerrors"
 
 var mutexNativeData = NativeTypeInfo{
 	Name: "mutex",
-	Methods: map[string]StdMethodInfo{
-		"lock": {
-			Name:        "lock",
-			Args:        []StdArg{},
-			Returns:     "void",
-			Description: "Acquires the mutex lock. Blocks other tasks until the lock is released.",
-		},
-		"unlock": {
-			Name:        "unlock",
-			Args:        []StdArg{},
-			Returns:     "void",
-			Description: "Releases the mutex lock.",
-		},
-	},
 }
 
 var mutexMethods map[string]NativeModuleFunc[*NativeMutexValue]
@@ -30,7 +16,7 @@ func init() {
 	registerNativeType(mutexNativeData)
 }
 
-func (vm *VM) callNativeMutexMethod(mutex *NativeMutexValue, method string, args []Value) {
+func (vm *VM) callNativeMutexMethod(mutex *NativeMutexValue, method string, args []TinyValue) {
 	fn, ok := mutexMethods[method]
 	if !ok {
 		vm.runtimeError(ErrorName, "unknown mutex method: %s", method)
@@ -39,7 +25,7 @@ func (vm *VM) callNativeMutexMethod(mutex *NativeMutexValue, method string, args
 	fn(vm, mutex, args)
 }
 
-func mutexLock(vm *VM, mutex *NativeMutexValue, args []Value) {
+func mutexLock(vm *VM, mutex *NativeMutexValue, args []TinyValue) {
 	dontExpectArgs(vm, "mutex.lock", args)
 
 	mutex.Lock()
@@ -47,7 +33,7 @@ func mutexLock(vm *VM, mutex *NativeMutexValue, args []Value) {
 	vm.push(NewNull())
 }
 
-func mutexUnlock(vm *VM, mutex *NativeMutexValue, args []Value) {
+func mutexUnlock(vm *VM, mutex *NativeMutexValue, args []TinyValue) {
 	dontExpectArgs(vm, "mutex.unlock", args)
 
 	mutex.Unlock()

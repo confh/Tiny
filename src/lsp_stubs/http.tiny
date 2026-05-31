@@ -1,0 +1,26 @@
+export interface RequestObject {
+    path: string,
+    method: string,
+    body: string,
+    params: object
+}
+
+export interface HttpResponse {
+    status: number;
+    body: string;
+    headers: object;
+}
+
+class Server {
+    fn get(path: string, handler: string | function) {}
+    fn post(path: string, handler: string | function) {}
+    fn stop() {}
+    fn start(isAsync?: bool) {}
+}
+
+export fn get(url: string, options: object): HttpResponse {}
+export fn post(url: string, body: object, options: object): HttpResponse {}
+export fn downloadFile(filePath: string, url: string): any {}
+export fn server(port: number): Server {}
+export fn json(data: object): any {}
+export fn text(data: string): any {}

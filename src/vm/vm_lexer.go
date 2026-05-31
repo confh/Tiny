@@ -193,6 +193,8 @@ func (l *Lexer) scanToken() Token {
 			tok.Type = TOKEN_EMBED_STR
 		case "embedbin":
 			tok.Type = TOKEN_EMBED_BIN
+		case "embeddir":
+			tok.Type = TOKEN_EMBED_DIR
 		case "native":
 			tok.Type = TOKEN_NATIVE
 		default:

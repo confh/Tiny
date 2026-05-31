@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 
+	webview "github.com/jchv/go-webview2"
+
 	. "language.com/src/tinyerrors"
 )
 
@@ -25,10 +27,10 @@ const (
 type NullValue struct{}
 
 type ArrayValue struct {
-	Elements []Value
+	Elements []TinyValue
 }
 
-type ObjectValue map[any]Value
+type ObjectValue map[any]TinyValue
 
 type NativeTaskValue struct {
 	Done chan TaskResult
@@ -47,7 +49,7 @@ func (this *NativeMutexValue) Unlock() {
 }
 
 type TaskResult struct {
-	Value Value
+	Value TinyValue
 	Error any
 }
 
@@ -56,7 +58,7 @@ type BufferValue struct {
 }
 
 type Cell struct {
-	Value Value
+	Value TinyValue
 	Int   int
 	IsInt bool
 }
@@ -75,10 +77,14 @@ type FunctionValue struct {
 
 type NativeServerValue struct {
 	Port       int
-	GetRoutes  map[string]Value
-	PostRoutes map[string]Value
+	GetRoutes  map[string]TinyValue
+	PostRoutes map[string]TinyValue
 	mux        *http.ServeMux
 	closed     bool
+}
+
+type NativeWebViewValue struct {
+	w webview.WebView
 }
 
 type NativeTcpServerValue struct {
@@ -95,7 +101,7 @@ type NativeTcpConnectionValue struct {
 
 type NativeHttpResponseValue struct {
 	Type  HttpResponseType
-	Value Value
+	Value TinyValue
 }
 
 type NativeAppValue struct {
@@ -124,20 +130,24 @@ type NativeProcessValue struct {
 
 type NamespaceValue struct {
 	Name    string
-	Members map[string]Value
+	Members map[string]TinyValue
 }
 
 type NamespaceMemberRef struct {
 	GlobalName string
 }
 
-type Value struct {
+type TinyTyped interface {
+	TinyTypeName() string
+}
+
+type TinyValue struct {
 	Value any
 	IsInt bool
 	AsInt int
 }
 
-func asInt64(value Value) int64 {
+func asInt64(value TinyValue) int64 {
 	if value.IsInt {
 		return int64(value.AsInt)
 	}
@@ -153,7 +163,7 @@ func asInt64(value Value) int64 {
 	}
 }
 
-func asInt(value Value) int {
+func asInt(value TinyValue) int {
 	if value.IsInt {
 		return value.AsInt
 	}
@@ -187,7 +197,7 @@ func asInt(value Value) int {
 	}
 }
 
-func asFloat32(value Value) float32 {
+func asFloat32(value TinyValue) float32 {
 	if value.IsInt {
 		return float32(value.AsInt)
 	}
@@ -203,7 +213,7 @@ func asFloat32(value Value) float32 {
 	}
 }
 
-func asFloat64(value Value) float64 {
+func asFloat64(value TinyValue) float64 {
 	if value.IsInt {
 		return float64(value.AsInt)
 	}
@@ -232,7 +242,7 @@ func asFloat64(value Value) float64 {
 	}
 }
 
-func isNumber(value Value) bool {
+func isNumber(value TinyValue) bool {
 	if value.IsInt {
 		return true
 	}
@@ -245,7 +255,7 @@ func isNumber(value Value) bool {
 	}
 }
 
-func isString(value Value) bool {
+func isString(value TinyValue) bool {
 	if value.IsInt {
 		return false
 	}
@@ -258,7 +268,7 @@ func isString(value Value) bool {
 	}
 }
 
-func asFloat(value Value, vm *VM) float64 {
+func asFloat(value TinyValue, vm *VM) float64 {
 	if value.IsInt {
 		return float64(value.AsInt)
 	}
@@ -301,7 +311,7 @@ func asFloat(value Value, vm *VM) float64 {
 	}
 }
 
-func asUint(value Value) uint64 {
+func asUint(value TinyValue) uint64 {
 	if value.IsInt {
 		return uint64(value.AsInt)
 	}
@@ -328,7 +338,22 @@ func asUint(value Value) uint64 {
 	}
 }
 
-func TypeName(value Value) string {
+func TypeName(value TinyValue) string {
+	if value.Value == nil {
+		if value.IsInt {
+			return "number"
+		}
+		return "null"
+	}
+
+	if typed, ok := value.Value.(TinyTyped); ok {
+		return typed.TinyTypeName()
+	}
+
+	return TypeNameStandard(value)
+}
+
+func TypeNameStandard(value TinyValue) string {
 	if value.IsInt {
 		return "number"
 	}
@@ -404,7 +429,7 @@ func TypeName(value Value) string {
 	}
 }
 
-func valueToJSONCompatible(value Value) any {
+func valueToJSONCompatible(value TinyValue) any {
 	if value.IsInt {
 		return value.AsInt
 	}
@@ -468,27 +493,27 @@ func valueToJSONCompatible(value Value) any {
 	}
 }
 
-func ToValue(value any) Value {
+func ToValue(value any) TinyValue {
 	switch v := value.(type) {
 	case nil:
-		return Value{
+		return TinyValue{
 			Value: NullValue{},
 			IsInt: false,
 			AsInt: 0,
 		}
 
-	case Value:
+	case TinyValue:
 		return v
 
 	case string:
-		return Value{
+		return TinyValue{
 			Value: v,
 			IsInt: false,
 			AsInt: 0,
 		}
 
 	case bool:
-		return Value{
+		return TinyValue{
 			Value: v,
 			IsInt: false,
 			AsInt: 0,
@@ -507,13 +532,13 @@ func ToValue(value any) Value {
 		return NewNative(v)
 
 	case []any:
-		elements := make([]Value, len(v))
+		elements := make([]TinyValue, len(v))
 
 		for i, item := range v {
 			elements[i] = jsonToTinyValue(item)
 		}
 
-		return Value{
+		return TinyValue{
 			Value: &ArrayValue{
 				Elements: elements,
 			},
@@ -528,7 +553,7 @@ func ToValue(value any) Value {
 			object[key] = jsonToTinyValue(item)
 		}
 
-		return Value{
+		return TinyValue{
 			Value: object,
 			IsInt: false,
 			AsInt: 0,
@@ -539,11 +564,11 @@ func ToValue(value any) Value {
 	}
 }
 
-func jsonToTinyValue(value any) Value {
+func jsonToTinyValue(value any) TinyValue {
 	return ToValue(value)
 }
 
-func valueToString(value Value) string {
+func valueToString(value TinyValue) string {
 	if value.IsInt {
 		return strconv.Itoa(value.AsInt)
 	}
@@ -585,7 +610,7 @@ func valueToString(value Value) string {
 	case ObjectValue:
 		type objectEntry struct {
 			keyText string
-			value   Value
+			value   TinyValue
 		}
 
 		entries := make([]objectEntry, 0, len(v))
@@ -652,7 +677,7 @@ func valueToString(value Value) string {
 	}
 }
 
-func asString(value Value, vm *VM) string {
+func asString(value TinyValue, vm *VM) string {
 	stringValue, ok := value.Value.(string)
 	if !ok {
 		vm.runtimeError(ErrorSyntax, "expected string, got %s", TypeName(value))
@@ -661,7 +686,7 @@ func asString(value Value, vm *VM) string {
 	return stringValue
 }
 
-func asObject(value Value, vm *VM) ObjectValue {
+func asObject(value TinyValue, vm *VM) ObjectValue {
 	objectValue, ok := value.Value.(ObjectValue)
 	if !ok {
 		vm.runtimeError(ErrorSyntax, "expected object, got %s", TypeName(value))
@@ -670,7 +695,7 @@ func asObject(value Value, vm *VM) ObjectValue {
 	return objectValue
 }
 
-func asBuffer(value Value, vm *VM) *BufferValue {
+func asBuffer(value TinyValue, vm *VM) *BufferValue {
 	bufferValue, ok := value.Value.(*BufferValue)
 	if !ok {
 		vm.runtimeError(ErrorSyntax, "expected buffer, got %s", TypeName(value))
@@ -679,7 +704,7 @@ func asBuffer(value Value, vm *VM) *BufferValue {
 	return bufferValue
 }
 
-func asArray(value Value, vm *VM) *ArrayValue {
+func asArray(value TinyValue, vm *VM) *ArrayValue {
 	arrayValue, ok := value.Value.(*ArrayValue)
 	if !ok {
 		vm.runtimeError(ErrorSyntax, "expected array, got %s", TypeName(value))
@@ -688,7 +713,7 @@ func asArray(value Value, vm *VM) *ArrayValue {
 	return arrayValue
 }
 
-func asBool(value Value, vm *VM) bool {
+func asBool(value TinyValue, vm *VM) bool {
 	boolean, ok := value.Value.(bool)
 	if !ok {
 		vm.runtimeError(ErrorSyntax, "expected bool, got %s", TypeName(value))
@@ -697,7 +722,7 @@ func asBool(value Value, vm *VM) bool {
 	return boolean
 }
 
-func isTruthy(value Value) bool {
+func isTruthy(value TinyValue) bool {
 	if value.IsInt {
 		return value.AsInt != 0
 	}
@@ -714,7 +739,7 @@ func isTruthy(value Value) bool {
 	}
 }
 
-func valuesEqual(a Value, b Value) bool {
+func valuesEqual(a TinyValue, b TinyValue) bool {
 	if a.IsInt {
 		if b.IsInt {
 			return a.AsInt == b.AsInt
@@ -756,24 +781,24 @@ func valuesEqual(a Value, b Value) bool {
 	}
 }
 
-func NewInt(val int) Value {
-	return Value{
+func NewInt(val int) TinyValue {
+	return TinyValue{
 		Value: nil,
 		IsInt: true,
 		AsInt: val,
 	}
 }
 
-func NewNull() Value {
-	return Value{
+func NewNull() TinyValue {
+	return TinyValue{
 		Value: NullValue{},
 		IsInt: false,
 		AsInt: 0,
 	}
 }
 
-func NewNative(variable any) Value {
-	return Value{
+func NewNative(variable any) TinyValue {
+	return TinyValue{
 		Value: variable,
 		IsInt: false,
 		AsInt: 0,

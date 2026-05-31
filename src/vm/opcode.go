@@ -334,7 +334,7 @@ type Interface struct {
 type ClassField struct {
 	Constant bool
 	Name     string
-	Value    Value
+	Value    TinyValue
 	TypeHint TypeHint
 	Private  bool
 }
@@ -345,7 +345,7 @@ type EnumField struct {
 }
 
 type NativeCallInfo struct {
-	Name          string
-	ArgCount      int
-	ReturnsString bool
+	Name       string
+	ArgCount   int
+	ReturnType string
 }

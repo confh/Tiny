@@ -9,46 +9,6 @@ import (
 
 var stdPathMetadata = StdModuleInfo{
 	Name: "path",
-	Methods: map[string]StdMethodInfo{
-		"join": {
-			Name: "join",
-			Args: []StdArg{
-				{Name: "paths", Type: "string", Optional: false},
-			},
-			Returns:     "string",
-			Description: "Joins one or more path segments into a single path.",
-		},
-		"baseName": {
-			Name: "baseName",
-			Args: []StdArg{
-				{Name: "path", Type: "string", Optional: false},
-			},
-			Returns:     "string",
-			Description: "Returns the last element of the path. Trailing slashes are removed before extracting the last element.",
-		},
-		"dirName": {
-			Name: "dirName",
-			Args: []StdArg{
-				{Name: "path", Type: "string", Optional: false},
-			},
-			Returns:     "string",
-			Description: "Returns all but the last element of the path, usually the directory.",
-		},
-		"extName": {
-			Name: "extName",
-			Args: []StdArg{
-				{Name: "path", Type: "string", Optional: false},
-			},
-			Returns:     "string",
-			Description: "Returns the file name extension used by path.",
-		},
-		"cwd": {
-			Name:        "cwd",
-			Args:        []StdArg{},
-			Returns:     "string",
-			Description: "Returns the current working directory.",
-		},
-	},
 }
 
 var stdPathMethods map[string]StdModuleFunc
@@ -64,7 +24,7 @@ func init() {
 	registerStdModule(stdPathMetadata)
 }
 
-func (vm *VM) callStdPath(method string, args []Value) {
+func (vm *VM) callStdPath(method string, args []TinyValue) {
 	fn, ok := stdPathMethods[method]
 	if !ok {
 		vm.runtimeError(ErrorName, "unknown path function: %s", method)
@@ -74,7 +34,7 @@ func (vm *VM) callStdPath(method string, args []Value) {
 	fn(vm, args)
 }
 
-func pathJoin(vm *VM, args []Value) {
+func pathJoin(vm *VM, args []TinyValue) {
 	expectArgsMin(vm, "path.join", args, 1)
 
 	parts := make([]string, len(args))
@@ -86,7 +46,7 @@ func pathJoin(vm *VM, args []Value) {
 	vm.push(NewNative(joined))
 }
 
-func pathBaseName(vm *VM, args []Value) {
+func pathBaseName(vm *VM, args []TinyValue) {
 	expectArgs(vm, "path.baseName", args, 1)
 
 	path := argString(vm, "path.baseName", args, 0)
@@ -94,7 +54,7 @@ func pathBaseName(vm *VM, args []Value) {
 	vm.push(NewNative(filepath.Base(path)))
 }
 
-func pathDirName(vm *VM, args []Value) {
+func pathDirName(vm *VM, args []TinyValue) {
 	expectArgs(vm, "path.dirName", args, 1)
 
 	directoryPath := argString(vm, "path.dirName", args, 0)
@@ -102,7 +62,7 @@ func pathDirName(vm *VM, args []Value) {
 	vm.push(NewNative(filepath.Dir(directoryPath)))
 }
 
-func pathExtName(vm *VM, args []Value) {
+func pathExtName(vm *VM, args []TinyValue) {
 	expectArgs(vm, "path.extName", args, 1)
 
 	path := argString(vm, "path.extName", args, 0)
@@ -110,7 +70,7 @@ func pathExtName(vm *VM, args []Value) {
 	vm.push(NewNative(filepath.Ext(path)))
 }
 
-func pathCwd(vm *VM, args []Value) {
+func pathCwd(vm *VM, args []TinyValue) {
 	dontExpectArgs(vm, "path.cwd", args)
 
 	dir, err := os.Getwd()

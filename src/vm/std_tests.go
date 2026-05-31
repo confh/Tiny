@@ -2,53 +2,29 @@ package vm
 
 import (
 	"fmt"
+	"time"
 
 	. "language.com/src/tinyerrors"
 )
 
 var stdTestMetadata = StdModuleInfo{
-	Name: "test",
-	Methods: map[string]StdMethodInfo{
-		"assert": {
-			Name:        "assert",
-			Args:        []StdArg{{Name: "condition", Type: "bool"}, {Name: "message", Type: "string"}},
-			Returns:     "null",
-			Description: "Asserts that a condition is true; throws with the given message if not.",
-		},
-		"equal": {
-			Name:        "equal",
-			Args:        []StdArg{{Name: "actual", Type: "any"}, {Name: "expected", Type: "any"}, {Name: "message", Type: "string"}},
-			Returns:     "null",
-			Description: "Asserts that two values are equal (including int equality); throws with the given message if not.",
-		},
-		"notEqual": {
-			Name:        "notEqual",
-			Args:        []StdArg{{Name: "actual", Type: "any"}, {Name: "expected", Type: "any"}, {Name: "message", Type: "string"}},
-			Returns:     "null",
-			Description: "Asserts that two values are not equal; throws with the given message if they are equal.",
-		},
-		"run": {
-			Name:        "run",
-			Args:        []StdArg{{Name: "name", Type: "string"}, {Name: "fn", Type: "function"}},
-			Returns:     "null",
-			Description: "Runs a test function and prints PASS/FAIL messages. Catches assertion failures.",
-		},
-	},
+	Name: "tests",
 }
 
 var stdTestMethods map[string]StdModuleFunc
 
 func init() {
 	stdTestMethods = map[string]StdModuleFunc{
-		"assert":   testAssert,
-		"equal":    testEqual,
-		"notEqual": testNotEqual,
-		"run":      testRun,
+		"assert":    testAssert,
+		"equal":     testEqual,
+		"notEqual":  testNotEqual,
+		"run":       testRun,
+		"measureMs": testMeasureMs,
 	}
 	registerStdModule(stdTestMetadata)
 }
 
-func (vm *VM) callStdTest(method string, args []Value) {
+func (vm *VM) callStdTest(method string, args []TinyValue) {
 	fn, ok := stdTestMethods[method]
 	if !ok {
 		vm.runtimeError(ErrorName, "unknown test function: %s", method)
@@ -58,7 +34,7 @@ func (vm *VM) callStdTest(method string, args []Value) {
 	fn(vm, args)
 }
 
-func testAssert(vm *VM, args []Value) {
+func testAssert(vm *VM, args []TinyValue) {
 	expectArgs(vm, "test.assert", args, 2)
 
 	condition := argBool(vm, "test.assert", args, 0)
@@ -71,7 +47,7 @@ func testAssert(vm *VM, args []Value) {
 	vm.push(NewNull())
 }
 
-func testEqual(vm *VM, args []Value) {
+func testEqual(vm *VM, args []TinyValue) {
 	expectArgs(vm, "test.equal", args, 3)
 
 	actual := args[0]
@@ -95,7 +71,7 @@ func testEqual(vm *VM, args []Value) {
 	vm.push(NewNull())
 }
 
-func testNotEqual(vm *VM, args []Value) {
+func testNotEqual(vm *VM, args []TinyValue) {
 	expectArgs(vm, "test.notEqual", args, 3)
 
 	actual := args[0]
@@ -119,7 +95,7 @@ func testNotEqual(vm *VM, args []Value) {
 	vm.push(NewNull())
 }
 
-func testRun(vm *VM, args []Value) {
+func testRun(vm *VM, args []TinyValue) {
 	expectArgs(vm, "test.run", args, 2)
 	name := argString(vm, "test.run", args, 0)
 	fn := argFn(vm, "test.run", args, 1)
@@ -139,7 +115,7 @@ func testRun(vm *VM, args []Value) {
 			}
 		}()
 
-		vm.callFunctionValue(fn, []Value{})
+		vm.callFunctionValue(fn, []TinyValue{})
 	}()
 
 	if testFailed {
@@ -149,4 +125,30 @@ func testRun(vm *VM, args []Value) {
 	}
 
 	vm.push(NewNull())
+}
+
+func testMeasureMs(vm *VM, args []TinyValue) {
+	expectArgs(vm, "test.measureMs", args, 1)
+
+	fn := argFn(vm, "test.measureMs", args, 0)
+
+	start := time.Now().UnixMilli()
+
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				if langErr, ok := r.(LangErrorType); ok {
+					vm.runtimeError(ErrorRuntime, "%s", langErr.Message)
+				} else {
+					vm.runtimeError(ErrorRuntime, "Go System Panic: %v", r)
+				}
+			}
+		}()
+
+		vm.callFunctionValue(fn, []TinyValue{})
+	}()
+
+	end := time.Now().UnixMilli()
+
+	vm.push(NewInt(int(end - start)))
 }

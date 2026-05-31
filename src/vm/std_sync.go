@@ -4,16 +4,12 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
+func (v *NativeMutexValue) TinyTypeName() string {
+	return "sync.Mutex"
+}
+
 var stdSyncMetadata = StdModuleInfo{
 	Name: "sync",
-	Methods: map[string]StdMethodInfo{
-		"mutex": {
-			Name:        "mutex",
-			Args:        []StdArg{},
-			Returns:     "mutex",
-			Description: "Creates and returns a new mutex object for concurrency control. Allows locking and unlocking to coordinate access across tasks.",
-		},
-	},
 }
 
 var stdSyncMethods map[string]StdModuleFunc
@@ -25,7 +21,7 @@ func init() {
 	registerStdModule(stdSyncMetadata)
 }
 
-func (vm *VM) callStdSync(method string, args []Value) {
+func (vm *VM) callStdSync(method string, args []TinyValue) {
 	fn, ok := stdSyncMethods[method]
 	if !ok {
 		vm.runtimeError(ErrorName, "unknown sync function: %s", method)
@@ -35,7 +31,7 @@ func (vm *VM) callStdSync(method string, args []Value) {
 	fn(vm, args)
 }
 
-func syncMakeMutex(vm *VM, args []Value) {
+func syncMakeMutex(vm *VM, args []TinyValue) {
 	dontExpectArgs(vm, "sync.mutex", args)
 
 	vm.push(NewNative(&NativeMutexValue{}))

@@ -91,7 +91,7 @@ func init() {
 
 var stringMethods map[string]NativeModuleFunc[string]
 
-func (vm *VM) callStringMethod(value string, method string, args []Value) {
+func (vm *VM) callStringMethod(value string, method string, args []TinyValue) {
 	fn, ok := stringMethods[method]
 	if !ok {
 		vm.runtimeError(ErrorName, "unknown string method: %s", method)
@@ -100,22 +100,22 @@ func (vm *VM) callStringMethod(value string, method string, args []Value) {
 	fn(vm, value, args)
 }
 
-func stringLength(vm *VM, value string, args []Value) {
+func stringLength(vm *VM, value string, args []TinyValue) {
 	expectArgs(vm, "string.length", args, 0)
 	vm.push(NewInt(len(value)))
 }
 
-func stringToUpperCase(vm *VM, value string, args []Value) {
+func stringToUpperCase(vm *VM, value string, args []TinyValue) {
 	expectArgs(vm, "string.toUpperCase", args, 0)
 	vm.push(NewNative(strings.ToUpper(value)))
 }
 
-func stringToLowerCase(vm *VM, value string, args []Value) {
+func stringToLowerCase(vm *VM, value string, args []TinyValue) {
 	expectArgs(vm, "string.toLowerCase", args, 0)
 	vm.push(NewNative(strings.ToLower(value)))
 }
 
-func stringUpper(vm *VM, value string, args []Value) {
+func stringUpper(vm *VM, value string, args []TinyValue) {
 	expectArgs(vm, "string.upper", args, 0)
 
 	result := strings.ToUpper(value[:1]) + value[1:]
@@ -123,7 +123,7 @@ func stringUpper(vm *VM, value string, args []Value) {
 	vm.push(NewNative(result))
 }
 
-func stringLower(vm *VM, value string, args []Value) {
+func stringLower(vm *VM, value string, args []TinyValue) {
 	expectArgs(vm, "string.lower", args, 0)
 
 	result := strings.ToLower(value[:1]) + value[1:]
@@ -131,13 +131,13 @@ func stringLower(vm *VM, value string, args []Value) {
 	vm.push(NewNative(result))
 }
 
-func stringSplit(vm *VM, value string, args []Value) {
+func stringSplit(vm *VM, value string, args []TinyValue) {
 	expectArgs(vm, "string.split", args, 1)
 	separator := argString(vm, "string.split", args, 0)
 
 	if separator == "" {
 		runes := []rune(value)
-		elements := make([]Value, len(runes))
+		elements := make([]TinyValue, len(runes))
 		for i, r := range runes {
 			elements[i] = NewNative(string(r))
 		}
@@ -146,7 +146,7 @@ func stringSplit(vm *VM, value string, args []Value) {
 	}
 
 	count := strings.Count(value, separator) + 1
-	elements := make([]Value, 0, count)
+	elements := make([]TinyValue, 0, count)
 
 	for {
 		idx := strings.Index(value, separator)
@@ -161,20 +161,20 @@ func stringSplit(vm *VM, value string, args []Value) {
 	vm.push(NewNative(&ArrayValue{Elements: elements}))
 }
 
-func stringIncludes(vm *VM, value string, args []Value) {
+func stringIncludes(vm *VM, value string, args []TinyValue) {
 	expectArgs(vm, "string.includes", args, 1)
 
 	search := argString(vm, "string.includes", args, 0)
 	vm.push(NewNative(strings.Contains(value, search)))
 }
 
-func stringTrim(vm *VM, value string, args []Value) {
+func stringTrim(vm *VM, value string, args []TinyValue) {
 	expectArgs(vm, "string.trim", args, 0)
 
 	vm.push(NewNative(strings.TrimSpace(value)))
 }
 
-func stringReplace(vm *VM, value string, args []Value) {
+func stringReplace(vm *VM, value string, args []TinyValue) {
 	expectArgs(vm, "string.replace", args, 2)
 
 	oldText := argString(vm, "string.replace", args, 0)
@@ -182,7 +182,7 @@ func stringReplace(vm *VM, value string, args []Value) {
 	vm.push(NewNative(strings.Replace(value, oldText, newText, 1)))
 }
 
-func stringReplaceAll(vm *VM, value string, args []Value) {
+func stringReplaceAll(vm *VM, value string, args []TinyValue) {
 	expectArgs(vm, "string.replaceAll", args, 2)
 
 	oldText := argString(vm, "string.replaceAll", args, 0)

@@ -2,11 +2,11 @@ package vm
 
 import . "language.com/src/tinyerrors"
 
-type StdModuleFunc func(vm *VM, args []Value)
+type StdModuleFunc func(vm *VM, args []TinyValue)
 
-type NativeModuleFunc[T any] func(vm *VM, value T, args []Value)
+type NativeModuleFunc[T any] func(vm *VM, value T, args []TinyValue)
 
-func dontExpectArgs(vm *VM, fnName string, args []Value) {
+func dontExpectArgs(vm *VM, fnName string, args []TinyValue) {
 	if len(args) != 0 {
 		vm.runtimeError(
 			ErrorRuntime,
@@ -18,7 +18,7 @@ func dontExpectArgs(vm *VM, fnName string, args []Value) {
 	}
 }
 
-func expectArgs(vm *VM, fnName string, args []Value, count int) {
+func expectArgs(vm *VM, fnName string, args []TinyValue, count int) {
 	if len(args) != count {
 		vm.runtimeError(
 			ErrorRuntime,
@@ -30,7 +30,7 @@ func expectArgs(vm *VM, fnName string, args []Value, count int) {
 	}
 }
 
-func expectArgsRange(vm *VM, fnName string, args []Value, min int, max int) {
+func expectArgsRange(vm *VM, fnName string, args []TinyValue, min int, max int) {
 	if len(args) < min || len(args) > max {
 		vm.runtimeError(
 			ErrorRuntime,
@@ -43,7 +43,7 @@ func expectArgsRange(vm *VM, fnName string, args []Value, min int, max int) {
 	}
 }
 
-func expectArgsMin(vm *VM, fnName string, args []Value, min int) {
+func expectArgsMin(vm *VM, fnName string, args []TinyValue, min int) {
 	if len(args) < min {
 		vm.runtimeError(
 			ErrorRuntime,
@@ -55,7 +55,7 @@ func expectArgsMin(vm *VM, fnName string, args []Value, min int) {
 	}
 }
 
-func argString(vm *VM, fnName string, args []Value, index int) string {
+func argString(vm *VM, fnName string, args []TinyValue, index int) string {
 	if index < 0 || index >= len(args) {
 		vm.runtimeError(ErrorRuntime, "%s missing argument %d", fnName, index)
 	}
@@ -74,7 +74,7 @@ func argString(vm *VM, fnName string, args []Value, index int) string {
 	return str
 }
 
-func argFn(vm *VM, fnName string, args []Value, index int) FunctionValue {
+func argFn(vm *VM, fnName string, args []TinyValue, index int) FunctionValue {
 	if index < 0 || index >= len(args) {
 		vm.runtimeError(ErrorRuntime, "%s missing argument %d", fnName, index)
 	}
@@ -93,7 +93,7 @@ func argFn(vm *VM, fnName string, args []Value, index int) FunctionValue {
 	return fn
 }
 
-func argBool(vm *VM, fnName string, args []Value, index int) bool {
+func argBool(vm *VM, fnName string, args []TinyValue, index int) bool {
 	if index < 0 || index >= len(args) {
 		vm.runtimeError(ErrorRuntime, "%s missing argument %d", fnName, index)
 	}
@@ -112,7 +112,7 @@ func argBool(vm *VM, fnName string, args []Value, index int) bool {
 	return str
 }
 
-func argArray(vm *VM, fnName string, args []Value, index int) *ArrayValue {
+func argArray(vm *VM, fnName string, args []TinyValue, index int) *ArrayValue {
 	if index < 0 || index >= len(args) {
 		vm.runtimeError(
 			ErrorRuntime,
@@ -136,7 +136,7 @@ func argArray(vm *VM, fnName string, args []Value, index int) *ArrayValue {
 	return array
 }
 
-func argObject(vm *VM, fnName string, args []Value, index int) ObjectValue {
+func argObject(vm *VM, fnName string, args []TinyValue, index int) ObjectValue {
 	if index < 0 || index >= len(args) {
 		vm.runtimeError(
 			ErrorRuntime,
@@ -160,7 +160,7 @@ func argObject(vm *VM, fnName string, args []Value, index int) ObjectValue {
 	return object
 }
 
-func argInt(vm *VM, fnName string, args []Value, index int) int {
+func argInt(vm *VM, fnName string, args []TinyValue, index int) int {
 	if index < 0 || index >= len(args) {
 		vm.runtimeError(ErrorRuntime, "%s missing argument %d", fnName, index)
 	}
@@ -178,7 +178,7 @@ func argInt(vm *VM, fnName string, args []Value, index int) int {
 	return args[index].AsInt
 }
 
-func argFloat64(vm *VM, fnName string, args []Value, index int) float64 {
+func argFloat64(vm *VM, fnName string, args []TinyValue, index int) float64 {
 	if index < 0 || index >= len(args) {
 		vm.runtimeError(ErrorRuntime, "%s missing argument %d", fnName, index)
 	}

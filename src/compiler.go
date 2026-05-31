@@ -676,7 +676,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 	namespaceClasses := map[string]string{}
 	namespaceEnums := map[string]string{}
 	namespaceInterfaces := map[string]string{}
-	members := map[string]Value{}
+	members := map[string]TinyValue{}
 
 	// 1. Nested namespaces first
 	for _, raw := range stmt.Statements {
@@ -944,14 +944,14 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 			fullName := stmt.Name + "." + embedStmt.Name
 
 			namespacedEmbed := EmbedStmt{
-				Kind:             embedStmt.Kind,
-				Name:             fullName,
-				EmbeddedFilePath: embedStmt.EmbeddedFilePath,
-				Constant:         embedStmt.Constant,
-				TypeHint:         embedStmt.TypeHint,
-				File:             embedStmt.File,
-				Line:             embedStmt.Line,
-				Column:           embedStmt.Column,
+				Kind:         embedStmt.Kind,
+				Name:         fullName,
+				EmbeddedPath: embedStmt.EmbeddedPath,
+				Constant:     embedStmt.Constant,
+				TypeHint:     embedStmt.TypeHint,
+				File:         embedStmt.File,
+				Line:         embedStmt.Line,
+				Column:       embedStmt.Column,
 			}
 
 			c.compileEmbedStatement(namespacedEmbed)
@@ -1068,6 +1068,7 @@ func (c *Compiler) compileMatchStatement(stmt MatchStmt) {
 		})
 	} else {
 		c.emit(OP_STORE_GLOBAL, VariableInfo{
+			Name:     tempName,
 			Slot:     tempBinding.Slot,
 			Constant: true,
 		})
@@ -1365,6 +1366,15 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 
 		if c.outerBindings != nil {
 			if outer, exists := c.outerBindings[s.Name]; exists {
+				if outer.Kind == BindingGlobal {
+					c.setLocation(s.File, s.Line, s.Column)
+					c.emit(OP_ASSIGN_GLOBAL, VariableInfo{
+						Name: outer.Name,
+						Slot: outer.Slot,
+					})
+					return
+				}
+
 				capture, already := c.currentCaptures[s.Name]
 				if !already {
 					slot := c.localCount
@@ -1779,6 +1789,10 @@ func (c *Compiler) ensureCaptured(name string) (Binding, bool) {
 		return Binding{}, false
 	}
 
+	if outer.Kind == BindingGlobal {
+		return outer, true
+	}
+
 	capture, already := c.currentCaptures[name]
 	if !already {
 		slot := c.localCount
@@ -1808,7 +1822,7 @@ func (c *Compiler) ensureCaptured(name string) (Binding, bool) {
 	}, true
 }
 
-func (c *Compiler) evalConstantExpr(expr Expr, err string) Value {
+func (c *Compiler) evalConstantExpr(expr Expr, err string) TinyValue {
 	switch e := expr.(type) {
 	case StringExpr:
 		return NewNative(e.Value)
@@ -1824,7 +1838,7 @@ func (c *Compiler) evalConstantExpr(expr Expr, err string) Value {
 
 	case ArrayExpr:
 		arr := &ArrayValue{
-			Elements: []Value{},
+			Elements: []TinyValue{},
 		}
 
 		for _, element := range e.Elements {
@@ -2004,19 +2018,55 @@ func (c *Compiler) compileLockStmt(stmt LockStmt) {
 }
 
 func (c *Compiler) compileEmbedStatement(stmt EmbedStmt) {
-	content, err := os.ReadFile(stmt.EmbeddedFilePath)
-	if err != nil {
-		c.fatalError(ErrorImport, "could not embed file '%s': %s", filepath.Base(stmt.EmbeddedFilePath), err)
-	}
+	if stmt.Kind == EmbedDir {
+		assets := ObjectValue{}
 
-	if stmt.Kind == EmbedStr {
-		c.emit(OP_CONST, string(content))
-	} else {
-		c.emit(OP_CONST, &BufferValue{
-			Bytes: content,
+		err := filepath.Walk(stmt.EmbeddedPath, func(path string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() {
+				return err
+			}
+
+			content, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+
+			relPath, _ := filepath.Rel(stmt.EmbeddedPath, path)
+			key := filepath.ToSlash(relPath)
+
+			ext := strings.ToLower(filepath.Ext(path))
+
+			if ext == ".html" || ext == ".css" || ext == ".js" || ext == ".json" || ext == ".svg" || ext == ".txt" {
+				assets[key] = NewNative(string(content))
+			} else {
+				assets[key] = NewNative(&BufferValue{Bytes: content})
+			}
+
+			return nil
 		})
+
+		if err != nil {
+			c.fatalError(ErrorImport, "could not embed folder '%s': %v", filepath.Base(stmt.EmbeddedPath), err)
+		}
+
+		c.emit(OP_CONST, assets)
+
+	} else {
+		content, err := os.ReadFile(stmt.EmbeddedPath)
+		if err != nil {
+			c.fatalError(ErrorImport, "could not embed file '%s': %s", filepath.Base(stmt.EmbeddedPath), err)
+		}
+
+		if stmt.Kind == EmbedStr {
+			c.emit(OP_CONST, string(content))
+		} else {
+			c.emit(OP_CONST, &BufferValue{
+				Bytes: content,
+			})
+		}
 	}
 
+	// 2. The variable binding and storing logic stays 100% the same! [compiler.go]
 	binding := c.declareVariable(stmt.Name, stmt.Constant)
 
 	c.setLocation(stmt.File, stmt.Line, stmt.Column)
@@ -2075,6 +2125,10 @@ func (c *Compiler) compileIfStatement(stmt IfStmt) {
 
 func (c *Compiler) compileFunction(stmt FunctionStmt) {
 	if existing, exists := c.functions[stmt.Name]; exists && len(existing.Instructions) > 0 {
+		c.fatalError(ErrorName, "function already defined: %s", stmt.Name)
+	}
+
+	if _, exists := c.nativeFunctions[stmt.Name]; exists {
 		c.fatalError(ErrorName, "function already defined: %s", stmt.Name)
 	}
 
@@ -2161,17 +2215,13 @@ func (c *Compiler) collectCapturableBindings() map[string]Binding {
 
 	for _, scope := range c.scopes {
 		for name, binding := range scope {
-			if binding.Kind == BindingLocal {
-				result[name] = binding
-			}
+			result[name] = binding
 		}
 	}
 
 	if c.outerBindings != nil {
 		for name, binding := range c.outerBindings {
-			if binding.Kind == BindingLocal {
-				result[name] = binding
-			}
+			result[name] = binding
 		}
 	}
 
@@ -2461,8 +2511,11 @@ func (c *Compiler) compileExpr(expr Expr) {
 		c.emit(OP_TYPEOF, nil)
 
 	case SpawnExpr:
+		for _, arg := range e.Args {
+			c.compileExpr(arg)
+		}
 		c.compileExpr(e.Function)
-		c.emit(OP_SPAWN, nil)
+		c.emit(OP_SPAWN, len(e.Args))
 
 	case DeferExpr:
 		c.setLocation(e.File, e.Line, e.Column)
@@ -2498,6 +2551,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 		c.emit(OP_CONST, e.Value)
 
 	case IdentExpr:
+		c.setLocation(e.File, e.Line, e.Column)
 		// 1. Normal local/global variable resolution first.
 		if binding, exists := c.resolveVariable(e.Name); exists {
 			if binding.Kind == BindingLocal {
@@ -2551,9 +2605,14 @@ func (c *Compiler) compileExpr(expr Expr) {
 			if binding.Kind == BindingLocal {
 				c.emit(OP_LOAD_LOCAL, binding.Slot)
 				return
+			} else {
+				c.emit(OP_LOAD_GLOBAL, VariableInfo{
+					Name: binding.Name,
+					Slot: binding.Slot,
+				})
+				return
 			}
 		}
-
 		// 4. Known global function.
 		if _, exists := c.functions[e.Name]; exists {
 			c.usedFunctions[e.Name] = true
@@ -2710,9 +2769,9 @@ func (c *Compiler) compileExpr(expr Expr) {
 
 			sanitizedName := strings.ReplaceAll(e.Name, ".", "_")
 			c.emit(OP_NATIVE_CALL, NativeCallInfo{
-				Name:          sanitizedName,
-				ArgCount:      len(e.Args),
-				ReturnsString: retType == "string",
+				Name:       sanitizedName,
+				ArgCount:   len(e.Args),
+				ReturnType: retType,
 			})
 
 			return
@@ -2796,9 +2855,9 @@ func (c *Compiler) compileExpr(expr Expr) {
 
 				sanitizedName := strings.ReplaceAll(ident.Name, ".", "_")
 				c.emit(OP_NATIVE_CALL, NativeCallInfo{
-					Name:          sanitizedName,
-					ArgCount:      len(e.Args),
-					ReturnsString: retType == "string",
+					Name:       sanitizedName,
+					ArgCount:   len(e.Args),
+					ReturnType: retType,
 				})
 
 				return

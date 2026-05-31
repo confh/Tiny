@@ -6,14 +6,6 @@ import (
 
 var stdErrorMetadata = StdModuleInfo{
 	Name: "error",
-	Methods: map[string]StdMethodInfo{
-		"new": {
-			Name:        "new",
-			Args:        []StdArg{{Name: "kind", Type: "string", Optional: false}, {Name: "message", Type: "string", Optional: false}},
-			Returns:     "Error",
-			Description: "Creates a new error object with kind and message.",
-		},
-	},
 }
 
 var stdErrorMethods map[string]StdModuleFunc
@@ -25,7 +17,7 @@ func init() {
 	registerStdModule(stdErrorMetadata)
 }
 
-func (vm *VM) callStdError(method string, args []Value) {
+func (vm *VM) callStdError(method string, args []TinyValue) {
 	fn, ok := stdErrorMethods[method]
 	if !ok {
 		vm.runtimeError(ErrorName, "unknown error function: %s", method)
@@ -34,7 +26,7 @@ func (vm *VM) callStdError(method string, args []Value) {
 	fn(vm, args)
 }
 
-func stdErrorNew(vm *VM, args []Value) {
+func stdErrorNew(vm *VM, args []TinyValue) {
 	expectArgs(vm, "error.new", args, 2)
 	kind := argString(vm, "error.new", args, 0)
 	message := argString(vm, "error.new", args, 1)

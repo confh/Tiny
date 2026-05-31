@@ -8,26 +8,6 @@ import (
 
 var stdRegexMetadata = StdModuleInfo{
 	Name: "regex",
-	Methods: map[string]StdMethodInfo{
-		"matchString": {
-			Name: "matchString",
-			Args: []StdArg{
-				{Name: "input", Type: "string", Optional: false},
-				{Name: "pattern", Type: "string", Optional: false},
-			},
-			Returns:     "bool",
-			Description: "Returns true if the input string matches the regex pattern.",
-		},
-		"findString": {
-			Name: "findString",
-			Args: []StdArg{
-				{Name: "input", Type: "string", Optional: false},
-				{Name: "pattern", Type: "string", Optional: false},
-			},
-			Returns:     "string",
-			Description: "Returns the first substring match for the regex pattern in the input string.",
-		},
-	},
 }
 
 var stdRegexMethods map[string]StdModuleFunc
@@ -40,7 +20,7 @@ func init() {
 	registerStdModule(stdRegexMetadata)
 }
 
-func (vm *VM) callStdRegex(method string, args []Value) {
+func (vm *VM) callStdRegex(method string, args []TinyValue) {
 	fn, ok := stdRegexMethods[method]
 	if !ok {
 		vm.runtimeError(ErrorName, "unknown regex function: %s", method)
@@ -49,7 +29,7 @@ func (vm *VM) callStdRegex(method string, args []Value) {
 	fn(vm, args)
 }
 
-func stdRegexMatchString(vm *VM, args []Value) {
+func stdRegexMatchString(vm *VM, args []TinyValue) {
 	expectArgs(vm, "regex.matchString", args, 2)
 
 	str := argString(vm, "regex.matchString", args, 0)
@@ -63,7 +43,7 @@ func stdRegexMatchString(vm *VM, args []Value) {
 	vm.push(NewNative(re.MatchString(str)))
 }
 
-func stdRegexFindString(vm *VM, args []Value) {
+func stdRegexFindString(vm *VM, args []TinyValue) {
 	expectArgs(vm, "regex.findString", args, 2)
 
 	str := argString(vm, "regex.findString", args, 0)

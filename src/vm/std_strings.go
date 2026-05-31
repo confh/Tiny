@@ -7,34 +7,14 @@ import (
 	. "language.com/src/tinyerrors"
 )
 
+func (v *NativeStringBuilderValue) TinyTypeName() string {
+	return "strings.StringBuilder"
+}
+
 const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
 var stdStringMetadata = StdModuleInfo{
-	Name: "string",
-	Methods: map[string]StdMethodInfo{
-		"newBuilder": {
-			Name:        "newBuilder",
-			Args:        []StdArg{},
-			Returns:     "stringBuilder",
-			Description: "Returns a new string builder object.",
-		},
-		"isDigit": {
-			Name: "isDigit",
-			Args: []StdArg{
-				{Name: "input", Type: "string", Optional: false},
-			},
-			Returns:     "bool",
-			Description: "Returns true if the string only contains digits.",
-		},
-		"random": {
-			Name: "random",
-			Args: []StdArg{
-				{Name: "length", Type: "int", Optional: false},
-			},
-			Returns:     "string",
-			Description: "Returns a random string of the given length using alphanumeric characters.",
-		},
-	},
+	Name: "strings",
 }
 
 var stdStringMethods map[string]StdModuleFunc
@@ -68,7 +48,7 @@ func isDigit(s string) bool {
 	return true
 }
 
-func (vm *VM) callStdString(method string, args []Value) {
+func (vm *VM) callStdString(method string, args []TinyValue) {
 	fn, ok := stdStringMethods[method]
 	if !ok {
 		vm.runtimeError(ErrorName, "unknown String function: %s", method)
@@ -77,7 +57,7 @@ func (vm *VM) callStdString(method string, args []Value) {
 	fn(vm, args)
 }
 
-func stdStringNewBuilder(vm *VM, args []Value) {
+func stdStringNewBuilder(vm *VM, args []TinyValue) {
 	dontExpectArgs(vm, "string.newBuilder", args)
 
 	sb := &strings.Builder{}
@@ -86,14 +66,14 @@ func stdStringNewBuilder(vm *VM, args []Value) {
 	}))
 }
 
-func stdStringIsDigit(vm *VM, args []Value) {
+func stdStringIsDigit(vm *VM, args []TinyValue) {
 	expectArgs(vm, "string.isDigit", args, 1)
 
 	value := argString(vm, "string.isDigit", args, 0)
 	vm.push(NewNative(isDigit(value)))
 }
 
-func stdStringRandom(vm *VM, args []Value) {
+func stdStringRandom(vm *VM, args []TinyValue) {
 	expectArgs(vm, "string.random", args, 1)
 
 	length := argInt(vm, "string.random", args, 0)

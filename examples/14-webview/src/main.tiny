@@ -1,0 +1,27 @@
+import std "ui"
+import std "io"
+
+// 1. Embed the entire UI folder as an object
+embeddir "./ui" const assets
+
+let count = 0
+
+// 2. Create the window
+const w = ui.new(true) // true = enable dev tools
+w.setTitle("Tiny WebView Example")
+w.setSize(400, 300)
+
+// 3. Bind a function for JS to call
+w.callback("increment", fn(arg) {
+    count++
+    io.println(`Counter incremented to: ${count}`)
+    return count
+})
+
+// 4. Set the HTML content from the embedded assets
+// embeddir maps relative paths to keys
+const html = assets["index.html"]
+w.setHtml(html)
+
+io.println("Window started...")
+w.run()

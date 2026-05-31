@@ -1,0 +1,9 @@
+export fn get(object: object, key: string): any {}
+export fn set(object: object, key: string, value: any): null {}
+export fn has(object: object, key: string): bool {}
+export fn delete(object: object, key: string): bool {}
+export fn keys(object: object): array {}
+export fn values(object: object): array {}
+export fn enteries(object: object): array {}
+export fn length(object: object): number {}
+export fn clear(object: object): null {}
