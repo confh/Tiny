@@ -139,7 +139,7 @@ func getMakcKey(key string) makc.Key {
 	return makc.Key(0)
 }
 
-func desktopMoveMouse(vm *VM, args []Value) {
+func desktopMoveMouse(vm *VM, args []TinyValue) {
 	expectArgs(vm, "desktop.moveMouse", args, 2)
 	x := argInt(vm, "desktop.moveMouse", args, 0)
 	y := argInt(vm, "desktop.moveMouse", args, 1)
@@ -152,7 +152,7 @@ func desktopMoveMouse(vm *VM, args []Value) {
 	vm.push(NewNull())
 }
 
-func desktopMoveMouseSmooth(vm *VM, args []Value) {
+func desktopMoveMouseSmooth(vm *VM, args []TinyValue) {
 	expectArgs(vm, "desktop.moveMouseSmooth", args, 2)
 	targetX := argInt(vm, "desktop.moveMouseSmooth", args, 0)
 	targetY := argInt(vm, "desktop.moveMouseSmooth", args, 1)
@@ -178,7 +178,7 @@ func desktopMoveMouseSmooth(vm *VM, args []Value) {
 	vm.push(NewNull())
 }
 
-func desktopMouseClick(vm *VM, args []Value) {
+func desktopMouseClick(vm *VM, args []TinyValue) {
 	dontExpectArgs(vm, "desktop.click", args)
 	client := getMakcClient(vm)
 	if client == nil {
@@ -188,7 +188,7 @@ func desktopMouseClick(vm *VM, args []Value) {
 	vm.push(NewNull())
 }
 
-func desktopMouseRightClick(vm *VM, args []Value) {
+func desktopMouseRightClick(vm *VM, args []TinyValue) {
 	dontExpectArgs(vm, "desktop.rightClick", args)
 	client := getMakcClient(vm)
 	if client == nil {
@@ -198,7 +198,7 @@ func desktopMouseRightClick(vm *VM, args []Value) {
 	vm.push(NewNull())
 }
 
-func desktopMouseDoubleClick(vm *VM, args []Value) {
+func desktopMouseDoubleClick(vm *VM, args []TinyValue) {
 	dontExpectArgs(vm, "desktop.doubleClick", args)
 	client := getMakcClient(vm)
 	if client == nil {
@@ -211,7 +211,7 @@ func desktopMouseDoubleClick(vm *VM, args []Value) {
 	vm.push(NewNull())
 }
 
-func desktopMouseMouseDown(vm *VM, args []Value) {
+func desktopMouseMouseDown(vm *VM, args []TinyValue) {
 	expectArgs(vm, "desktop.mouseDown", args, 1)
 	button := argString(vm, "desktop.mouseDown", args, 0)
 	if button != "left" && button != "right" {
@@ -227,7 +227,7 @@ func desktopMouseMouseDown(vm *VM, args []Value) {
 	vm.push(NewNull())
 }
 
-func desktopMouseMouseUp(vm *VM, args []Value) {
+func desktopMouseMouseUp(vm *VM, args []TinyValue) {
 	expectArgs(vm, "desktop.mouseUp", args, 1)
 	button := argString(vm, "desktop.mouseUp", args, 0)
 	if button != "left" && button != "right" {
@@ -243,7 +243,7 @@ func desktopMouseMouseUp(vm *VM, args []Value) {
 	vm.push(NewNull())
 }
 
-func desktopKeyboardPress(vm *VM, args []Value) {
+func desktopKeyboardPress(vm *VM, args []TinyValue) {
 	expectArgs(vm, "desktop.press", args, 1)
 	keyStr := argString(vm, "desktop.press", args, 0)
 	client := getMakcClient(vm)
@@ -254,7 +254,7 @@ func desktopKeyboardPress(vm *VM, args []Value) {
 	vm.push(NewNull())
 }
 
-func desktopKeyboardHotKey(vm *VM, args []Value) {
+func desktopKeyboardHotKey(vm *VM, args []TinyValue) {
 	expectArgs(vm, "desktop.hotKey", args, 2)
 	k1 := getMakcKey(argString(vm, "desktop.hotKey", args, 0))
 	k2 := getMakcKey(argString(vm, "desktop.hotKey", args, 1))
@@ -270,7 +270,7 @@ func desktopKeyboardHotKey(vm *VM, args []Value) {
 	vm.push(NewNull())
 }
 
-func desktopKeyboardType(vm *VM, args []Value) {
+func desktopKeyboardType(vm *VM, args []TinyValue) {
 	expectArgs(vm, "desktop.type", args, 1)
 	text := argString(vm, "desktop.type", args, 0)
 	client := getMakcClient(vm)
@@ -281,7 +281,7 @@ func desktopKeyboardType(vm *VM, args []Value) {
 	vm.push(NewNull())
 }
 
-func desktopMousePosition(vm *VM, args []Value) {
+func desktopMousePosition(vm *VM, args []TinyValue) {
 	dontExpectArgs(vm, "desktop.mousePosition", args)
 	client := getMakcClient(vm)
 	if client == nil {
@@ -294,7 +294,7 @@ func desktopMousePosition(vm *VM, args []Value) {
 	}))
 }
 
-func desktopScreenSize(vm *VM, args []Value) {
+func desktopScreenSize(vm *VM, args []TinyValue) {
 	dontExpectArgs(vm, "desktop.screenSize", args)
 
 	bounds := screenshot.GetDisplayBounds(0)
@@ -304,7 +304,7 @@ func desktopScreenSize(vm *VM, args []Value) {
 	}))
 }
 
-func desktopScreenShot(vm *VM, args []Value) {
+func desktopScreenShot(vm *VM, args []TinyValue) {
 	expectArgs(vm, "desktop.screenshot", args, 1)
 	fileName := argString(vm, "desktop.screenshot", args, 0)
 
@@ -320,13 +320,13 @@ func desktopScreenShot(vm *VM, args []Value) {
 	vm.push(NewNull())
 }
 
-func desktopGetClipboard(vm *VM, args []Value) {
+func desktopGetClipboard(vm *VM, args []TinyValue) {
 	dontExpectArgs(vm, "desktop.getClipboard", args)
 	text, _ := clipboard.ReadAll()
 	vm.push(NewNative(text))
 }
 
-func desktopSetClipboard(vm *VM, args []Value) {
+func desktopSetClipboard(vm *VM, args []TinyValue) {
 	expectArgs(vm, "desktop.setClipboard", args, 1)
 	text := argString(vm, "desktop.setClipboard", args, 0)
 	clipboard.WriteAll(text)
