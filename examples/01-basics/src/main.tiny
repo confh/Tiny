@@ -7,7 +7,6 @@ let count: number = 3
 let ratio = 2.5
 let enabled = true
 let empty = null
-let missing = undefined
 
 count = count + step
 
@@ -27,7 +26,6 @@ let result = {
     ratio: ratio,
     enabled: enabled,
     emptyType: typeof empty,
-    missingType: typeof missing,
     firstNumber: numbers[0],
     user: user,
     comparison: count > 3 and enabled

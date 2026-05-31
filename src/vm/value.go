@@ -24,8 +24,6 @@ const (
 
 type NullValue struct{}
 
-type UndefinedValue struct{}
-
 type ArrayValue struct {
 	Elements []Value
 }
@@ -348,8 +346,6 @@ func TypeName(value Value) string {
 		return "array"
 	case NullValue, NullExpr:
 		return "null"
-	case UndefinedValue:
-		return "undefined"
 	case ObjectValue:
 		if classNameVal, exists := v["__class"]; exists {
 			if className, ok := classNameVal.Value.(string); ok {
@@ -463,10 +459,6 @@ func valueToJSONCompatible(value Value) any {
 
 	case NullValue:
 		return nil
-
-	case UndefinedValue:
-		return nil
-
 	case nil:
 		return nil
 
@@ -588,8 +580,6 @@ func valueToString(value Value) string {
 		return v.Kind + ": " + v.Message
 	case NullValue:
 		return "null"
-	case UndefinedValue:
-		return "undefined"
 	case nil:
 		return "nil"
 	case ObjectValue:
@@ -719,8 +709,6 @@ func isTruthy(value Value) bool {
 		return v != ""
 	case NullValue:
 		return false
-	case UndefinedValue:
-		return false
 	default:
 		return v != nil
 	}
@@ -763,10 +751,6 @@ func valuesEqual(a Value, b Value) bool {
 		_, ok := b.Value.(NullValue)
 		return ok
 
-	case UndefinedValue:
-		_, ok := b.Value.(UndefinedValue)
-		return ok
-
 	default:
 		return a == b
 	}
@@ -783,14 +767,6 @@ func NewInt(val int) Value {
 func NewNull() Value {
 	return Value{
 		Value: NullValue{},
-		IsInt: false,
-		AsInt: 0,
-	}
-}
-
-func NewUndefined() Value {
-	return Value{
-		Value: UndefinedValue{},
 		IsInt: false,
 		AsInt: 0,
 	}

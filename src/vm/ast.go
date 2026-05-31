@@ -352,10 +352,6 @@ type NullExpr struct{}
 
 func (e NullExpr) exprNode() {}
 
-type UndefinedExpr struct{}
-
-func (e UndefinedExpr) exprNode() {}
-
 type ExprStmt struct {
 	Value Expr
 }
@@ -426,6 +422,18 @@ type FunctionStmt struct {
 }
 
 func (s FunctionStmt) stmtNode() {}
+
+type NativeFnStmt struct {
+	Name       string
+	Params     []Param
+	ReturnType TypeHint
+	GoCode     string
+	File       string
+	Line       int
+	Column     int
+}
+
+func (s NativeFnStmt) stmtNode() {}
 
 type TryCatchStmt struct {
 	TryBody     []Stmt
@@ -530,3 +538,9 @@ type MemberCallExpr struct {
 }
 
 func (e MemberCallExpr) exprNode() {}
+
+type SpreadExpr struct {
+	Value Expr
+}
+
+func (e SpreadExpr) exprNode() {}

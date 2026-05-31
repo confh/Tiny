@@ -12,7 +12,7 @@ var stdTimeMetadata = StdModuleInfo{
 		"sleep": {
 			Name:        "sleep",
 			Args:        []StdArg{{Name: "ms", Type: "number", Optional: false}},
-			Returns:     "undefined",
+			Returns:     "null",
 			Description: "Sleeps for the given number of milliseconds.",
 		},
 		"nowNs": {
@@ -68,7 +68,7 @@ func stdTimeSleep(vm *VM, args []Value) {
 	expectArgs(vm, "time.sleep", args, 1)
 	ms := argInt(vm, "time.sleep", args, 0)
 	time.Sleep(time.Duration(ms) * time.Millisecond)
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }
 
 func stdTimeNowNs(vm *VM, args []Value) {

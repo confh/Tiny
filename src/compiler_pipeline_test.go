@@ -185,7 +185,7 @@ func TestTinyPipelineNamespacedImports(t *testing.T) {
 func TestTinyPipelineArraysObjectsAndNativeMethods(t *testing.T) {
 	out := requireTinySuccess(t, runTinyFile(t, fixturePath("arrays_objects.tiny")))
 
-	const want = "4\n1\n1-2-3-4\nTiny\n15\nundefined\n2,4,6,8\n"
+	const want = "4\n1\n1-2-3-4\nTiny\n15\nnull\n2,4,6,8\n"
 	if out != want {
 		t.Fatalf("unexpected output:\nwant:\n%q\ngot:\n%q", want, out)
 	}

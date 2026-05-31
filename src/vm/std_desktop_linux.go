@@ -149,7 +149,7 @@ func desktopMoveMouse(vm *VM, args []Value) {
 		return
 	}
 	client.Mouse.MoveTo(context.Background(), x, y)
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }
 
 func desktopMoveMouseSmooth(vm *VM, args []Value) {
@@ -175,7 +175,7 @@ func desktopMoveMouseSmooth(vm *VM, args []Value) {
 		client.Mouse.MoveTo(ctx, x, y)
 		time.Sleep(10 * time.Millisecond)
 	}
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }
 
 func desktopMouseClick(vm *VM, args []Value) {
@@ -185,7 +185,7 @@ func desktopMouseClick(vm *VM, args []Value) {
 		return
 	}
 	client.Mouse.Click(context.Background(), makc.ButtonLeft)
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }
 
 func desktopMouseRightClick(vm *VM, args []Value) {
@@ -195,7 +195,7 @@ func desktopMouseRightClick(vm *VM, args []Value) {
 		return
 	}
 	client.Mouse.Click(context.Background(), makc.ButtonRight)
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }
 
 func desktopMouseDoubleClick(vm *VM, args []Value) {
@@ -208,7 +208,7 @@ func desktopMouseDoubleClick(vm *VM, args []Value) {
 	client.Mouse.Click(ctx, makc.ButtonLeft)
 	time.Sleep(50 * time.Millisecond)
 	client.Mouse.Click(ctx, makc.ButtonLeft)
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }
 
 func desktopMouseMouseDown(vm *VM, args []Value) {
@@ -224,7 +224,7 @@ func desktopMouseMouseDown(vm *VM, args []Value) {
 		btn = "3" // Right click
 	}
 	exec.Command("xdotool", "mousedown", btn).Run()
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }
 
 func desktopMouseMouseUp(vm *VM, args []Value) {
@@ -240,7 +240,7 @@ func desktopMouseMouseUp(vm *VM, args []Value) {
 		btn = "3"
 	}
 	exec.Command("xdotool", "mouseup", btn).Run()
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }
 
 func desktopKeyboardPress(vm *VM, args []Value) {
@@ -251,7 +251,7 @@ func desktopKeyboardPress(vm *VM, args []Value) {
 		return
 	}
 	client.Keyboard.Tap(context.Background(), getMakcKey(keyStr))
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }
 
 func desktopKeyboardHotKey(vm *VM, args []Value) {
@@ -267,7 +267,7 @@ func desktopKeyboardHotKey(vm *VM, args []Value) {
 	client.Keyboard.Down(ctx, k1)
 	client.Keyboard.Tap(ctx, k2)
 	client.Keyboard.Release(ctx, k1)
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }
 
 func desktopKeyboardType(vm *VM, args []Value) {
@@ -278,7 +278,7 @@ func desktopKeyboardType(vm *VM, args []Value) {
 		return
 	}
 	client.Keyboard.TypeText(context.Background(), text)
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }
 
 func desktopMousePosition(vm *VM, args []Value) {
@@ -317,7 +317,7 @@ func desktopScreenShot(vm *VM, args []Value) {
 	file, _ := os.Create(fileName)
 	defer file.Close()
 	png.Encode(file, img)
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }
 
 func desktopGetClipboard(vm *VM, args []Value) {
@@ -330,5 +330,5 @@ func desktopSetClipboard(vm *VM, args []Value) {
 	expectArgs(vm, "desktop.setClipboard", args, 1)
 	text := argString(vm, "desktop.setClipboard", args, 0)
 	clipboard.WriteAll(text)
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }

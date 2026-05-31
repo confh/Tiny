@@ -1078,11 +1078,12 @@ func remapJumpTargets(instructions []Instruction, oldToNew []int) {
 			instructions[i].Value = info
 
 		case OP_JUMP, OP_JUMP_IF_FALSE, OP_JUMP_IF_TRUE:
-			target, ok := instructions[i].Value.(int)
-			if ok && target >= 0 && target < len(oldToNew) {
-				newTarget := oldToNew[target]
-				instructions[i].Value = newTarget
-				instructions[i].IntArg = newTarget
+			if target, ok := AsIntInternal(instructions[i].Value); ok {
+				if target >= 0 && target < len(oldToNew) {
+					newTarget := oldToNew[target]
+					instructions[i].Value = newTarget
+					instructions[i].IntArg = newTarget
+				}
 			}
 
 		case OP_JUMP_LOCAL_GE_CONST:
@@ -1180,6 +1181,37 @@ func constIntAmount(value any) (int, bool) {
 			return int(v), true
 		}
 		return 0, false
+	default:
+		return 0, false
+	}
+}
+
+func AsIntInternal(v any) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case int8:
+		return int(n), true
+	case int16:
+		return int(n), true
+	case int32:
+		return int(n), true
+	case int64:
+		return int(n), true
+	case uint:
+		return int(n), true
+	case uint8:
+		return int(n), true
+	case uint16:
+		return int(n), true
+	case uint32:
+		return int(n), true
+	case uint64:
+		return int(n), true
+	case float32:
+		return int(n), true
+	case float64:
+		return int(n), true
 	default:
 		return 0, false
 	}

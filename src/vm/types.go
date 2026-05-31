@@ -115,12 +115,6 @@ func checkSingleTypeHint(value Value, hint string, interfaces map[string]Interfa
 		}
 		return false, ""
 
-	case "undefined":
-		if TypeName(value) == "undefined" {
-			return true, ""
-		}
-		return false, ""
-
 	default:
 		if iface, exists := interfaces[hint]; exists {
 			obj, ok := value.Value.(ObjectValue)
@@ -130,7 +124,7 @@ func checkSingleTypeHint(value Value, hint string, interfaces map[string]Interfa
 
 			for fieldName, expectedHint := range iface.Fields {
 				required := false
-				if slices.Contains(expectedHint.Types, "undefined") {
+				if slices.Contains(expectedHint.Types, "null") {
 					required = true
 				}
 

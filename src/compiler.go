@@ -1,9 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -42,6 +48,7 @@ type LoopContext struct {
 type Compiler struct {
 	mainInstructions       []Instruction
 	functions              map[string]Function
+	nativeFunctions        map[string]string
 	interfaces             map[string]Interface
 	classes                map[string]Class
 	usedFunctions          map[string]bool
@@ -70,7 +77,6 @@ type Compiler struct {
 	currentNamespaceFunctions  map[string]string
 	currentNamespaceEnums      map[string]string
 	currentNamespaceInterfaces map[string]string
-	currentNamespaceEmbeds     map[string]string
 
 	currentReturnType   TypeHint
 	currentFunctionName string
@@ -330,6 +336,7 @@ func NewCompiler() *Compiler {
 		mainInstructions:       []Instruction{},
 		functions:              map[string]Function{},
 		interfaces:             map[string]Interface{},
+		nativeFunctions:        map[string]string{},
 		classes:                map[string]Class{},
 		usedFunctions:          map[string]bool{},
 		loopStack:              []LoopContext{},
@@ -356,6 +363,10 @@ func (c *Compiler) predeclareFunctions(statements []Stmt) {
 		case FunctionStmt:
 			c.declaredFunctions[s.Name] = true
 			c.getFunctionID(s.Name)
+
+		case NativeFnStmt:
+			c.declaredFunctions[s.Name] = true
+			c.nativeFunctions[s.Name] = s.ReturnType.Name
 
 		case NamespaceStmt:
 			for _, nsStmt := range s.Statements {
@@ -477,7 +488,7 @@ func (c *Compiler) compileFunctionLiteral(stmt FunctionStmt) {
 		c.compileStatement(bodyStmt)
 	}
 
-	c.emit(OP_CONST, NewUndefined())
+	c.emit(OP_CONST, NewNull())
 	c.emit(OP_RETURN, nil)
 
 	captures := []CapturedVar{}
@@ -623,6 +634,8 @@ func (c *Compiler) compileScopedBlock(body []Stmt) {
 func (c *Compiler) CompileProgram(program Program) ([]Instruction, map[string]Function, map[string]Class, map[string]Interface, map[string]int) {
 	c.predeclareFunctions(program.Statements)
 
+	c.compileNativeFunctions(program.Statements)
+
 	for _, stmt := range program.Statements {
 		c.compileStatement(stmt)
 	}
@@ -656,7 +669,6 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 	oldNamespaceClasses := c.currentNamespaceClasses
 	oldNamespaceEnums := c.currentNamespaceEnums
 	oldNamespaceInterfaces := c.currentNamespaceInterfaces
-	oldNamespaceEmbeds := c.currentNamespaceEmbeds
 	oldIsCompilingNamespace := c.isCompilingNamespace
 
 	namespaceFunctions := map[string]string{}
@@ -664,7 +676,6 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 	namespaceClasses := map[string]string{}
 	namespaceEnums := map[string]string{}
 	namespaceInterfaces := map[string]string{}
-	namespaceEmbeds := map[string]string{}
 	members := map[string]Value{}
 
 	// 1. Nested namespaces first
@@ -711,24 +722,34 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 	for _, raw := range stmt.Statements {
 		inner, exported := unwrapExport(raw)
 
-		fn, ok := inner.(FunctionStmt)
-		if !ok {
+		var name string
+		var isNative bool
+
+		if fn, ok := inner.(FunctionStmt); ok {
+			name = fn.Name
+		} else if fn, ok := inner.(NativeFnStmt); ok {
+			name = fn.Name
+			isNative = true
+		} else {
 			continue
 		}
 
-		fullName := stmt.Name + "." + fn.Name
+		fullName := stmt.Name + "." + name
 
-		namespaceFunctions[fn.Name] = fullName
+		namespaceFunctions[name] = fullName
 
 		if !hasExplicitExports || exported {
-			members[fn.Name] = NewNative(FunctionValue{Name: fullName})
+			members[name] = NewNative(FunctionValue{Name: fullName})
 		}
 
-		c.functions[fullName] = Function{
-			ID:     c.getFunctionID(fullName),
-			Async:  fn.Async,
-			Name:   fullName,
-			Params: fn.Params,
+		if !isNative {
+			fn, _ := inner.(FunctionStmt)
+			c.functions[fullName] = Function{
+				ID:     c.getFunctionID(fullName),
+				Async:  fn.Async,
+				Name:   fullName,
+				Params: fn.Params,
+			}
 		}
 	}
 
@@ -736,17 +757,21 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 	for _, raw := range stmt.Statements {
 		inner, exported := unwrapExport(raw)
 
-		v, ok := inner.(VariableStmt)
-		if !ok {
+		var name string
+		if v, ok := inner.(VariableStmt); ok {
+			name = v.Name
+		} else if s, ok := inner.(EmbedStmt); ok {
+			name = s.Name
+		} else {
 			continue
 		}
 
-		fullName := stmt.Name + "." + v.Name
+		fullName := stmt.Name + "." + name
 
-		namespaceVariables[v.Name] = fullName
+		namespaceVariables[name] = fullName
 
 		if !hasExplicitExports || exported {
-			members[v.Name] = NewNative(NamespaceMemberRef{GlobalName: fullName})
+			members[name] = NewNative(NamespaceMemberRef{GlobalName: fullName})
 		}
 	}
 
@@ -808,26 +833,6 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		}
 	}
 
-	// 6. Collect embeds
-	for _, raw := range stmt.Statements {
-		inner, exported := unwrapExport(raw)
-
-		embedStmt, ok := inner.(EmbedStmt)
-		if !ok {
-			continue
-		}
-
-		fullName := stmt.Name + "." + embedStmt.Name
-
-		namespaceEmbeds[embedStmt.Name] = fullName
-
-		if !hasExplicitExports || exported {
-			members[embedStmt.Name] = NewNative(NamespaceMemberRef{
-				GlobalName: fullName,
-			})
-		}
-	}
-
 	for _, raw := range stmt.Statements {
 		inner, _ := unwrapExport(raw)
 
@@ -865,7 +870,6 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 			})
 		}
 
-		// --- DECLARED AND PASSED SLOT ---
 		binding := c.declareVariable(fullName, true)
 		c.emit(OP_STORE_GLOBAL, VariableInfo{
 			Name:     fullName,
@@ -882,7 +886,6 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 	c.currentNamespaceClasses = namespaceClasses
 	c.currentNamespaceEnums = namespaceEnums
 	c.currentNamespaceInterfaces = namespaceInterfaces
-	c.currentNamespaceEmbeds = namespaceEmbeds
 	c.isCompilingNamespace = true
 
 	// 6. Compile enums as hidden globals FIRST.
@@ -918,29 +921,41 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		c.globalConstants[fullName] = true
 	}
 
-	// 7. Compile variables AFTER enums.
+	// 7. Compile variables and embeds AFTER enums.
 	for _, raw := range stmt.Statements {
 		inner, _ := unwrapExport(raw)
 
-		v, ok := inner.(VariableStmt)
-		if !ok {
-			continue
+		if v, ok := inner.(VariableStmt); ok {
+			fullName := stmt.Name + "." + v.Name
+
+			c.compileExpr(v.Value)
+
+			binding := c.declareVariable(fullName, v.Constant)
+			c.emit(OP_STORE_GLOBAL, VariableInfo{
+				Name:     fullName,
+				Constant: v.Constant,
+				TypeHint: v.TypeHint,
+				Slot:     binding.Slot,
+			})
+
+			c.globalConstants[fullName] = v.Constant
+
+		} else if embedStmt, ok := inner.(EmbedStmt); ok {
+			fullName := stmt.Name + "." + embedStmt.Name
+
+			namespacedEmbed := EmbedStmt{
+				Kind:             embedStmt.Kind,
+				Name:             fullName,
+				EmbeddedFilePath: embedStmt.EmbeddedFilePath,
+				Constant:         embedStmt.Constant,
+				TypeHint:         embedStmt.TypeHint,
+				File:             embedStmt.File,
+				Line:             embedStmt.Line,
+				Column:           embedStmt.Column,
+			}
+
+			c.compileEmbedStatement(namespacedEmbed)
 		}
-
-		fullName := stmt.Name + "." + v.Name
-
-		c.compileExpr(v.Value)
-
-		// --- DECLARED AND PASSED SLOT ---
-		binding := c.declareVariable(fullName, v.Constant)
-		c.emit(OP_STORE_GLOBAL, VariableInfo{
-			Name:     fullName,
-			Constant: v.Constant,
-			TypeHint: v.TypeHint,
-			Slot:     binding.Slot,
-		})
-
-		c.globalConstants[fullName] = v.Constant
 	}
 
 	// 8. Compile classes
@@ -1003,34 +1018,11 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		c.compileInterfaceStatement(namespacedInterface)
 	}
 
-	// 11. Compile embeds
-	for _, raw := range stmt.Statements {
-		inner, _ := unwrapExport(raw)
-
-		embedStmt, ok := inner.(EmbedStmt)
-		if !ok {
-			continue
-		}
-
-		fullName := stmt.Name + "." + embedStmt.Name
-
-		namespacedEmbed := EmbedStmt{
-			Kind:             embedStmt.Kind,
-			Name:             fullName,
-			EmbeddedFilePath: embedStmt.EmbeddedFilePath,
-			Constant:         embedStmt.Constant,
-			TypeHint:         embedStmt.TypeHint,
-		}
-
-		c.compileEmbedStatement(namespacedEmbed)
-	}
-
 	c.currentNamespaceFunctions = oldNamespaceFunctions
 	c.currentNamespaceVariables = oldNamespaceVariables
 	c.currentNamespaceClasses = oldNamespaceClasses
 	c.currentNamespaceEnums = oldNamespaceEnums
 	c.currentNamespaceInterfaces = oldNamespaceInterfaces
-	c.currentNamespaceEmbeds = oldNamespaceEmbeds
 	c.isCompilingNamespace = oldIsCompilingNamespace
 
 	// 10. Create namespace object.
@@ -1415,7 +1407,10 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 			LangErrorAt(ErrorName, c.currentFile, c.currentLine, c.currentColumn, "undefined variable in namespace: %s", s.Name)
 		}
 
-		c.emit(OP_ASSIGN_GLOBAL, c.globalIndexes[s.Name])
+		c.emit(OP_ASSIGN_GLOBAL, VariableInfo{
+			Name: s.Name,
+			Slot: c.globalIndexes[s.Name],
+		})
 
 	case IndexAssignStmt:
 		c.compileExpr(s.Object)
@@ -1442,18 +1437,20 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 		c.emit(OP_POP, nil)
 
 	case FunctionStmt:
+		c.setLocation(s.File, s.Line, s.Column)
 		if c.isCompilingMain() {
 			c.compileFunction(s)
 		} else {
 			c.compileNestedFunction(s)
 		}
-		c.setLocation(s.File, s.Line, s.Column)
+
+	case NativeFnStmt:
 
 	case ReturnStmt:
 		c.setLocation(s.File, s.Line, s.Column)
 
 		if !c.currentReturnType.IsEmpty() && c.currentReturnType.Name != "any" {
-			returnedType := "undefined"
+			returnedType := "null"
 			if s.HasValue {
 				returnedType = c.inferCompileTimeType(s.Value)
 			}
@@ -1468,7 +1465,7 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 		if s.HasValue {
 			c.compileExpr(s.Value)
 		} else {
-			c.emit(OP_CONST, NewUndefined())
+			c.emit(OP_CONST, NewNull())
 		}
 
 		for i := len(c.activeLocks) - 1; i >= 0; i-- {
@@ -1851,7 +1848,7 @@ func (c *Compiler) evalConstantExpr(expr Expr, err string) Value {
 			"%s",
 			err,
 		)
-		return NewUndefined()
+		return NewNull()
 	}
 }
 
@@ -2129,7 +2126,7 @@ func (c *Compiler) compileFunction(stmt FunctionStmt) {
 		c.compileStatement(bodyStmt)
 	}
 
-	c.emit(OP_CONST, NewUndefined())
+	c.emit(OP_CONST, NewNull())
 	c.emit(OP_RETURN, nil)
 
 	localCount := c.localCount
@@ -2379,7 +2376,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 			c.compileStatement(bodyStmt)
 		}
 
-		c.emit(OP_CONST, NewUndefined())
+		c.emit(OP_CONST, NewNull())
 		c.emit(OP_RETURN, nil)
 
 		captures := []CapturedVar{}
@@ -2423,9 +2420,6 @@ func (c *Compiler) compileExpr(expr Expr) {
 
 	case NullExpr:
 		c.emit(OP_CONST, NullValue{})
-
-	case UndefinedExpr:
-		c.emit(OP_CONST, NewUndefined())
 
 	case ObjectExpr:
 		names := make([]ObjectFieldsInfo, len(e.Fields))
@@ -2707,6 +2701,23 @@ func (c *Compiler) compileExpr(expr Expr) {
 			return
 		}
 
+		if retType, isNative := c.nativeFunctions[e.Name]; isNative {
+			for _, arg := range e.Args {
+				c.compileExpr(arg)
+			}
+
+			c.setLocation(e.File, e.Line, e.Column)
+
+			sanitizedName := strings.ReplaceAll(e.Name, ".", "_")
+			c.emit(OP_NATIVE_CALL, NativeCallInfo{
+				Name:          sanitizedName,
+				ArgCount:      len(e.Args),
+				ReturnsString: retType == "string",
+			})
+
+			return
+		}
+
 		if c.currentNamespaceFunctions != nil {
 			if fullName, exists := c.currentNamespaceFunctions[e.Name]; exists {
 				for _, arg := range e.Args {
@@ -2745,6 +2756,19 @@ func (c *Compiler) compileExpr(expr Expr) {
 		})
 
 	case CallValueExpr:
+		if len(e.Args) == 1 {
+			if spread, ok := e.Args[0].(SpreadExpr); ok {
+				c.compileExpr(e.Callee)
+
+				c.compileExpr(spread.Value)
+
+				c.setLocation(e.File, e.Line, e.Column)
+
+				c.emit(OP_CALL_VALUE_SPREAD, nil)
+				return
+			}
+		}
+
 		if ident, ok := e.Callee.(IdentExpr); ok {
 			if c.currentNamespaceClasses != nil {
 				if fullName, exists := c.currentNamespaceClasses[ident.Name]; exists {
@@ -2761,6 +2785,23 @@ func (c *Compiler) compileExpr(expr Expr) {
 
 					return
 				}
+			}
+
+			if retType, isNative := c.nativeFunctions[ident.Name]; isNative {
+				for _, arg := range e.Args {
+					c.compileExpr(arg)
+				}
+
+				c.setLocation(ident.File, ident.Line, ident.Column)
+
+				sanitizedName := strings.ReplaceAll(ident.Name, ".", "_")
+				c.emit(OP_NATIVE_CALL, NativeCallInfo{
+					Name:          sanitizedName,
+					ArgCount:      len(e.Args),
+					ReturnsString: retType == "string",
+				})
+
+				return
 			}
 
 			if c.currentNamespaceFunctions != nil {
@@ -2952,7 +2993,7 @@ func (c *Compiler) compileMethod(className string, stmt FunctionStmt) {
 		c.compileStatement(bodyStmt)
 	}
 
-	c.emit(OP_CONST, NewUndefined())
+	c.emit(OP_CONST, NewNull())
 	c.emit(OP_RETURN, nil)
 
 	params := make([]Param, 0, len(stmt.Params)+1)
@@ -3027,8 +3068,6 @@ func (c *Compiler) inferCompileTimeType(expr Expr) string {
 		return "bool"
 	case NullExpr:
 		return "null"
-	case UndefinedExpr:
-		return "undefined"
 	case ArrayExpr:
 		return "array"
 	case ObjectExpr:
@@ -3078,4 +3117,195 @@ func (c *Compiler) checkCompileTimeArguments(fnName string, args []Expr, params 
 			c.fatalError(ErrorType, "cannot pass %s to parameter '%s' of function '%s' (expected %s)", argType, param.Name, fnName, param.TypeHint.Name)
 		}
 	}
+}
+
+func (c *Compiler) collectNativeFnStmts(stmts []Stmt, prefix string, out *[]NativeFnStmt) {
+	for _, raw := range stmts {
+		stmt, _ := unwrapExport(raw)
+
+		switch s := stmt.(type) {
+		case NativeFnStmt:
+			fullName := s.Name
+			if prefix != "" {
+				fullName = prefix + "." + s.Name
+			}
+			s.Name = fullName
+			*out = append(*out, s)
+
+		case NamespaceStmt:
+			c.collectNativeFnStmts(s.Statements, s.Name, out)
+		}
+	}
+}
+
+func (c *Compiler) compileNativeFunctions(statements []Stmt) {
+	nativeFns := []NativeFnStmt{}
+	c.collectNativeFnStmts(statements, "", &nativeFns)
+
+	if len(nativeFns) == 0 {
+		return
+	}
+
+	var goSource strings.Builder
+	goSource.WriteString("package main\n")
+	goSource.WriteString("import \"C\"\n")
+
+	imports := map[string]bool{}
+
+	for i := range nativeFns {
+		lines := strings.Split(nativeFns[i].GoCode, "\n")
+		cleanBody := []string{}
+		for _, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "import ") {
+				imp := strings.TrimSpace(strings.TrimPrefix(trimmed, "import "))
+				imports[imp] = true
+			} else {
+				cleanBody = append(cleanBody, line)
+			}
+		}
+		nativeFns[i].GoCode = strings.Join(cleanBody, "\n")
+	}
+
+	goSource.WriteString("import (\n")
+	for imp := range imports {
+		goSource.WriteString("    ")
+		goSource.WriteString(imp)
+		goSource.WriteString("\n")
+	}
+	goSource.WriteString(")\n\n")
+
+	stringRegex := regexp.MustCompile(`"(?:\\.|[^"\\])*"|` + "`" + `[^` + "`" + `]*` + "`")
+
+	for i, fn := range nativeFns {
+		var stashedStrings []string
+		placeholderPrefix := "__TINY_STR_STASH_"
+
+		stashedCode := stringRegex.ReplaceAllStringFunc(nativeFns[i].GoCode, func(matched string) string {
+			placeholder := fmt.Sprintf("%s%d__", placeholderPrefix, len(stashedStrings))
+			stashedStrings = append(stashedStrings, matched)
+			return placeholder
+		})
+
+		for _, targetFn := range nativeFns {
+			parts := strings.Split(targetFn.Name, ".")
+			shortName := parts[len(parts)-1]
+			sanitizedName := strings.ReplaceAll(targetFn.Name, ".", "_")
+
+			re := regexp.MustCompile(`\b` + regexp.QuoteMeta(shortName) + `\b`)
+			stashedCode = re.ReplaceAllString(stashedCode, sanitizedName)
+		}
+
+		for idx, original := range stashedStrings {
+			placeholder := fmt.Sprintf("%s%d__", placeholderPrefix, idx)
+			stashedCode = strings.Replace(stashedCode, placeholder, original, 1)
+		}
+
+		nativeFns[i].GoCode = stashedCode
+
+		sanitizedName := strings.ReplaceAll(fn.Name, ".", "_")
+
+		goSource.WriteString("//export ")
+		goSource.WriteString(sanitizedName)
+		goSource.WriteString("\n")
+
+		params := []string{}
+		for _, param := range fn.Params {
+			if strings.Contains(param.TypeHint.Name, "|") {
+				LangErrorAt(ErrorSyntax, fn.File, fn.Line, fn.Column, "native functions cannot have union types")
+			}
+			typ := ""
+			switch param.TypeHint.Name {
+			case "string":
+				typ = "string"
+			case "bool":
+				typ = "bool"
+			case "number":
+				typ = "float64"
+			case "array":
+				typ = "[]float64"
+			default:
+				LangErrorAt(ErrorSyntax, fn.File, fn.Line, fn.Column, "invalid parameter '%s' type for native function '%s': only 'string', 'array', 'bool' or 'number' are allowed.", param.Name, fn.Name)
+			}
+			params = append(params, param.Name+" "+typ)
+		}
+
+		if strings.Contains(fn.ReturnType.Name, "|") {
+			LangErrorAt(ErrorSyntax, fn.File, fn.Line, fn.Column, "native functions cannot have union types")
+		}
+
+		retType := ""
+		switch fn.ReturnType.Name {
+		case "string":
+			retType = "string"
+		case "bool":
+			retType = "bool"
+		case "array":
+			retType = "[]float64"
+		case "null":
+			retType = ""
+		case "number":
+			retType = "float64"
+		default:
+			LangErrorAt(ErrorSyntax, fn.File, fn.Line, fn.Column, "invalid return type for native function '%s': only 'string', 'array', 'bool', 'null', or 'number' are allowed.", fn.Name)
+		}
+
+		signature := fmt.Sprintf("func %s(%s) %s", sanitizedName, strings.Join(params, ", "), retType)
+		goSource.WriteString(signature)
+		goSource.WriteString(" {\n")
+		goSource.WriteString(stashedCode)
+		goSource.WriteString("\n")
+		goSource.WriteString("}\n\n")
+	}
+
+	goSource.WriteString("func main() {}\n")
+
+	hashBytes := sha256.Sum256([]byte(goSource.String()))
+	hashStr := hex.EncodeToString(hashBytes[:])
+
+	cacheDir := filepath.Join(os.TempDir(), "tiny_compiler_cache")
+	err := os.MkdirAll(cacheDir, 0755)
+	if err != nil {
+		c.fatalError(ErrorInternal, "failed to create compiler cache directory: %v", err)
+	}
+
+	cachedWasmFile := filepath.Join(cacheDir, "tiny_native_"+hashStr+".wasm")
+
+	wasmBytes, err := os.ReadFile(cachedWasmFile)
+	if err == nil {
+		wasmInstr := Instruction{
+			Op:    OP_LOAD_WASM,
+			Value: wasmBytes,
+		}
+		c.mainInstructions = append([]Instruction{wasmInstr}, c.mainInstructions...)
+		return
+	}
+
+	tmpGoFile := filepath.Join(os.TempDir(), "tiny_native_source.go")
+	err = os.WriteFile(tmpGoFile, []byte(goSource.String()), 0644)
+	if err != nil {
+		c.fatalError(ErrorInternal, "failed to write temporary Go source: %v", err)
+	}
+	defer os.Remove(tmpGoFile)
+
+	cmd := exec.Command("tinygo", "build", "-target=wasi", "-scheduler=none", "-no-debug", "-o", cachedWasmFile, tmpGoFile)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err = cmd.Run()
+	if err != nil {
+		os.Remove(cachedWasmFile)
+		c.fatalError(ErrorInternal, "failed to compile native functions with TinyGo:\n%s\n%v", stderr.String(), err)
+	}
+
+	wasmBytes, err = os.ReadFile(cachedWasmFile)
+	if err != nil {
+		c.fatalError(ErrorInternal, "failed to read compiled Wasm binary: %v", err)
+	}
+	wasmInstr := Instruction{
+		Op:    OP_LOAD_WASM,
+		Value: wasmBytes,
+	}
+
+	c.mainInstructions = append([]Instruction{wasmInstr}, c.mainInstructions...)
 }

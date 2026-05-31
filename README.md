@@ -1,8 +1,8 @@
 <div align="center">
   <img src="examples/tiny.png" alt="Tiny Logo" width="200">
   <h1>Tiny Programming Language</h1>
-  <p><b>Small. Fast. Expressive.</b></p>
-  <p>Tiny is a lightweight scripting language and stack-based bytecode VM written in Go.</p>
+  <p><b>A high-performance, concurrent bytecode virtual machine and language written in Go.</b></p>
+  <p>Tiny combines the development speed of dynamic coding with a robust, multi-threaded runtime engine.</p>
 
   <p>
     <img src="https://img.shields.io/badge/Language-Tiny-blue.svg">
@@ -14,45 +14,41 @@
 
 ---
 
-Tiny sits in the "sweet spot" between a quick bash script and a complex Go program. It’s perfect for CLI tools, JSON automation, HTTP services, and native-plugin experiments.
+Tiny bridges the gap between high-level dynamic languages and strict compiled systems. It compiles human-readable source code into compact binary bytecode instructions executed on a custom stack-based VM. It is highly optimized for concurrent network services, desktop automation, and lightweight standalone tool distribution.
 
 <p align="center">
   <img src="examples/showcase.gif" alt="Tiny Showcase">
 </p>
 
-## Features
+## Core Features
 
-* Dynamically typed with optional static type hints
-* Structural interfaces for defining object shapes
-* Compiles to bytecode (.tbc) and runs on a custom VM
-* Case-sensitive syntax
-* In-place bytecode optimizations (fusing common loop and variable operations)
-* Built-in Language Server (LSP) for VS Code (supporting syntax warnings, autocomplete, jump-to-definition, and renaming)
-* Single-binary packaging (`tiny pack` bundles your script and the VM into a standalone executable)
-* Native Go-based standard library, including:
-  * `io` (console I/O)
-  * `fs` (file system operations)
-  * `json` (high-performance parsing and stringifying)
-  * `http` (built-in client and server)
-  * `math` (math operations and matrix multiplication)
-  * `desktop` (CGO-free mouse, keyboard, and clipboard automation)
-  * `test` (integrated unit testing framework)
-  * `process`, `regex`, `time`, `net`, `sync`
+* **True Concurrency:** Native OS-level multi-threading via Go-backed scheduler loops. Spawn parallel tasks seamlessly using the `spawn` keyword.
+* **Thread Safety:** Built-in mutex engine featuring a native `lock` block syntax to automatically manage mutex acquisition and release, preventing common deadlock scenarios.
+* **Hybrid Type System:** Dynamically typed for rapid prototyping, with full support for optional static type hints and structural interfaces (shape-based validation).
+* **Compiled Performance:** Translates source code into structured bytecode (`.tbc`). Features in-place instruction fusing, constant folding, and flat slot-based variable lookups.
+* **Self-Contained Distribution:** Single-command packaging (`tiny pack`) bundles your bytecode and the runtime interpreter into an independent, obfuscated ~9MB native executable.
+* **Production-Ready Standard Library:** Completely CGO-free core modules:
+  * `http` (Fully concurrent HTTP client and microservices server architecture - capable of handling 45,000+ requests per second)
+  * `desktop` (Cross-platform mouse, keyboard, and clipboard automation)
+  * `json` (High-performance parsing/serialization directly mapped to Go streams)
+  * `io`, `fs`, `math` (featuring matrix multiplication), `regex`, `sync`, and `test` (integrated unit testing framework).
+* **Native Plugin Architecture:** High-performance FFI layer using lazyloading (Windows) and `purego` (Linux). Link external DLLs/SOs cleanly via JSON-serialized message protocols without breaking cross-compilation.
+* **Inline Go Extensions:** Use the `native fn` keyword to write high-performance Go logic directly in your code. Code is compiled to WebAssembly via TinyGo for near-native speeds.
 
 ## VS Code Support
 
-Tiny has a built-in Language Server (LSP) to provide a modern development workflow. You can install the official VS Code extension for syntax highlighting, autocomplete, and diagnostics. The LSP supports advanced static analysis features such as type narrowing, which refines variable types after conditional checks.
+Tiny includes a native Language Server (LSP) providing advanced static analysis, type narrowing (refining types following conditional blocks), autocomplete, diagnostics, and jump-to-definition tracking.
 
 <p align="center">
   <img src="examples/extension.png" alt="VS Code Extension" width="500">
 </p>
 
-The extension can be downloaded by searching for "Tiny" in the VS Code extension marketplace.
+---
 
-## Quick Start (Language Tour)
+## Language Tour
 
-### Structural Interfaces
-Tiny uses structural typing. Objects are validated against interfaces based on their shape without explicit implementation.
+### Structural Interfaces & Shape Validation
+Objects are implicitly validated against structural interfaces at runtime based entirely on their properties.
 ```js
 import std "io";
 
@@ -68,7 +64,8 @@ fn complete(t: Task) {
 complete({ title: "Write Documentation", done: false });
 ```
 
-### Classes and Methods
+### Native Classes & Encapsulation
+
 ```js
 import std "io";
 
@@ -84,93 +81,113 @@ let g = Greeter("Welcome");
 io.println(g.greet("Tiny"));
 ```
 
-### Unit Testing
-The built-in `test` module provides a standard way to verify logic.
-```js
-import std "test";
+### Concurrency & Parallel Threading
 
-test.run("math operations", fn() {
-    test.assert(1 + 1 == 2, "basic addition");
-    test.equal(10 * 2, 20, "multiplication check");
-});
-```
+Tiny bypasses single-threaded event loops and Global Interpreter Locks (GIL). Tasks spawned run in parallel, backed by independent, isolated VM state spaces.
 
-### Async Tasks
 ```js
 import std "io";
 import std "time";
 
 let task = spawn fn() {
     time.sleep(1000);
-    return "Result from background!";
+    return "Result from parallel thread!";
 };
 
-io.println("Doing other things...");
+io.println("Main thread continuing execution...");
 io.println(await task);
 ```
 
-## Installation & Setup
+### High-Performance Native Functions (Go)
+Write performance-critical logic in Go directly inside your Tiny code. Native functions are compiled to WebAssembly via [TinyGo](https://tinygo.org/) for near-native throughput. For example, a recursive Fibonacci implementation (`fib(30)`) executes in approximately **10ms**.
 
-### Pre-built Binaries
-You can download the pre-compiled executable for your OS from the [Releases Page](https://github.com/confh/Tiny/releases/latest).
+> **Note:** Compiling code with `native fn` requires **Go** and **TinyGo** to be installed on the host machine.
 
-1. Move the binary into a folder named `.tiny` in your home directory (e.g., `C:\Users\YourName\.tiny\tiny.exe` or `~/.tiny/tiny`).
-2. Add the `.tiny` folder path to your system's `PATH` environment variable.
-3. Grab the official VS Code extension from the marketplace for LSP support.
+```js
+import std "io";
+import std "time";
 
-### Building from Source
-If you prefer to build from source, clone the repository and build:
+native fn gosha256(input: string): string {
+    go {
+        import "crypto/sha256"
+        import "encoding/hex"
 
-```bash
-git clone https://github.com/confh/Tiny.git tiny
-cd tiny
+        h := sha256.Sum256([]byte(input))
+        return hex.EncodeToString(h[:])
+    }
+}
 
-# On Linux/macOS
-./build.sh
+// Direct recursion within native blocks
+native fn goFib(n: number): number {
+    go {
+        if n < 2 {return n }
+        return goFib(n - 1) + goFib(n - 2)
+    }
+}
 
-# On Windows
-.\build.bat
+io.println(gosha256("Tiny is fast"));
+
+const start = time.nowMs()
+
+io.println(`Fibonacci(30): ${goFib(30)}`);
+
+const end = time.nowMs()
+
+io.println(`Native Fibonacci took ${end-start}ms`)
 ```
 
-## How It Works (Performance & Design)
+---
 
-Tiny compiles source files into a custom binary bytecode instruction stream (`.tbc`) before running them. The VM uses several optimizations to keep things fast:
+## Virtual Machine Architecture & Optimizations
 
-* **Fast Slot-Based Access:** Both local and global variables are resolved by the compiler and indexed as flat numeric slots inside call frames and global storage, eliminating expensive string-map lookups during execution.
-* **Instruction Fusing:** The optimizer passes over the bytecode and fuses common sequences (like `OP_LOAD_LOCAL` followed by `OP_INC` and `OP_ASSIGN`) into single, optimized opcodes like `OP_INC_LOCAL`.
-* **Constant Folding:** Static math expressions (like `1 + 2 * 3`) are evaluated by the compiler during codegen rather than at runtime.
-* **Go GC Integration:** Tiny values are directly backed by Go's concurrent garbage collector, so memory is handled automatically.
+Tiny compiles plain text source files into a dense, binary bytecode stream (`.tbc`) before execution. The stack-based VM utilizes several modern architectural design choices to maximize throughput:
 
-## Distribution & Bundling
+* **Isolated VM State Cloning:** When `spawn` is invoked, the engine duplicates the call frame tracking structures and memory stack to isolate concurrent execution spaces. Shared resource operations are wrapped cleanly using native synchronization blocks:
+```js
+lock communicationMutex {
+    // Thread-safe mutations happen here
+}
+```
 
-Tiny has built-in tools to package and distribute your code:
 
-### Standalone Binaries (`tiny pack`)
-You can bundle your compiled bytecode and the Tiny interpreter into a single standalone binary using the pack command:
+* **Flat Slot-Based Access:** Resolution of local and global variables happens entirely during compilation. Variables are mapped to numerical indices within flat arrays inside execution frames, eliminating string-map lookups during runtime.
+* **Instruction Fusing:** The pipeline runs an optimization pass over generated bytecode to compress patterns (e.g., fusing sequential loading, incrementing, and assignment operations into singular opcodes like `OP_INC_LOCAL`).
+* **Automated Memory Tracking:** Tiny primitives integrate natively with Go's concurrent garbage collector, maintaining automatic memory cycles without manual allocation tracking.
+
+---
+
+## Bundling & Bytecode Security
+
+### Standalone Packaging (`tiny pack`)
+
+Compress and compile your script assets straight into a single native runtime executable:
 
 ```bash
 tiny pack src/main.tiny -o mytool
 ```
 
-<p align="center">
-  <img src="examples/packing.gif" alt="Tiny Packing">
-</p>
+### Cryptographic Asset Embedding
 
-### Static Asset Embedding
-The `embedstr` and `embedbin` keywords allow you to include external assets directly in the compiled bytecode.
+The `embedstr` and `embedbin` operations securely compile internal text configurations or assets straight into the binary stream, passing them through an automated XOR obfuscation layer to shield keys and strings from simple binary extraction attacks (such as the standard `strings` command):
+
 ```js
 embedstr "./config.json" const config
 embedbin "./icon.png" const iconBytes
-
-// Assets are bundled into the .tbc or packed executable
 ```
 
-### Distribution Folder (`tiny dist`)
-If your project uses **Native Plugins** (DLLs/SOs), `tiny dist` is the answer. It packs the executable *and* automatically gathers all linked plugins into a clean `dist/` folder.
+### Production Shipments (`tiny dist`)
+
+When working with native external shared libraries, the system resolves dependency tracking instantly, packaging the application along with any required `.dll` or `.so` native components into a clean target environment:
+
 ```bash
 tiny dist src/main.tiny -o release/app
 ```
 
 ---
-
-*Tiny is an open-source project licensed under the MIT License.*
+<div align="center">
+  <p>Tiny Language © 2026 | MIT Licensed</p>
+  <p>
+    <a href="https://github.com/confh/Tiny/issues">Report an Issue</a> • 
+    <a href="https://github.com/confh/Tiny/blob/main/LICENSE">License</a>
+  </p>
+</div>

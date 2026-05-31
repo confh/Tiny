@@ -157,8 +157,6 @@ func (l *Lexer) scanToken() Token {
 			tok.Type = TOKEN_THIS
 		case "null":
 			tok.Type = TOKEN_NULL
-		case "undefined":
-			tok.Type = TOKEN_UNDEFINED
 		case "class":
 			tok.Type = TOKEN_CLASS
 		case "enum":
@@ -195,6 +193,8 @@ func (l *Lexer) scanToken() Token {
 			tok.Type = TOKEN_EMBED_STR
 		case "embedbin":
 			tok.Type = TOKEN_EMBED_BIN
+		case "native":
+			tok.Type = TOKEN_NATIVE
 		default:
 			tok.Type = TOKEN_IDENT
 		}
@@ -519,7 +519,7 @@ func (l *Lexer) canInsertSemi(t TokenType) bool {
 	switch t {
 	case TOKEN_IDENT, TOKEN_NUMBER, TOKEN_STRING, TOKEN_BACKTICK_STRING,
 		TOKEN_BREAK, TOKEN_CONTINUE, TOKEN_RETURN, TOKEN_IOTA,
-		TOKEN_TRUE, TOKEN_FALSE, TOKEN_NULL, TOKEN_UNDEFINED,
+		TOKEN_TRUE, TOKEN_FALSE, TOKEN_NULL,
 		TOKEN_THIS, TOKEN_INCREMENT, TOKEN_DECREMENT,
 		TOKEN_RPAREN, TOKEN_RBRACKET, TOKEN_RBRACE:
 		return true

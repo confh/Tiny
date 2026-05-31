@@ -146,7 +146,7 @@ func splitUnionType(typ string) []string {
 
 func isNullishLSPType(typ string) bool {
 	typ = strings.TrimSpace(typ)
-	return typ == "null" || typ == "undefined"
+	return typ == "null"
 }
 
 func scanCatchVariables(scope *Scope, text string, pos Position, uri string) {
@@ -328,7 +328,6 @@ func shouldCheckMemberAccess(receiverType string) bool {
 	if receiverType == "any" ||
 		receiverType == "unknown" ||
 		receiverType == "object" ||
-		receiverType == "undefined" ||
 		receiverType == "null" {
 		return false
 	}
@@ -338,8 +337,7 @@ func shouldCheckMemberAccess(receiverType string) bool {
 			if part == "any" ||
 				part == "unknown" ||
 				part == "object" ||
-				part == "null" ||
-				part == "undefined" {
+				part == "null" {
 				return false
 			}
 		}
@@ -1522,7 +1520,7 @@ func inferReturnTypeFromBody(scope *Scope, body string, explicitReturn string) s
 
 	matches := returnRegex.FindAllStringSubmatch(body, -1)
 	if len(matches) == 0 {
-		return "undefined"
+		return "null"
 	}
 
 	for _, match := range matches {
@@ -1620,10 +1618,6 @@ func inferExprTypeFromText(scope *Scope, expr string) string {
 
 	if expr == "null" {
 		return "null"
-	}
-
-	if expr == "undefined" {
-		return "undefined"
 	}
 
 	if strings.HasPrefix(expr, "spawn fn") {
@@ -1925,23 +1919,14 @@ func splitTopLevel(text string, delimiter byte) []string {
 func appendNullableLSPType(typ string) string {
 	parts := splitUnionType(typ)
 
-	hasUndefined := false
 	hasNull := false
 
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
 
-		if part == "undefined" {
-			hasUndefined = true
-		}
-
 		if part == "null" {
 			hasNull = true
 		}
-	}
-
-	if !hasUndefined {
-		parts = append(parts, "undefined")
 	}
 
 	if !hasNull {
@@ -2145,6 +2130,21 @@ func collectExportsFromAST(scope *Scope, text string, exports map[string]SymbolI
 		case ClassStmt:
 			sym := classSymbolFromStmt(scope, s, uri, text)
 			exports[sym.Name] = sym
+			scope.Define(sym)
+
+		case NativeFnStmt:
+			sym := SymbolInfo{
+				Name:      s.Name,
+				Kind:      SymbolFunction,
+				Type:      "function",
+				Detail:    "export native fn " + s.Name,
+				Line:      s.Line,
+				Column:    s.Column,
+				SourceURI: uri,
+				Params:    stdArgsFromParams(scope, s.Params),
+				Returns:   returnTypeNameScoped(scope, s.ReturnType),
+			}
+			exports[s.Name] = sym
 			scope.Define(sym)
 
 		case InterfaceStmt:
@@ -3449,6 +3449,20 @@ func (a *astSemanticAnalyzer) predeclareStatements(stmts []Stmt) {
 				Detail: "import " + s.Path, Line: s.Line, Column: s.Column, SourceURI: a.uri,
 			})
 
+		case NativeFnStmt:
+			a.checkNamingConflict(s.Name, s.Line, s.Column)
+			a.root.Define(SymbolInfo{
+				Name:      s.Name,
+				Kind:      SymbolFunction,
+				Type:      "function",
+				Detail:    "native fn " + s.Name,
+				Line:      s.Line,
+				Column:    s.Column,
+				SourceURI: a.uri,
+				Params:    stdArgsFromParams(a.scope, s.Params),
+				Returns:   returnTypeNameScoped(a.root, s.ReturnType),
+			})
+
 		case FunctionStmt:
 			a.checkNamingConflict(s.Name, s.Line, s.Column)
 			a.root.Define(SymbolInfo{Name: s.Name, Kind: SymbolFunction, Type: "function", Detail: "fn " + s.Name, Line: s.Line, Column: s.Column, SourceURI: a.uri, Params: stdArgsFromParams(a.scope, s.Params), Returns: returnTypeNameScoped(a.root, s.ReturnType)})
@@ -3583,6 +3597,8 @@ func (a *astSemanticAnalyzer) visitStmt(stmt Stmt) {
 	case FunctionStmt:
 		a.visitFunction(s)
 
+	case NativeFnStmt:
+
 	case ClassStmt:
 		for _, f := range s.Fields {
 			a.validateTypeHint(f.TypeHint, f.Line, f.Column)
@@ -3622,7 +3638,7 @@ func (a *astSemanticAnalyzer) visitStmt(stmt Stmt) {
 				}
 			}
 		} else {
-			if a.currentReturnType != "" && a.currentReturnType != "any" && a.currentReturnType != "undefined" && a.currentReturnType != "void" {
+			if a.currentReturnType != "" && a.currentReturnType != "any" && a.currentReturnType != "null" {
 				a.addDiagnostic(s.Line, s.Column, fmt.Sprintf("cannot return empty value from this function (expected '%s')", a.currentReturnType))
 			}
 		}
@@ -3765,7 +3781,7 @@ func (a *astSemanticAnalyzer) typeNameExists(typ string) bool {
 	}
 
 	switch typ {
-	case "string", "number", "bool", "object", "array", "any", "null", "undefined", "function", "error":
+	case "string", "number", "bool", "object", "array", "any", "null", "function", "error":
 		return true
 	}
 
@@ -3837,7 +3853,7 @@ func normalizeLSPType(scope *Scope, typ string) string {
 	}
 
 	switch typ {
-	case "string", "number", "bool", "object", "array", "any", "null", "undefined", "function", "error":
+	case "string", "number", "bool", "object", "array", "any", "null", "function", "error":
 		return typ
 	}
 
@@ -3888,8 +3904,6 @@ func (a *astSemanticAnalyzer) inferExprType(expr Expr) string {
 		return "bool"
 	case NullExpr:
 		return "null"
-	case UndefinedExpr:
-		return "undefined"
 	case ArrayExpr:
 		for _, el := range e.Elements {
 			a.inferExprType(el)
@@ -4310,7 +4324,7 @@ func (a *astSemanticAnalyzer) privateMemberByType(typ string, member string) boo
 func (a *astSemanticAnalyzer) memberExistsByType(typ string, member string) bool {
 	typ = strings.TrimSpace(typ)
 
-	if typ == "" || typ == "any" || typ == "unknown" || typ == "null" || typ == "undefined" {
+	if typ == "" || typ == "any" || typ == "unknown" || typ == "null" {
 		return true
 	}
 
@@ -4546,7 +4560,7 @@ func findEnclosingIfBlock(text string, pos Position) (string, bool) {
 	return "", false
 }
 
-var nullCheckRegex = regexp.MustCompile(`if\s+([A-Za-z_][A-Za-z0-9_]*)\s*!=\s*(null|undefined)`)
+var nullCheckRegex = regexp.MustCompile(`if\s+([A-Za-z_][A-Za-z0-9_]*)\s*!=\s*(null)`)
 var typeOfRegex = regexp.MustCompile("if\\s+typeof\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*==\\s*[\"'\u0060](string|number|bool|object|array)[\"'\u0060]")
 
 func applyTypeNarrowing(scope *Scope, ifLine string) {
@@ -4556,7 +4570,7 @@ func applyTypeNarrowing(scope *Scope, ifLine string) {
 			parts := splitUnionType(sym.Type)
 			newParts := []string{}
 			for _, part := range parts {
-				if part != "null" && part != "undefined" {
+				if part != "null" {
 					newParts = append(newParts, part)
 				}
 			}

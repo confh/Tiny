@@ -13,7 +13,7 @@ var stdDesktopMetadata = StdModuleInfo{
 				{Name: "x", Type: "number"},
 				{Name: "y", Type: "number"},
 			},
-			Returns:     "undefined",
+			Returns:     "null",
 			Description: "Moves the mouse pointer to the given screen coordinates (x, y).",
 		},
 		"moveMouseSmooth": {
@@ -22,25 +22,25 @@ var stdDesktopMetadata = StdModuleInfo{
 				{Name: "x", Type: "number"},
 				{Name: "y", Type: "number"},
 			},
-			Returns:     "undefined",
+			Returns:     "null",
 			Description: "Smoothly moves the mouse pointer to the given (x, y) coordinates.",
 		},
 		"click": {
 			Name:        "click",
 			Args:        []StdArg{},
-			Returns:     "undefined",
+			Returns:     "null",
 			Description: "Performs a left mouse button click at the current mouse position.",
 		},
 		"rightClick": {
 			Name:        "rightClick",
 			Args:        []StdArg{},
-			Returns:     "undefined",
+			Returns:     "null",
 			Description: "Performs a right mouse button click at the current mouse position.",
 		},
 		"doubleClick": {
 			Name:        "doubleClick",
 			Args:        []StdArg{},
-			Returns:     "undefined",
+			Returns:     "null",
 			Description: "Performs a double left mouse button click at the current mouse position.",
 		},
 		"mouseDown": {
@@ -48,7 +48,7 @@ var stdDesktopMetadata = StdModuleInfo{
 			Args: []StdArg{
 				{Name: "button", Type: "string"},
 			},
-			Returns:     "undefined",
+			Returns:     "null",
 			Description: "Presses down the specified mouse button ('left' or 'right').",
 		},
 		"mouseUp": {
@@ -56,7 +56,7 @@ var stdDesktopMetadata = StdModuleInfo{
 			Args: []StdArg{
 				{Name: "button", Type: "string"},
 			},
-			Returns:     "undefined",
+			Returns:     "null",
 			Description: "Releases the specified mouse button ('left' or 'right').",
 		},
 		"press": {
@@ -64,7 +64,7 @@ var stdDesktopMetadata = StdModuleInfo{
 			Args: []StdArg{
 				{Name: "key", Type: "string"},
 			},
-			Returns:     "undefined",
+			Returns:     "null",
 			Description: "Presses the specified keyboard key.",
 		},
 		"hotKey": {
@@ -73,7 +73,7 @@ var stdDesktopMetadata = StdModuleInfo{
 				{Name: "key1", Type: "string"},
 				{Name: "key2", Type: "string"},
 			},
-			Returns:     "undefined",
+			Returns:     "null",
 			Description: "Sends a hotkey combination (e.g., Ctrl+C) using two keys.",
 		},
 		"type": {
@@ -81,7 +81,7 @@ var stdDesktopMetadata = StdModuleInfo{
 			Args: []StdArg{
 				{Name: "text", Type: "string"},
 			},
-			Returns:     "undefined",
+			Returns:     "null",
 			Description: "Types the given text using the keyboard.",
 		},
 		"mousePosition": {
@@ -101,7 +101,7 @@ var stdDesktopMetadata = StdModuleInfo{
 			Args: []StdArg{
 				{Name: "filename", Type: "string"},
 			},
-			Returns:     "undefined",
+			Returns:     "null",
 			Description: "Saves a screenshot of the screen to the specified file.",
 		},
 		"getClipboard": {
@@ -115,7 +115,7 @@ var stdDesktopMetadata = StdModuleInfo{
 			Args: []StdArg{
 				{Name: "text", Type: "string"},
 			},
-			Returns:     "undefined",
+			Returns:     "null",
 			Description: "Sets the system clipboard to the provided text.",
 		},
 	},

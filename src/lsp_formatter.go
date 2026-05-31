@@ -302,6 +302,14 @@ func writeMultiCharOperator(out *strings.Builder, runes []rune, index int) (bool
 		"&&",
 		"||",
 		"=>",
+		":=",
+		"<-",
+		"&^",
+		"&^=",
+		"<<",
+		">>",
+		"<<=",
+		">>=",
 	}
 
 	for _, op := range spacedOperators {
@@ -318,7 +326,7 @@ func writeMultiCharOperator(out *strings.Builder, runes []rune, index int) (bool
 
 func isTinyOperator(ch rune) bool {
 	switch ch {
-	case '=', '+', '-', '*', '/', '%', '<', '>', '!', '.', '?', '|':
+	case '=', '+', '-', '*', '/', '%', '<', '>', '!', '.', '?', '|', '&', '^':
 		return true
 	default:
 		return false

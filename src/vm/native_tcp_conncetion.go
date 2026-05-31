@@ -46,7 +46,7 @@ func tcpConnReadLine(vm *VM, tcp *NativeTcpConnectionValue, args []Value) {
 	if err != nil {
 		if err == io.EOF {
 			if line == "" {
-				vm.push(NewUndefined())
+				vm.push(NewNull())
 				return
 			}
 
@@ -101,7 +101,7 @@ func tcpConnWrite(vm *VM, tcp *NativeTcpConnectionValue, args []Value) {
 		vm.runtimeError(ErrorRuntime, "tcp.write expects string or buffer, got %s.", TypeName(args[0]))
 	}
 
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }
 
 func tcpConnClose(vm *VM, tcp *NativeTcpConnectionValue, args []Value) {
@@ -109,5 +109,5 @@ func tcpConnClose(vm *VM, tcp *NativeTcpConnectionValue, args []Value) {
 
 	tcp.Connection.Close()
 
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }

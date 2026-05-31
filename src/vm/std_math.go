@@ -170,14 +170,6 @@ var stdMathMetadata = StdModuleInfo{
 			Returns:     "object",
 			Description: "Scales a matrix by a scalar (returns a new matrix object).",
 		},
-		"fib": {
-			Name: "fib",
-			Args: []StdArg{
-				{Name: "n", Type: "int", Optional: false},
-			},
-			Returns:     "int",
-			Description: "Returns the nth Fibonacci number (recursive implementation).",
-		},
 	},
 }
 
@@ -204,7 +196,6 @@ func init() {
 		"matMul":       stdMathMatMul,
 		"matTranspose": stdMathMatTranspose,
 		"matScale":     stdMathMatScale,
-		"fib":          stdMathFib,
 	}
 	registerStdModule(stdMathMetadata)
 }
@@ -212,7 +203,7 @@ func init() {
 func (vm *VM) callStdMath(method string, args []Value) {
 	fn, ok := stdMathMethods[method]
 	if !ok {
-		vm.push(NewUndefined())
+		vm.push(NewNull())
 		return
 	}
 	fn(vm, args)
@@ -252,19 +243,19 @@ func getMatrixFields(v ObjectValue, matName string, vm *VM) (int, int, []float64
 	rows := v["rows"]
 	if !rows.IsInt {
 		vm.runtimeError(ErrorType, "%s matrix missing or invalid 'rows' field", matName)
-		vm.push(NewUndefined())
+		vm.push(NewNull())
 		return 0, 0, nil
 	}
 	cols := v["cols"]
 	if !cols.IsInt {
 		vm.runtimeError(ErrorType, "%s matrix missing or invalid 'cols' field", matName)
-		vm.push(NewUndefined())
+		vm.push(NewNull())
 		return 0, 0, nil
 	}
 	rawData, ok := v["data"].Value.(*BufferValue)
 	if !ok {
 		vm.runtimeError(ErrorType, "%s matrix missing or invalid 'data' field", matName)
-		vm.push(NewUndefined())
+		vm.push(NewNull())
 		return 0, 0, nil
 	}
 
@@ -402,7 +393,7 @@ func stdMathMatMul(vm *VM, args []Value) {
 	bRows, bCols, bData := getMatrixFields(bValue, "second", vm)
 
 	if aCols != bRows {
-		vm.push(NewUndefined())
+		vm.push(NewNull())
 		return
 	}
 
@@ -457,10 +448,4 @@ func stdMathMatScale(vm *VM, args []Value) {
 			Bytes: float64SliceToBytes(resultData),
 		}),
 	}))
-}
-
-func stdMathFib(vm *VM, args []Value) {
-	expectArgs(vm, "math.fib", args, 1)
-	n := argInt(vm, "math.fib", args, 0)
-	vm.push(NewInt(nativeFib(n)))
 }

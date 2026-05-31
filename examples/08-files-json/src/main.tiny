@@ -5,7 +5,7 @@ import std "json"
 let text = fs.readFile("data/input.json")
 let data = json.parse(text)
 
-if typeof data["version"] == "undefined" {
+if typeof data["version"] == "null" {
     data.version = "0.1.0"
 }
 

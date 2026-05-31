@@ -116,7 +116,7 @@ func pathCwd(vm *VM, args []Value) {
 	dir, err := os.Getwd()
 	if err != nil {
 		vm.runtimeError(ErrorRuntime, "could not get current working directory: %s", err)
-		vm.push(NewUndefined())
+		vm.push(NewNull())
 		return
 	}
 

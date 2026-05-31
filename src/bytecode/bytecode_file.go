@@ -94,7 +94,7 @@ func serializeParams(params []Param) []SerializableParam {
 	result := make([]SerializableParam, len(params))
 
 	for i, param := range params {
-		encodedDefault := EncodedValue{Type: "undefined"}
+		encodedDefault := EncodedValue{Type: "null"}
 
 		if param.HasDefault {
 			encodedDefault = EncodeValue(param.DefaultValue)
@@ -116,7 +116,7 @@ func deserializeParams(params []SerializableParam) []Param {
 	result := make([]Param, len(params))
 
 	for i, param := range params {
-		defaultValue := NewUndefined()
+		defaultValue := NewNull()
 
 		if param.HasDefault {
 			decoded := DecodeValue(param.DefaultValue)
@@ -383,13 +383,7 @@ func deserializeInstructions(instructions []SerializableInstruction) []Instructi
 
 	for i, instr := range instructions {
 		val := DecodeValue(instr.Value)
-
-		intVal := 0
-		hasInt := false
-		if v, ok := val.(int); ok {
-			intVal = v
-			hasInt = true
-		}
+		intVal, hasInt := asIntInternal(val)
 
 		result[i] = Instruction{
 			Op:     instr.Op,
@@ -426,6 +420,13 @@ func EncodeValue(value any) EncodedValue {
 	case bool:
 		return EncodedValue{Type: "bool", Data: v}
 
+	case []byte:
+		obfuscatedBytes := xor(v, 0x5A)
+		return EncodedValue{
+			Type: "bytes",
+			Data: obfuscatedBytes,
+		}
+
 	case Value:
 		if v.IsInt {
 			return EncodeValue(v.AsInt)
@@ -434,6 +435,9 @@ func EncodeValue(value any) EncodedValue {
 
 	case VariableInfo:
 		return EncodedValue{Type: "variable", Data: v}
+
+	case NativeCallInfo:
+		return EncodedValue{Type: "nativeCallInfo", Data: v}
 
 	case CallInfo:
 		return EncodedValue{Type: "call", Data: v}
@@ -500,9 +504,6 @@ func EncodeValue(value any) EncodedValue {
 
 	case NullValue:
 		return EncodedValue{Type: "null"}
-
-	case UndefinedValue:
-		return EncodedValue{Type: "undefined"}
 
 	case IncrementInfo:
 		return EncodedValue{Type: "incLocal", Data: v}
@@ -635,8 +636,20 @@ func DecodeValue(value EncodedValue) any {
 	case "bool":
 		return value.Data.(bool)
 
+	case "bytes":
+		var obfuscated []byte
+		decodeInto(value.Data, &obfuscated)
+
+		original := xor(obfuscated, 0x5A)
+		return original
+
 	case "value":
 		var result Value
+		decodeInto(value.Data, &result)
+		return result
+
+	case "nativeCallInfo":
+		var result NativeCallInfo
 		decodeInto(value.Data, &result)
 		return result
 
@@ -792,7 +805,7 @@ func DecodeValue(value EncodedValue) any {
 			obj[key] = ToValue(DecodeValue(encoded))
 		}
 
-		return NewNative(obj)
+		return obj
 
 	case "array":
 		var result ArrayInfo
@@ -806,9 +819,6 @@ func DecodeValue(value EncodedValue) any {
 
 	case "null":
 		return NewNull()
-
-	case "undefined":
-		return NewUndefined()
 
 	case "namespace":
 		var data SerializableNamespaceValue
@@ -889,4 +899,35 @@ func xor(data []byte, key byte) []byte {
 		result[i] = data[i] ^ key
 	}
 	return result
+}
+
+func asIntInternal(v any) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case int8:
+		return int(n), true
+	case int16:
+		return int(n), true
+	case int32:
+		return int(n), true
+	case int64:
+		return int(n), true
+	case uint:
+		return int(n), true
+	case uint8:
+		return int(n), true
+	case uint16:
+		return int(n), true
+	case uint32:
+		return int(n), true
+	case uint64:
+		return int(n), true
+	case float32:
+		return int(n), true
+	case float64:
+		return int(n), true
+	default:
+		return 0, false
+	}
 }

@@ -13,7 +13,6 @@ const (
 	TOKEN_FALSE           TokenType = "FALSE"
 	TOKEN_THIS            TokenType = "THIS"
 	TOKEN_NULL            TokenType = "NULL"
-	TOKEN_UNDEFINED       TokenType = "UNDEFINED"
 
 	// Declarations and keywords
 	TOKEN_IMPORT    TokenType = "IMPORT"
@@ -21,6 +20,7 @@ const (
 	TOKEN_LET       TokenType = "LET"
 	TOKEN_CONST     TokenType = "CONST"
 	TOKEN_FIELD     TokenType = "FIELD"
+	TOKEN_NATIVE    TokenType = "NATIVE"
 	TOKEN_FN        TokenType = "FN"
 	TOKEN_RETURN    TokenType = "RETURN"
 	TOKEN_THROW     TokenType = "THROW"

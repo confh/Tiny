@@ -189,10 +189,9 @@ var tinyKeywords = map[string]bool{
 	"throw":    true,
 	"defer":    true,
 
-	"true":      true,
-	"false":     true,
-	"null":      true,
-	"undefined": true,
+	"true":  true,
+	"false": true,
+	"null":  true,
 
 	"spawn":      true,
 	"typeof":     true,
@@ -1533,7 +1532,7 @@ func handleLSPMessage(msg LSPMessage) {
 
 		text := lspDocs[URIToPath(params.TextDocument.URI)]
 		params.Position = lspPositionToBytePosition(text, params.Position)
-		items := getCompletions(URIToPath(params.TextDocument.URI), text, params.Position)
+		items := getCompletions(params.TextDocument.URI, text, params.Position)
 
 		writeLSPMessage(LSPMessage{
 			ID:     msg.ID,
@@ -1556,7 +1555,7 @@ func handleLSPMessage(msg LSPMessage) {
 				}
 			}()
 
-			result = getSignatureHelp(URIToPath(params.TextDocument.URI), text, params.Position)
+			result = getSignatureHelp(params.TextDocument.URI, text, params.Position)
 		}()
 
 		writeLSPMessage(LSPMessage{
@@ -1580,7 +1579,7 @@ func handleLSPMessage(msg LSPMessage) {
 				}
 			}()
 
-			result = getDefinition(URIToPath(params.TextDocument.URI), text, params.Position)
+			result = getDefinition(params.TextDocument.URI, text, params.Position)
 		}()
 
 		writeLSPMessage(LSPMessage{
@@ -1603,7 +1602,7 @@ func handleLSPMessage(msg LSPMessage) {
 				}
 			}()
 
-			result = getReferences(URIToPath(params.TextDocument.URI), text, params.Position, params.Context.IncludeDeclaration)
+			result = getReferences(params.TextDocument.URI, text, params.Position, params.Context.IncludeDeclaration)
 		}()
 
 		writeLSPMessage(LSPMessage{
@@ -1626,7 +1625,7 @@ func handleLSPMessage(msg LSPMessage) {
 				}
 			}()
 
-			result = getRenameEdit(URIToPath(params.TextDocument.URI), text, params.Position, params.NewName)
+			result = getRenameEdit(params.TextDocument.URI, text, params.Position, params.NewName)
 		}()
 
 		writeLSPMessage(LSPMessage{
@@ -1652,7 +1651,7 @@ func handleLSPMessage(msg LSPMessage) {
 				}
 			}()
 
-			result = getDocumentSymbols(URIToPath(params.TextDocument.URI), text)
+			result = getDocumentSymbols(params.TextDocument.URI, text)
 		}()
 
 		writeLSPMessage(LSPMessage{
@@ -1706,7 +1705,7 @@ func handleLSPMessage(msg LSPMessage) {
 				}
 			}()
 
-			result = getHover(URIToPath(URIToPath(params.TextDocument.URI)), text, params.Position)
+			result = getHover(params.TextDocument.URI, text, params.Position)
 		}()
 
 		writeLSPMessage(LSPMessage{
@@ -2038,7 +2037,6 @@ func scopeCompletions(scope *Scope, uri string, text string, hasParens bool) []C
 		{Label: "true", Kind: 14, Detail: "boolean literal"},
 		{Label: "false", Kind: 14, Detail: "boolean literal"},
 		{Label: "null", Kind: 14, Detail: "null literal"},
-		{Label: "undefined", Kind: 14, Detail: "undefined literal"},
 	}
 
 	seen := map[string]bool{}
@@ -2619,7 +2617,7 @@ func scanClassMethodHeaders(scope *Scope, className string, body string, bodyBas
 			detail = "private " + detail
 		}
 
-		returnType := "undefined"
+		returnType := "null"
 		if len(match) > 3 && strings.TrimSpace(match[3]) != "" {
 			returnType = normalizeLSPType(scope, match[3])
 		}

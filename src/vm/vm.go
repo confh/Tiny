@@ -1,6 +1,8 @@
 package vm
 
 import (
+	"context"
+	"encoding/binary"
 	"fmt"
 	"maps"
 	"math"
@@ -10,6 +12,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tetratelabs/wazero"
+	"github.com/tetratelabs/wazero/api"
+	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 
 	json "github.com/goccy/go-json"
 	. "language.com/src/tinyerrors"
@@ -85,6 +91,10 @@ type VM struct {
 	globalConstants map[string]bool
 
 	frames []*Frame
+
+	wazeroRuntime wazero.Runtime
+	wazeroCtx     context.Context
+	wasmModule    api.Module
 }
 
 func intToString(n int) string {
@@ -168,6 +178,7 @@ func NewVM(mainInstructions []Instruction, functions map[string]Function, classe
 		stack:            make([]Value, 1024),
 		framePool:        make([]*Frame, 0, 1024),
 		frames:           []*Frame{},
+		wazeroCtx:        context.Background(),
 	}
 }
 
@@ -287,7 +298,7 @@ func (vm *VM) getFrame(fn Function) *Frame {
 			frame.locals[i] = &Cell{}
 		}
 
-		setCellValue(frame.locals[i], NewUndefined())
+		setCellValue(frame.locals[i], NewNull())
 		frame.constants[i] = false
 		frame.localTypes[i] = TypeHint{}
 	}
@@ -344,6 +355,10 @@ func (vm *VM) CloneForTask() *VM {
 		globalTypes:     vm.globalTypes,
 
 		cliArgs: vm.cliArgs,
+
+		wazeroRuntime: vm.wazeroRuntime,
+		wazeroCtx:     vm.wazeroCtx,
+		wasmModule:    vm.wasmModule,
 	}
 }
 
@@ -631,10 +646,9 @@ func (vm *VM) getGlobalByName(name string) (Value, bool) {
 	return vm.globals[slot], true
 }
 
-func (vm *VM) setGlobal(slot int, value Value) {
+func (vm *VM) setGlobalUnlocked(slot int, value Value) {
 	if slot >= len(vm.globals) {
 		newSize := slot + 1
-
 		if newSize < len(vm.globals)*2 {
 			newSize = len(vm.globals) * 2
 		}
@@ -645,20 +659,36 @@ func (vm *VM) setGlobal(slot int, value Value) {
 	vm.globals[slot] = value
 }
 
+func (vm *VM) setGlobal(slot int, value Value) {
+	if slot < len(vm.globals) {
+		vm.globals[slot] = value
+		return
+	}
+
+	vm.mu.Lock()
+	vm.setGlobalUnlocked(slot, value)
+	vm.mu.Unlock()
+}
+
 func (vm *VM) getGlobal(slot int) Value {
 	if slot < 0 || slot >= len(vm.globals) {
-		return NewUndefined()
+		return NewNull()
 	}
 	return vm.globals[slot]
 }
 
 func (vm *VM) setGlobalByName(name string, value Value) {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
+	if vm.globalNames == nil {
+		return
+	}
 	slot, exists := vm.globalNames[name]
 	if !exists {
 		return
 	}
 
-	vm.globals[slot] = value
+	vm.setGlobalUnlocked(slot, value)
 }
 
 func (vm *VM) canAccessField(object ObjectValue, field string) bool {
@@ -689,14 +719,14 @@ func (vm *VM) canAccessMethod(object ObjectValue, method string) bool {
 
 func (vm *VM) getProperty(objectValue Value, name string, safe bool) Value {
 	if safe && isNullish(objectValue) {
-		return NewUndefined()
+		return NewNull()
 	}
 
 	if ns, ok := objectValue.Value.(NamespaceValue); ok {
 		value, exists := ns.Members[name]
 		if !exists {
 			if safe {
-				return NewUndefined()
+				return NewNull()
 			}
 			vm.nameError("namespace %s has no member: %s", ns.Name, name)
 		}
@@ -705,7 +735,7 @@ func (vm *VM) getProperty(objectValue Value, name string, safe bool) Value {
 			slot, exists := vm.globalNames[ref.GlobalName]
 			if !exists {
 				if safe {
-					return NewUndefined()
+					return NewNull()
 				}
 				vm.nameError("undefined namespace global: %s", ref.GlobalName)
 			}
@@ -719,7 +749,7 @@ func (vm *VM) getProperty(objectValue Value, name string, safe bool) Value {
 		value, exists := ns.Members[name]
 		if !exists {
 			if safe {
-				return NewUndefined()
+				return NewNull()
 			}
 			vm.nameError("namespace %s has no member: %s", ns.Name, name)
 		}
@@ -728,7 +758,7 @@ func (vm *VM) getProperty(objectValue Value, name string, safe bool) Value {
 			slot, exists := vm.globalNames[ref.GlobalName]
 			if !exists {
 				if safe {
-					return NewUndefined()
+					return NewNull()
 				}
 				vm.nameError("undefined namespace global: %s", ref.GlobalName)
 			}
@@ -741,7 +771,7 @@ func (vm *VM) getProperty(objectValue Value, name string, safe bool) Value {
 	object, ok := objectValue.Value.(ObjectValue)
 	if !ok {
 		if safe {
-			return NewUndefined()
+			return NewNull()
 		}
 		vm.typeError("expected object, got %s", TypeName(objectValue))
 	}
@@ -749,7 +779,7 @@ func (vm *VM) getProperty(objectValue Value, name string, safe bool) Value {
 	value, exists := object[name]
 	if !exists {
 		if safe {
-			return NewUndefined()
+			return NewNull()
 		}
 		vm.nameError("object has no property: %s", name)
 	}
@@ -1150,7 +1180,7 @@ func isNullish(value Value) bool {
 		return false
 	}
 	switch value.Value.(type) {
-	case NullValue, UndefinedValue:
+	case NullValue:
 		return true
 	default:
 		return false
@@ -1261,6 +1291,15 @@ func makeErrorObject(value Value) ObjectValue {
 }
 
 func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []Value) {
+	if vm.wasmModule != nil {
+		sanitizedName := strings.ReplaceAll(fnValue.Name, ".", "_")
+		fn := vm.wasmModule.ExportedFunction(sanitizedName)
+		if fn != nil {
+			vm.executeNativeWasmCall(fn, args)
+			return
+		}
+	}
+
 	fn, ok := vm.functions[fnValue.Name]
 	if !ok {
 		vm.fatalError(ErrorName, "undefined function: %s", fnValue.Name)
@@ -1425,17 +1464,24 @@ func (vm *VM) callFunctionValue(fnValue FunctionValue, args []Value) Value {
 	}
 
 	if vm.top <= stackDepthBefore {
-		return NewUndefined()
+		return NewNull()
 	}
 
 	return vm.pop()
 }
 
 func (vm *VM) Run() {
+	defer vm.Close()
 	for {
 		if vm.step() {
 			return
 		}
+	}
+}
+
+func (vm *VM) Close() {
+	if vm.wazeroRuntime != nil {
+		vm.wazeroRuntime.Close(vm.wazeroCtx)
 	}
 }
 
@@ -1463,6 +1509,34 @@ func (vm *VM) step() bool {
 	}
 
 	switch instr.Op {
+	case OP_LOAD_WASM:
+		wasmBytes := instr.Value.([]byte)
+
+		vm.wazeroRuntime = wazero.NewRuntime(vm.wazeroCtx)
+
+		wasi_snapshot_preview1.MustInstantiate(vm.wazeroCtx, vm.wazeroRuntime)
+
+		var err error
+		vm.wasmModule, err = vm.wazeroRuntime.InstantiateWithConfig(
+			vm.wazeroCtx,
+			wasmBytes,
+			wazero.NewModuleConfig().WithStartFunctions("_initialize"),
+		)
+		if err != nil {
+			vm.fatalError(ErrorRuntime, "failed to load WebAssembly module: %v", err)
+		}
+
+	case OP_NATIVE_CALL:
+		info := instr.Value.(NativeCallInfo)
+
+		args := vm.popArgs(info.ArgCount)
+
+		fn := vm.wasmModule.ExportedFunction(info.Name)
+		if fn == nil {
+			vm.fatalError(ErrorName, "undefined native function: %s", info.Name)
+		}
+
+		vm.executeNativeWasmCall(fn, args)
 	case OP_ADD_LOCAL_LOCAL_STORE:
 		info := instr.Value.(AddLocalLocalStoreInfo)
 		frame := vm.frames[len(vm.frames)-1]
@@ -2162,7 +2236,7 @@ func (vm *VM) step() bool {
 
 		mutex.Lock()
 
-		vm.push(NewUndefined())
+		vm.push(NewNull())
 
 	case OP_UNLOCK_MUTEX:
 		value := vm.popFast()
@@ -2174,7 +2248,7 @@ func (vm *VM) step() bool {
 
 		mutex.Unlock()
 
-		vm.push(NewUndefined())
+		vm.push(NewNull())
 
 	case OP_DEFER:
 		value := vm.popFast()
@@ -2195,7 +2269,7 @@ func (vm *VM) step() bool {
 			FrameDepth: len(vm.frames),
 		})
 
-		vm.push(NewUndefined())
+		vm.push(NewNull())
 
 	case OP_SPAWN:
 		value := vm.popFast()
@@ -2300,16 +2374,7 @@ func (vm *VM) step() bool {
 		}))
 
 	case OP_CONST:
-		var wrapped Value
-		switch v := instr.Value.(type) {
-		case int:
-			wrapped = NewInt(v)
-		case int64:
-			wrapped = NewInt(int(v))
-		default:
-			wrapped = NewNative(v)
-		}
-		vm.push(wrapped)
+		vm.push(ToValue(instr.Value))
 
 	case OP_SET_PROPERTY:
 		name := instr.Value.(string)
@@ -2343,7 +2408,7 @@ func (vm *VM) step() bool {
 		objectValue := vm.popFast()
 
 		if isNullish(objectValue) {
-			vm.push(NewUndefined())
+			vm.push(NewNull())
 			break
 		}
 
@@ -2368,14 +2433,10 @@ func (vm *VM) step() bool {
 		var slot int
 		if info, ok := instr.Value.(VariableInfo); ok {
 			slot = info.Slot
-		} else if name, ok := instr.Value.(string); ok {
-			var exists bool
-
-			slot, exists = vm.globalNames[name]
-
-			if !exists {
-				vm.fatalError(ErrorName, "undefined global variable: %s", name)
-			}
+		} else if s, ok := asIntInternal(instr.Value); ok {
+			slot = s
+		} else {
+			vm.fatalError(ErrorInternal, "unexpected type for OP_LOAD_GLOBAL: %T", instr.Value)
 		}
 
 		vm.push(vm.getGlobal(slot))
@@ -2420,7 +2481,7 @@ func (vm *VM) step() bool {
 		}
 		vm.globalNames[info.Name] = info.Slot
 
-		vm.setGlobal(info.Slot, value)
+		vm.setGlobalUnlocked(info.Slot, value)
 
 		vm.globalConstants[info.Name] = info.Constant
 		vm.globalTypes[info.Name] = info.TypeHint
@@ -2567,9 +2628,7 @@ func (vm *VM) step() bool {
 			}
 		}
 
-		vm.mu.Lock()
 		vm.setGlobal(slot, value)
-		vm.mu.Unlock()
 
 	case OP_INC_LOCAL:
 		var slot int
@@ -2577,17 +2636,14 @@ func (vm *VM) step() bool {
 		floatAmount := 1.0
 		isFloat := false
 
-		switch info := instr.Value.(type) {
-		case int:
-			slot = info
-		case int64:
-			slot = int(info)
-		case IncrementInfo:
+		if s, ok := asIntInternal(instr.Value); ok {
+			slot = s
+		} else if info, ok := instr.Value.(IncrementInfo); ok {
 			slot = info.Slot
 			intAmount = info.IntAmount
 			floatAmount = info.FloatAmount
 			isFloat = info.IsFloat
-		default:
+		} else {
 			vm.fatalError(ErrorInternal, "unexpected type for OP_INC_LOCAL: %T", instr.Value)
 		}
 
@@ -2721,15 +2777,20 @@ func (vm *VM) step() bool {
 			vm.fatalError(ErrorInternal, "unexpected type for OP_INC_GLOBAL: %T", instr.Value)
 		}
 
+		vm.mu.Lock()
+
 		if vm.globalConstants[name] {
+			vm.mu.Unlock()
 			vm.fatalError(ErrorConst, "cannot increment constant global")
 		}
 
-		value, exists := vm.getGlobalByName(name)
+		slot, exists := vm.globalNames[name]
 		if !exists {
+			vm.mu.Unlock()
 			vm.fatalError(ErrorName, "undefined global variable: %s", name)
 		}
 
+		value := vm.globals[slot]
 		var rawVal any
 		if value.IsInt {
 			rawVal = value.AsInt
@@ -2737,23 +2798,21 @@ func (vm *VM) step() bool {
 			rawVal = value.Value
 		}
 
-		vm.mu.Lock()
 		switch v := rawVal.(type) {
 		case int:
 			if isFloat {
-				vm.setGlobalByName(name, NewNative(float64(v)+floatAmount))
+				vm.setGlobalUnlocked(slot, NewNative(float64(v)+floatAmount))
 			} else {
-				vm.setGlobalByName(name, NewInt(v+intAmount))
+				vm.setGlobalUnlocked(slot, NewInt(v+intAmount))
 			}
-
 		case float64:
 			if isFloat {
-				vm.setGlobalByName(name, NewNative(v+floatAmount))
+				vm.setGlobalUnlocked(slot, NewNative(v+floatAmount))
 			} else {
-				vm.setGlobalByName(name, NewNative(v+float64(intAmount)))
+				vm.setGlobalUnlocked(slot, NewNative(v+float64(intAmount)))
 			}
-
 		default:
+			vm.mu.Unlock()
 			vm.fatalError(ErrorType, "cannot increment %s", TypeName(value))
 		}
 		vm.mu.Unlock()
@@ -2776,15 +2835,20 @@ func (vm *VM) step() bool {
 			vm.fatalError(ErrorInternal, "unexpected type for OP_DEC_GLOBAL: %T", instr.Value)
 		}
 
+		vm.mu.Lock()
+
 		if vm.globalConstants[name] {
+			vm.mu.Unlock()
 			vm.fatalError(ErrorConst, "cannot decrement constant global")
 		}
 
-		value, exists := vm.getGlobalByName(name)
+		slot, exists := vm.globalNames[name]
 		if !exists {
+			vm.mu.Unlock()
 			vm.fatalError(ErrorName, "undefined global variable: %s", name)
 		}
 
+		value := vm.globals[slot]
 		var rawVal any
 		if value.IsInt {
 			rawVal = value.AsInt
@@ -2792,23 +2856,21 @@ func (vm *VM) step() bool {
 			rawVal = value.Value
 		}
 
-		vm.mu.Lock()
 		switch v := rawVal.(type) {
 		case int:
 			if isFloat {
-				vm.setGlobalByName(name, NewNative(float64(v)-floatAmount))
+				vm.setGlobalUnlocked(slot, NewNative(float64(v)-floatAmount))
 			} else {
-				vm.setGlobalByName(name, NewInt(v-intAmount))
+				vm.setGlobalUnlocked(slot, NewInt(v-intAmount))
 			}
-
 		case float64:
 			if isFloat {
-				vm.setGlobalByName(name, NewNative(v-floatAmount))
+				vm.setGlobalUnlocked(slot, NewNative(v-floatAmount))
 			} else {
-				vm.setGlobalByName(name, NewNative(v-float64(intAmount)))
+				vm.setGlobalUnlocked(slot, NewNative(v-float64(intAmount)))
 			}
-
 		default:
+			vm.mu.Unlock()
 			vm.fatalError(ErrorType, "cannot decrement %s", TypeName(value))
 		}
 		vm.mu.Unlock()
@@ -3352,6 +3414,18 @@ func (vm *VM) step() bool {
 
 		return false
 
+	case OP_CALL_VALUE_SPREAD:
+		arrayValue := vm.popFast()
+		callee := vm.popFast()
+
+		array, ok := arrayValue.Value.(*ArrayValue)
+		if !ok {
+			vm.fatalError(ErrorType, "spread operator expects array, got %s", TypeName(arrayValue))
+		}
+
+		result := vm.callFunctionValue(callee.Value.(FunctionValue), array.Elements)
+		vm.push(result)
+
 	case OP_BUILTIN_CALL:
 		info := instr.Value.(BuiltinCallInfo)
 		vm.callBuiltin(info.Object, info.Method, info.ArgCount)
@@ -3471,7 +3545,7 @@ func (vm *VM) step() bool {
 
 			value, exists := obj[key]
 			if !exists {
-				obj[key] = NewUndefined()
+				obj[key] = NewNull()
 				value = obj[key]
 			}
 
@@ -3529,7 +3603,7 @@ func (vm *VM) step() bool {
 		var returnValue Value
 
 		if vm.top == 0 {
-			returnValue = NewUndefined()
+			returnValue = NewNull()
 		} else {
 			returnValue = vm.popFast()
 		}
@@ -3955,7 +4029,7 @@ func (vm *VM) callStdObjectFast3(method string, objectValue Value, arg0 Value, a
 		return true
 	}
 	obj[key] = arg2
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 	return true
 }
 
@@ -4037,7 +4111,7 @@ func (vm *VM) callStdObjectFast(method string, objectValue Value, args ...Value)
 			return true
 		}
 		obj[key] = args[2]
-		vm.push(NewUndefined())
+		vm.push(NewNull())
 		return true
 
 	case "length":
@@ -4639,4 +4713,227 @@ func (vm *VM) popFast() Value {
 	val := vm.stack[vm.top]
 	vm.stack[vm.top] = Value{}
 	return val
+}
+
+func (vm *VM) executeNativeWasmCall(fn api.Function, args []Value) {
+	expectedArgsParams := 0
+	for _, arg := range args {
+		var rawVal any
+		if arg.IsInt {
+			rawVal = arg.AsInt
+		} else {
+			rawVal = arg.Value
+		}
+
+		if _, ok := rawVal.(string); ok {
+			expectedArgsParams += 2
+		} else if _, ok := rawVal.(*ArrayValue); ok {
+			expectedArgsParams += 3
+		} else {
+			expectedArgsParams += 1
+		}
+	}
+
+	returnsString := len(fn.Definition().ResultTypes()) == 0 && len(fn.Definition().ParamTypes()) == expectedArgsParams+1
+
+	wasmParams := []uint64{}
+	var allocatedPtrs []uint64
+
+	for _, arg := range args {
+		var rawVal any
+		if arg.IsInt {
+			rawVal = arg.AsInt
+		} else {
+			rawVal = arg.Value
+		}
+
+		switch v := rawVal.(type) {
+		case float64:
+			wasmParams = append(wasmParams, api.EncodeF64(v))
+		case float32:
+			wasmParams = append(wasmParams, api.EncodeF64(float64(v)))
+		case int:
+			wasmParams = append(wasmParams, api.EncodeF64(float64(v)))
+		case int64:
+			wasmParams = append(wasmParams, api.EncodeF64(float64(v)))
+		case bool:
+			val := uint32(0)
+			if v {
+				val = 1
+			}
+			wasmParams = append(wasmParams, api.EncodeU32(val))
+		case *ArrayValue:
+			floats := make([]float64, len(v.Elements))
+			for idx, el := range v.Elements {
+				var num float64
+				if el.IsInt {
+					num = float64(el.AsInt)
+				} else if f, ok := el.Value.(float64); ok {
+					num = f
+				} else if b, ok := el.Value.(bool); ok {
+					if b {
+						num = 1
+					} else {
+						num = 0
+					}
+				} else {
+					vm.runtimeError(ErrorType, "invalid element type in native array at index %d: only numbers or booleans are allowed", idx)
+				}
+				floats[idx] = num
+			}
+
+			malloc := vm.wasmModule.ExportedFunction("malloc")
+			if malloc == nil {
+				vm.fatalError(ErrorRuntime, "native arrays are not supported because 'malloc' is not exported")
+			}
+
+			size := uint64(len(floats) * 8)
+			results, err := malloc.Call(vm.wazeroCtx, size)
+			if err != nil || len(results) == 0 {
+				vm.fatalError(ErrorRuntime, "failed to allocate Wasm memory for array: %v", err)
+			}
+			ptr := results[0]
+
+			allocatedPtrs = append(allocatedPtrs, ptr)
+
+			if len(floats) > 0 {
+				buf := make([]byte, size)
+				for idx, f := range floats {
+					bits := math.Float64bits(f)
+					binary.LittleEndian.PutUint64(buf[idx*8:(idx+1)*8], bits)
+				}
+
+				ok := vm.wasmModule.Memory().Write(uint32(ptr), buf)
+				if !ok {
+					vm.fatalError(ErrorRuntime, "failed to write array to Wasm memory")
+				}
+			}
+
+			wasmParams = append(wasmParams, api.EncodeU32(uint32(ptr)))
+			wasmParams = append(wasmParams, api.EncodeU32(uint32(len(floats))))
+			wasmParams = append(wasmParams, api.EncodeU32(uint32(len(floats))))
+		case string:
+			malloc := vm.wasmModule.ExportedFunction("malloc")
+			if malloc == nil {
+				vm.fatalError(ErrorRuntime, "native strings are not supported because 'malloc' is not exported")
+			}
+
+			size := uint64(len(v))
+			results, err := malloc.Call(vm.wazeroCtx, size)
+			if err != nil || len(results) == 0 {
+				vm.fatalError(ErrorRuntime, "failed to allocate Wasm memory for string: %v", err)
+			}
+			ptr := results[0]
+
+			allocatedPtrs = append(allocatedPtrs, ptr)
+
+			if len(v) > 0 {
+				ok := vm.wasmModule.Memory().Write(uint32(ptr), []byte(v))
+				if !ok {
+					vm.fatalError(ErrorRuntime, "failed to write string to Wasm memory")
+				}
+			}
+
+			wasmParams = append(wasmParams, api.EncodeU32(uint32(ptr)))
+			wasmParams = append(wasmParams, api.EncodeU32(uint32(size)))
+
+		default:
+			vm.fatalError(ErrorType, "unsupported native parameter type: %T", v)
+		}
+	}
+
+	var retPtr uint64
+	if returnsString {
+		malloc := vm.wasmModule.ExportedFunction("malloc")
+		if malloc == nil {
+			vm.fatalError(ErrorRuntime, "native string returns are not supported because 'malloc' is not exported")
+		}
+
+		results, err := malloc.Call(vm.wazeroCtx, 8)
+		if err != nil || len(results) == 0 {
+			vm.fatalError(ErrorRuntime, "failed to allocate return buffer in Wasm memory: %v", err)
+		}
+		retPtr = results[0]
+
+		wasmParams = append([]uint64{api.EncodeU32(uint32(retPtr))}, wasmParams...)
+	}
+
+	results, err := fn.Call(vm.wazeroCtx, wasmParams...)
+	if err != nil {
+		vm.fatalError(ErrorRuntime, "native function crashed: %v", err)
+	}
+
+	free := vm.wasmModule.ExportedFunction("free")
+	if free != nil {
+		for _, ptr := range allocatedPtrs {
+			free.Call(vm.wazeroCtx, ptr)
+		}
+	}
+
+	if returnsString {
+		descBytes, ok := vm.wasmModule.Memory().Read(uint32(retPtr), 8)
+		if !ok {
+			vm.fatalError(ErrorRuntime, "failed to read return descriptor from Wasm memory")
+		}
+
+		ptr := binary.LittleEndian.Uint32(descBytes[0:4])
+		length := binary.LittleEndian.Uint32(descBytes[4:8])
+
+		if free != nil {
+			free.Call(vm.wazeroCtx, retPtr)
+		}
+
+		if length == 0 {
+			vm.push(NewNative(""))
+		} else {
+			strBytes, ok := vm.wasmModule.Memory().Read(ptr, length)
+			if !ok {
+				vm.fatalError(ErrorRuntime, "failed to read return string from Wasm memory")
+			}
+			vm.push(NewNative(string(strBytes)))
+		}
+	} else {
+		if len(results) == 0 {
+			vm.push(NewNull())
+		} else {
+			resType := fn.Definition().ResultTypes()[0]
+
+			if resType == api.ValueTypeI32 {
+				vm.push(NewNative(results[0] != 0))
+			} else {
+				vm.push(NewNative(api.DecodeF64(results[0])))
+			}
+		}
+	}
+}
+
+func asIntInternal(v any) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case int8:
+		return int(n), true
+	case int16:
+		return int(n), true
+	case int32:
+		return int(n), true
+	case int64:
+		return int(n), true
+	case uint:
+		return int(n), true
+	case uint8:
+		return int(n), true
+	case uint16:
+		return int(n), true
+	case uint32:
+		return int(n), true
+	case uint64:
+		return int(n), true
+	case float32:
+		return int(n), true
+	case float64:
+		return int(n), true
+	default:
+		return 0, false
+	}
 }

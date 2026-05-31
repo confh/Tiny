@@ -1,0 +1,40 @@
+import std "io";
+import std "time";
+
+// A native Go implementation of Fibonacci.
+// Notice the 'goFib' call inside the go block - direct recursion.
+native fn goFib(n: number): number {
+    go {
+        if n < 2 {
+            return n
+        }
+        return goFib(n-1) + goFib(n-2)
+    }
+}
+
+// A native Go function that uses standard library packages.
+native fn gosha256(input: string): string {
+    go {
+        import "crypto/sha256"
+        import "encoding/hex"
+        
+        h := sha256.Sum256([]byte(input))
+        return hex.EncodeToString(h[:])
+    }
+}
+
+
+// 1. High-Performance Recursion
+const N = 30;
+let start = time.nowMs();
+let fibResult = goFib(N);
+let end = time.nowMs();
+
+io.println(`Fibonacci(${N}) = ${fibResult}`);
+io.println(`Execution time: ${end - start}ms`);
+
+// 2. Go Standard Library Integration
+const text = "Tiny is fast";
+let hash = gosha256(text);
+
+io.println(`SHA256("${text}") = ${hash}`);

@@ -8,7 +8,7 @@ let input = {
 }
 
 try {
-    if typeof input["path"] == "undefined" {
+    if typeof input["path"] == "null" {
         throw error.new("ValidationError", "path is required")
     }
 

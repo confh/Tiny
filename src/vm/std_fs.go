@@ -67,7 +67,7 @@ var stdFsMetadata = StdModuleInfo{
 			Args: []StdArg{
 				{Name: "dirName", Type: "string", Optional: false},
 			},
-			Returns:     "undefined",
+			Returns:     "null",
 			Description: "Creates a new directory.",
 		},
 		"stat": {
@@ -84,7 +84,7 @@ var stdFsMetadata = StdModuleInfo{
 				{Name: "src", Type: "string", Optional: false},
 				{Name: "dst", Type: "string", Optional: false},
 			},
-			Returns:     "undefined",
+			Returns:     "null",
 			Description: "Copies a file from src to dst.",
 		},
 		"remove": {
@@ -92,7 +92,7 @@ var stdFsMetadata = StdModuleInfo{
 			Args: []StdArg{
 				{Name: "path", Type: "string", Optional: false},
 			},
-			Returns:     "undefined",
+			Returns:     "null",
 			Description: "Removes a file or directory at the given path.",
 		},
 	},
@@ -214,7 +214,7 @@ func stdFsMkDir(vm *VM, args []Value) {
 		vm.runtimeError(ErrorRuntime, "error creating directory: %s", err)
 	}
 
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }
 
 func stdFsStat(vm *VM, args []Value) {
@@ -318,5 +318,5 @@ func stdFsRemove(vm *VM, args []Value) {
 		vm.runtimeError(ErrorRuntime, "error while removing file: %s", err)
 	}
 
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }

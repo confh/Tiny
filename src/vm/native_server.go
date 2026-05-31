@@ -84,7 +84,7 @@ func serverGetPrettyJSON(vm *VM, server *NativeServerValue, args []Value) {
 		return
 	}
 	server.GetRoutes[path] = NewNative(string(bytes))
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }
 
 func serverGetJSON(vm *VM, server *NativeServerValue, args []Value) {
@@ -97,7 +97,7 @@ func serverGetJSON(vm *VM, server *NativeServerValue, args []Value) {
 		return
 	}
 	server.GetRoutes[path] = NewNative(string(bytes))
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }
 
 func serverGet(vm *VM, server *NativeServerValue, args []Value) {
@@ -113,7 +113,7 @@ func serverGet(vm *VM, server *NativeServerValue, args []Value) {
 		vm.runtimeError(ErrorType, "server.get expects string or function as second argument")
 		return
 	}
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }
 
 func serverPost(vm *VM, server *NativeServerValue, args []Value) {
@@ -129,7 +129,7 @@ func serverPost(vm *VM, server *NativeServerValue, args []Value) {
 		vm.runtimeError(ErrorType, "server.post expects string or function as second argument")
 		return
 	}
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }
 
 func serverStop(vm *VM, server *NativeServerValue, args []Value) {
@@ -256,7 +256,7 @@ func serverStart(vm *VM, server *NativeServerValue, args []Value) {
 		}
 	}
 
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }
 
 func matchRoute(pattern string, actualPath string) (bool, ObjectValue) {

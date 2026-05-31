@@ -48,7 +48,7 @@ var stdJsonMetadata = StdModuleInfo{
 				{Name: "value", Type: "object", Optional: false},
 				{Name: "fileName", Type: "string", Optional: false},
 			},
-			Returns:     "undefined",
+			Returns:     "null",
 			Description: "Serializes an object value as pretty-printed JSON and writes it to a file.",
 		},
 	},
@@ -159,5 +159,5 @@ func stdJsonWriteFile(vm *VM, args []Value) {
 	if err != nil {
 		vm.runtimeError(ErrorRuntime, "error writing json file: %s", err)
 	}
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }

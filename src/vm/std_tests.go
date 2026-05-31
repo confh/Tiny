@@ -12,25 +12,25 @@ var stdTestMetadata = StdModuleInfo{
 		"assert": {
 			Name:        "assert",
 			Args:        []StdArg{{Name: "condition", Type: "bool"}, {Name: "message", Type: "string"}},
-			Returns:     "undefined",
+			Returns:     "null",
 			Description: "Asserts that a condition is true; throws with the given message if not.",
 		},
 		"equal": {
 			Name:        "equal",
 			Args:        []StdArg{{Name: "actual", Type: "any"}, {Name: "expected", Type: "any"}, {Name: "message", Type: "string"}},
-			Returns:     "undefined",
+			Returns:     "null",
 			Description: "Asserts that two values are equal (including int equality); throws with the given message if not.",
 		},
 		"notEqual": {
 			Name:        "notEqual",
 			Args:        []StdArg{{Name: "actual", Type: "any"}, {Name: "expected", Type: "any"}, {Name: "message", Type: "string"}},
-			Returns:     "undefined",
+			Returns:     "null",
 			Description: "Asserts that two values are not equal; throws with the given message if they are equal.",
 		},
 		"run": {
 			Name:        "run",
 			Args:        []StdArg{{Name: "name", Type: "string"}, {Name: "fn", Type: "function"}},
-			Returns:     "undefined",
+			Returns:     "null",
 			Description: "Runs a test function and prints PASS/FAIL messages. Catches assertion failures.",
 		},
 	},
@@ -68,7 +68,7 @@ func testAssert(vm *VM, args []Value) {
 		vm.runtimeError(ErrorRuntime, "%s", message)
 	}
 
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }
 
 func testEqual(vm *VM, args []Value) {
@@ -92,7 +92,7 @@ func testEqual(vm *VM, args []Value) {
 		vm.runtimeError(ErrorRuntime, "%s", message)
 	}
 
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }
 
 func testNotEqual(vm *VM, args []Value) {
@@ -116,7 +116,7 @@ func testNotEqual(vm *VM, args []Value) {
 		vm.runtimeError(ErrorRuntime, "%s", message)
 	}
 
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }
 
 func testRun(vm *VM, args []Value) {
@@ -148,5 +148,5 @@ func testRun(vm *VM, args []Value) {
 		fmt.Printf("✅ PASS: %s\n", name)
 	}
 
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }

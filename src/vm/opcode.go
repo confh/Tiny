@@ -44,6 +44,7 @@ const (
 	OP_METHOD_CALL
 	OP_CALL
 	OP_CALL_VALUE
+	OP_CALL_VALUE_SPREAD
 	OP_RETURN
 
 	OP_CLOSURE
@@ -120,6 +121,9 @@ const (
 	OP_SUB_LOCAL_LOCAL
 	OP_MUL_LOCAL_LOCAL
 	OP_DIV_LOCAL_LOCAL
+
+	OP_LOAD_WASM
+	OP_NATIVE_CALL
 )
 
 type Instruction struct {
@@ -338,4 +342,10 @@ type ClassField struct {
 type EnumField struct {
 	Name  string
 	Value Expr
+}
+
+type NativeCallInfo struct {
+	Name          string
+	ArgCount      int
+	ReturnsString bool
 }

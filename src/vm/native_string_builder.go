@@ -46,7 +46,7 @@ func stringBuilderWriteString(vm *VM, sb *NativeStringBuilderValue, args []Value
 	expectArgs(vm, "stringBuilder.writeString", args, 1)
 	str := argString(vm, "stringBuilder.writeString", args, 0)
 	sb.Builder.WriteString(str)
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }
 
 func stringBuilderString(vm *VM, sb *NativeStringBuilderValue, args []Value) {

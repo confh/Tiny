@@ -155,7 +155,7 @@ func arrayPush(vm *VM, array *ArrayValue, args []Value) {
 func arrayPop(vm *VM, array *ArrayValue, args []Value) {
 	expectArgs(vm, "array.pop", args, 0)
 	if len(array.Elements) == 0 {
-		vm.push(NewUndefined())
+		vm.push(NewNull())
 		return
 	}
 	last := array.Elements[len(array.Elements)-1]

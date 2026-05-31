@@ -14,7 +14,7 @@ var appNativeMetadata = NativeTypeInfo{
 		"run": {
 			Name:        "run",
 			Args:        []StdArg{},
-			Returns:     "undefined",
+			Returns:     "null",
 			Description: "Runs the app with command-line arguments.",
 		},
 	},
@@ -51,5 +51,5 @@ func appCommand(vm *VM, app *NativeAppValue, args []Value) {
 func appRun(vm *VM, app *NativeAppValue, args []Value) {
 	expectArgs(vm, "app.run", args, 0)
 	vm.runNativeApp(app)
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }

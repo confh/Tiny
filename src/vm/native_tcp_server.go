@@ -16,7 +16,7 @@ var tcpNativeMetadata = NativeTypeInfo{
 			Args: []StdArg{
 				{Name: "async", Type: "bool", Optional: true},
 			},
-			Returns:     "undefined",
+			Returns:     "null",
 			Description: "Reads up to the specified number of bytes from the file.",
 		},
 		"onConnection": {
@@ -24,7 +24,7 @@ var tcpNativeMetadata = NativeTypeInfo{
 			Args: []StdArg{
 				{Name: "callback", Type: "function"},
 			},
-			Returns:     "undefined",
+			Returns:     "null",
 			Description: "Reads up to the specified number of bytes from the file.",
 		},
 	},
@@ -76,7 +76,7 @@ func tcpOnConnection(vm *VM, tcp *NativeTcpServerValue, args []Value) {
 
 	tcp.ConnectionHandler = &callback
 
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }
 
 func tcpStart(vm *VM, tcp *NativeTcpServerValue, args []Value) {
@@ -116,5 +116,5 @@ func tcpStart(vm *VM, tcp *NativeTcpServerValue, args []Value) {
 
 	acceptLoop()
 
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }

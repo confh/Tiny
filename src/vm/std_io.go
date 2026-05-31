@@ -4,8 +4,11 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 
+	"github.com/charmbracelet/x/term"
 	. "language.com/src/tinyerrors"
 )
 
@@ -42,6 +45,18 @@ var stdIOMetadata = StdModuleInfo{
 			Returns:     "string",
 			Description: "Reads one line of input from the terminal.",
 		},
+		"readKey": {
+			Name:        "readKey",
+			Args:        []StdArg{},
+			Returns:     "string",
+			Description: "Reads a single key press from the terminal.",
+		},
+		"clear": {
+			Name:        "clear",
+			Args:        []StdArg{},
+			Returns:     "null",
+			Description: "Clears the terminal screen.",
+		},
 	},
 }
 
@@ -53,6 +68,8 @@ func init() {
 		"print":    stdIOPrint,
 		"input":    stdIOInput,
 		"readLine": stdIOReadLine,
+		"readKey":  stdIOReadKey,
+		"clear":    stdIOClearScreen,
 	}
 	registerStdModule(stdIOMetadata)
 }
@@ -74,14 +91,14 @@ func stdIOPrintln(vm *VM, args []Value) {
 		fmt.Print(valueToString(arg))
 	}
 	fmt.Println()
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }
 
 func stdIOPrint(vm *VM, args []Value) {
 	for _, arg := range args {
 		fmt.Print(valueToString(arg))
 	}
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }
 
 func stdIOInput(vm *VM, args []Value) {
@@ -102,4 +119,45 @@ func stdIOReadLine(vm *VM, args []Value) {
 	line, _ := reader.ReadString('\n')
 	line = strings.TrimRight(line, "\r\n")
 	vm.push(NewNative(line))
+}
+
+func stdIOReadKey(vm *VM, args []Value) {
+	dontExpectArgs(vm, "io.readKey", args)
+
+	fd := uintptr(os.Stdin.Fd())
+
+	oldState, err := term.MakeRaw(fd)
+	if err != nil {
+		fmt.Println("Error:", err)
+		return
+	}
+
+	defer term.Restore(fd, oldState)
+
+	b := make([]byte, 1)
+	_, err = os.Stdin.Read(b)
+	if err != nil {
+		fmt.Println("Error reading key:", err)
+		return
+	}
+
+	vm.push(NewNative(string(b[0])))
+}
+
+func stdIOClearScreen(vm *VM, args []Value) {
+	dontExpectArgs(vm, "io.readKey", args)
+
+	switch v := runtime.GOOS; v {
+	case "windows":
+		cmd := exec.Command("cmd", "/c", "cls")
+		cmd.Stdout = os.Stdout
+		cmd.Run()
+
+	case "linux":
+		cmd := exec.Command("clear")
+		cmd.Stdout = os.Stdout
+		cmd.Run()
+	}
+
+	vm.push(NewNull())
 }

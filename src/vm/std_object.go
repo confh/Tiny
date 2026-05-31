@@ -14,7 +14,7 @@ var stdObjectMetadata = StdModuleInfo{
 				{Name: "key", Type: "string"},
 			},
 			Returns:     "any",
-			Description: "Returns the value for the given key, or undefined if the key is not present.",
+			Description: "Returns the value for the given key, or null if the key is not present.",
 		},
 		"set": {
 			Name: "set",
@@ -23,7 +23,7 @@ var stdObjectMetadata = StdModuleInfo{
 				{Name: "key", Type: "string"},
 				{Name: "value", Type: "any"},
 			},
-			Returns:     "undefined",
+			Returns:     "null",
 			Description: "Sets the value for the given key in the object.",
 		},
 		"has": {
@@ -81,7 +81,7 @@ var stdObjectMetadata = StdModuleInfo{
 			Args: []StdArg{
 				{Name: "object", Type: "object"},
 			},
-			Returns:     "undefined",
+			Returns:     "null",
 			Description: "Removes all keys and values from the object.",
 		},
 	},
@@ -123,7 +123,7 @@ func objectGet(vm *VM, args []Value) {
 	if ok {
 		vm.push(val)
 	} else {
-		vm.push(NewUndefined())
+		vm.push(NewNull())
 	}
 }
 
@@ -136,7 +136,7 @@ func objectSet(vm *VM, args []Value) {
 
 	obj[key] = value
 
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }
 
 func objectHas(vm *VM, args []Value) {
@@ -213,5 +213,5 @@ func objectClear(vm *VM, args []Value) {
 	for k := range obj {
 		delete(obj, k)
 	}
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }

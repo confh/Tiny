@@ -14,7 +14,7 @@ server.get("/", fn(req) {
 server.get("/echo", fn(req) {
     let text = "missing text query"
 
-    if typeof req.query["text"] != "undefined" {
+    if typeof req.query["text"] != "null" {
         text = req.query["text"]
     }
 

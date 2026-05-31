@@ -101,6 +101,26 @@ func parseInterpolatedString(input string) Expr {
 	return InterpolatedStringExpr{Parts: parts}
 }
 
+func (p *Parser) posOfToken(tok Token) int {
+	line := 1
+	column := 1
+
+	for i := 0; i < len(p.lexer.input); i++ {
+		if line == tok.Line && column == tok.Column {
+			return i
+		}
+
+		if p.lexer.input[i] == '\n' {
+			line++
+			column = 1
+		} else {
+			column++
+		}
+	}
+
+	return len(p.lexer.input)
+}
+
 type Parser struct {
 	lexer *Lexer
 
@@ -221,7 +241,6 @@ func (p *Parser) parseTypeHint(nullable bool) TypeHint {
 	if len(types) == 1 {
 		if nullable {
 			types = append(types, "null")
-			types = append(types, "undefined")
 
 			return TypeHint{
 				Name:  strings.Join(types, " | "),
@@ -235,7 +254,6 @@ func (p *Parser) parseTypeHint(nullable bool) TypeHint {
 
 	if nullable {
 		types = append(types, "null")
-		types = append(types, "undefined")
 	}
 
 	return TypeHint{
@@ -275,8 +293,7 @@ func (p *Parser) parseOptionalTypeHint() TypeHint {
 
 func (p *Parser) isValidType(token TokenType) bool {
 	return token == TOKEN_IDENT ||
-		token == TOKEN_NULL ||
-		token == TOKEN_UNDEFINED
+		token == TOKEN_NULL
 }
 
 func (p *Parser) parsePossibleAssignmentStatement() Stmt {
@@ -612,6 +629,8 @@ func (p *Parser) parseStatement() Stmt {
 		return p.parseLetStatement()
 	case TOKEN_CONST:
 		return p.parseConstStatement()
+	case TOKEN_NATIVE:
+		return p.parseNativeFunctionStatement()
 	case TOKEN_FN:
 		return p.parseFunctionStatement(false)
 	case TOKEN_ASYNC:
@@ -753,13 +772,16 @@ func (p *Parser) parseExportStatement() Stmt {
 	case TOKEN_EMBED_BIN:
 		return ExportStmt{Inner: p.parseEmbedBinStatement()}
 
+	case TOKEN_NATIVE:
+		return ExportStmt{Inner: p.parseNativeFunctionStatement()}
+
 	default:
 		LangErrorAt(
 			ErrorSyntax,
 			p.current.File,
 			p.current.Line,
 			p.current.Column,
-			"expected const, let, fn, class, embedbin, embedstr, interface, or enum after export",
+			"expected const, let, fn, class, embedbin, embedstr, native fn, interface, or enum after export",
 		)
 	}
 
@@ -826,9 +848,9 @@ func (p *Parser) parseThrowStatement() Stmt {
 }
 
 func (p *Parser) parseForStatement() Stmt {
+	p.expect(TOKEN_FOR)
 	line := p.current.Line
 	column := p.current.Column
-	p.expect(TOKEN_FOR)
 
 	if p.current.Type == TOKEN_IDENT {
 		itemName := p.current.Literal
@@ -1609,10 +1631,6 @@ func (p *Parser) parseDefaultParamValue() Value {
 		p.advance()
 		return NewNull()
 
-	case TOKEN_UNDEFINED:
-		p.advance()
-		return NewUndefined()
-
 	case TOKEN_MINUS:
 		p.advance()
 
@@ -1643,7 +1661,7 @@ func (p *Parser) parseDefaultParamValue() Value {
 			ErrorSyntax,
 			"default arguments currently only support constant values",
 		)
-		return NewUndefined()
+		return NewNull()
 	}
 }
 
@@ -1684,6 +1702,87 @@ func (p *Parser) parseConstStatement() Stmt {
 	}
 }
 
+func (p *Parser) parseNativeFunctionStatement() Stmt {
+	file := p.current.File
+	line := p.current.Line
+	column := p.current.Column
+
+	p.expect(TOKEN_NATIVE)
+	p.expect(TOKEN_FN)
+
+	if p.current.Type != TOKEN_IDENT {
+		LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "expected native function name")
+	}
+
+	name := p.current.Literal
+	p.advance()
+
+	p.expect(TOKEN_LPAREN)
+	params := p.parseParameterList(true)
+	p.expect(TOKEN_RPAREN)
+
+	if p.current.Type != TOKEN_COLON {
+		LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "native function declarations require an explicit return type. use \"null\" if there is none.")
+	}
+
+	returnType := p.parseTypeHint(false)
+
+	p.expect(TOKEN_LBRACE)
+
+	if p.current.Type == TOKEN_IDENT && p.current.Literal == "go" {
+		p.advance()
+	} else {
+		LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "expected 'go' block inside native function body")
+	}
+
+	startPos := p.posOfToken(p.current)
+	var builder strings.Builder
+	depth := 1
+	pos := startPos + 1
+
+	for {
+		if pos >= len(p.lexer.input) {
+			LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "unexpected EOF while parsing native block")
+		}
+
+		ch := p.lexer.input[pos]
+		pos++
+
+		if ch == '{' {
+			depth++
+		} else if ch == '}' {
+			depth--
+			if depth == 0 {
+				break
+			}
+		}
+
+		builder.WriteRune(ch)
+	}
+
+	p.lexer.pos = pos
+	p.lexer.line, p.lexer.column = p.lexer.lineColumnAt(pos)
+
+	p.advance()
+	p.advance()
+
+	for p.current.Type == TOKEN_SEMI {
+		p.advance()
+	}
+
+	p.expect(TOKEN_RBRACE)
+
+	return NativeFnStmt{
+		Name:       name,
+		Params:     params,
+		ReturnType: returnType,
+		GoCode:     builder.String(),
+		File:       file,
+		Line:       line,
+		Column:     column,
+	}
+}
+
 func (p *Parser) parseFunctionStatement(async bool) Stmt {
 	line := p.current.Line
 	column := p.current.Column
@@ -1720,8 +1819,14 @@ func containsString(items []string, target string) bool {
 	return false
 }
 
-func (p *Parser) parseParameterList() []Param {
+func (p *Parser) parseParameterList(enforceTypes ...bool) []Param {
 	params := []Param{}
+	var enforceTypeChecks bool
+	if len(enforceTypes) > 0 {
+		enforceTypeChecks = enforceTypes[0]
+	} else {
+		enforceTypeChecks = false
+	}
 
 	if p.current.Type == TOKEN_RPAREN {
 		return params
@@ -1764,6 +1869,10 @@ func (p *Parser) parseParameterList() []Param {
 
 		typeHint := TypeHint{}
 
+		if enforceTypeChecks && p.current.Type != TOKEN_COLON {
+			LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "function parameter types are required")
+		}
+
 		if p.current.Type == TOKEN_COLON {
 			p.advance()
 
@@ -1788,15 +1897,11 @@ func (p *Parser) parseParameterList() []Param {
 		if nullable {
 			if typeHint.IsEmpty() {
 				typeHint = TypeHint{
-					Name:  "any|undefined|null",
-					Types: []string{"any", "undefined", "null"},
+					Name:  "any|null",
+					Types: []string{"any", "null"},
 				}
 			} else {
 				types := typeHint.AllTypes()
-
-				if !containsString(types, "undefined") {
-					types = append(types, "undefined")
-				}
 
 				if !containsString(types, "null") {
 					types = append(types, "null")
@@ -1817,7 +1922,7 @@ func (p *Parser) parseParameterList() []Param {
 
 		if nullable {
 			param.HasDefault = true
-			param.DefaultValue = NewUndefined()
+			param.DefaultValue = NewNull()
 		}
 
 		if p.current.Type == TOKEN_ASSIGN {
@@ -1960,9 +2065,9 @@ func cloneDefaultValue(value Value) Value {
 }
 
 func (p *Parser) parseReturnStatement() Stmt {
+	p.expect(TOKEN_RETURN)
 	line := p.current.Line
 	column := p.current.Column
-	p.expect(TOKEN_RETURN)
 
 	if p.current.Type == TOKEN_SEMI {
 		p.consumeTerminator()
@@ -2537,10 +2642,6 @@ func (p *Parser) parsePrimary() Expr {
 		p.advance()
 		return NullExpr{}
 
-	case TOKEN_UNDEFINED:
-		p.advance()
-		return UndefinedExpr{}
-
 	case TOKEN_BANG:
 		return p.parseUnary()
 
@@ -2552,7 +2653,7 @@ func (p *Parser) parsePrimary() Expr {
 			p.current.Column,
 			"expected expression, got %s", p.current.Type,
 		)
-		return UndefinedExpr{}
+		return NullExpr{}
 	}
 }
 
@@ -2957,7 +3058,14 @@ func (p *Parser) parseArgumentList() []Expr {
 			break
 		}
 
-		arg := p.parseExpression()
+		var arg Expr
+		if p.current.Type == TOKEN_DOT_DOT_DOT {
+			p.expect(TOKEN_DOT_DOT_DOT)
+			arg = SpreadExpr{Value: p.parseExpression()}
+		} else {
+			arg = p.parseExpression()
+		}
+
 		args = append(args, arg)
 
 		for p.current.Type == TOKEN_SEMI {

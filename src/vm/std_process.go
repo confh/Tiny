@@ -186,7 +186,7 @@ func processHalt(vm *VM, args []Value) {
 	fmt.Println("Press Enter to exit...")
 	reader := bufio.NewReader(os.Stdin)
 	_, _ = reader.ReadString('\n')
-	vm.push(NewUndefined())
+	vm.push(NewNull())
 }
 
 func processRun(vm *VM, args []Value) {
