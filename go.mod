@@ -15,6 +15,7 @@ require (
 )
 
 require (
+	github.com/abemedia/go-webview v0.0.0-20250327021345-7b06ad397f16 // indirect
 	github.com/jchv/go-webview2 v0.0.0-20260205173254-56598839c808 // indirect
 	github.com/jchv/go-winloader v0.0.0-20250406163304-c1995be93bd1 // indirect
 	github.com/lxn/win v0.0.0-20210218163916-a377121e959e // indirect

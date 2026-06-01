@@ -1,7 +1,9 @@
 package vm
 
 import (
-	webview "github.com/jchv/go-webview-selector"
+	webview "github.com/abemedia/go-webview"
+
+	_ "github.com/abemedia/go-webview/embedded"
 	. "language.com/src/tinyerrors"
 )
 

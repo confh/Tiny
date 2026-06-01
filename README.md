@@ -29,7 +29,7 @@ Check out the [examples](https://github.com/confh/Tiny/tree/master/examples) to 
 * **Hybrid Type System:** Dynamically typed for rapid prototyping, with full support for optional static type hints and structural interfaces (shape-based validation).
 * **Compiled Performance:** Translates source code into structured bytecode (`.tbc`). Features in-place instruction fusing, constant folding, and flat slot-based variable lookups.
 * **Self-Contained Distribution:** Single-command packaging (`tiny pack`) bundles your bytecode and the runtime interpreter into an independent, obfuscated ~9MB native executable.
-* **Production-Ready Standard Library:**
+* **Production-Ready Standard Library:** (CGO-Free)
   * `http` (Fully concurrent HTTP client and microservices server architecture - capable of handling 45,000+ requests per second)
   * `desktop` (Cross-platform mouse, keyboard, and clipboard automation)
   * `json` (High-performance parsing/serialization directly mapped to Go streams)

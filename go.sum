@@ -1,3 +1,5 @@
+github.com/abemedia/go-webview v0.0.0-20250327021345-7b06ad397f16 h1:TzbbT13DaJy3TR2zae7TFy1/kLk5ht7vFU1yn+YF+bs=
+github.com/abemedia/go-webview v0.0.0-20250327021345-7b06ad397f16/go.mod h1:MUm5qeBfgr9qtrAHbpCbdQwx6wiQRih+dQpzkpqzzFY=
 github.com/aiwaki/makc v0.2.0 h1:Ml7LPFJOekSnrd7AgvJdg/6rThSdwsIguSHZFxzhBxU=
 github.com/aiwaki/makc v0.2.0/go.mod h1:8XXFLWdE4Nhzhi7ZocbjN3hzjl5Je8XPnEKrrLWOeRg=
 github.com/atotto/clipboard v0.1.4 h1:EH0zSVneZPSuFR11BlR9YppQTVDbh5+16AmcJi4g1z4=
