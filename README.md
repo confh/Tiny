@@ -45,6 +45,8 @@ Tiny includes a native Language Server (LSP) providing advanced static analysis,
   <img src="examples/extension.png" alt="VS Code Extension" width="500">
 </p>
 
+Download the VS Code extension by searching "Tiny" in the extension marketplace.
+
 ---
 
 ## Language Tour
