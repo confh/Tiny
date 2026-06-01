@@ -12,6 +12,5 @@ fn runSimulation() {
     io.println("Function body finished.")
 }
 
-io.println("--- Defer Example ---")
 runSimulation()
 io.println("Back in main scope.")
