@@ -16,7 +16,7 @@
 
 Tiny bridges the gap between high-level dynamic languages and strict compiled systems. It compiles human-readable source code into compact binary bytecode instructions executed on a custom stack-based VM. It is highly optimized for concurrent network services, desktop automation, and lightweight standalone tool distribution.
 
-Check out the [examples](https://github.com/confh/Tiny/tree/master/examples) to see Tiny in action.
+Read the full documentation at [tiny-lang-docs.github.io](https://tiny-lang-docs.github.io/), or check out the [examples](https://github.com/confh/Tiny/tree/master/examples) to see Tiny in action.
 
 <p align="center">
   <img src="examples/showcase.gif" alt="Tiny Showcase">

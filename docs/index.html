@@ -1,0 +1,1177 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description"
+    content="Tiny programming language documentation: syntax, bytecode VM, standard library, modules, classes, concurrency, packaging, and native Go functions.">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#0d1413">
+  <title>Tiny Language Docs</title>
+  <link rel="icon" href="assets/tiny.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+  <a class="skip-link" href="#content">Skip to content</a>
+
+  <header class="topbar">
+    <a class="brand" href="#overview" aria-label="Tiny documentation home">
+      <img src="assets/tiny.png" alt="" width="40" height="40">
+      <span>
+        <strong>Tiny</strong>
+        <small>Language Docs</small>
+      </span>
+    </a>
+
+    <div class="top-actions">
+      <nav class="top-links" aria-label="Primary">
+        <a href="#install">Install</a>
+        <a href="#quick-start">Quick start</a>
+        <a href="#language">Language</a>
+        <a href="#stdlib">Standard library</a>
+        <a href="#deploy">Deploy</a>
+      </nav>
+
+      <button class="theme-toggle" type="button" aria-label="Switch to light mode" aria-pressed="true">
+        <span class="theme-icon" aria-hidden="true"></span>
+        <span class="theme-label">Dark</span>
+      </button>
+
+      <button class="nav-toggle" type="button" aria-controls="sidebar" aria-expanded="false"
+        aria-label="Open documentation navigation">
+        <span></span>
+        <span></span>
+        <span></span>
+      </button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar" id="sidebar">
+      <label class="search">
+        <span>Search docs</span>
+        <input id="doc-search" type="search" placeholder="Search syntax, modules, pack..." autocomplete="off">
+        <small id="search-status" aria-live="polite">Showing all sections</small>
+      </label>
+
+      <nav class="sidebar-nav" aria-label="Documentation">
+        <a href="#overview">Overview</a>
+        <a href="#install">Install</a>
+        <a href="#quick-start">Quick Start</a>
+        <a href="#project-layout">Project Layout</a>
+        <a href="#language">Language Basics</a>
+        <a href="#types">Types & Interfaces</a>
+        <a href="#control-flow">Control Flow</a>
+        <a href="#functions">Functions</a>
+        <a href="#modules">Modules</a>
+        <a href="#classes">Classes</a>
+        <a href="#errors">Errors & Defer</a>
+        <a href="#concurrency">Concurrency</a>
+        <a href="#embedding">Embedding Assets</a>
+        <a href="#native-functions">Native Functions</a>
+        <a href="#stdlib">Standard Library</a>
+        <a href="#examples">Examples</a>
+        <a href="#plugin-development">Plugin Development</a>
+        <a href="#runtime-model">Runtime Model</a>
+        <a href="#gotchas">Gotchas</a>
+        <a href="#deploy">Packaging & Deploy</a>
+        <a href="#lsp">Editor Support</a>
+      </nav>
+    </aside>
+
+    <main id="content" class="content">
+      <section class="hero doc-section" id="overview"
+        data-search="overview bytecode virtual machine scripting go concurrent documentation">
+        <div class="hero-copy">
+          <p class="eyebrow">Tiny Programming Language</p>
+          <h1>Readable scripts, compact bytecode, Go-powered runtime.</h1>
+          <p class="lede">Tiny is a dynamic language with optional static hints, classes, modules, structural
+            interfaces, native concurrency, and a production-minded standard library. Source files compile into `.tbc`
+            bytecode and run on a custom stack-based VM written in Go.</p>
+          <div class="hero-actions">
+            <a class="button primary" href="#quick-start">Start building</a>
+            <a class="button secondary" href="#language">Read the syntax</a>
+          </div>
+        </div>
+
+        <div class="hero-panel" aria-label="Tiny example">
+          <div class="panel-head">
+            <span></span>
+            <span></span>
+            <span></span>
+            <strong>main.tiny</strong>
+          </div>
+          <pre><code>import std "io"
+import std "json"
+
+interface Task {
+    title: string
+    done: bool
+}
+
+fn complete(task: Task) {
+    return {
+        message: `Completing ${task.title}`,
+        ok: task.done == false
+    }
+}
+
+io.println(json.pretty(complete({
+    title: "Write docs",
+    done: false
+})))</code></pre>
+        </div>
+      </section>
+
+      <section class="doc-section compact-grid"
+        data-search="features concurrency packaging standard library native functions lsp">
+        <article class="feature">
+          <strong>Hybrid typing</strong>
+          <p>Write quickly with dynamic values, then add hints and interfaces where contracts matter.</p>
+        </article>
+        <article class="feature">
+          <strong>Compiled VM</strong>
+          <p>Tiny compiles source into binary bytecode with slot-based locals and optimization passes.</p>
+        </article>
+        <article class="feature">
+          <strong>Parallel tasks</strong>
+          <p>`spawn`, `await`, `lock`, and mutexes make concurrent scripts feel direct.</p>
+        </article>
+        <article class="feature">
+          <strong>Standalone apps</strong>
+          <p>Package scripts, bytecode, embedded assets, and native plugins into distributable builds.</p>
+        </article>
+      </section>
+
+      <section class="doc-section" id="install"
+        data-search="install build from source windows linux go version tiny version path release verify">
+        <div class="section-heading">
+          <p class="eyebrow">01</p>
+          <h2>Install</h2>
+          <p>Tiny is distributed as a standalone executable. Put the binary somewhere on your `PATH`, then verify it
+            with `tiny version`.</p>
+        </div>
+
+        <div class="reference-grid">
+          <article>
+            <h3>Use a release binary</h3>
+            <p>Download the Tiny executable for your platform, place it in a tools folder, and make sure that folder is
+              available from your terminal.</p>
+            <pre data-code-label="terminal"><code># Windows
+tiny.exe version
+
+# Linux
+./tiny_linux version</code></pre>
+          </article>
+
+          <article>
+            <h3>Build on Windows</h3>
+            <p>The repository includes a Windows build script that builds the runtime and compiler executable.</p>
+            <pre data-code-label="terminal"><code>build.bat
+tiny version</code></pre>
+          </article>
+
+          <article>
+            <h3>Build on Linux</h3>
+            <p>The Linux build script produces `tiny_linux` and the embedded Linux runtime.</p>
+            <pre data-code-label="terminal"><code>chmod +x build.sh
+./build.sh
+./tiny_linux version</code></pre>
+          </article>
+
+          <article>
+            <h3>Command check</h3>
+            <p>`tiny version` prints the language version and bytecode cache version. If this command works, the CLI is
+              installed correctly.</p>
+            <pre data-code-label="terminal"><code>tiny version</code></pre>
+          </article>
+        </div>
+
+        <div class="note">
+          <strong>Native functions need extra tools</strong>
+          <p>Normal Tiny programs do not need Go or TinyGo at runtime. `native fn` blocks require Go and TinyGo on the
+            machine compiling those native functions.</p>
+        </div>
+      </section>
+
+      <section class="doc-section" id="quick-start" data-search="quick start install run tiny json source command">
+        <div class="section-heading">
+          <p class="eyebrow">02</p>
+          <h2>Quick Start</h2>
+          <p>Run Tiny from a project folder with a `tiny.json` file, or pass a source file directly. The examples in
+            this repository are ready to run.</p>
+        </div>
+
+        <div class="steps">
+          <article>
+            <span>1</span>
+            <h3>Create a source file</h3>
+            <pre><code>import std "io"
+
+const name = "Tiny"
+io.println(`Hello from ${name}`)</code></pre>
+          </article>
+          <article>
+            <span>2</span>
+            <h3>Run the program</h3>
+            <pre><code># From a project with tiny.json
+tiny
+
+# Or run a file directly
+tiny src/main.tiny</code></pre>
+          </article>
+          <article>
+            <span>3</span>
+            <h3>Explore examples</h3>
+            <pre><code>cd examples/01-basics
+../../tiny</code></pre>
+          </article>
+        </div>
+
+        <div class="note">
+          <strong>Command behavior</strong>
+          <p>Example projects include `tiny.json`; when you run `tiny` inside one of those folders, the tool resolves
+            the configured entrypoint and executes it.</p>
+        </div>
+      </section>
+
+      <section class="doc-section" id="project-layout" data-search="project layout tiny json src cache tbc examples">
+        <div class="section-heading">
+          <p class="eyebrow">03</p>
+          <h2>Project Layout</h2>
+          <p>A Tiny project is usually small: one config file, source files, optional assets, and generated bytecode
+            cache files.</p>
+        </div>
+
+        <div class="split">
+          <div>
+            <h3>Typical structure</h3>
+            <pre><code>my-tool/
+  tiny.json
+  src/
+    main.tiny
+    helpers.tiny
+    ui/
+      index.html
+  data/
+    input.json</code></pre>
+          </div>
+          <div>
+            <h3>Generated files</h3>
+            <p>Tiny may create `.tinycache` folders containing compiled `.tbc` bytecode. These files speed repeated runs
+              and are also the format used by the runtime.</p>
+            <p>For distribution, use `tiny pack` or `tiny dist` instead of manually copying cache files.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="doc-section" id="language"
+        data-search="language basics let const strings arrays objects interpolation typeof operators">
+        <div class="section-heading">
+          <p class="eyebrow">04</p>
+          <h2>Language Basics</h2>
+          <p>Tiny syntax is familiar if you know JavaScript, Lua, or Python, but it has its own compact style: braces
+            for blocks, optional semicolons, and direct standard-library imports.</p>
+        </div>
+
+        <div class="reference-grid">
+          <article>
+            <h3>Variables</h3>
+            <p>Use `let` for mutable bindings and `const` for values that should not be reassigned.</p>
+            <pre><code>const language: string = "Tiny"
+let count: number = 3
+
+count = count + 1
+count += 2
+count++</code></pre>
+          </article>
+
+          <article>
+            <h3>Values</h3>
+            <p>Core values include numbers, strings, booleans, arrays, objects, functions, classes, buffers, errors, and
+              `null`.</p>
+            <pre><code>let enabled = true
+let empty = null
+let words = ["tiny", "docs"]
+let user = {
+    name: "Ada",
+    active: enabled
+}</code></pre>
+          </article>
+
+          <article>
+            <h3>Strings</h3>
+            <p>Backtick strings support interpolation with `${...}` expressions.</p>
+            <pre><code>const name = "Tiny"
+const version = 1
+
+let label = `${name} docs v${version}`</code></pre>
+          </article>
+
+          <article>
+            <h3>Objects and arrays</h3>
+            <p>Use dot access for named fields and bracket access for dynamic keys.</p>
+            <pre><code>let numbers = [1, 2, 3]
+numbers.push(4)
+
+let user = { name: "Sam" }
+user.role = "reader"
+user["level"] = "beginner"</code></pre>
+          </article>
+        </div>
+      </section>
+
+      <section class="doc-section" id="types"
+        data-search="types hints interface structural validation union optional any string number bool object array function">
+        <div class="section-heading">
+          <p class="eyebrow">05</p>
+          <h2>Types & Interfaces</h2>
+          <p>Tiny is dynamic by default, with runtime-checked type hints for variables, parameters, returns, and
+            structural interfaces.</p>
+        </div>
+
+        <div class="split">
+          <div>
+            <h3>Type hints</h3>
+            <pre><code>fn add(a: number, b: number): number {
+    return a + b
+}
+
+let name: string = "Tiny"
+let handler: function = fn(value) {
+    return value
+}</code></pre>
+            <p>Common hint names include `string`, `number`, `bool`, `array`, `object`, `function`, `buffer`, `error`,
+              `null`, and `any`.</p>
+          </div>
+
+          <div>
+            <h3>Interfaces</h3>
+            <pre><code>interface Request {
+    path: string
+    method: string
+    params: object
+}
+
+fn logRequest(req: Request) {
+    return `${req.method} ${req.path}`
+}</code></pre>
+            <p>Interfaces are structural: an object is valid when it has the required shape, regardless of where it was
+              created.</p>
+          </div>
+        </div>
+
+        <div class="note">
+          <strong>Union and optional signatures</strong>
+          <p>Standard library stubs use unions such as `string | function` and optional parameters like `debug?: bool`,
+            so public APIs can express flexible call patterns.</p>
+        </div>
+      </section>
+
+      <section class="doc-section" id="control-flow"
+        data-search="control flow if else while for for in break continue ternary match enum iota">
+        <div class="section-heading">
+          <p class="eyebrow">06</p>
+          <h2>Control Flow</h2>
+          <p>Tiny supports familiar imperative control flow, plus `match` and enums for cleaner branching.</p>
+        </div>
+
+        <div class="reference-grid">
+          <article>
+            <h3>If and loops</h3>
+            <pre><code>while index < values.length() {
+    const value = values.get(index)
+    index = index + 1
+
+    if value == 5 {
+        continue
+    }
+
+    if value > 6 {
+        break
+    }
+}</code></pre>
+          </article>
+          <article>
+            <h3>Classic `for`</h3>
+            <pre><code>for let i = 0; i < values.length(); i++ {
+    io.println(values.get(i))
+}</code></pre>
+          </article>
+          <article>
+            <h3>`for in`</h3>
+            <pre><code>for value in values {
+    io.println(value)
+}</code></pre>
+          </article>
+          <article>
+            <h3>Match</h3>
+            <pre><code>match state {
+    "Small" {
+        io.println("small")
+    }
+    "Medium" {
+        io.println("medium")
+    }
+    _ { // default
+        io.println("large")
+    }
+}</code></pre>
+          </article>
+        </div>
+
+        <h3>Enums</h3>
+        <pre><code>enum State {
+    Small = "small",
+    Medium = "medium",
+    Large = "large"
+}</code></pre>
+        <pre><code>enum State {
+    Small = 1,
+    Medium = 2,
+    Large = 3
+}</code></pre>
+        <pre><code>enum State {
+    Small = iota, // starts from 0
+    Medium,
+    Large
+}</code></pre>
+        <pre><code>enum State {
+    Small, // becomes "Small"
+    Medium,
+    Large
+}
+
+let current = State.Small</code></pre>
+      </section>
+
+      <section class="doc-section" id="functions"
+        data-search="functions fn default parameters callbacks closures anonymous rest spread return">
+        <div class="section-heading">
+          <p class="eyebrow">07</p>
+          <h2>Functions</h2>
+          <p>Functions are first-class values. You can pass them as callbacks, return them from other functions, and
+            close over local state.</p>
+        </div>
+
+        <div class="split">
+          <div>
+            <h3>Named functions</h3>
+            <pre><code>fn greet(name, prefix = "Hello") {
+    return `${prefix}, ${name}`
+}
+
+io.println(greet("Tiny"))
+io.println(greet("Tiny", "Welcome"))</code></pre>
+          </div>
+          <div>
+            <h3>Closures</h3>
+            <pre><code>fn makeCounter(start) {
+    let current = start
+
+    return fn() {
+        current = current + 1
+        return current
+    }
+}
+
+let next = makeCounter(10)</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="doc-section" id="modules"
+        data-search="modules import export std alias namespace private file plugin">
+        <div class="section-heading">
+          <p class="eyebrow">08</p>
+          <h2>Modules</h2>
+          <p>Tiny has standard-library imports and file imports. File modules expose only values marked with `export`.
+          </p>
+        </div>
+
+        <div class="reference-grid">
+          <article>
+            <h3>Standard modules</h3>
+            <pre><code>import std "io"
+import std "json"
+
+io.println(json.pretty({ ok: true }))</code></pre>
+          </article>
+          <article>
+            <h3>File modules</h3>
+            <pre><code>import "numbers.tiny" as Numbers
+
+io.println(Numbers.sum([2, 4, 6]))</code></pre>
+          </article>
+          <article>
+            <h3>Exports</h3>
+            <pre><code>export const defaultStep = 1
+
+export fn sum(values): number {
+    let total = 0
+    for value in values {
+        total += value
+    }
+    return total
+}</code></pre>
+          </article>
+          <article>
+            <h3>Plugin imports</h3>
+            <p>The compiler includes native plugin support for external DLL/SO integrations. Plugins are imported
+              separately from standard and file modules.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="doc-section" id="classes"
+        data-search="classes class field method init this embed private instanceof chaining">
+        <div class="section-heading">
+          <p class="eyebrow">09</p>
+          <h2>Classes</h2>
+          <p>Classes provide constructors, fields, methods, `this`, method chaining, embedded objects, and `instanceof`
+            checks.</p>
+        </div>
+
+        <pre><code>class Log {
+    field messages = []
+
+    fn init() {
+        this.messages = []
+    }
+
+    fn add(message) {
+        this.messages.push(message)
+        return this
+    }
+}
+
+class Box {
+    field value = null
+    embed log
+
+    fn init(value) {
+        this.value = value
+        this.log = Log()
+        this.add("created")
+    }
+}
+
+let box = Box("start")
+io.println(box instanceof Box)</code></pre>
+      </section>
+
+      <section class="doc-section" id="errors" data-search="errors try catch finally throw defer cleanup error module">
+        <div class="section-heading">
+          <p class="eyebrow">10</p>
+          <h2>Errors & Defer</h2>
+          <p>Tiny includes exceptions for recoverable runtime failures and `defer` for cleanup just before a function
+            returns.</p>
+        </div>
+
+        <div class="split">
+          <div>
+            <h3>Try, catch, finally</h3>
+            <pre><code>import std "error"
+
+try {
+    throw error.new("ValidationError", "path is required")
+} catch err {
+    io.println(err.kind)
+    io.println(err.message)
+} finally {
+    io.println("done")
+}</code></pre>
+          </div>
+          <div>
+            <h3>Defer cleanup</h3>
+            <pre><code>fn runSimulation() {
+    io.println("Opening resource")
+
+    defer fn() {
+        io.println("Closing resource")
+    }
+
+    io.println("Working")
+}</code></pre>
+            <p>Current parser behavior permits one `defer` statement per function scope.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="doc-section media-section" id="concurrency"
+        data-search="concurrency spawn await lock mutex sync thread task parallel">
+        <div class="section-heading">
+          <p class="eyebrow">11</p>
+          <h2>Concurrency</h2>
+          <p>Tiny exposes Go-backed concurrency through language syntax and standard library primitives. Spawned tasks
+            run with isolated VM state, and shared mutations can be protected with locks.</p>
+        </div>
+
+        <div class="split">
+          <pre><code>import std "time"
+import std "sync"
+
+let mutex = sync.mutex()
+let task = spawn () fn() {
+    time.sleep(1000)
+    return "parallel result"
+}
+
+lock mutex {
+    io.println("safe section")
+}
+
+io.println(await task)</code></pre>
+          <div>
+            <h3>Concurrency tools</h3>
+            <ul class="plain-list">
+              <li><strong>`spawn`</strong> starts work in another VM execution space.</li>
+              <li><strong>`await`</strong> waits for a spawned task and returns its result.</li>
+              <li><strong>`sync.mutex()`</strong> creates a mutex object.</li>
+              <li><strong>`lock mutex { ... }`</strong> acquires and releases around a block.</li>
+              <li><strong>`http.server(...).start(true)`</strong> can run server work asynchronously.</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="doc-section" id="embedding"
+        data-search="embedding embedstr embedbin embeddir assets binary string webview config">
+        <div class="section-heading">
+          <p class="eyebrow">12</p>
+          <h2>Embedding Assets</h2>
+          <p>Embed data at compile time so scripts and packaged executables can carry configuration, binary files, or
+            whole UI folders.</p>
+        </div>
+
+        <div class="reference-grid">
+          <article>
+            <h3>Text</h3>
+            <pre><code>embedstr "./data.json" const data
+io.println(data)</code></pre>
+          </article>
+          <article>
+            <h3>Binary</h3>
+            <pre><code>embedbin "./icon.png" const iconBytes
+fs.writeBytes("icon-copy.png", iconBytes)</code></pre>
+          </article>
+          <article>
+            <h3>Directory</h3>
+            <pre><code>embeddir "./ui" const assets
+const html = assets["index.html"]</code></pre>
+          </article>
+          <article>
+            <h3>Use cases</h3>
+            <p>Bundled webview HTML, config files, templates, images, and other static resources that should travel with
+              a distributed tool.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="doc-section media-section" id="native-functions"
+        data-search="native functions native fn go tinygo wasm performance sha256 fibonacci">
+        <div class="section-heading">
+          <p class="eyebrow">13</p>
+          <h2>Native Go Functions</h2>
+          <p>`native fn` lets you write performance-sensitive logic in Go inside Tiny source. Native blocks are compiled
+            through TinyGo to WebAssembly and cached.</p>
+        </div>
+
+        <div class="split">
+          <pre><code>native fn gosha256(input: string): string {
+    go {
+        import "crypto/sha256"
+        import "encoding/hex"
+
+        h := sha256.Sum256([]byte(input))
+        return hex.EncodeToString(h[:])
+    }
+}</code></pre>
+          <div>
+            <h3>Requirements</h3>
+            <p>Native functions require Go and TinyGo installed on the host machine. They are best for tight loops,
+              hashing, parsing, math-heavy work, or targeted use of Go packages.</p>
+            <p>Because native functions cross a runtime boundary, keep their API narrow and pass simple data where
+              possible.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="doc-section" id="stdlib"
+        data-search="standard library std io json fs http array math process regex runtime sync time ui desktop net object path buffer tests app error strings">
+        <div class="section-heading">
+          <p class="eyebrow">14</p>
+          <h2>Standard Library</h2>
+          <p>The standard library is broad enough for scripts, servers, automation, tests, desktop tools, and GUI
+            shells.</p>
+        </div>
+
+        <div class="module-table" role="table" aria-label="Tiny standard library modules">
+          <div role="row">
+            <strong role="cell">`io`</strong>
+            <span role="cell">Console IO: `print`, `println`, `input`, `readLine`, `readKey`, `clear`.</span>
+          </div>
+          <div role="row">
+            <strong role="cell">`json`</strong>
+            <span role="cell">Parse, stringify, pretty-print, read JSON files, and write JSON files.</span>
+          </div>
+          <div role="row">
+            <strong role="cell">`fs`</strong>
+            <span role="cell">Read/write files, bytes, directories, stat paths, copy, remove, and create
+              directories.</span>
+          </div>
+          <div role="row">
+            <strong role="cell">`http`</strong>
+            <span role="cell">HTTP client helpers and a route-based server with JSON/text responses.</span>
+          </div>
+          <div role="row">
+            <strong role="cell">`array`</strong>
+            <span role="cell">Helpers such as `range`, `from`, and array methods exposed on values.</span>
+          </div>
+          <div role="row">
+            <strong role="cell">`math`</strong>
+            <span role="cell">Numeric helpers, trigonometry, clamping, sums, and matrix operations.</span>
+          </div>
+          <div role="row">
+            <strong role="cell">`process`</strong>
+            <span role="cell">Args, cwd, env vars, process execution, background processes, and signals.</span>
+          </div>
+          <div role="row">
+            <strong role="cell">`sync`</strong>
+            <span role="cell">Mutex creation for use with explicit locks and concurrent code.</span>
+          </div>
+          <div role="row">
+            <strong role="cell">`time`</strong>
+            <span role="cell">Sleep, clock, measurement, and current time in ns, ms, or seconds.</span>
+          </div>
+          <div role="row">
+            <strong role="cell">`ui`</strong>
+            <span role="cell">Native WebView windows, HTML content, navigation, and JS-to-Tiny callbacks.</span>
+          </div>
+          <div role="row">
+            <strong role="cell">`desktop`</strong>
+            <span role="cell">Mouse, keyboard, clipboard, screenshots, and screen-size automation.</span>
+          </div>
+          <div role="row">
+            <strong role="cell">`net`</strong>
+            <span role="cell">TCP servers and connections with line reads, binary/string writes, and addresses.</span>
+          </div>
+          <div role="row">
+            <strong role="cell">`object`</strong>
+            <span role="cell">Dynamic object operations: get, set, has, delete, keys, values, entries, length,
+              clear.</span>
+          </div>
+          <div role="row">
+            <strong role="cell">`path`</strong>
+            <span role="cell">Path joins and basename, dirname, extension helpers.</span>
+          </div>
+          <div role="row">
+            <strong role="cell">`regex`</strong>
+            <span role="cell">Regex matching and string extraction.</span>
+          </div>
+          <div role="row">
+            <strong role="cell">`runtime`</strong>
+            <span role="cell">Thread locking, fatal handlers, memory stats, and manual GC.</span>
+          </div>
+          <div role="row">
+            <strong role="cell">`tests`</strong>
+            <span role="cell">Assertions, equality helpers, test runners, and timing measurement.</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="doc-section" id="examples"
+        data-search="examples basics control flow functions modules classes errors files json cli server defer embed native webview">
+        <div class="section-heading">
+          <p class="eyebrow">15</p>
+          <h2>Examples</h2>
+          <p>The repository includes focused examples that double as a learning path.</p>
+        </div>
+
+        <div class="example-list">
+          <a href="https://github.com/confh/Tiny/tree/master/examples/01-basics" target="_blank"
+            rel="noopener noreferrer"><strong>01 Basics</strong><span>Values, expressions, interpolation, arrays,
+              objects.</span></a>
+          <a href="https://github.com/confh/Tiny/tree/master/examples/02-control-flow" target="_blank"
+            rel="noopener noreferrer"><strong>02 Control Flow</strong><span>If, loops, `for in`, ternary, match,
+              enums.</span></a>
+          <a href="https://github.com/confh/Tiny/tree/master/examples/03-functions" target="_blank"
+            rel="noopener noreferrer"><strong>03 Functions</strong><span>Default parameters, callbacks,
+              closures.</span></a>
+          <a href="https://github.com/confh/Tiny/tree/master/examples/04-arrays-objects" target="_blank"
+            rel="noopener noreferrer"><strong>04 Arrays & Objects</strong><span>Methods, nested objects, bracket
+              access.</span></a>
+          <a href="https://github.com/confh/Tiny/tree/master/examples/05-modules" target="_blank"
+            rel="noopener noreferrer"><strong>05 Modules</strong><span>Imports, aliases, namespaces, explicit
+              exports.</span></a>
+          <a href="https://github.com/confh/Tiny/tree/master/examples/06-classes" target="_blank"
+            rel="noopener noreferrer"><strong>06 Classes</strong><span>Constructors, methods, embeds,
+              `instanceof`.</span></a>
+          <a href="https://github.com/confh/Tiny/tree/master/examples/07-errors" target="_blank"
+            rel="noopener noreferrer"><strong>07 Errors</strong><span>`try`, `catch`, `throw`, and error
+              objects.</span></a>
+          <a href="https://github.com/confh/Tiny/tree/master/examples/08-files-json" target="_blank"
+            rel="noopener noreferrer"><strong>08 Files & JSON</strong><span>Read, parse, mutate, and write
+              JSON.</span></a>
+          <a href="https://github.com/confh/Tiny/tree/master/examples/09-cli-args" target="_blank"
+            rel="noopener noreferrer"><strong>09 CLI Args</strong><span>`process.args()` and command
+              dispatch.</span></a>
+          <a href="https://github.com/confh/Tiny/tree/master/examples/10-http-server" target="_blank"
+            rel="noopener noreferrer"><strong>10 HTTP Server</strong><span>Routes, params, query values, JSON
+              responses.</span></a>
+          <a href="https://github.com/confh/Tiny/tree/master/examples/11-defer" target="_blank"
+            rel="noopener noreferrer"><strong>11 Defer</strong><span>Cleanup work before function return.</span></a>
+          <a href="https://github.com/confh/Tiny/tree/master/examples/12-embed" target="_blank"
+            rel="noopener noreferrer"><strong>12 Embed</strong><span>`embedstr`, `embedbin`, bundled static
+              data.</span></a>
+          <a href="https://github.com/confh/Tiny/tree/master/examples/13-native-functions" target="_blank"
+            rel="noopener noreferrer"><strong>13 Native Functions</strong><span>Go snippets compiled with
+              TinyGo.</span></a>
+          <a href="https://github.com/confh/Tiny/tree/master/examples/14-webview" target="_blank"
+            rel="noopener noreferrer"><strong>14 WebView</strong><span>Desktop UI with embedded HTML and
+              callbacks.</span></a>
+        </div>
+      </section>
+
+      <section class="doc-section" id="plugin-development"
+        data-search="plugin developers native plugins dll so shared library TinyPluginCall TinyPluginFree json payload wrapper tiny interface import plugin Plugin.load handles">
+        <div class="section-heading">
+          <p class="eyebrow">16</p>
+          <h2>Plugin Development</h2>
+          <p>Native plugins let Tiny call external shared libraries while keeping Tiny programs pleasant to use. A good
+            plugin has two layers: a native `.dll` or `.so` that speaks Tiny's JSON call protocol, and a `.tiny` wrapper
+            module that exposes a typed, documented Tiny interface.</p>
+        </div>
+
+        <div class="note">
+          <strong>Always ship a Tiny wrapper</strong>
+          <p>Raw plugin calls are intentionally low-level. Put `import plugin ...` inside a `.tiny` wrapper, then export
+            functions, enums, interfaces, and classes that Tiny users can call normally. That wrapper is where you
+            define
+            Tiny-facing type hints, object shapes, defaults, validation, and friendly names.</p>
+        </div>
+
+        <div class="reference-grid">
+          <article>
+            <h3>What Tiny loads</h3>
+            <p>Tiny loads platform shared libraries. On Windows, paths without an extension resolve as `.dll`; on Linux,
+              they resolve as `.so`.</p>
+            <pre><code>import plugin "./hash" as hashPlugin</code></pre>
+            <p>The runtime searches the current working directory, the executable directory, and registered
+              import/source
+              folders.</p>
+          </article>
+
+          <article>
+            <h3>Required exports</h3>
+            <p>The native library must export exactly the functions Tiny looks for: `TinyPluginCall` and
+              `TinyPluginFree`.</p>
+            <pre><code>// Tiny calls this with a method name and JSON payload.
+TinyPluginCall(method, argsJSON) -> char*
+
+// Tiny calls this after reading the returned string.
+TinyPluginFree(ptr)</code></pre>
+            <p>If either symbol is missing, plugin loading fails before any method is called.</p>
+          </article>
+
+          <article>
+            <h3>Call payload</h3>
+            <p>Each call is serialized as JSON. Tiny sends the method name separately and also includes it in the
+              payload.</p>
+            <pre><code>{
+  "method": "hash",
+  "args": [
+    {
+      "text": "Tiny",
+      "method": "sha256"
+    }
+  ]
+}</code></pre>
+          </article>
+
+          <article>
+            <h3>Return payload</h3>
+            <p>Return normal JSON-compatible values: strings, numbers, booleans, arrays, objects, or `null`. Tiny maps
+              the JSON result back into Tiny values.</p>
+            <pre><code>{
+  "success": true,
+  "method": "sha256",
+  "result": "..."
+}</code></pre>
+          </article>
+        </div>
+
+        <h3>Native Go plugin shape</h3>
+        <p>A Go plugin can use the repository's `tinyplugin` helper package to register named handlers and handle the
+          JSON request/response protocol.</p>
+        <pre><code>package main
+
+/*
+#include <stdlib.h>
+*/
+import "C"
+
+import (
+    "unsafe"
+    "language.com/src/tinyplugin"
+)
+
+func init() {
+    tinyplugin.Register("hash", func(args tinyplugin.Args) (any, error) {
+        config := args.Object(0)
+        text := config["text"].(string)
+
+        return map[string]any{
+            "success": true,
+            "input": text,
+        }, nil
+    })
+}
+
+//export TinyPluginCall
+func TinyPluginCall(methodC *C.char, argsC *C.char) *C.char {
+    method := C.GoString(methodC)
+    argsJSON := C.GoString(argsC)
+    return C.CString(tinyplugin.HandleCall(method, argsJSON))
+}
+
+//export TinyPluginFree
+func TinyPluginFree(ptr *C.char) {
+    C.free(unsafe.Pointer(ptr))
+}
+
+func main() {}</code></pre>
+
+        <div class="split">
+          <div>
+            <h3>Error contract</h3>
+            <p>Plugins report failures by returning an object with an `error` field. Tiny turns that into a Tiny runtime
+              error with the given kind and message.</p>
+            <pre><code>{
+  "error": {
+    "kind": "ValidationError",
+    "message": "Missing text field"
+  }
+}</code></pre>
+          </div>
+
+          <div>
+            <h3>Handle state safely</h3>
+            <p>If your plugin owns long-lived native resources, return opaque handles to Tiny instead of raw pointers.
+              The helper package includes a handle store pattern for mapping IDs like `file_1` or `socket_2` to native
+              values.</p>
+            <pre><code>let handle = filePlugin.open("data.txt")
+filePlugin.close(handle)</code></pre>
+          </div>
+        </div>
+
+        <h3>Tiny wrapper module</h3>
+        <p>The wrapper is the public API. It hides the raw native namespace, validates Tiny inputs, and gives the LSP
+          type hints and structural interfaces to work with.</p>
+        <pre><code>import plugin "./hash" as hashPlugin
+
+export enum HashMethod {
+    md5,
+    sha256
+}
+
+export interface HashResult {
+    success: bool
+    method: string
+    input: string
+    result: string
+}
+
+export fn hash(text: string, method: string): HashResult {
+    return hashPlugin.hash({
+        text: text,
+        method: method
+    })
+}</code></pre>
+
+        <div class="reference-grid">
+          <article>
+            <h3>Wrapper responsibilities</h3>
+            <p>Expose a Tiny-shaped API, not a native-shaped API. Prefer objects with named fields over positional
+              argument lists when a call has several options.</p>
+          </article>
+          <article>
+            <h3>Type the boundary</h3>
+            <p>Use `interface`, `enum`, and return type hints in the `.tiny` wrapper so callers get validation and
+              editor
+              help before the native library is involved.</p>
+          </article>
+          <article>
+            <h3>Keep JSON-compatible data</h3>
+            <p>The native boundary is JSON-based. Pass simple Tiny values, arrays, and objects. Represent native
+              resources as string handles.</p>
+          </article>
+          <article>
+            <h3>Distribution</h3>
+            <p>`tiny dist` scans plugin imports and literal `Plugin.load("...")` calls, copies plugin files into the
+              release, and rewrites paths for the target package.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="doc-section" id="runtime-model"
+        data-search="runtime model compiler pipeline source parser compiler bytecode tbc vm standard library plugins native functions">
+        <div class="section-heading">
+          <p class="eyebrow">17</p>
+          <h2>Runtime Model</h2>
+          <p>Tiny separates the developer-facing language from the runtime that executes it. Source files compile into a
+            compact bytecode format, then the VM runs that bytecode with access to standard modules, plugins, and native
+            functions.</p>
+        </div>
+
+        <div class="runtime-diagram" aria-label="Tiny runtime pipeline">
+          <div>
+            <strong>.tiny source</strong>
+            <span>Readable program files</span>
+          </div>
+          <div>
+            <strong>Parser</strong>
+            <span>Builds the AST</span>
+          </div>
+          <div>
+            <strong>Compiler</strong>
+            <span>Slots, constants, functions</span>
+          </div>
+          <div>
+            <strong>.tbc bytecode</strong>
+            <span>Cached or packaged output</span>
+          </div>
+          <div>
+            <strong>Stack VM</strong>
+            <span>Executes optimized opcodes</span>
+          </div>
+          <div>
+            <strong>Runtime APIs</strong>
+            <span>std, plugins, native fn</span>
+          </div>
+        </div>
+
+        <div class="reference-grid">
+          <article>
+            <h3>Cache path</h3>
+            <p>Normal runs may create `.tinycache` bytecode beside the entry file. The cache is an implementation
+              detail; source files remain the normal authoring format.</p>
+          </article>
+          <article>
+            <h3>Distribution path</h3>
+            <p>`tiny pack` and `tiny dist` turn bytecode, runtime assets, embeds, and plugin dependencies into
+              deployable artifacts.</p>
+          </article>
+          <article>
+            <h3>Concurrency path</h3>
+            <p>`spawn` runs work in isolated VM state, while shared resources should be protected by `sync.mutex()` and
+              `lock` blocks.</p>
+          </article>
+          <article>
+            <h3>Native boundary</h3>
+            <p>`native fn` compiles Go snippets through TinyGo/WASM, while plugins communicate with the VM through a
+              JSON-compatible ABI.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="doc-section" id="gotchas"
+        data-search="gotchas caveats defer cache plugins json boundary native fn tiny version dist wrapper">
+        <div class="section-heading">
+          <p class="eyebrow">18</p>
+          <h2>Gotchas</h2>
+          <p>These are the small details worth knowing before building larger Tiny projects.</p>
+        </div>
+
+        <div class="reference-grid">
+          <article>
+            <h3>Use `tiny version`</h3>
+            <p>The version command is `tiny version`, with aliases `tiny ver` and `tiny v`. It is not
+              `tiny --version`.</p>
+          </article>
+          <article>
+            <h3>One defer per scope</h3>
+            <p>The current parser permits one `defer` statement per function scope. Use one cleanup function that
+              performs all cleanup work.</p>
+          </article>
+          <article>
+            <h3>Plugins are JSON-boundary APIs</h3>
+            <p>Keep plugin arguments and results JSON-compatible. Use string handles for native resources rather than
+              exposing raw pointers to Tiny.</p>
+          </article>
+          <article>
+            <h3>Ship plugin wrappers</h3>
+            <p>Plugin users should import `.tiny` wrapper modules, not call raw native plugin methods directly. Wrappers
+              provide types, defaults, validation, and editor help.</p>
+          </article>
+          <article>
+            <h3>Cache is not your API</h3>
+            <p>`.tinycache` files are generated artifacts. Do not edit them by hand; rebuild from source or use
+              `--disable-cache` while debugging cache behavior.</p>
+          </article>
+          <article>
+            <h3>Native functions need tooling</h3>
+            <p>`native fn` requires Go and TinyGo where the native code is compiled. Plain Tiny scripts and packaged
+              runtime execution do not require those tools.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="doc-section" id="deploy"
+        data-search="deploy package dist pack bytecode tbc executable github pages distribution obfuscation">
+        <div class="section-heading">
+          <p class="eyebrow">19</p>
+          <h2>Packaging & Deploy</h2>
+          <p>Tiny can ship scripts as bytecode or bundle them into standalone native executables with the runtime.</p>
+        </div>
+
+        <div class="reference-grid">
+          <article>
+            <h3>Compile and run bytecode</h3>
+            <p>Source is compiled into `.tbc` bytecode and executed by the VM. Cache files live under `.tinycache`.</p>
+          </article>
+          <article>
+            <h3>Pack a standalone tool</h3>
+            <pre><code>tiny pack src/main.tiny -o mytool</code></pre>
+            <p>`pack` bundles bytecode and the Tiny runtime into one native executable.</p>
+          </article>
+          <article>
+            <h3>Distribute with native dependencies</h3>
+            <pre><code>tiny dist src/main.tiny -o release/app</code></pre>
+            <p>`dist` resolves plugin/runtime assets and produces a clean release folder.</p>
+          </article>
+          <article>
+            <h3>Windowed apps</h3>
+            <pre><code>tiny dist --windowed</code></pre>
+            <p>Use this for GUI apps on Windows when you do not want a console window.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="doc-section" id="lsp"
+        data-search="lsp editor vscode autocomplete diagnostics formatter language server type narrowing jump definition">
+        <div class="section-heading">
+          <p class="eyebrow">20</p>
+          <h2>Editor Support</h2>
+          <p>The project includes a Tiny language server with diagnostics, formatting, autocomplete, type analysis, and
+            jump-to-definition support. The LSP also ships stubs for the standard library so editors can understand
+            `std` imports.</p>
+          <p><a href="https://marketplace.visualstudio.com/items?itemName=Confis.tiny" target="_blank"
+              rel="noopener noreferrer">Open the Tiny VS Code extension on the Marketplace</a>.</p>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <img src="assets/tiny.png" alt="" width="36" height="36">
+        <p>Tiny Language documentation.</p>
+        <a href="#overview">Back to top</a>
+      </footer>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+
+</html>

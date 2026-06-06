@@ -2,4 +2,4 @@ export fn assert(condition: bool, message: string): null {}
 export fn equal(actual: any, expected: any, message: string): null {}
 export fn notEqual(actual: any, expected: any, message: string): null {}
 export fn run(name: string, func: function): null {}
-export fn testMeasureMs(func: function): number {}
+export fn measureMs(func: function): number {}
