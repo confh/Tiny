@@ -12,6 +12,29 @@ import (
 	_ "embed"
 )
 
+//go:embed embedded/tiny_runtime_windows_amd64.exe
+var embeddedRuntimeWindowsAMD64 []byte
+
+//go:embed embedded/tiny_runtime_linux_amd64
+var embeddedRuntimeLinuxAMD64 []byte
+
+//go:embed embedded/tiny_runtime_darwin_arm64
+var embeddedRuntimeDarwinARM64 []byte
+
+func getEmbeddedRuntimeForTarget(target string) []byte {
+	switch target {
+	case "windows-amd64":
+		return embeddedRuntimeWindowsAMD64
+	case "linux-amd64":
+		return embeddedRuntimeLinuxAMD64
+	case "darwin-arm64":
+		return embeddedRuntimeDarwinARM64
+	default:
+		LangError(ErrorRuntime, "unsupported target: %s", target)
+		return nil
+	}
+}
+
 func normalizePluginPathForTarget(path string, target string) string {
 	ext := filepath.Ext(path)
 
@@ -26,6 +49,9 @@ func normalizePluginPathForTarget(path string, target string) string {
 	case "linux-amd64":
 		return path + ".so"
 
+	case "darwin-arm64":
+		return path + ".dylib"
+
 	default:
 		return path
 	}
@@ -35,10 +61,10 @@ func normalizeTarget(target string) string {
 	if target == "" {
 		if runtime.GOOS == "windows" && runtime.GOARCH == "amd64" {
 			return "windows-amd64"
-		}
-
-		if runtime.GOOS == "linux" && runtime.GOARCH == "amd64" {
+		} else if runtime.GOOS == "linux" && runtime.GOARCH == "amd64" {
 			return "linux-amd64"
+		} else if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
+			return "darwin-arm64"
 		}
 
 		LangError(ErrorRuntime, "unsupported default target: %s-%s", runtime.GOOS, runtime.GOARCH)
@@ -52,6 +78,32 @@ func packCommand(args []string) {
 	outFile := ""
 	target := normalizeTarget("")
 	windowed := false
+
+	for i := 1; i < len(args); i++ {
+		switch args[i] {
+		case "-o":
+			if i+1 >= len(args) {
+				LangError(ErrorRuntime, "expected output path after -o")
+			}
+
+			outFile = args[i+1]
+			i++
+
+		case "--target":
+			if i+1 >= len(args) {
+				LangError(ErrorRuntime, "expected target after --target")
+			}
+
+			target = normalizeTarget(args[i+1])
+			i++
+
+		case "--windowed":
+			windowed = true
+
+		default:
+			LangError(ErrorRuntime, "unknown pack argument: %s", args[i])
+		}
+	}
 
 	if len(args) == 0 {
 		config, ok := loadTinyConfig()
@@ -71,32 +123,6 @@ func packCommand(args []string) {
 	} else {
 		entryFile = args[0]
 		outFile = defaultPackOutputName(entryFile, target)
-	}
-
-	for i := 1; i < len(args); i++ {
-		switch args[i] {
-		case "-o":
-			if i+1 >= len(args) {
-				LangError(ErrorRuntime, "expected output path after -o")
-			}
-
-			outFile = args[i+1]
-			i++
-
-		// case "--target":
-		// 	if i+1 >= len(args) {
-		// 		LangError(ErrorRuntime, "expected target after --target")
-		// 	}
-
-		// 	target = normalizeTarget(args[i+1])
-		// 	i++
-
-		case "--windowed":
-			windowed = true
-
-		default:
-			LangError(ErrorRuntime, "unknown pack argument: %s", args[i])
-		}
 	}
 
 	outFile = addExtensionForTarget(outFile, target)

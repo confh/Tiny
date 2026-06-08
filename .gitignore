@@ -8,8 +8,10 @@ release notes
 !src/lsp_stubs/*.tiny
 !src/testdata/tiny/errors/*.tiny
 !src/testdata/tiny/imports/*.tiny
+!test.tiny
 *.exe
 tiny_runtime_linux_amd64
+tiny_runtime_darwin_arm64
 *.syso
 *.tbc
 *.txt
@@ -17,3 +19,5 @@ dist/
 test/
 .tinycache
 tiny.exe~
+tiny_linux
+tiny_darwin

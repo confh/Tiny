@@ -362,6 +362,21 @@ func memberExistsOnSymbol(scope *Scope, sym SymbolInfo, member string) bool {
 		return false
 	}
 
+	if strings.HasPrefix(sym.Type, "interface:") {
+		ifaceName := strings.TrimPrefix(sym.Type, "interface:")
+		ifaceSym, ok := resolveInterfaceSymbol(scope, ifaceName)
+		if !ok {
+			return false
+		}
+		_, ok = ifaceSym.Fields[member]
+		return ok
+	}
+
+	if ifaceSym, ok := resolveInterfaceSymbol(scope, sym.Type); ok && ifaceSym.Kind == SymbolInterface {
+		_, ok = ifaceSym.Fields[member]
+		return ok
+	}
+
 	if sym.Type == "object" && sym.Fields != nil {
 		if _, ok := sym.Fields[member]; ok {
 			return true
@@ -3837,6 +3852,11 @@ func (a *astSemanticAnalyzer) visitStmt(stmt Stmt) {
 	case VariableStmt:
 		a.validateTypeHint(s.TypeHint, s.Line, s.Column)
 		typ := a.inferExprType(s.Value)
+		if !s.TypeHint.IsEmpty() {
+			typ = normalizeLSPType(a.root, s.TypeHint.Name)
+		} else {
+			typ = normalizeLSPType(a.root, typ)
+		}
 		fields := map[string]SymbolInfo(nil)
 		if typ == "object" {
 			fields = a.fieldsFromObjectExpr(s.Value, s.Line)
@@ -4611,6 +4631,11 @@ func (a *astSemanticAnalyzer) memberExistsByType(typ string, member string) bool
 		return ok
 	}
 
+	if ifaceSym, ok := resolveInterfaceSymbol(a.root, typ); ok && ifaceSym.Kind == SymbolInterface {
+		_, ok = ifaceSym.Fields[member]
+		return ok
+	}
+
 	if strings.HasPrefix(typ, "enum:") {
 		enumName := strings.TrimPrefix(typ, "enum:")
 		enumSym, ok := resolveEnumSymbol(a.root, enumName)
@@ -4699,6 +4724,13 @@ func (a *astSemanticAnalyzer) memberType(typ string, member string) string {
 		if !ok {
 			return "unknown"
 		}
+		if fieldSym, ok := ifaceSym.Fields[member]; ok {
+			return firstNonEmpty(fieldSym.Type, "any")
+		}
+		return "unknown"
+	}
+
+	if ifaceSym, ok := resolveInterfaceSymbol(a.root, typ); ok && ifaceSym.Kind == SymbolInterface {
 		if fieldSym, ok := ifaceSym.Fields[member]; ok {
 			return firstNonEmpty(fieldSym.Type, "any")
 		}

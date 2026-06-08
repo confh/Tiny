@@ -1,0 +1,39 @@
+name: Test Tiny
+
+on: [push, pull_request]
+
+jobs:
+  test-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-go@v4
+        with:
+          go-version: '1.26.2'
+      - run: chmod +x build_linux.sh
+      - run: ./build_linux.sh
+      - run: go test ./src/...
+      - run: ./tiny_linux test.tiny
+
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-go@v4
+        with:
+          go-version: '1.26.2'
+      - run: ./build.bat
+      - run: go test ./src/...
+      - run: ./tiny.exe test.tiny
+
+  test-mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-go@v4
+        with:
+          go-version: '1.26.2'
+      - run: chmod +x build_mac.sh
+      - run: ./build_mac.sh
+      - run: go test ./src/...
+      - run: ./tiny_darwin test.tiny

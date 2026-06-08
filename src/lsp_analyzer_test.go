@@ -883,6 +883,24 @@ func TestLSPDocumentSymbolsSkipAnonymousHTTPCallbacks(t *testing.T) {
 	}
 }
 
+func TestLSPStdHttpResponseReturnTypeAllowsStatusAccess(t *testing.T) {
+	text := strings.Join([]string{
+		"import std \"http\";",
+		"import std \"io\";",
+		"",
+		"let req = http.get(\"https://example.com\");",
+		"io.println(req.status);",
+	}, "\n")
+
+	diagnostics := semanticDiagnostics("file:///http_response.tiny", text)
+	if diagnosticsContain(diagnostics, "undefined method or property: status") {
+		t.Fatalf("expected http.get result to expose HttpResponse.status, got %#v", diagnostics)
+	}
+	if diagnosticsContain(diagnostics, "unknown type: HttpResponse") {
+		t.Fatalf("expected std http HttpResponse type to resolve, got %#v", diagnostics)
+	}
+}
+
 func completionLabelsContain(items []CompletionItem, label string) bool {
 	for _, item := range items {
 		if item.Label == label {

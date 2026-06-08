@@ -116,7 +116,7 @@ func checkSingleTypeHint(value TinyValue, hint string, interfaces map[string]Int
 		return false, ""
 
 	default:
-		if iface, exists := interfaces[hint]; exists {
+		if iface, exists := resolveInterfaceHint(hint, interfaces); exists {
 			obj, ok := value.Value.(ObjectValue)
 			if !ok {
 				return false, ": expected object to match interface '" + hint + "'"
@@ -156,4 +156,49 @@ func checkSingleTypeHint(value TinyValue, hint string, interfaces map[string]Int
 		}
 		return false, ""
 	}
+}
+
+func resolveInterfaceHint(hint string, interfaces map[string]Interface) (Interface, bool) {
+	if iface, exists := interfaces[hint]; exists {
+		return iface, true
+	}
+
+	if iface, exists := standardInterfaceHints[hint]; exists {
+		return iface, true
+	}
+
+	if dot := strings.LastIndex(hint, "."); dot >= 0 {
+		shortName := hint[dot+1:]
+		if iface, exists := interfaces[shortName]; exists {
+			return iface, true
+		}
+	}
+
+	return Interface{}, false
+}
+
+func stdTypeHint(name string) TypeHint {
+	return TypeHint{Name: name, Types: []string{name}}
+}
+
+var standardInterfaceHints = map[string]Interface{
+	"http.RequestObject": {
+		Name: "http.RequestObject",
+		Fields: map[string]TypeHint{
+			"path":    stdTypeHint("string"),
+			"method":  stdTypeHint("string"),
+			"body":    stdTypeHint("string"),
+			"params":  stdTypeHint("object"),
+			"query":   stdTypeHint("object"),
+			"headers": stdTypeHint("object"),
+		},
+	},
+	"http.HttpResponse": {
+		Name: "http.HttpResponse",
+		Fields: map[string]TypeHint{
+			"status":  stdTypeHint("number"),
+			"body":    stdTypeHint("string"),
+			"headers": stdTypeHint("object"),
+		},
+	},
 }

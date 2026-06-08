@@ -13,10 +13,11 @@ var serverMethods map[string]NativeModuleFunc[*NativeServerValue]
 
 func init() {
 	serverMethods = map[string]NativeModuleFunc[*NativeServerValue]{
-		"get":   serverGet,
-		"post":  serverPost,
-		"stop":  serverStop,
-		"start": serverStart,
+		"get":       serverGet,
+		"post":      serverPost,
+		"onRequest": serverOnRequest,
+		"stop":      serverStop,
+		"start":     serverStart,
 	}
 }
 
@@ -29,14 +30,25 @@ func (vm *VM) callServerMethod(server *NativeServerValue, method string, args []
 	fn(vm, server, args)
 }
 
+func serverOnRequest(vm *VM, server *NativeServerValue, args []TinyValue) {
+	expectArgs(vm, "server.onRequest", args, 1)
+	handler := args[0]
+	switch handler.Value.(type) {
+	case string, FunctionValue:
+		server.GenericRoute = handler
+	default:
+		vm.runtimeError(ErrorType, "server.onRequest expects string or function as second argument")
+		return
+	}
+	vm.push(NewNull())
+}
+
 func serverGet(vm *VM, server *NativeServerValue, args []TinyValue) {
 	expectArgs(vm, "server.get", args, 2)
 	path := argString(vm, "server.get", args, 0)
 	handler := args[1]
 	switch handler.Value.(type) {
-	case string:
-		server.GetRoutes[path] = handler
-	case FunctionValue:
+	case string, FunctionValue:
 		server.GetRoutes[path] = handler
 	default:
 		vm.runtimeError(ErrorType, "server.get expects string or function as second argument")
@@ -50,9 +62,7 @@ func serverPost(vm *VM, server *NativeServerValue, args []TinyValue) {
 	path := argString(vm, "server.post", args, 0)
 	handler := args[1]
 	switch handler.Value.(type) {
-	case string:
-		server.PostRoutes[path] = handler
-	case FunctionValue:
+	case string, FunctionValue:
 		server.PostRoutes[path] = handler
 	default:
 		vm.runtimeError(ErrorType, "server.post expects string or function as second argument")
@@ -92,9 +102,9 @@ func serverStart(vm *VM, server *NativeServerValue, args []TinyValue) {
 
 		switch r.Method {
 		case http.MethodGet:
-			handler, params, found = findRoute(server.GetRoutes, r.URL.Path)
+			handler, params, found = findRoute(server.GetRoutes, server.GenericRoute, r.URL.Path)
 		case http.MethodPost:
-			handler, params, found = findRoute(server.PostRoutes, r.URL.Path)
+			handler, params, found = findRoute(server.PostRoutes, server.GenericRoute, r.URL.Path)
 		default:
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 			return
@@ -145,16 +155,8 @@ func serverStart(vm *VM, server *NativeServerValue, args []TinyValue) {
 
 			reqObj := NewNative(obj)
 
-			vm.mu.Lock()
-			defer vm.mu.Unlock()
-
-			var result TinyValue
-			if async {
-				requestVM := vm.CloneForTask()
-				result = requestVM.callFunctionValue(h, []TinyValue{reqObj})
-			} else {
-				result = vm.callFunctionValue(h, []TinyValue{reqObj})
-			}
+			requestVM := vm.CloneForTask()
+			result := requestVM.callFunctionValue(h, []TinyValue{reqObj})
 
 			httpResponseObject, ok := result.Value.(NativeHttpResponseValue)
 			if !ok {
@@ -231,7 +233,7 @@ func matchRoute(pattern string, actualPath string) (bool, ObjectValue) {
 	return true, params
 }
 
-func findRoute(routes map[string]TinyValue, actualPath string) (TinyValue, ObjectValue, bool) {
+func findRoute(routes map[string]TinyValue, genericRoute TinyValue, actualPath string) (TinyValue, ObjectValue, bool) {
 	// exact match
 	if handler, ok := routes[actualPath]; ok {
 		return handler, ObjectValue{}, true
@@ -243,6 +245,11 @@ func findRoute(routes map[string]TinyValue, actualPath string) (TinyValue, Objec
 		if matched {
 			return handler, params, true
 		}
+	}
+
+	// // fallback to generic handler
+	if !isNullish(genericRoute) {
+		return genericRoute, ObjectValue{}, true
 	}
 
 	return NewNull(), ObjectValue{}, false

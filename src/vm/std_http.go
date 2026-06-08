@@ -48,9 +48,10 @@ func stdHttpServer(vm *VM, args []TinyValue) {
 
 	port := asInt(args[0])
 	server := &NativeServerValue{
-		Port:       port,
-		GetRoutes:  map[string]TinyValue{},
-		PostRoutes: map[string]TinyValue{},
+		Port:         port,
+		GetRoutes:    map[string]TinyValue{},
+		PostRoutes:   map[string]TinyValue{},
+		GenericRoute: NewNull(),
 	}
 	vm.push(NewNative(server))
 }

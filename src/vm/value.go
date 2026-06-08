@@ -78,11 +78,12 @@ type FunctionValue struct {
 }
 
 type NativeServerValue struct {
-	Port       int
-	GetRoutes  map[string]TinyValue
-	PostRoutes map[string]TinyValue
-	mux        *http.ServeMux
-	closed     bool
+	Port         int
+	GetRoutes    map[string]TinyValue
+	PostRoutes   map[string]TinyValue
+	GenericRoute TinyValue
+	mux          *http.ServeMux
+	closed       bool
 }
 
 type NativeWebViewValue struct {

@@ -28,6 +28,7 @@ func init() {
 		"getClipboard":    desktopGetClipboard,
 		"setClipboard":    desktopSetClipboard,
 	}
+	registerStdModule(stdDesktopMetadata)
 }
 
 func (vm *VM) callStdDesktop(method string, args []TinyValue) {

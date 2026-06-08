@@ -18,6 +18,20 @@ Tiny bridges the gap between high-level dynamic languages and strict compiled sy
 
 Read the full documentation at [tiny-lang-docs.github.io](https://tiny-lang-docs.github.io/), or check out the [examples](https://github.com/confh/Tiny/tree/master/examples) to see Tiny in action.
 
+## Install
+
+Download the latest Tiny binary from [the release page](https://github.com/confh/Tiny/releases/latest):
+
+* Windows: `tiny_windows_amd64.exe`
+* Linux: `tiny_linux_amd64`
+* macOS Apple Silicon: `tiny_darwin_arm64`
+
+Rename the downloaded file to `tiny` (`tiny.exe` on Windows). Create a folder such as `.tiny` in your user/home directory, move the binary into that folder, then add that folder to your `PATH` environment variable.
+
+For manual builds from source, follow the install guide at [docs](https://tiny-lang-docs.github.io/#install).
+
+---
+
 <p align="center">
   <img src="examples/showcase.gif" alt="Tiny Showcase">
 </p>
@@ -34,7 +48,7 @@ Read the full documentation at [tiny-lang-docs.github.io](https://tiny-lang-docs
   * `desktop` (Cross-platform mouse, keyboard, and clipboard automation)
   * `json` (High-performance parsing/serialization directly mapped to Go streams)
   * `io`, `fs`, `math` (featuring matrix multiplication), `regex`, `sync`, and `test` (integrated unit testing framework).
-* **Native Plugin Architecture:** High-performance FFI layer using lazyloading (Windows) and `purego` (Linux). Link external DLLs/SOs cleanly via JSON-serialized message protocols without breaking cross-compilation.
+* **Native Plugin Architecture:** High-performance FFI layer using lazyloading (Windows) and `purego` (Linux, Darwin). Link external DLLs/SOs cleanly via JSON-serialized message protocols without breaking cross-compilation.
 * **Inline Go Extensions:** Use the `native fn` keyword to write high-performance Go logic directly in your code. Code is compiled to WebAssembly via TinyGo for near-native speeds.
 
 ## VS Code Support

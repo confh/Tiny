@@ -163,7 +163,10 @@ io.println(json.pretty(complete({
 tiny.exe version
 
 # Linux
-./tiny_linux version</code></pre>
+./tiny_linux version
+
+# Mac
+./tiny_darwin version</code></pre>
           </article>
 
           <article>
@@ -176,14 +179,22 @@ tiny version</code></pre>
           <article>
             <h3>Build on Linux</h3>
             <p>The Linux build script produces `tiny_linux` and the embedded Linux runtime.</p>
-            <pre data-code-label="terminal"><code>chmod +x build.sh
-./build.sh
+            <pre data-code-label="terminal"><code>chmod +x ./build_linux.sh
+./build_linux.sh
 ./tiny_linux version</code></pre>
+          </article>
+          <article>
+            <h3>Build on Mac</h3>
+            <p>The Mac build script produces `tiny_darwin` and the embedded Darwin runtime.</p>
+            <pre data-code-label="terminal"><code>chmod +x ./build_mac.sh
+./build_darwin.sh
+./tiny_darwin version</code></pre>
           </article>
 
           <article>
             <h3>Command check</h3>
-            <p>`tiny version` prints the language version and bytecode cache version. If this command works, the CLI is
+            <p>`tiny version` prints the language version and bytecode cache version. If this command works, the CLI
+              is
               installed correctly.</p>
             <pre data-code-label="terminal"><code>tiny version</code></pre>
           </article>
@@ -857,7 +868,7 @@ const html = assets["index.html"]</code></pre>
           <article>
             <h3>What Tiny loads</h3>
             <p>Tiny loads platform shared libraries. On Windows, paths without an extension resolve as `.dll`; on Linux,
-              they resolve as `.so`.</p>
+              they resolve as `.so` and Darwin as `.dylib`.</p>
             <pre><code>import plugin "./hash" as hashPlugin</code></pre>
             <p>The runtime searches the current working directory, the executable directory, and registered
               import/source
