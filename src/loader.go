@@ -10,9 +10,10 @@ import (
 )
 
 type Loader struct {
-	states map[string]ImportState
-	stack  []string
-	cache  map[string][]Stmt
+	states       map[string]ImportState
+	stack        []string
+	cache        map[string][]Stmt
+	dependencies map[string]TinyDependencyConfig
 }
 
 func (l *Loader) loadFile(path string) []Stmt {
@@ -57,6 +58,22 @@ func (l *Loader) loadFile(path string) []Stmt {
 				continue
 			}
 
+			if s.Library {
+				importPath := resolveLibraryImportPath(s.Path)
+				importedStatements := l.loadFile(importPath)
+
+				alias := s.Alias
+				if alias == "" {
+					alias = defaultLibraryAlias(s.Path)
+				}
+
+				result = append(result, NamespaceStmt{
+					Name:       alias,
+					Statements: importedStatements,
+				})
+				continue
+			}
+
 			if s.Plugin {
 				if !filepath.IsAbs(s.Path) {
 					s.Path = filepath.Clean(filepath.Join(dir, s.Path))
@@ -66,7 +83,7 @@ func (l *Loader) loadFile(path string) []Stmt {
 				continue
 			}
 
-			importPath := filepath.Join(dir, s.Path)
+			importPath := l.resolveSourceImportPath(dir, s.Path)
 			importedStatements := l.loadFile(importPath)
 
 			if s.Alias != "" {
@@ -88,6 +105,61 @@ func (l *Loader) loadFile(path string) []Stmt {
 	l.cache[absPath] = result
 
 	return result
+}
+
+func (l *Loader) resolveSourceImportPath(baseDir string, importPath string) string {
+	if filepath.IsAbs(importPath) {
+		return importPath
+	}
+
+	localPath := filepath.Clean(filepath.Join(baseDir, importPath))
+	if fileExists(localPath) {
+		return localPath
+	}
+
+	parts := strings.FieldsFunc(importPath, func(r rune) bool {
+		return r == '/' || r == '\\'
+	})
+
+	if len(parts) == 0 {
+		return localPath
+	}
+
+	dep, exists := l.dependencies[parts[0]]
+	if !exists {
+		return localPath
+	}
+
+	root := filepath.Join(".tinydeps", parts[0])
+	if dep.Path != "" {
+		root = dep.Path
+	} else if dep.Source != "" {
+		spec := parseGitHubPackageSource(dep.Source)
+		version := dep.Version
+		if version == "" {
+			version = spec.Ref
+		}
+		root = libraryGlobalRoot(spec.Owner, spec.Repo, version)
+	}
+
+	if len(parts) == 1 {
+		depConfig, ok := loadTinyConfigFrom(filepath.Join(root, "tiny.json"))
+		if ok && depConfig.Entry != "" {
+			return filepath.Clean(filepath.Join(root, depConfig.Entry))
+		}
+	}
+
+	rest := filepath.Join(parts[1:]...)
+	return filepath.Clean(filepath.Join(root, rest))
+}
+
+func defaultLibraryAlias(path string) string {
+	lib, ok := parseLibraryImportPath(path)
+	if !ok {
+		return filepath.Base(path)
+	}
+
+	return lib.Repo
 }
 
 func (l *Loader) formatImportCycle(repeatedPath string) string {
@@ -112,10 +184,13 @@ func (l *Loader) formatImportCycle(repeatedPath string) string {
 }
 
 func LoadProgram(path string) Program {
+	config, _ := loadTinyConfig()
+
 	loader := &Loader{
-		states: map[string]ImportState{},
-		stack:  []string{},
-		cache:  map[string][]Stmt{},
+		states:       map[string]ImportState{},
+		stack:        []string{},
+		cache:        map[string][]Stmt{},
+		dependencies: config.Dependencies,
 	}
 
 	statements := loader.loadFile(path)

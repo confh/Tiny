@@ -775,6 +775,10 @@ func (vm *VM) getProperty(objectValue TinyValue, name string, safe bool) TinyVal
 		vm.typeError("expected object, got %s", TypeName(objectValue))
 	}
 
+	if !vm.canAccessField(object, name) {
+		vm.fatalError(ErrorRuntime, "cannot access private field: %s", name)
+	}
+
 	value, exists := object[name]
 	if !exists {
 		if safe {
@@ -825,10 +829,23 @@ func (vm *VM) callClassWithArgs(class Class, args []TinyValue) {
 			vm.fatalError(ErrorName, "undefined init function: %s", initName)
 		}
 
-		expected := len(fn.Params) - 1
+		paramOffset := 1
+		expected := len(fn.Params) - paramOffset
+		isVariadic := expected > 0 && fn.Params[len(fn.Params)-1].Variadic
 
-		if fn.HasDefaults {
-			args = vm.applyDefaultArgs(fn, args, 1, "class "+class.Name+" constructor")
+		if isVariadic {
+			minArgs := expected - 1
+			if len(args) < minArgs {
+				vm.runtimeError(
+					ErrorRuntime,
+					"class %s constructor expects at least %d arguments, got %d",
+					class.Name,
+					minArgs,
+					len(args),
+				)
+			}
+		} else if fn.HasDefaults {
+			args = vm.applyDefaultArgs(fn, args, paramOffset, "class "+class.Name+" constructor")
 		} else if len(args) != expected {
 			vm.runtimeError(
 				ErrorRuntime,
@@ -843,12 +860,51 @@ func (vm *VM) callClassWithArgs(class Class, args []TinyValue) {
 
 		frame := vm.getFrame(fn)
 
+		frame.methodClass = class.Name
+
 		setCellValue(frame.locals[0], NewNative(object))
 		frame.constants[0] = true
 
-		for i, arg := range args {
-			setCellValue(frame.locals[i+1], arg)
-			frame.constants[i+1] = false
+		if isVariadic {
+			fixedCount := expected - 1
+
+			for i := range fixedCount {
+				paramIndex := paramOffset + i
+				param := fn.Params[paramIndex]
+				arg := args[i]
+
+				vm.checkCallableArgType(fn, "method", "init", "parameter", param, arg)
+				setCellValue(frame.locals[paramIndex], arg)
+				frame.constants[paramIndex] = false
+				frame.localTypes[paramIndex] = param.TypeHint
+			}
+
+			restSlot := paramOffset + fixedCount
+			restParam := fn.Params[restSlot]
+			rest := &ArrayValue{
+				Elements: make([]TinyValue, 0, len(args)-fixedCount),
+			}
+
+			for i := fixedCount; i < len(args); i++ {
+				arg := args[i]
+
+				vm.checkCallableArgType(fn, "method", "init", "rest parameter", restParam, arg)
+				rest.Elements = append(rest.Elements, arg)
+			}
+
+			setCellValue(frame.locals[restSlot], NewNative(rest))
+			frame.constants[restSlot] = false
+			frame.localTypes[restSlot] = TypeHint{Name: "array"}
+		} else {
+			for i, arg := range args {
+				paramIndex := paramOffset + i
+				param := fn.Params[paramIndex]
+
+				vm.checkCallableArgType(fn, "method", "init", "parameter", param, arg)
+				setCellValue(frame.locals[paramIndex], arg)
+				frame.constants[paramIndex] = false
+				frame.localTypes[paramIndex] = param.TypeHint
+			}
 		}
 
 		vm.frames = append(vm.frames, frame)
@@ -874,6 +930,26 @@ func (vm *VM) callClassByName(name string, args []TinyValue) {
 	}
 
 	vm.callClassWithArgs(class, args)
+}
+
+func (vm *VM) checkCallableArgType(fn Function, callableType string, callableName string, parameterKind string, param Param, arg TinyValue) {
+	if !fn.HasTypeHints || param.TypeHint.IsEmpty() {
+		return
+	}
+
+	if ok, reason := CheckTypeHint(arg, param.TypeHint, vm.interfaces); !ok {
+		vm.fatalError(
+			ErrorType,
+			"%s %s %s %s expected %s, got %s%s",
+			callableType,
+			callableName,
+			parameterKind,
+			param.Name,
+			param.TypeHint.String(),
+			TypeName(arg),
+			reason,
+		)
+	}
 }
 
 func (vm *VM) stackTrace() string {

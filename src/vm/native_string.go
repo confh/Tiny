@@ -46,6 +46,18 @@ var stringNativeMetadata = NativeTypeInfo{
 			Returns:     "bool",
 			Description: "Returns true if the string contains the given substring.",
 		},
+		"startsWith": {
+			Name:        "startsWith",
+			Args:        []StdArg{{Name: "prefix", Type: "string"}},
+			Returns:     "bool",
+			Description: "Returns true if the string starts with the specified prefix.",
+		},
+		"endsWith": {
+			Name:        "endsWith",
+			Args:        []StdArg{{Name: "suffix", Type: "string"}},
+			Returns:     "bool",
+			Description: "Returns true if the string ends with the specified suffix.",
+		},
 		"trim": {
 			Name:        "trim",
 			Returns:     "string",
@@ -83,6 +95,8 @@ func init() {
 		"lower":       stringLower,
 		"split":       stringSplit,
 		"includes":    stringIncludes,
+		"startsWith":  stringStartsWith,
+		"endsWith":    stringEndsWith,
 		"trim":        stringTrim,
 		"replace":     stringReplace,
 		"replaceAll":  stringReplaceAll,
@@ -166,6 +180,20 @@ func stringIncludes(vm *VM, value string, args []TinyValue) {
 
 	search := argString(vm, "string.includes", args, 0)
 	vm.push(NewNative(strings.Contains(value, search)))
+}
+
+func stringStartsWith(vm *VM, value string, args []TinyValue) {
+	expectArgs(vm, "string.startsWith", args, 1)
+
+	prefix := argString(vm, "string.startsWith", args, 0)
+	vm.push(NewNative(strings.HasPrefix(value, prefix)))
+}
+
+func stringEndsWith(vm *VM, value string, args []TinyValue) {
+	expectArgs(vm, "string.endsWith", args, 1)
+
+	suffix := argString(vm, "string.endsWith", args, 0)
+	vm.push(NewNative(strings.HasSuffix(value, suffix)))
 }
 
 func stringTrim(vm *VM, value string, args []TinyValue) {

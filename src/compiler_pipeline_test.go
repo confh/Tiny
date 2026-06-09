@@ -218,6 +218,68 @@ func TestTinyPipelineTypeHintErrors(t *testing.T) {
 	)
 }
 
+func TestTinyPipelineMethodTypeHintErrors(t *testing.T) {
+	requireTinyError(
+		t,
+		runTinyFile(t, fixturePath("errors", "method_type_hint.tiny")),
+		tinyerrors.ErrorType,
+		"method init parameter value expected Payload",
+	)
+}
+
+func TestTinyPipelineInterfaceReturnObjectLiteral(t *testing.T) {
+	out := requireTinySuccess(t, runTinyFile(t, fixturePath("interface_return_object.tiny")))
+
+	const want = "true\n123\nfalse\nnope\n"
+	if out != want {
+		t.Fatalf("unexpected output:\nwant:\n%q\ngot:\n%q", want, out)
+	}
+}
+
+func TestTinyPipelineNamespaceMethodReturnsInterfaceObjectLiteral(t *testing.T) {
+	program := vm.Program{
+		Statements: []vm.Stmt{
+			vm.NamespaceStmt{
+				Name: "TinyJWT",
+				Statements: []vm.Stmt{
+					vm.InterfaceStmt{
+						Name: "VerifyData",
+						Fields: map[string]vm.TypeHint{
+							"valid": {Name: "bool"},
+						},
+					},
+					vm.ClassStmt{
+						Name: "JWT",
+						Methods: []vm.FunctionStmt{
+							{
+								Name:       "verify",
+								ReturnType: vm.TypeHint{Name: "VerifyData"},
+								Body: []vm.Stmt{
+									vm.ReturnStmt{
+										HasValue: true,
+										Value: vm.ObjectExpr{
+											Fields: []vm.ObjectField{
+												{Name: "valid", Value: vm.BoolExpr{Value: true}},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	compiler := NewCompiler()
+	_, _, _, interfaces, _ := compiler.CompileProgram(program)
+
+	if _, ok := interfaces["TinyJWT.VerifyData"]; !ok {
+		t.Fatalf("expected namespaced interface to be compiled, got %#v", interfaces)
+	}
+}
+
 func TestTinyPipelineBytecodeRoundTrip(t *testing.T) {
 	mainInstructions, functions, classes, interfaces, globalIndex := compileTinyFile(t, fixturePath("arithmetic.tiny"))
 

@@ -32,6 +32,7 @@
         <a href="#language">Language</a>
         <a href="#stdlib">Standard library</a>
         <a href="#deploy">Deploy</a>
+        <a href="https://github.com/confh/Tiny" target="_blank" rel="noopener noreferrer">GitHub</a>
       </nav>
 
       <button class="theme-toggle" type="button" aria-label="Switch to light mode" aria-pressed="true">
@@ -67,6 +68,7 @@
         <a href="#functions">Functions</a>
         <a href="#modules">Modules</a>
         <a href="#classes">Classes</a>
+        <a href="#libraries">Libraries</a>
         <a href="#errors">Errors & Defer</a>
         <a href="#concurrency">Concurrency</a>
         <a href="#embedding">Embedding Assets</a>
@@ -573,9 +575,97 @@ let box = Box("start")
 io.println(box instanceof Box)</code></pre>
       </section>
 
-      <section class="doc-section" id="errors" data-search="errors try catch finally throw defer cleanup error module">
+      <section class="doc-section" id="libraries"
+        data-search="libraries package install remove list deps TinyJWT Jwt plugins package manager tiny.json dependency entry">
         <div class="section-heading">
           <p class="eyebrow">10</p>
+          <h2>Libraries</h2>
+          <p>Tiny has built-in package management to add, install, list, and remove external libraries from GitHub, including support for native plugins.</p>
+        </div>
+
+        <div class="reference-grid">
+          <article>
+            <h3>Installing libraries</h3>
+            <p>Use <code>tiny add</code> to add a dependency to your <code>tiny.json</code> and download it. You can specify a custom alias name if desired.</p>
+            <pre data-code-label="terminal"><code># Install library using default repo name
+tiny add github:owner/repo
+
+# Install library using a specific alias name
+tiny add aliasName github:owner/repo
+
+# Install using a specific ref (branch, tag, or commit)
+tiny add github:owner/repo@v1.0.0</code></pre>
+            <p>Run <code>tiny install</code> to download all dependencies declared in your project's <code>tiny.json</code> file.</p>
+            <pre data-code-label="terminal"><code>tiny install</code></pre>
+          </article>
+
+          <article>
+            <h3>Removing & Listing</h3>
+            <p>Use <code>tiny remove</code> (or <code>tiny rm</code>) to delete a dependency from your project and its downloaded files.</p>
+            <pre data-code-label="terminal"><code># Remove project dependency and its global cache
+tiny remove aliasName
+
+# Remove dependency from project only
+tiny remove aliasName --project-only
+
+# Remove globally downloaded library cache
+tiny remove owner/repo --global</code></pre>
+            <p>Use <code>tiny deps</code> (or <code>tiny list</code>) to list all globally downloaded libraries and their versions.</p>
+            <pre data-code-label="terminal"><code>tiny deps</code></pre>
+          </article>
+
+          <article>
+            <h3>Using libraries</h3>
+            <p>Import library modules using the <code>import lib</code> syntax. Use <code>"owner/repo"</code> as the import path and provide an alias name.</p>
+            <pre><code>import lib "owner/repo" as MyLib</code></pre>
+          </article>
+        </div>
+
+        <h3>Example: TinyJWT</h3>
+        <p>This example demonstrates how to install and use <a href="https://github.com/confh/TinyJWT" target="_blank" rel="noopener noreferrer">TinyJWT</a> for signing and verifying tokens.</p>
+        <pre data-code-label="terminal"><code>tiny add github:confh/TinyJWT</code></pre>
+        <pre><code>import lib "confh/TinyJWT" as Jwt
+import std "io";
+import std "time";
+
+const secret = "7T]kC&amp;'.d&amp;1|PC0M$]&gt;vH~:"
+
+const jwt = Jwt.JWT(secret)
+
+const token = jwt.sign({
+    message: "hello"
+}, 3)
+
+io.println(`Token: ${token}`)
+io.println(`Verification: ${jwt.verify(token)}`)
+
+// wait 4 seconds for the token to expire
+time.sleep(4000)
+
+io.println(`Verification: ${jwt.verify(token)}`)</code></pre>
+
+        <div class="split">
+          <div>
+            <h3>Creating libraries</h3>
+            <p>A library is a standard Tiny project that contains a <code>tiny.json</code> file at its root. It is critical that the <code>"entry"</code> field in <code>tiny.json</code> is set to the default <code>.tiny</code> file path that consumer imports will point to.</p>
+            <pre><code>{
+  "entry": "src/jwt.tiny",
+  "dependencies": {},
+  "plugins": []
+}</code></pre>
+          </div>
+
+          <div>
+            <h3>Packaging plugins</h3>
+            <p>If your library requires native compiled plugins (e.g. <code>.dll</code>, <code>.so</code>, or <code>.dylib</code> files), define them under the <code>"plugins"</code> list in your library's <code>tiny.json</code>.</p>
+            <p>When compiling your native plugins for distribution, upload the compiled binaries for all target platforms as assets on your GitHub releases. When consumers run <code>tiny install</code>, the package manager will automatically download the correct native plugin binary matching their target platform from the latest GitHub Release.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="doc-section" id="errors" data-search="errors try catch finally throw defer cleanup error module">
+        <div class="section-heading">
+          <p class="eyebrow">11</p>
           <h2>Errors & Defer</h2>
           <p>Tiny includes exceptions for recoverable runtime failures and `defer` for cleanup just before a function
             returns.</p>
@@ -614,7 +704,7 @@ try {
       <section class="doc-section media-section" id="concurrency"
         data-search="concurrency spawn await lock mutex sync thread task parallel">
         <div class="section-heading">
-          <p class="eyebrow">11</p>
+          <p class="eyebrow">12</p>
           <h2>Concurrency</h2>
           <p>Tiny exposes Go-backed concurrency through language syntax and standard library primitives. Spawned tasks
             run with isolated VM state, and shared mutations can be protected with locks.</p>
@@ -651,7 +741,7 @@ io.println(await task)</code></pre>
       <section class="doc-section" id="embedding"
         data-search="embedding embedstr embedbin embeddir assets binary string webview config">
         <div class="section-heading">
-          <p class="eyebrow">12</p>
+          <p class="eyebrow">13</p>
           <h2>Embedding Assets</h2>
           <p>Embed data at compile time so scripts and packaged executables can carry configuration, binary files, or
             whole UI folders.</p>
@@ -684,7 +774,7 @@ const html = assets["index.html"]</code></pre>
       <section class="doc-section media-section" id="native-functions"
         data-search="native functions native fn go tinygo wasm performance sha256 fibonacci">
         <div class="section-heading">
-          <p class="eyebrow">13</p>
+          <p class="eyebrow">14</p>
           <h2>Native Go Functions</h2>
           <p>`native fn` lets you write performance-sensitive logic in Go inside Tiny source. Native blocks are compiled
             through TinyGo to WebAssembly and cached.</p>
@@ -713,7 +803,7 @@ const html = assets["index.html"]</code></pre>
       <section class="doc-section" id="stdlib"
         data-search="standard library std io json fs http array math process regex runtime sync time ui desktop net object path buffer tests app error strings">
         <div class="section-heading">
-          <p class="eyebrow">14</p>
+          <p class="eyebrow">15</p>
           <h2>Standard Library</h2>
           <p>The standard library is broad enough for scripts, servers, automation, tests, desktop tools, and GUI
             shells.</p>
@@ -796,7 +886,7 @@ const html = assets["index.html"]</code></pre>
       <section class="doc-section" id="examples"
         data-search="examples basics control flow functions modules classes errors files json cli server defer embed native webview">
         <div class="section-heading">
-          <p class="eyebrow">15</p>
+          <p class="eyebrow">16</p>
           <h2>Examples</h2>
           <p>The repository includes focused examples that double as a learning path.</p>
         </div>
@@ -849,7 +939,7 @@ const html = assets["index.html"]</code></pre>
       <section class="doc-section" id="plugin-development"
         data-search="plugin developers native plugins dll so shared library TinyPluginCall TinyPluginFree json payload wrapper tiny interface import plugin Plugin.load handles">
         <div class="section-heading">
-          <p class="eyebrow">16</p>
+          <p class="eyebrow">17</p>
           <h2>Plugin Development</h2>
           <p>Native plugins let Tiny call external shared libraries while keeping Tiny programs pleasant to use. A good
             plugin has two layers: a native `.dll` or `.so` that speaks Tiny's JSON call protocol, and a `.tiny` wrapper
@@ -1030,7 +1120,7 @@ export fn hash(text: string, method: string): HashResult {
       <section class="doc-section" id="runtime-model"
         data-search="runtime model compiler pipeline source parser compiler bytecode tbc vm standard library plugins native functions">
         <div class="section-heading">
-          <p class="eyebrow">17</p>
+          <p class="eyebrow">18</p>
           <h2>Runtime Model</h2>
           <p>Tiny separates the developer-facing language from the runtime that executes it. Source files compile into a
             compact bytecode format, then the VM runs that bytecode with access to standard modules, plugins, and native
@@ -1091,7 +1181,7 @@ export fn hash(text: string, method: string): HashResult {
       <section class="doc-section" id="gotchas"
         data-search="gotchas caveats defer cache plugins json boundary native fn tiny version dist wrapper">
         <div class="section-heading">
-          <p class="eyebrow">18</p>
+          <p class="eyebrow">19</p>
           <h2>Gotchas</h2>
           <p>These are the small details worth knowing before building larger Tiny projects.</p>
         </div>
@@ -1133,7 +1223,7 @@ export fn hash(text: string, method: string): HashResult {
       <section class="doc-section" id="deploy"
         data-search="deploy package dist pack bytecode tbc executable github pages distribution obfuscation">
         <div class="section-heading">
-          <p class="eyebrow">19</p>
+          <p class="eyebrow">20</p>
           <h2>Packaging & Deploy</h2>
           <p>Tiny can ship scripts as bytecode or bundle them into standalone native executables with the runtime.</p>
         </div>
@@ -1164,7 +1254,7 @@ export fn hash(text: string, method: string): HashResult {
       <section class="doc-section" id="lsp"
         data-search="lsp editor vscode autocomplete diagnostics formatter language server type narrowing jump definition">
         <div class="section-heading">
-          <p class="eyebrow">20</p>
+          <p class="eyebrow">21</p>
           <h2>Editor Support</h2>
           <p>The project includes a Tiny language server with diagnostics, formatting, autocomplete, type analysis, and
             jump-to-definition support. The LSP also ships stubs for the standard library so editors can understand
@@ -1177,6 +1267,7 @@ export fn hash(text: string, method: string): HashResult {
       <footer class="footer">
         <img src="assets/tiny.png" alt="" width="36" height="36">
         <p>Tiny Language documentation.</p>
+        <a href="https://github.com/confh/Tiny" target="_blank" rel="noopener noreferrer">GitHub</a>
         <a href="#overview">Back to top</a>
       </footer>
     </main>

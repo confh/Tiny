@@ -18,6 +18,10 @@ import (
 
 var pluginSearchPaths []string
 
+func SetPluginSearchPaths(paths []string) {
+	pluginSearchPaths = append([]string{}, paths...)
+}
+
 type loadedNativePluginFuncs struct {
 	call func(method string, argsJSON string) *byte
 	free func(ptr *byte)

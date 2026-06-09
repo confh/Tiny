@@ -17,6 +17,10 @@ import (
 
 var pluginSearchPaths []string
 
+func SetPluginSearchPaths(paths []string) {
+	pluginSearchPaths = append([]string{}, paths...)
+}
+
 func defaultPluginPath(path string, ext string) string {
 	if filepath.Ext(path) == "" {
 		return path + ext

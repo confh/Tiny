@@ -9,14 +9,21 @@ import (
 )
 
 type TinyProjectConfig struct {
-	Name            string                    `json:"name"`
-	Version         string                    `json:"version"`
-	Entry           string                    `json:"entry"`
-	OutDir          string                    `json:"outDir"`
-	Target          string                    `json:"target"`
-	Scripts         map[string]string         `json:"scripts"`
-	Plugins         []TinyProjectPluginConfig `json:"plugins"`
-	CompilerOptions TinyCompilerOptions       `json:"compilerOptions"`
+	Name            string                          `json:"name"`
+	Version         string                          `json:"version"`
+	Entry           string                          `json:"entry"`
+	OutDir          string                          `json:"outDir"`
+	Target          string                          `json:"target"`
+	Scripts         map[string]string               `json:"scripts"`
+	Dependencies    map[string]TinyDependencyConfig `json:"dependencies"`
+	Plugins         []TinyProjectPluginConfig       `json:"plugins"`
+	CompilerOptions TinyCompilerOptions             `json:"compilerOptions"`
+}
+
+type TinyDependencyConfig struct {
+	Source  string `json:"source"`
+	Version string `json:"version"`
+	Path    string `json:"path"`
 }
 
 type TinyProjectPluginConfig struct {
@@ -43,7 +50,8 @@ func defaultTinyConfig(projectName string) TinyProjectConfig {
 			"pack":  "tiny pack",
 			"dist":  "tiny dist",
 		},
-		Plugins: []TinyProjectPluginConfig{},
+		Dependencies: map[string]TinyDependencyConfig{},
+		Plugins:      []TinyProjectPluginConfig{},
 		CompilerOptions: TinyCompilerOptions{
 			StackTraces: true,
 			Strict:      false,
@@ -76,8 +84,10 @@ func writeJSONFile(path string, value any) {
 }
 
 func loadTinyConfig() (TinyProjectConfig, bool) {
-	path := "tiny.json"
+	return loadTinyConfigFrom("tiny.json")
+}
 
+func loadTinyConfigFrom(path string) (TinyProjectConfig, bool) {
 	bytes, err := os.ReadFile(path)
 	if err != nil {
 		return TinyProjectConfig{}, false
@@ -87,7 +97,7 @@ func loadTinyConfig() (TinyProjectConfig, bool) {
 
 	err = json.Unmarshal(bytes, &config)
 	if err != nil {
-		LangError(ErrorRuntime, "failed to parse tiny.json: %v", err)
+		LangError(ErrorRuntime, "failed to parse %s: %v", path, err)
 	}
 
 	return config, true

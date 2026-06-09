@@ -145,7 +145,7 @@ func checkSingleTypeHint(value TinyValue, hint string, interfaces map[string]Int
 			classValue, exists := obj["__class"]
 			if exists {
 				className, ok := classValue.Value.(string)
-				if ok && className == hint {
+				if ok && (className == hint || strings.HasSuffix(className, "."+hint)) {
 					return true, ""
 				}
 			}
@@ -171,6 +171,14 @@ func resolveInterfaceHint(hint string, interfaces map[string]Interface) (Interfa
 		shortName := hint[dot+1:]
 		if iface, exists := interfaces[shortName]; exists {
 			return iface, true
+		}
+	}
+
+	if !strings.Contains(hint, ".") {
+		for key, iface := range interfaces {
+			if strings.HasSuffix(key, "."+hint) {
+				return iface, true
+			}
 		}
 	}
 

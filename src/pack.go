@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	. "language.com/src/tinyerrors"
 
@@ -79,7 +80,13 @@ func packCommand(args []string) {
 	target := normalizeTarget("")
 	windowed := false
 
-	for i := 1; i < len(args); i++ {
+	start := 0
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		entryFile = args[0]
+		start = 1
+	}
+
+	for i := start; i < len(args); i++ {
 		switch args[i] {
 		case "-o":
 			if i+1 >= len(args) {
@@ -105,7 +112,7 @@ func packCommand(args []string) {
 		}
 	}
 
-	if len(args) == 0 {
+	if entryFile == "" {
 		config, ok := loadTinyConfig()
 		if !ok {
 			LangError(ErrorRuntime, "usage: tiny pack <file.tiny> -o <output>")
@@ -120,8 +127,7 @@ func packCommand(args []string) {
 
 		outFile = filepath.Join(config.OutDir, name)
 		target = config.Target
-	} else {
-		entryFile = args[0]
+	} else if outFile == "" {
 		outFile = defaultPackOutputName(entryFile, target)
 	}
 

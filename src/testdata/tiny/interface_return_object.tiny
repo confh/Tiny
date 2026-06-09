@@ -1,0 +1,31 @@
+import std "io";
+
+interface VerifyData {
+    valid: bool,
+    error?: string,
+    payload?: object
+}
+
+fn ok(): VerifyData {
+    return {
+        valid: true,
+        payload: {
+            sub: "123"
+        }
+    };
+}
+
+fn failed(): VerifyData {
+    return {
+        valid: false,
+        error: "nope"
+    };
+}
+
+let result = ok();
+let failure = failed();
+
+io.println(result.valid);
+io.println(result.payload.sub);
+io.println(failure.valid);
+io.println(failure.error);

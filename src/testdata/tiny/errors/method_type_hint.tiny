@@ -1,0 +1,10 @@
+class Payload {
+}
+
+class Checker {
+    fn init(value: Payload) {
+        this.value = value;
+    }
+}
+
+Checker("nope");

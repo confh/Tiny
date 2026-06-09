@@ -12,17 +12,13 @@ import (
 )
 
 func DistCommand(args []string) {
-	if len(args) < 1 {
-		LangError(ErrorRuntime, "usage: tiny dist <file.tiny> -o <output> [--target windows-amd64|linux-amd64] [--plugin <path>]")
-	}
-
-	entryFile := args[0]
 	target := normalizeTarget("")
-	outFile := defaultDistOutputName(entryFile, target)
+	entryFile := ""
+	outFile := ""
 	extraPlugins := []string{}
 	windowed := false
 
-	for i := 1; i < len(args); i++ {
+	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "-o":
 			if i+1 >= len(args) {
@@ -52,8 +48,25 @@ func DistCommand(args []string) {
 			windowed = true
 
 		default:
-			LangError(ErrorRuntime, "unknown dist argument: %s", args[i])
+			if entryFile != "" {
+				LangError(ErrorRuntime, "unknown dist argument: %s", args[i])
+			}
+			entryFile = args[i]
 		}
+	}
+
+	if entryFile == "" {
+		config, ok := loadTinyConfig()
+		if !ok {
+			LangError(ErrorRuntime, "usage: tiny dist <file.tiny> -o <output> [--target windows-amd64|linux-amd64] [--plugin <path>]")
+		}
+
+		entryFile = config.Entry
+		target = normalizeTarget(config.Target)
+	}
+
+	if outFile == "" {
+		outFile = defaultDistOutputName(entryFile, target)
 	}
 
 	outFile = addExtensionForTarget(outFile, target)
@@ -69,23 +82,13 @@ func DistCommand(args []string) {
 	}
 
 	program := LoadProgram(entryFile)
-
-	pluginPaths := collectPluginPathsFromProgram(program, target)
-
-	for _, plugin := range extraPlugins {
-		pluginPaths = append(pluginPaths, normalizePluginPathForTarget(plugin, target))
-	}
+	pluginPaths := bundledPluginPaths(program, target, extraPlugins)
 
 	program = rewritePluginPathsForDist(program, target)
 
 	packProgramToOutput(program, outFile, target, windowed)
 
-	for _, pluginPath := range pluginPaths {
-		err := copyPluginToDist(pluginPath, distDir)
-		if err != nil {
-			LangError(ErrorRuntime, "failed to copy plugin %s: %v", pluginPath, err)
-		}
-	}
+	copyPluginsToOutputDir(pluginPaths, distDir)
 
 	fmt.Println("Dist created:", distDir)
 }
@@ -118,7 +121,83 @@ func packToOutput(entryFile string, outFile string, target string, windowed bool
 	target = normalizeTarget(target)
 
 	program := LoadProgram(entryFile)
+	pluginPaths := bundledPluginPaths(program, target, nil)
+
+	if len(pluginPaths) > 0 {
+		program = rewritePluginPathsForDist(program, target)
+	}
+
 	packProgramToOutput(program, outFile, target, windowed)
+
+	if len(pluginPaths) > 0 {
+		outDir := filepath.Dir(outFile)
+		if outDir == "" {
+			outDir = "."
+		}
+
+		copyPluginsToOutputDir(pluginPaths, outDir)
+	}
+}
+
+func bundledPluginPaths(program Program, target string, extraPlugins []string) []string {
+	pluginPaths := collectPluginPathsFromProgram(program, target)
+	pluginPaths = append(pluginPaths, configuredPluginPaths(target)...)
+
+	for _, plugin := range extraPlugins {
+		pluginPaths = append(pluginPaths, normalizePluginPathForTarget(plugin, target))
+	}
+
+	return preferExistingPluginBundlePaths(pluginPaths)
+}
+
+func preferExistingPluginBundlePaths(pluginPaths []string) []string {
+	type candidate struct {
+		path   string
+		exists bool
+	}
+
+	byName := map[string]candidate{}
+	order := []string{}
+
+	for _, pluginPath := range pluginPaths {
+		if pluginPath == "" {
+			continue
+		}
+
+		pluginPath = filepath.Clean(pluginPath)
+		name := pluginDistFileName(pluginPath)
+		if name == "" || name == "." {
+			continue
+		}
+
+		next := candidate{path: pluginPath, exists: fileExists(pluginPath)}
+		current, seen := byName[name]
+		if !seen {
+			byName[name] = next
+			order = append(order, name)
+			continue
+		}
+
+		if !current.exists && next.exists {
+			byName[name] = next
+		}
+	}
+
+	result := []string{}
+	for _, name := range order {
+		result = append(result, byName[name].path)
+	}
+
+	return result
+}
+
+func copyPluginsToOutputDir(pluginPaths []string, outputDir string) {
+	for _, pluginPath := range pluginPaths {
+		err := copyPluginToDist(pluginPath, outputDir)
+		if err != nil {
+			LangError(ErrorRuntime, "failed to copy plugin %s: %v", pluginPath, err)
+		}
+	}
 }
 
 func packProgramToOutput(program Program, outFile string, target string, windowed bool) {

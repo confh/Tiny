@@ -1538,6 +1538,51 @@ func (p *Parser) parseImportStatement() Stmt {
 			Line:   line,
 			Column: column,
 		}
+	} else if p.current.Type == TOKEN_IDENT && (p.current.Literal == "library" || p.current.Literal == "lib") {
+		p.advance()
+
+		if p.current.Type != TOKEN_STRING {
+			LangErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"expected library path after import library",
+			)
+		}
+
+		libraryPath := p.current.Literal
+		p.advance()
+
+		alias := ""
+
+		if p.current.Type == TOKEN_IDENT && p.current.Literal == "as" {
+			p.advance()
+
+			if p.current.Type != TOKEN_IDENT {
+				LangErrorAt(
+					ErrorSyntax,
+					p.current.File,
+					p.current.Line,
+					p.current.Column,
+					"expected alias name after as",
+				)
+			}
+
+			alias = p.current.Literal
+			p.advance()
+		}
+
+		p.consumeTerminator()
+
+		return ImportStmt{
+			Path:    libraryPath,
+			Library: true,
+			Alias:   alias,
+			File:    file,
+			Line:    line,
+			Column:  column,
+		}
 	}
 
 	if p.current.Type != TOKEN_STRING {
@@ -1590,6 +1635,7 @@ func (p *Parser) parseFieldStatement() Stmt {
 
 	constant := false
 	private := false
+	nullable := false
 
 	switch p.current.Type {
 	case TOKEN_PRIVATE:
@@ -1619,7 +1665,17 @@ func (p *Parser) parseFieldStatement() Stmt {
 	column := p.current.Column
 	p.advance()
 
+	if p.current.Type == TOKEN_QUESTION {
+		p.advance()
+		nullable = true
+	}
+
 	typeHint := p.parseOptionalTypeHint()
+
+	if nullable {
+		typeHint.Name += "|null"
+		typeHint.Types = append(typeHint.Types, "null")
+	}
 
 	p.expect(TOKEN_ASSIGN)
 

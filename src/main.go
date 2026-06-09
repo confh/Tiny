@@ -49,12 +49,32 @@ func main() {
 			initCommand(os.Args[2:])
 			return
 
+		case "add":
+			addPackageCommand(os.Args[2:])
+			return
+
+		case "install":
+			installPackagesCommand(os.Args[2:])
+			return
+
+		case "remove", "rm":
+			removePackageCommand(os.Args[2:])
+			return
+
+		case "deps", "list":
+			listDownloadedDependenciesCommand(os.Args[2:])
+			return
+
 		case "task":
 			taskCommand(os.Args[2:])
 			return
 
 		case "version", "ver", "v":
 			versionCommand()
+			return
+
+		case "update":
+			updateCommand()
 			return
 
 		case "lsp":
@@ -160,6 +180,7 @@ func runBytecodeFile(path string) {
 	}
 
 	vm := NewVM(mainBytecode, functions, classes, interfaces, globalIndex)
+	SetPluginSearchPaths(configuredPluginSearchPaths(normalizeTarget("")))
 	vm.SetCLIArgs(getScriptArgs())
 	vm.Run()
 }
@@ -194,6 +215,7 @@ func compileAndRun(entryFile string, cliArgs []string) {
 	}
 
 	vm := NewVM(mainBytecode, functions, classes, interfaces, globalIndex)
+	SetPluginSearchPaths(configuredPluginSearchPaths(normalizeTarget("")))
 	vm.SetCLIArgs(cliArgs)
 	vm.Run()
 }

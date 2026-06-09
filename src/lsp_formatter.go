@@ -354,10 +354,70 @@ func shouldKeepOperatorTight(runes []rune, index int) bool {
 		if index+1 < len(runes) && runes[index+1] == ':' {
 			return true
 		}
+		// Nullable field suffix: field name? = null
+		if index > 0 && isIdentifierPart(runes[index-1]) && isFieldDeclarationLineRunes(runes) && !hasEqualBefore(runes, index) {
+			return true
+		}
 	}
 
 	return false
 }
+
+func isFieldDeclarationLine(code string) bool {
+	trimmed := strings.TrimSpace(code)
+	if strings.HasPrefix(trimmed, "field ") || trimmed == "field" {
+		return true
+	}
+	parts := strings.Fields(trimmed)
+	for _, p := range parts {
+		if p == "field" {
+			return true
+		}
+		if p == "private" || p == "public" || p == "const" {
+			continue
+		}
+		break
+	}
+	return false
+}
+
+func isFieldDeclarationLineRunes(runes []rune) bool {
+	return isFieldDeclarationLine(string(runes))
+}
+
+func hasEqualBefore(runes []rune, index int) bool {
+	inString := false
+	stringQuote := rune(0)
+	escaped := false
+
+	for i := 0; i < index; i++ {
+		ch := runes[i]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == stringQuote {
+				inString = false
+			}
+			continue
+		}
+		if ch == '"' || ch == '\'' || ch == '`' {
+			inString = true
+			stringQuote = ch
+			continue
+		}
+		if ch == '=' {
+			return true
+		}
+	}
+	return false
+}
+
 
 func isUnaryBang(runes []rune, index int) bool {
 	j := index - 1

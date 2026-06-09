@@ -22,3 +22,14 @@ func TestFormatTinyDocumentPreservesOperatorsInsideStrings(t *testing.T) {
 		t.Fatalf("unexpected formatted string line:\nwant:\n%q\ngot:\n%q", want, got)
 	}
 }
+
+func TestFormatTinyDocumentFieldQuestionMarkSuffix(t *testing.T) {
+	input := "class Bot {\nfield handler? = null\nfield private handle?: any = null\n}\n"
+	got := formatTinyDocument(input)
+	want := "class Bot {\n    field handler? = null\n    field private handle?: any = null\n}\n"
+
+	if got != want {
+		t.Fatalf("unexpected formatted document:\nwant:\n%q\ngot:\n%q", want, got)
+	}
+}
+

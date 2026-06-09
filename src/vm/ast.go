@@ -91,13 +91,14 @@ type PropertyAssignStmt struct {
 func (s PropertyAssignStmt) stmtNode() {}
 
 type ImportStmt struct {
-	Path   string
-	Std    bool
-	Plugin bool
-	Alias  string
-	File   string
-	Line   int
-	Column int
+	Path    string
+	Std     bool
+	Plugin  bool
+	Library bool
+	Alias   string
+	File    string
+	Line    int
+	Column  int
 }
 
 func (s ImportStmt) stmtNode() {}

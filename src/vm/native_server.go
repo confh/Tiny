@@ -1,6 +1,7 @@
 package vm
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -95,6 +96,14 @@ func serverStart(vm *VM, server *NativeServerValue, args []TinyValue) {
 		if server.closed {
 			return
 		}
+
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Printf("[http server handler panic] %v\n", r)
+
+				http.Error(w, "Internal Server Error", 500)
+			}
+		}()
 
 		var handler TinyValue
 		var params ObjectValue

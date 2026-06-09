@@ -5,6 +5,9 @@ package vm
 
 import . "language.com/src/tinyerrors"
 
+func SetPluginSearchPaths(paths []string) {
+}
+
 func (vm *VM) callPluginModule(method string, argCount int) {
 	LangError(ErrorRuntime, "native plugins are not supported on this build")
 }

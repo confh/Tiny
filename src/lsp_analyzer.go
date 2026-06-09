@@ -84,6 +84,8 @@ var variableLineRegex = regexp.MustCompile(
 var fieldLineRegex = regexp.MustCompile(
 	`(?m)^field\s+(?:(?:public|private|const)\s+)*([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*(` + unionTypePattern + `))?\s*(?:=\s*(.+?))?(?:;|\r?$)`,
 )
+var classFieldNameWithQuestionRegex = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\?(\s*[:=;]|$)`)
+var fieldNameWithQuestionRegex = regexp.MustCompile(`^field\s+([A-Za-z_][A-Za-z0-9_]*)\?(\s*[:=;]|$)`)
 var functionLineRegex = regexp.MustCompile(
 	`^(?:export\s+)?(?:async\s+)?(?:(?:public|private)\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*(?::\s*(` + unionTypePattern + `))?`,
 )
@@ -93,6 +95,7 @@ var normalCallRegex = regexp.MustCompile(`(?m)^([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
 var classEmbedRegex = regexp.MustCompile(`(?m)\bembed\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:;|\r?$)`)
 var returnRegex = regexp.MustCompile(`(?m)return\s+(.+?)(?:;|\r?$)`)
 var fileImportRegex = regexp.MustCompile(`(?m)import\s+"([^"]+)"(?:\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?\s*(?:;|\r?$)`)
+var libraryImportRegex = regexp.MustCompile(`(?m)^\s*import\s+(?:library|lib)\s+"([^"]+)"(?:\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?\s*;?`)
 var catchVarRegex = regexp.MustCompile(`(?m)\bcatch\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{`)
 var enumLineRegex = regexp.MustCompile(`(?m)^(?:export\s+)?enum\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{([^}]*)\}`)
 var exportedEnumBlockRegex = regexp.MustCompile(`(?s)\bexport\s+enum\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{(.*?)\}`)
@@ -503,7 +506,7 @@ func fallbackScopeAtPosition(uri string, text string, pos Position) *Scope {
 
 	classBlocks := findBlocks(text, "class")
 
-	for lineIndex := 0; lineIndex <= maxLine; lineIndex++ {
+	for lineIndex := 0; lineIndex < len(lines); lineIndex++ {
 		line := cleanLine(lines[lineIndex])
 		if line == "" {
 			continue
@@ -521,28 +524,28 @@ func fallbackScopeAtPosition(uri string, text string, pos Position) *Scope {
 		}
 	}
 
-	scanFullInterfaces(scope, text, maxLine, uri)
-	scanFullEnums(scope, text, maxLine, uri)
-	scanFullClasses(scope, text, maxLine, uri)
-	scanFullFunctions(scope, text, maxLine, uri)
+	scanFullInterfaces(scope, text, len(lines), uri)
+	scanFullEnums(scope, text, len(lines), uri)
+	scanFullClasses(scope, text, len(lines), uri)
+	scanFullFunctions(scope, text, len(lines), uri)
+
+	className := classNameAtPosition(text, pos)
+	if className != "" {
+		if classSym, exists := resolveClassSymbol(scope, className); exists {
+			scope.Define(SymbolInfo{
+				Name:    "this",
+				Kind:    SymbolVariable,
+				Type:    "class:" + className,
+				Detail:  "current class instance",
+				Fields:  classSym.Fields,
+				Methods: classSym.Methods,
+			})
+		}
+	}
+
 	scanAnonymousFunctions(scope, text, maxLine, uri)
 	scanInlineAnonymousFunctionParams(scope, text, pos, uri)
 	scanCatchVariables(scope, text, pos, uri)
-
-	for lineIndex := 0; lineIndex <= maxLine; lineIndex++ {
-		line := cleanLine(lines[lineIndex])
-		if line == "" {
-			continue
-		}
-
-		scanVariableLine(scope, line, lineIndex+1, uri)
-		scanEmbedLine(scope, line, lineIndex+1, uri)
-
-		lineOffset := offsetAtLine(text, lineIndex+1)
-		if !blockInsideAny(lineOffset, classBlocks) {
-			scanFieldLine(scope, line, lineIndex+1, uri)
-		}
-	}
 
 	currentFunction := functionBlockAtLine(text, pos.Line)
 	if currentFunction != nil {
@@ -558,6 +561,22 @@ func fallbackScopeAtPosition(uri string, text string, pos Position) *Scope {
 			})
 		}
 	}
+
+	for lineIndex := 0; lineIndex <= maxLine; lineIndex++ {
+		line := cleanLine(lines[lineIndex])
+		if line == "" {
+			continue
+		}
+
+		scanVariableLine(scope, line, lineIndex+1, uri)
+		scanEmbedLine(scope, line, lineIndex+1, uri)
+
+		lineOffset := offsetAtLine(text, lineIndex+1)
+		if !blockInsideAny(lineOffset, classBlocks) {
+			scanFieldLine(scope, line, lineIndex+1, uri)
+		}
+	}
+	scanVariableDeclarations(scope, text, maxLine, uri)
 
 	if ifLine, ok := findEnclosingIfBlock(text, pos); ok {
 		applyTypeNarrowing(scope, ifLine)
@@ -621,7 +640,6 @@ func objectLiteralCompletions(scope *Scope, text string, pos Position) []Complet
 		}
 	}
 
-	// --- THE CRITICAL FIX: If namespace resolution failed, fall back to global search! ---
 	if !exists {
 		if iface, ok := resolveInterfaceSymbol(scope, typeName); ok {
 			sym = iface
@@ -937,6 +955,17 @@ func scanFullEnums(scope *Scope, text string, maxLine int, uri string) {
 
 func scanFieldLine(scope *Scope, line string, lineNumber int, uri string) {
 	line = strings.Replace(strings.Replace(strings.Replace(line, "private ", "", 1), "public ", "", 1), "const ", "", 1)
+
+	isNullable := false
+	if match := fieldNameWithQuestionRegex.FindStringSubmatch(line); match != nil {
+		isNullable = true
+		name := match[1]
+		idx := strings.Index(line, name+"?")
+		if idx >= 0 {
+			line = line[:idx] + name + line[idx+len(name)+1:]
+		}
+	}
+
 	match := fieldLineRegex.FindStringSubmatch(line)
 	if match == nil {
 		return
@@ -961,6 +990,14 @@ func scanFieldLine(scope *Scope, line string, lineNumber int, uri string) {
 		typ = normalizeLSPType(scope, typ)
 		if typ == "object" {
 			fields = inferObjectFieldsFromText(scope, exprText, uri, lineNumber)
+		}
+	}
+
+	if isNullable {
+		if typ == "unknown" || typ == "null" {
+			typ = "any | null"
+		} else if !strings.Contains(typ, "null") {
+			typ = typ + " | null"
 		}
 	}
 
@@ -1045,6 +1082,166 @@ func scanVariableLine(scope *Scope, line string, lineNumber int, uri string) {
 	})
 }
 
+func scanVariableDeclarations(scope *Scope, text string, maxLine int, uri string) {
+	lines := strings.Split(text, "\n")
+	if maxLine >= len(lines) {
+		maxLine = len(lines) - 1
+	}
+
+	startRegex := regexp.MustCompile(`^\s*(?:export\s+)?(?:let|const)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*(` + unionTypePattern + `))?\s*=\s*`)
+	for lineIndex := 0; lineIndex <= maxLine; lineIndex++ {
+		raw := lines[lineIndex]
+		match := startRegex.FindStringSubmatchIndex(raw)
+		if match == nil {
+			continue
+		}
+
+		name := raw[match[2]:match[3]]
+		typeHint := ""
+		if match[4] >= 0 {
+			typeHint = raw[match[4]:match[5]]
+		}
+
+		exprStart := offsetAtLine(text, lineIndex+1) + match[1]
+		exprEnd := variableInitializerEnd(text, exprStart)
+		if exprEnd < exprStart {
+			continue
+		}
+
+		scanVariableDeclaration(scope, text, name, typeHint, strings.TrimSpace(text[exprStart:exprEnd]), lineIndex+1, indexColumn(raw, name), uri)
+	}
+}
+
+func variableInitializerEnd(text string, start int) int {
+	depth := 0
+	inString := byte(0)
+	escaped := false
+	inLineComment := false
+	lastNonSpace := start
+
+	for i := start; i < len(text); i++ {
+		ch := text[i]
+
+		if inLineComment {
+			if ch == '\n' {
+				inLineComment = false
+				if depth == 0 {
+					return lastNonSpace
+				}
+			}
+			continue
+		}
+
+		if inString != 0 {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == inString {
+				inString = 0
+			}
+			lastNonSpace = i + 1
+			continue
+		}
+
+		if i+1 < len(text) && ch == '/' && text[i+1] == '/' {
+			inLineComment = true
+			i++
+			continue
+		}
+
+		if ch == '"' || ch == '\'' || ch == '`' {
+			inString = ch
+			lastNonSpace = i + 1
+			continue
+		}
+
+		switch ch {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			if depth > 0 {
+				depth--
+			}
+		case ';':
+			if depth == 0 {
+				return i
+			}
+		case '\n':
+			if depth == 0 {
+				return lastNonSpace
+			}
+		}
+
+		if ch != ' ' && ch != '\t' && ch != '\r' && ch != '\n' {
+			lastNonSpace = i + 1
+		}
+	}
+
+	return lastNonSpace
+}
+
+func scanVariableDeclaration(scope *Scope, sourceText string, name string, typeHint string, exprText string, lineNumber int, column int, uri string) {
+	if existing, ok := scope.Resolve(name); ok && (existing.Type == "function" || strings.HasPrefix(existing.Type, "task:")) {
+		return
+	}
+
+	typ := "any"
+	fields := map[string]SymbolInfo(nil)
+
+	if typeHint != "" {
+		typ = normalizeLSPType(scope, typeHint)
+	} else {
+		typ = inferExprTypeFromText(scope, exprText)
+		if (typ == "" || typ == "any" || typ == "unknown") && sourceText != "" {
+			if fallback, ok := inferNamespaceFunctionReturnFromText(scope, sourceText, exprText); ok {
+				typ = fallback
+			}
+		}
+		typ = normalizeLSPType(scope, typ)
+		if typ == "object" {
+			fields = inferObjectFieldsFromText(scope, exprText, uri, lineNumber)
+		}
+	}
+
+	scope.Define(SymbolInfo{
+		Name:      name,
+		Kind:      SymbolVariable,
+		Type:      typ,
+		Detail:    "variable " + name,
+		Line:      lineNumber,
+		Column:    column,
+		SourceURI: uri,
+		Fields:    fields,
+	})
+}
+
+func inferNamespaceFunctionReturnFromText(scope *Scope, text string, expr string) (string, bool) {
+	match := memberCallRegex.FindStringSubmatch(expr)
+	if match == nil {
+		return "", false
+	}
+
+	receiver := match[1]
+	member := match[2]
+	for _, nsBlock := range findBlocks(text, "namespace") {
+		if nsBlock.Name != receiver {
+			continue
+		}
+		for _, fnBlock := range findBlocks(nsBlock.Body, "fn") {
+			if fnBlock.Name == member {
+				return firstNonEmpty(inferReturnTypeFromBody(scope, fnBlock.Body, fnBlock.ReturnType), "any"), true
+			}
+		}
+	}
+
+	return "", false
+}
+
 func scanFullFunctions(scope *Scope, text string, maxLine int, uri string) {
 	classBlocks := findBlocks(text, "class")
 
@@ -1115,6 +1312,16 @@ func scanClassFields(scope *Scope, classBody string, uri string, baseLine int) m
 			break
 		}
 
+		isNullable := false
+		if match := classFieldNameWithQuestionRegex.FindStringSubmatch(line); match != nil {
+			isNullable = true
+			name := match[1]
+			idx := strings.Index(line, name+"?")
+			if idx >= 0 {
+				line = line[:idx] + name + line[idx+len(name)+1:]
+			}
+		}
+
 		fakeLine := "let " + line
 		if !strings.Contains(fakeLine, "=") {
 			fakeLine = strings.TrimSuffix(fakeLine, ";") + " = undefined"
@@ -1134,6 +1341,14 @@ func scanClassFields(scope *Scope, classBody string, uri string, baseLine int) m
 			typ = normalizeLSPType(scope, typeHint)
 		} else {
 			typ = inferExprTypeFromText(scope, expr)
+		}
+
+		if isNullable {
+			if typ == "unknown" || typ == "null" {
+				typ = "any | null"
+			} else if !strings.Contains(typ, "null") {
+				typ = typ + " | null"
+			}
 		}
 
 		detail := "field " + name
@@ -1698,7 +1913,7 @@ func inferExprTypeFromText(scope *Scope, expr string) string {
 		return innerType
 	}
 
-	if strings.HasPrefix(expr, `"`) || strings.HasPrefix(expr, "`") || strings.HasPrefix(expr, "'") {
+	if isQuotedLiteralOnly(expr) {
 		return "string"
 	}
 
@@ -1755,11 +1970,84 @@ func inferExprTypeFromText(scope *Scope, expr string) string {
 		return typ
 	}
 
+	if typ := inferParsedExprTypeFromText(scope, expr); typ != "" {
+		return typ
+	}
+
 	if sym, ok := scope.Resolve(expr); ok {
 		return sym.Type
 	}
 
 	return "unknown"
+}
+
+func inferParsedExprTypeFromText(scope *Scope, expr string) string {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return ""
+	}
+
+	statements, diagnostics := parseTinyForLSP("lsp://expr", "const __tiny_lsp_expr = "+expr+";")
+	if len(diagnostics) > 0 || len(statements) != 1 {
+		return ""
+	}
+
+	variable, ok := statements[0].(VariableStmt)
+	if !ok {
+		return ""
+	}
+
+	analyzer := &astSemanticAnalyzer{uri: "lsp://expr", text: "", root: scope, scope: scope}
+	typ := analyzer.inferExprType(variable.Value)
+	typ = normalizeLSPType(scope, typ)
+
+	if typ == "unknown" {
+		return ""
+	}
+	return typ
+}
+
+func leadingCallConsumesExpr(expr string, openParen int) bool {
+	if openParen < 0 || openParen >= len(expr) || expr[openParen] != '(' {
+		return false
+	}
+
+	closeParen := findMatching(expr, openParen, '(', ')')
+	if closeParen < 0 {
+		return false
+	}
+
+	return strings.TrimSpace(expr[closeParen+1:]) == ""
+}
+
+func isQuotedLiteralOnly(expr string) bool {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return false
+	}
+
+	quote := expr[0]
+	if quote != '"' && quote != '\'' && quote != '`' {
+		return false
+	}
+
+	escaped := false
+	for i := 1; i < len(expr); i++ {
+		ch := expr[i]
+		if quote != '`' && escaped {
+			escaped = false
+			continue
+		}
+		if quote != '`' && ch == '\\' {
+			escaped = true
+			continue
+		}
+		if ch == quote {
+			return strings.TrimSpace(expr[i+1:]) == ""
+		}
+	}
+
+	return false
 }
 
 func isComparisonExprText(expr string) bool {
@@ -1781,6 +2069,11 @@ func isComparisonExprText(expr string) bool {
 }
 
 func inferMemberCallTypeFromText(scope *Scope, expr string) string {
+	matchIndex := memberCallRegex.FindStringSubmatchIndex(expr)
+	if matchIndex == nil || !leadingCallConsumesExpr(expr, matchIndex[1]-1) {
+		return ""
+	}
+
 	match := memberCallRegex.FindStringSubmatch(expr)
 	if match == nil {
 		return ""
@@ -1789,8 +2082,22 @@ func inferMemberCallTypeFromText(scope *Scope, expr string) string {
 	receiver := match[1]
 	method := match[2]
 
+	if strings.Contains(receiver, ".") {
+		if sym, receiverType, ok := resolveReceiverPath(scope, "", Position{}, receiver); ok {
+			if sym.Kind == SymbolFunction {
+				return firstNonEmpty(sym.Returns, "any")
+			}
+			if receiverType != "" {
+				return inferMemberCallTypeByTypeString(scope, receiverType, method, sym.Fields)
+			}
+		}
+	}
+
 	sym, ok := scope.Resolve(receiver)
 	if !ok {
+		if typ, ok := namespaceFunctionReturnFromScope(scope, receiver, method); ok {
+			return typ
+		}
 		return ""
 	}
 
@@ -1812,6 +2119,17 @@ func inferMemberCallTypeFromText(scope *Scope, expr string) string {
 	}
 
 	return inferMemberCallTypeByTypeString(scope, sym.Type, method, sym.Fields)
+}
+
+func namespaceFunctionReturnFromScope(scope *Scope, namespace string, member string) (string, bool) {
+	for s := scope; s != nil; s = s.Parent {
+		if ns, ok := s.Symbols[namespace]; ok && ns.Kind == SymbolNamespace {
+			if memberSym, ok := ns.Members[member]; ok && memberSym.Kind == SymbolFunction {
+				return firstNonEmpty(memberSym.Returns, "any"), true
+			}
+		}
+	}
+	return "", false
 }
 
 func inferMemberCallTypeByTypeString(scope *Scope, typ string, method string, fields map[string]SymbolInfo) string {
@@ -1886,6 +2204,11 @@ func inferMemberCallTypeByTypeString(scope *Scope, typ string, method string, fi
 }
 
 func inferNormalCallTypeFromText(scope *Scope, expr string) string {
+	matchIndex := normalCallRegex.FindStringSubmatchIndex(expr)
+	if matchIndex == nil || !leadingCallConsumesExpr(expr, matchIndex[1]-1) {
+		return ""
+	}
+
 	match := normalCallRegex.FindStringSubmatch(expr)
 	if match == nil {
 		return ""
@@ -2753,6 +3076,31 @@ func scanFileImportsIntoScopeWithVisited(scope *Scope, currentURI string, text s
 			scope.Define(sym)
 		}
 	}
+
+	libraryMatches := libraryImportRegex.FindAllStringSubmatch(text, -1)
+	for _, match := range libraryMatches {
+		importPath := match[1]
+		alias := ""
+
+		if len(match) > 2 {
+			alias = match[2]
+		}
+		if alias == "" {
+			alias = defaultLibraryAlias(importPath)
+		}
+
+		resolved := resolveLibraryImportPath(importPath)
+		exports := loadTinyFileExports(resolved, visited)
+
+		scope.Define(SymbolInfo{
+			Name:      alias,
+			Kind:      SymbolNamespace,
+			Type:      "namespace:" + alias,
+			Detail:    "library " + importPath,
+			Members:   exports,
+			SourceURI: pathToFileURI(resolved),
+		})
+	}
 }
 
 func scanExportedEnums(scope *Scope, text string, exports map[string]SymbolInfo, uri string) {
@@ -3137,6 +3485,9 @@ func memberExprAtPosition(text string, pos Position) (string, string, bool) {
 			continue
 		}
 		if ch == '(' {
+			if parenDepth == 0 {
+				break
+			}
 			parenDepth--
 			i--
 			continue
@@ -3147,6 +3498,9 @@ func memberExprAtPosition(text string, pos Position) (string, string, bool) {
 			continue
 		}
 		if ch == '[' {
+			if bracketDepth == 0 {
+				break
+			}
 			bracketDepth--
 			i--
 			continue
@@ -3296,6 +3650,8 @@ func getHover(uri string, text string, pos Position) any {
 			return nil
 		}
 
+		receiverType = unwrapNullableType(receiverType)
+
 		if receiverSym.Kind == SymbolNamespace || receiverSym.Kind == SymbolEnum {
 			memberSym, ok := receiverSym.Members[member]
 			if !ok {
@@ -3305,6 +3661,11 @@ func getHover(uri string, text string, pos Position) any {
 			if memberSym.Kind == SymbolFunction {
 				signature := formatFunctionSignature(receiver+"."+memberSym.Name, memberSym.Params, memberSym.Returns)
 				return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "```tiny\n" + signature + "\n```\n" + memberSym.Detail}}
+			}
+			if memberSym.Kind == SymbolClass {
+				constructor := constructorSymbolFromClass(memberSym, receiver+"."+memberSym.Name)
+				signature := formatFunctionSignature(constructor.Name, constructor.Params, constructor.Returns)
+				return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "```tiny\n" + signature + "\n```\n" + constructor.Detail}}
 			}
 
 			return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "**" + receiver + "." + memberSym.Name + "**\n\nType: `" + firstNonEmpty(memberSym.Type, "any") + "`\n\n" + memberSym.Detail}}
@@ -3370,12 +3731,29 @@ func getHover(uri string, text string, pos Position) any {
 
 	sym, exists := scope.Resolve(word)
 	if !exists {
+		className := classNameAtPosition(text, pos)
+		if className != "" {
+			if classSym, ok := resolveClassSymbol(scope, className); ok && classSym.Kind == SymbolClass {
+				if methodSym, ok := classSym.Methods[word]; ok {
+					signature := formatFunctionSignature(className+"."+methodSym.Name, methodSym.Params, methodSym.Returns)
+					return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "```tiny\n" + signature + "\n```\n" + methodSym.Detail}}
+				}
+				if fieldSym, ok := classSym.Fields[word]; ok {
+					return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "**" + className + "." + fieldSym.Name + "**\n\nType: `" + fieldSym.Type + "`\n\n" + fieldSym.Detail}}
+				}
+			}
+		}
 		return nil
 	}
 
 	if sym.Kind == SymbolFunction {
 		signature := formatFunctionSignature(sym.Name, sym.Params, sym.Returns)
 		return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "```tiny\n" + signature + "\n```\n" + sym.Detail}}
+	}
+	if sym.Kind == SymbolClass {
+		constructor := constructorSymbolFromClass(sym, sym.Name)
+		signature := formatFunctionSignature(constructor.Name, constructor.Params, constructor.Returns)
+		return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "```tiny\n" + signature + "\n```\n" + constructor.Detail}}
 	}
 
 	return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "**" + sym.Name + "**\n\nType: `" + sym.Type + "`\n\n" + sym.Detail}}
@@ -3593,6 +3971,8 @@ func collectUnusedSymbolDecls(stmts []Stmt, exported bool, inClass bool) []unuse
 			if alias == "" {
 				if s.Std {
 					alias = s.Path
+				} else if s.Library {
+					alias = defaultLibraryAlias(s.Path)
 				} else {
 					alias = strings.TrimSuffix(filepath.Base(s.Path), filepath.Ext(s.Path))
 				}
@@ -3695,7 +4075,11 @@ func (a *astSemanticAnalyzer) predeclareStatements(stmts []Stmt) {
 		case ImportStmt:
 			alias := s.Alias
 			if alias == "" {
-				alias = s.Path
+				if s.Library {
+					alias = defaultLibraryAlias(s.Path)
+				} else {
+					alias = s.Path
+				}
 			}
 
 			if s.Std {
@@ -3703,7 +4087,12 @@ func (a *astSemanticAnalyzer) predeclareStatements(stmts []Stmt) {
 			}
 
 			if !s.Plugin {
-				importPath := resolveImportPath(a.uri, s.Path)
+				importPath := ""
+				if s.Library {
+					importPath = resolveLibraryImportPath(s.Path)
+				} else {
+					importPath = resolveImportPath(a.uri, s.Path)
+				}
 				if _, err := os.Stat(importPath); err != nil {
 					a.addDiagnostic(s.Line, s.Column, "import file not found: "+s.Path)
 				}
@@ -4812,23 +5201,22 @@ func findEnclosingIfBlock(text string, pos Position) (string, bool) {
 }
 
 var nullCheckRegex = regexp.MustCompile(`if\s*\(?\s*([A-Za-z_][A-Za-z0-9_]*)\s*!=\s*(null)\s*\)?`)
-var typeOfRegex = regexp.MustCompile("if\\s+typeof\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*==\\s*[\"'\u0060](string|number|bool|object|array)[\"'\u0060]")
+var nullIsRegex = regexp.MustCompile(`if\s*\(?\s*([A-Za-z_][A-Za-z0-9_]*)\s+is\s+null\s*\)?`)
+var truthyIdentRegex = regexp.MustCompile(`^if\s*\(?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)?\s*\{?`)
+var typeOfRegex = regexp.MustCompile("if\\s*\\(?\\s*typeof\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*==\\s*[\"'\u0060](string|number|bool|object|array)[\"'\u0060]\\s*\\)?")
+var instanceOfRegex = regexp.MustCompile(`if\s*\(?\s*([A-Za-z_][A-Za-z0-9_]*)\s+instanceof\s+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s*\)?`)
 
 func applyTypeNarrowing(scope *Scope, ifLine string) {
 	if match := nullCheckRegex.FindStringSubmatch(ifLine); match != nil {
 		name := match[1]
-		if sym, ok := scope.Resolve(name); ok {
-			parts := splitUnionType(sym.Type)
-			newParts := []string{}
-			for _, part := range parts {
-				if part != "null" {
-					newParts = append(newParts, part)
-				}
-			}
-			if len(newParts) > 0 {
-				sym.Type = strings.Join(newParts, " | ")
-				scope.Define(sym)
-			}
+		narrowSymbolRemovingNull(scope, name)
+		return
+	}
+
+	if match := nullIsRegex.FindStringSubmatch(ifLine); match != nil {
+		if sym, ok := scope.Resolve(match[1]); ok {
+			sym.Type = "null"
+			scope.Define(sym)
 		}
 		return
 	}
@@ -4842,14 +5230,107 @@ func applyTypeNarrowing(scope *Scope, ifLine string) {
 		}
 		return
 	}
+
+	if match := instanceOfRegex.FindStringSubmatch(ifLine); match != nil {
+		if sym, ok := scope.Resolve(match[1]); ok {
+			sym.Type = "class:" + match[2]
+			scope.Define(sym)
+		}
+		return
+	}
+
+	if match := truthyIdentRegex.FindStringSubmatch(ifLine); match != nil {
+		narrowSymbolRemovingNull(scope, match[1])
+		return
+	}
+}
+
+func narrowSymbolRemovingNull(scope *Scope, name string) {
+	if sym, ok := scope.Resolve(name); ok {
+		parts := splitUnionType(sym.Type)
+		newParts := []string{}
+		for _, part := range parts {
+			if strings.TrimSpace(part) != "null" {
+				newParts = append(newParts, strings.TrimSpace(part))
+			}
+		}
+		if len(newParts) > 0 && len(newParts) != len(parts) {
+			sym.Type = strings.Join(newParts, " | ")
+			scope.Define(sym)
+		}
+	}
+}
+
+func scanProjectTinyFiles(startPath string) []string {
+	if strings.HasPrefix(startPath, "file://") {
+		startPath = URIToPath(startPath)
+	}
+	var files []string
+	root := ""
+	if startPath != "" {
+		dir := startPath
+		if info, err := os.Stat(dir); err == nil && !info.IsDir() {
+			dir = filepath.Dir(dir)
+		}
+		for {
+			if _, err := os.Stat(filepath.Join(dir, "tiny.json")); err == nil {
+				root = dir
+				break
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+		if root == "" {
+			root = filepath.Dir(startPath)
+		}
+	}
+
+	if root == "" {
+		var err error
+		root, err = os.Getwd()
+		if err != nil {
+			return nil
+		}
+	}
+
+	filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if entry.IsDir() {
+			name := entry.Name()
+			if name == ".tiny" || name == ".tinydeps" || name == "dist" || name == "bin" || strings.HasPrefix(name, ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(path) == ".tiny" {
+			files = append(files, path)
+		}
+		return nil
+	})
+
+	return files
 }
 
 func isPositionInStringOrComment(line string, charIndex int) bool {
-	inString := byte(0)
+	type parserState struct {
+		isString bool
+		quote    byte
+		braces   int
+	}
+
+	stack := []parserState{{isString: false}}
 	escaped := false
+
 	for i := 0; i < len(line) && i < charIndex; i++ {
 		ch := line[i]
-		if inString != 0 {
+		curr := &stack[len(stack)-1]
+
+		if curr.isString {
 			if escaped {
 				escaped = false
 				continue
@@ -4858,19 +5339,47 @@ func isPositionInStringOrComment(line string, charIndex int) bool {
 				escaped = true
 				continue
 			}
-			if ch == inString {
-				inString = 0
+			if ch == curr.quote {
+				// Exit string
+				stack = stack[:len(stack)-1]
+				continue
 			}
-			continue
-		}
-		if i+1 < len(line) && ch == '/' && line[i+1] == '/' {
-			return true
-		}
-		if ch == '"' || ch == '\'' || ch == '`' {
-			inString = ch
+			if curr.quote == '`' && ch == '$' && i+1 < len(line) && line[i+1] == '{' {
+				// Enter interpolation inside backtick
+				stack = append(stack, parserState{isString: false, braces: 1})
+				i++ // Skip '{'
+				continue
+			}
+		} else {
+			// Code context
+			if i+1 < len(line) && ch == '/' && line[i+1] == '/' {
+				// Comment starts and goes to the end of the line
+				return true
+			}
+			if ch == '"' || ch == '\'' || ch == '`' {
+				// Enter string
+				stack = append(stack, parserState{isString: true, quote: ch})
+				escaped = false
+				continue
+			}
+			switch ch {
+			case '{':
+				if curr.braces > 0 {
+					curr.braces++
+				}
+			case '}':
+				if curr.braces > 0 {
+					curr.braces--
+					if curr.braces == 0 {
+						// Exit interpolation
+						stack = stack[:len(stack)-1]
+					}
+				}
+			}
 		}
 	}
-	return inString != 0
+
+	return stack[len(stack)-1].isString
 }
 
 func findFunctionArgumentTypeHint(scope *Scope, text string, pos Position) (string, bool) {
@@ -4904,7 +5413,15 @@ func findFunctionArgumentTypeHint(scope *Scope, text string, pos Position) (stri
 		}
 	}
 
-	if !exists || sym.Kind != SymbolFunction {
+	if !exists {
+		return "", false
+	}
+
+	if sym.Kind == SymbolClass {
+		sym = constructorSymbolFromClass(sym, sym.Name)
+	}
+
+	if sym.Kind != SymbolFunction {
 		return "", false
 	}
 
@@ -5145,4 +5662,524 @@ func (a *astSemanticAnalyzer) checkNamingConflict(name string, line int, col int
 		return true
 	}
 	return false
+}
+
+func unwrapNullableType(typ string) string {
+	typ = strings.TrimSpace(typ)
+	if strings.Contains(typ, "|") {
+		parts := splitUnionType(typ)
+		nonNullParts := []string{}
+		for _, part := range parts {
+			if !isNullishLSPType(part) {
+				nonNullParts = append(nonNullParts, part)
+			}
+		}
+		if len(nonNullParts) == 1 {
+			return nonNullParts[0]
+		}
+	}
+	return typ
+}
+
+func classImplementsInterface(classSym SymbolInfo, ifaceSym SymbolInfo) bool {
+	for name, ifaceField := range ifaceSym.Fields {
+		classField, hasField := classSym.Fields[name]
+		_, hasMethod := classSym.Methods[name]
+		if !hasField && !hasMethod {
+			return false
+		}
+		if hasMethod {
+			if ifaceField.Type != "function" && ifaceField.Type != "" && ifaceField.Type != "any" {
+				return false
+			}
+		}
+		if hasField {
+			if ifaceField.Type == "function" && classField.Type != "function" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func interfaceNameAtPosition(text string, pos Position) string {
+	offset := offsetAtLine(text, pos.Line+1)
+	for _, block := range findBlocks(text, "interface") {
+		if offset >= block.Start && offset < block.End {
+			return block.Name
+		}
+	}
+	return ""
+}
+
+func getImplementations(uri string, text string, pos Position) []Location {
+	line := getLine(text, pos.Line)
+	if isPositionInStringOrComment(line, pos.Character) {
+		return nil
+	}
+
+	word := wordAtPosition(text, pos)
+	if word == "" || tinyKeywords[word] {
+		return nil
+	}
+
+	scope := scopeAtPosition(uri, text, pos)
+
+	if ifaceSym, ok := resolveInterfaceSymbol(scope, word); ok && ifaceSym.Kind == SymbolInterface {
+		return findClassesImplementing(scope, ifaceSym, "", uri)
+	}
+
+	ifaceName := interfaceNameAtPosition(text, pos)
+	if ifaceName != "" {
+		if ifaceSym, ok := resolveInterfaceSymbol(scope, ifaceName); ok && ifaceSym.Kind == SymbolInterface {
+			if _, ok := ifaceSym.Fields[word]; ok {
+				return findClassesImplementing(scope, ifaceSym, word, uri)
+			}
+		}
+	}
+
+	return nil
+}
+
+func findClassesImplementing(scope *Scope, ifaceSym SymbolInfo, methodName string, uri string) []Location {
+	locations := []Location{}
+	projectFiles := scanProjectTinyFiles(URIToPath(uri))
+	fileSet := map[string]bool{}
+	for _, f := range projectFiles {
+		fileSet[filepath.Clean(f)] = true
+	}
+	for openPath := range lspDocs {
+		fileSet[filepath.Clean(openPath)] = true
+	}
+
+	for path := range fileSet {
+		uri := pathToFileURI(path)
+		text, ok := tinyFileTextForLSP(path, uri)
+		if !ok {
+			continue
+		}
+
+		lines := strings.Split(text, "\n")
+		fileScope := fallbackScopeAtPosition(uri, text, Position{Line: len(lines), Character: 0})
+
+		for _, sym := range fileScope.Symbols {
+			if sym.Kind == SymbolClass {
+				if classImplementsInterface(sym, ifaceSym) {
+					if methodName == "" {
+						locations = append(locations, Location{
+							URI: uri,
+							Range: LSPRange{
+								Start: Position{Line: sym.Line - 1, Character: sym.Column - 1},
+								End:   Position{Line: sym.Line - 1, Character: sym.Column - 1 + len(sym.Name)},
+							},
+						})
+					} else {
+						if methodSym, ok := sym.Methods[methodName]; ok {
+							locations = append(locations, Location{
+								URI: uri,
+								Range: LSPRange{
+									Start: Position{Line: methodSym.Line - 1, Character: methodSym.Column - 1},
+									End:   Position{Line: methodSym.Line - 1, Character: methodSym.Column - 1 + len(methodSym.Name)},
+								},
+							})
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return locations
+}
+
+func prepareCallHierarchy(uri string, text string, pos Position) []CallHierarchyItem {
+	line := getLine(text, pos.Line)
+	if isPositionInStringOrComment(line, pos.Character) {
+		return nil
+	}
+
+	word := wordAtPosition(text, pos)
+	if word == "" || tinyKeywords[word] {
+		return nil
+	}
+
+	scope := scopeAtPosition(uri, text, pos)
+
+	// First check if it's a member access: receiver.member (e.g. Utils.helper() or user.verify())
+	receiver, member, ok := memberExprAtPosition(text, pos)
+	if ok && member == word {
+		sym, typ, exists := resolveReceiverPath(scope, text, pos, receiver)
+		if exists {
+			typ = unwrapNullableType(typ)
+			if sym.Kind == SymbolNamespace {
+				if memberSym, ok := sym.Members[word]; ok && memberSym.Kind == SymbolFunction {
+					rng := LSPRange{
+						Start: Position{Line: memberSym.Line - 1, Character: memberSym.Column - 1},
+						End:   Position{Line: memberSym.Line - 1, Character: memberSym.Column - 1 + len(memberSym.Name)},
+					}
+					return []CallHierarchyItem{{
+						Name:           memberSym.Name,
+						Kind:           12, // Function
+						Detail:         memberSym.Name,
+						URI:            memberSym.SourceURI,
+						Range:          rng,
+						SelectionRange: rng,
+						Data: map[string]any{
+							"name":  memberSym.Name,
+							"class": "",
+							"uri":   memberSym.SourceURI,
+						},
+					}}
+				} else if memberSym, ok := sym.Members[word]; ok && memberSym.Kind == SymbolClass {
+					rng := LSPRange{
+						Start: Position{Line: memberSym.Line - 1, Character: memberSym.Column - 1},
+						End:   Position{Line: memberSym.Line - 1, Character: memberSym.Column - 1 + len(memberSym.Name)},
+					}
+					return []CallHierarchyItem{{
+						Name:           memberSym.Name,
+						Kind:           7, // Class
+						Detail:         memberSym.Name,
+						URI:            memberSym.SourceURI,
+						Range:          rng,
+						SelectionRange: rng,
+						Data: map[string]any{
+							"name":  memberSym.Name,
+							"class": memberSym.Name,
+							"uri":   memberSym.SourceURI,
+						},
+					}}
+				}
+			} else if strings.HasPrefix(typ, "class:") {
+				className := strings.TrimPrefix(typ, "class:")
+				if classSym, ok := resolveClassSymbol(scope, className); ok {
+					if methodSym, ok := classSym.Methods[word]; ok {
+						rng := LSPRange{
+							Start: Position{Line: methodSym.Line - 1, Character: methodSym.Column - 1},
+							End:   Position{Line: methodSym.Line - 1, Character: methodSym.Column - 1 + len(methodSym.Name)},
+						}
+						sourceURI := classSym.SourceURI
+						if sourceURI == "" {
+							sourceURI = uri
+						}
+						return []CallHierarchyItem{{
+							Name:           methodSym.Name,
+							Kind:           6, // Method
+							Detail:         className + "." + methodSym.Name,
+							URI:            sourceURI,
+							Range:          rng,
+							SelectionRange: rng,
+							Data: map[string]any{
+								"name":  methodSym.Name,
+								"class": className,
+								"uri":   sourceURI,
+							},
+						}}
+					}
+				}
+			}
+		}
+	}
+
+	className := classNameAtPosition(text, pos)
+	if className != "" {
+		if classSym, ok := resolveClassSymbol(scope, className); ok && classSym.Kind == SymbolClass {
+			if methodSym, ok := classSym.Methods[word]; ok {
+				rng := LSPRange{
+					Start: Position{Line: methodSym.Line - 1, Character: methodSym.Column - 1},
+					End:   Position{Line: methodSym.Line - 1, Character: methodSym.Column - 1 + len(methodSym.Name)},
+				}
+				return []CallHierarchyItem{{
+					Name:           methodSym.Name,
+					Kind:           6, // Method
+					Detail:         className + "." + methodSym.Name,
+					URI:            uri,
+					Range:          rng,
+					SelectionRange: rng,
+					Data: map[string]any{
+						"name":  methodSym.Name,
+						"class": className,
+						"uri":   uri,
+					},
+				}}
+			}
+		}
+	}
+
+	if sym, ok := scope.Resolve(word); ok && sym.Kind == SymbolFunction {
+		rng := LSPRange{
+			Start: Position{Line: sym.Line - 1, Character: sym.Column - 1},
+			End:   Position{Line: sym.Line - 1, Character: sym.Column - 1 + len(sym.Name)},
+		}
+		return []CallHierarchyItem{{
+			Name:           sym.Name,
+			Kind:           12, // Function
+			Detail:         sym.Name,
+			URI:            uri,
+			Range:          rng,
+			SelectionRange: rng,
+			Data: map[string]any{
+				"name":  sym.Name,
+				"class": "",
+				"uri":   uri,
+			},
+		}}
+	}
+
+	return nil
+}
+
+func getIncomingCalls(item CallHierarchyItem) []CallHierarchyIncomingCall {
+	incomingMap := make(map[string]*CallHierarchyIncomingCall)
+	targetName := item.Name
+	var targetClass string
+	if dataMap, ok := item.Data.(map[string]any); ok {
+		if cls, ok := dataMap["class"].(string); ok {
+			targetClass = cls
+		}
+	}
+	targetURI := item.URI
+
+	targetLine := -1
+	targetText, ok := tinyFileTextForLSP(URIToPath(targetURI), targetURI)
+	if ok {
+		targetScope := scopeAtPosition(targetURI, targetText, item.Range.Start)
+		if targetClass == "" {
+			if sym, ok := targetScope.Resolve(targetName); ok {
+				targetLine = sym.Line
+			}
+		} else {
+			if classSym, ok := resolveClassSymbol(targetScope, targetClass); ok {
+				if methodSym, ok := classSym.Methods[targetName]; ok {
+					targetLine = methodSym.Line
+				}
+			}
+		}
+	}
+
+	projectFiles := scanProjectTinyFiles(URIToPath(targetURI))
+
+	fileSet := map[string]bool{}
+	for _, f := range projectFiles {
+		fileSet[filepath.Clean(f)] = true
+	}
+	fileSet[filepath.Clean(URIToPath(targetURI))] = true
+
+	for path := range fileSet {
+		fileURI := pathToFileURI(path)
+		text, ok := tinyFileTextForLSP(path, fileURI)
+		if !ok {
+			continue
+		}
+
+		ranges := identifierRangesInText(text, targetName)
+		for _, r := range ranges {
+			pos := Position{Line: r.Line, Character: r.Start}
+			called := false
+			scope := scopeAtPosition(fileURI, text, pos)
+			if targetClass == "" {
+				receiver, member, ok := memberExprAtPosition(text, pos)
+				if ok && member == targetName {
+					sym, _, exists := resolveReceiverPath(scope, text, pos, receiver)
+					if exists && sym.Kind == SymbolNamespace {
+						if memberSym, ok := sym.Members[targetName]; ok && memberSym.SourceURI == targetURI && memberSym.Line == targetLine {
+							called = true
+						}
+					}
+				} else {
+					if sym, ok := scope.Resolve(targetName); ok && sym.Kind == SymbolFunction && sym.SourceURI == targetURI && sym.Line == targetLine {
+						called = true
+					}
+				}
+			} else {
+				receiver, member, ok := memberExprAtPosition(text, pos)
+				if ok && member == targetName {
+					_, receiverType, exists := resolveReceiverPath(scope, text, pos, receiver)
+					if exists && unwrapNullableType(receiverType) == "class:"+targetClass {
+						called = true
+					}
+				}
+			}
+
+			if called {
+				// Skip if it is the declaration itself
+				if pos.Line == targetLine-1 {
+					lineText := getLine(text, pos.Line)
+					beforeIdent := strings.TrimSpace(lineText[:pos.Character])
+					if strings.HasSuffix(beforeIdent, "fn") {
+						continue
+					}
+				}
+				fnBlock := functionBlockAtLine(text, pos.Line)
+				var callerItem CallHierarchyItem
+				callerKey := ""
+
+				if fnBlock != nil {
+					classBlock := classBlockAtLine(text, pos.Line)
+					if classBlock != nil {
+						callerKey = fileURI + ":" + classBlock.Name + "." + fnBlock.Name
+						rng := LSPRange{
+							Start: Position{Line: fnBlock.Line - 1, Character: fnBlock.Column - 1},
+							End:   Position{Line: fnBlock.Line - 1, Character: fnBlock.Column - 1 + len(fnBlock.Name)},
+						}
+						callerItem = CallHierarchyItem{
+							Name:           fnBlock.Name,
+							Kind:           6, // Method
+							Detail:         classBlock.Name + "." + fnBlock.Name,
+							URI:            fileURI,
+							Range:          rng,
+							SelectionRange: rng,
+						}
+					} else {
+						callerKey = fileURI + ":" + fnBlock.Name
+						rng := LSPRange{
+							Start: Position{Line: fnBlock.Line - 1, Character: fnBlock.Column - 1},
+							End:   Position{Line: fnBlock.Line - 1, Character: fnBlock.Column - 1 + len(fnBlock.Name)},
+						}
+						callerItem = CallHierarchyItem{
+							Name:           fnBlock.Name,
+							Kind:           12, // Function
+							Detail:         fnBlock.Name,
+							URI:            fileURI,
+							Range:          rng,
+							SelectionRange: rng,
+						}
+					}
+				} else {
+					callerKey = fileURI + ":<top-level>"
+					rng := LSPRange{
+						Start: Position{Line: 0, Character: 0},
+						End:   Position{Line: 0, Character: 0},
+					}
+					callerItem = CallHierarchyItem{
+						Name:           "<top-level>",
+						Kind:           12,
+						Detail:         "top-level statements",
+						URI:            fileURI,
+						Range:          rng,
+						SelectionRange: rng,
+					}
+				}
+
+				callRange := LSPRange{
+					Start: Position{Line: r.Line, Character: r.Start},
+					End:   Position{Line: r.Line, Character: r.End},
+				}
+
+				if call, exists := incomingMap[callerKey]; exists {
+					call.FromRanges = append(call.FromRanges, callRange)
+				} else {
+					incomingMap[callerKey] = &CallHierarchyIncomingCall{
+						From:       callerItem,
+						FromRanges: []LSPRange{callRange},
+					}
+				}
+			}
+		}
+	}
+
+	result := []CallHierarchyIncomingCall{}
+	for _, call := range incomingMap {
+		result = append(result, *call)
+	}
+	return result
+}
+
+func getOutgoingCalls(item CallHierarchyItem) []CallHierarchyOutgoingCall {
+	targetURI := item.URI
+	text, ok := tinyFileTextForLSP(URIToPath(targetURI), targetURI)
+	if !ok {
+		return nil
+	}
+
+	fnBlock := functionBlockAtLine(text, item.Range.Start.Line)
+	if fnBlock == nil {
+		return nil
+	}
+
+	callRegex := regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
+	matches := callRegex.FindAllStringSubmatchIndex(fnBlock.Body, -1)
+
+	outgoingMap := map[string]*CallHierarchyOutgoingCall{}
+
+	for _, match := range matches {
+		wordStart := match[2]
+		wordEnd := match[3]
+		word := fnBlock.Body[wordStart:wordEnd]
+
+		if tinyKeywords[word] {
+			continue
+		}
+
+		bodyOffset := fnBlock.Start + len(fnBlock.Header) + 1 + wordStart
+		pos := bytePositionAtOffset(text, bodyOffset)
+
+		scope := scopeAtPosition(targetURI, text, pos)
+
+		var calledItem *CallHierarchyItem
+
+		receiver, member, ok := memberExprAtPosition(text, pos)
+		if ok && member == word {
+			_, receiverType, exists := resolveReceiverPath(scope, text, pos, receiver)
+			if exists {
+				receiverType = unwrapNullableType(receiverType)
+				if strings.HasPrefix(receiverType, "class:") {
+					className := strings.TrimPrefix(receiverType, "class:")
+					if classSym, ok := resolveClassSymbol(scope, className); ok {
+						if methodSym, ok := classSym.Methods[word]; ok {
+							rng := LSPRange{
+								Start: Position{Line: methodSym.Line - 1, Character: methodSym.Column - 1},
+								End:   Position{Line: methodSym.Line - 1, Character: methodSym.Column - 1 + len(methodSym.Name)},
+							}
+							calledItem = &CallHierarchyItem{
+								Name:           methodSym.Name,
+								Kind:           6, // Method
+								Detail:         className + "." + methodSym.Name,
+								URI:            targetURI,
+								Range:          rng,
+								SelectionRange: rng,
+							}
+						}
+					}
+				}
+			}
+		} else {
+			if sym, ok := scope.Resolve(word); ok && sym.Kind == SymbolFunction {
+				rng := LSPRange{
+					Start: Position{Line: sym.Line - 1, Character: sym.Column - 1},
+					End:   Position{Line: sym.Line - 1, Character: sym.Column - 1 + len(sym.Name)},
+				}
+				calledItem = &CallHierarchyItem{
+					Name:           sym.Name,
+					Kind:           12, // Function
+					Detail:         sym.Name,
+					URI:            sym.SourceURI,
+					Range:          rng,
+					SelectionRange: rng,
+				}
+			}
+		}
+
+		if calledItem != nil {
+			key := calledItem.URI + ":" + calledItem.Detail
+			callRange := LSPRange{
+				Start: pos,
+				End:   Position{Line: pos.Line, Character: pos.Character + len(word)},
+			}
+
+			if call, exists := outgoingMap[key]; exists {
+				call.FromRanges = append(call.FromRanges, callRange)
+			} else {
+				outgoingMap[key] = &CallHierarchyOutgoingCall{
+					To:         *calledItem,
+					FromRanges: []LSPRange{callRange},
+				}
+			}
+		}
+	}
+
+	result := []CallHierarchyOutgoingCall{}
+	for _, call := range outgoingMap {
+		result = append(result, *call)
+	}
+	return result
 }

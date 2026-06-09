@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -742,7 +743,11 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 			members[name] = NewNative(FunctionValue{Name: fullName})
 		}
 
-		if !isNative {
+		if isNative {
+			fn, _ := inner.(NativeFnStmt)
+			c.declaredFunctions[fullName] = true
+			c.nativeFunctions[fullName] = fn.ReturnType.Name
+		} else {
 			fn, _ := inner.(FunctionStmt)
 			c.functions[fullName] = Function{
 				ID:     c.getFunctionID(fullName),
@@ -958,7 +963,27 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		}
 	}
 
-	// 8. Compile classes
+	// 8. Compile interfaces before classes/functions so namespace-local return
+	// hints can be checked while compiling method and function bodies.
+	for _, raw := range stmt.Statements {
+		inner, _ := unwrapExport(raw)
+
+		interfaceStmt, ok := inner.(InterfaceStmt)
+		if !ok {
+			continue
+		}
+
+		fullName := stmt.Name + "." + interfaceStmt.Name
+
+		namespacedInterface := InterfaceStmt{
+			Name:   fullName,
+			Fields: interfaceStmt.Fields,
+		}
+
+		c.compileInterfaceStatement(namespacedInterface)
+	}
+
+	// 9. Compile classes
 	for _, raw := range stmt.Statements {
 		inner, _ := unwrapExport(raw)
 
@@ -977,7 +1002,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		c.compileClass(namespacedClass)
 	}
 
-	// 9. Compile functions
+	// 10. Compile functions
 	for _, raw := range stmt.Statements {
 		inner, _ := unwrapExport(raw)
 
@@ -997,25 +1022,6 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		}
 
 		c.compileFunction(namespacedFn)
-	}
-
-	// 10. Compile interfaces
-	for _, raw := range stmt.Statements {
-		inner, _ := unwrapExport(raw)
-
-		interfaceStmt, ok := inner.(InterfaceStmt)
-		if !ok {
-			continue
-		}
-
-		fullName := stmt.Name + "." + interfaceStmt.Name
-
-		namespacedInterface := InterfaceStmt{
-			Name:   fullName,
-			Fields: interfaceStmt.Fields,
-		}
-
-		c.compileInterfaceStatement(namespacedInterface)
 	}
 
 	c.currentNamespaceFunctions = oldNamespaceFunctions
@@ -1890,11 +1896,12 @@ func (c *Compiler) compileClass(stmt ClassStmt) {
 		c.usedFunctions[compiledName] = true
 
 		classMethod := FunctionStmt{
-			Name:    method.Name,
-			Params:  method.Params,
-			Body:    method.Body,
-			Private: method.Private,
-			Async:   method.Async,
+			Name:       method.Name,
+			Params:     method.Params,
+			ReturnType: method.ReturnType,
+			Body:       method.Body,
+			Private:    method.Private,
+			Async:      method.Async,
 		}
 
 		c.compileMethod(stmt.Name, classMethod)
@@ -2783,6 +2790,19 @@ func (c *Compiler) compileExpr(expr Expr) {
 					c.compileExpr(arg)
 				}
 
+				if retType, isNative := c.nativeFunctions[fullName]; isNative {
+					c.setLocation(e.File, e.Line, e.Column)
+
+					sanitizedName := strings.ReplaceAll(fullName, ".", "_")
+					c.emit(OP_NATIVE_CALL, NativeCallInfo{
+						Name:       sanitizedName,
+						ArgCount:   len(e.Args),
+						ReturnType: retType,
+					})
+
+					return
+				}
+
 				c.usedFunctions[fullName] = true
 
 				c.setLocation(e.File, e.Line, e.Column)
@@ -2867,6 +2887,19 @@ func (c *Compiler) compileExpr(expr Expr) {
 				if fullName, exists := c.currentNamespaceFunctions[ident.Name]; exists {
 					for _, arg := range e.Args {
 						c.compileExpr(arg)
+					}
+
+					if retType, isNative := c.nativeFunctions[fullName]; isNative {
+						c.setLocation(ident.File, ident.Line, ident.Column)
+
+						sanitizedName := strings.ReplaceAll(fullName, ".", "_")
+						c.emit(OP_NATIVE_CALL, NativeCallInfo{
+							Name:       sanitizedName,
+							ArgCount:   len(e.Args),
+							ReturnType: retType,
+						})
+
+						return
 					}
 
 					c.setLocation(ident.File, ident.Line, ident.Column)
@@ -3069,6 +3102,7 @@ func (c *Compiler) compileMethod(className string, stmt FunctionStmt) {
 		ID:           c.getFunctionID(name),
 		Name:         name,
 		Params:       params,
+		ReturnType:   stmt.ReturnType,
 		Instructions: functionInstructions,
 		LocalCount:   c.localCount,
 		HasDefaults:  hasDefaults,
@@ -3151,7 +3185,42 @@ func (c *Compiler) compareCompileTimeTypes(got string, expected string) bool {
 		if part == "object" && (strings.HasPrefix(got, "class:") || strings.HasPrefix(got, "interface:") || got == "object") {
 			return true
 		}
+
+		if got == "object" {
+			if c.hasInterfaceHint(part) {
+				return true
+			}
+		}
 	}
+	return false
+}
+
+func (c *Compiler) hasInterfaceHint(name string) bool {
+	if _, exists := c.interfaces[name]; exists {
+		return true
+	}
+
+	if fullName, exists := c.currentNamespaceInterfaces[name]; exists {
+		if _, exists := c.interfaces[fullName]; exists {
+			return true
+		}
+	}
+
+	if dot := strings.LastIndex(name, "."); dot >= 0 {
+		shortName := name[dot+1:]
+		if _, exists := c.interfaces[shortName]; exists {
+			return true
+		}
+	}
+
+	if !strings.Contains(name, ".") {
+		for key := range c.interfaces {
+			if strings.HasSuffix(key, "."+name) {
+				return true
+			}
+		}
+	}
+
 	return false
 }
 
@@ -3227,7 +3296,7 @@ func (c *Compiler) compileNativeFunctions(statements []Stmt) {
 	}
 
 	goSource.WriteString("import (\n")
-	for imp := range imports {
+	for _, imp := range sortedNativeImports(imports) {
 		goSource.WriteString("    ")
 		goSource.WriteString(imp)
 		goSource.WriteString("\n")
@@ -3367,4 +3436,13 @@ func (c *Compiler) compileNativeFunctions(statements []Stmt) {
 	}
 
 	c.mainInstructions = append([]Instruction{wasmInstr}, c.mainInstructions...)
+}
+
+func sortedNativeImports(imports map[string]bool) []string {
+	names := make([]string, 0, len(imports))
+	for name := range imports {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
