@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLSPThisCompletionInPartialClass(t *testing.T) {
@@ -1122,6 +1123,22 @@ func TestLSPCallableCompletionInsertText(t *testing.T) {
 	}
 	if item.InsertText != "greet($0)" || item.InsertTextFormat != 2 {
 		t.Fatalf("expected callable snippet insert text, got %#v", item)
+	}
+}
+
+func TestLSPVirtualRootFileAutoImportDoesNotWalkFilesystemRoot(t *testing.T) {
+	done := make(chan []string, 1)
+	go func() {
+		done <- scanProjectTinyFiles("file:///completion.tiny")
+	}()
+
+	select {
+	case files := <-done:
+		if len(files) != 0 {
+			t.Fatalf("expected no project files for virtual root file, got %#v", files)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("scanProjectTinyFiles walked too much filesystem for virtual root file")
 	}
 }
 

@@ -5284,7 +5284,14 @@ func scanProjectTinyFiles(startPath string) []string {
 			dir = parent
 		}
 		if root == "" {
-			root = filepath.Dir(startPath)
+			fallbackRoot := filepath.Dir(startPath)
+			if isFilesystemRoot(fallbackRoot) {
+				return nil
+			}
+			if info, err := os.Stat(fallbackRoot); err != nil || !info.IsDir() {
+				return nil
+			}
+			root = fallbackRoot
 		}
 	}
 
@@ -5314,6 +5321,14 @@ func scanProjectTinyFiles(startPath string) []string {
 	})
 
 	return files
+}
+
+func isFilesystemRoot(path string) bool {
+	if path == "" || path == "." {
+		return false
+	}
+	clean := filepath.Clean(path)
+	return filepath.Dir(clean) == clean
 }
 
 func isPositionInStringOrComment(line string, charIndex int) bool {
