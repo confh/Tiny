@@ -1,9 +1,26 @@
+// Retrieves the value associated with the specified key from an object.
 export fn get(object: object, key: string): any {}
+
+// Sets the value associated with the specified key on an object.
 export fn set(object: object, key: string, value: any): null {}
+
+// Checks if the specified key exists in an object.
 export fn has(object: object, key: string): bool {}
+
+// Deletes the specified key from an object. Returns true if the key existed.
 export fn delete(object: object, key: string): bool {}
+
+// Returns an array containing all key names of the specified object.
 export fn keys(object: object): array {}
+
+// Returns an array containing all property values of the specified object.
 export fn values(object: object): array {}
+
+// Returns an array of key-value pair arrays representing the object's entries.
 export fn enteries(object: object): array {}
+
+// Returns the number of properties defined on the specified object.
 export fn length(object: object): number {}
+
+// Removes all properties from the specified object.
 export fn clear(object: object): null {}

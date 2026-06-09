@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -39,6 +40,10 @@ type githubContentInfo struct {
 	Type     string `json:"type"`
 	Encoding string `json:"encoding"`
 	Content  string `json:"content"`
+}
+
+type installedDependencyMetadata struct {
+	Target string `json:"target"`
 }
 
 func addPackageCommand(args []string) {
@@ -77,6 +82,10 @@ func addPackageCommand(args []string) {
 
 	config.Dependencies[name] = dep
 	writeJSONFile("tiny.json", config)
+
+	lock, _ := loadTinyLock()
+	updateTinyLockDependency(&lock, name, dep)
+	writeTinyLock(lock)
 }
 
 func installPackagesCommand(args []string) {
@@ -110,8 +119,22 @@ func installPackagesCommand(args []string) {
 		return
 	}
 
+	lock, _ := loadTinyLock()
+	lockChanged := false
+
 	for name, dep := range config.Dependencies {
-		installOneDependency(name, dep, target)
+		if locked, ok := lock.Dependencies[name]; ok {
+			dep = applyLockedDependency(dep, locked)
+		}
+
+		installedDep := installOneDependency(name, dep, target)
+		if updateTinyLockDependency(&lock, name, installedDep) {
+			lockChanged = true
+		}
+	}
+
+	if lockChanged {
+		writeTinyLock(lock)
 	}
 }
 
@@ -143,6 +166,7 @@ func removePackageCommand(args []string) {
 	}
 
 	removed := []TinyDependencyConfig{}
+	removedNames := []string{}
 	if !globalOnly {
 		config, ok := loadTinyConfig()
 		if !ok {
@@ -157,6 +181,7 @@ func removePackageCommand(args []string) {
 		for name, dep := range config.Dependencies {
 			if dependencyMatchesRemoveTarget(name, dep, target) {
 				removed = append(removed, dep)
+				removedNames = append(removedNames, name)
 				continue
 			}
 			next[name] = dep
@@ -168,6 +193,20 @@ func removePackageCommand(args []string) {
 
 		config.Dependencies = next
 		writeJSONFile("tiny.json", config)
+
+		lock, ok := loadTinyLock()
+		if ok {
+			changed := false
+			for _, name := range removedNames {
+				if _, exists := lock.Dependencies[name]; exists {
+					delete(lock.Dependencies, name)
+					changed = true
+				}
+			}
+			if changed {
+				writeTinyLock(lock)
+			}
+		}
 	}
 
 	if globalOnly {
@@ -269,6 +308,11 @@ func installOneDependency(name string, dep TinyDependencyConfig, target string) 
 
 	dest := libraryGlobalRoot(spec.Owner, spec.Repo, spec.Ref)
 
+	if installedDependencyExists(spec.Owner, spec.Repo, spec.Ref, target) {
+		fmt.Printf("Using cached %s from %s@%s\n", name, spec.Owner+"/"+spec.Repo, spec.Ref)
+		return dep
+	}
+
 	fmt.Printf("Installing %s from %s@%s\n", name, spec.Owner+"/"+spec.Repo, spec.Ref)
 
 	packageConfig := fetchGitHubTinyConfig(spec)
@@ -292,14 +336,46 @@ func installOneDependency(name string, dep TinyDependencyConfig, target string) 
 		LangError(ErrorRuntime, "failed to replace dependency folder %s: %v", dest, err)
 	}
 
-	err = copyDirectory(tempDir, dest)
+	err = copyDirectoryWithIgnore(tempDir, dest, packageConfig.Ignore)
 	if err != nil {
 		LangError(ErrorRuntime, "failed to install dependency %s: %v", name, err)
 	}
+	writeInstalledDependencyMetadata(dest, target)
 
 	invalidateInstalledLibraryImportCache()
 
 	return dep
+}
+
+func installedDependencyExists(owner string, repo string, version string, target string) bool {
+	root := libraryGlobalRoot(owner, repo, version)
+	config, ok := loadTinyConfigFrom(filepath.Join(root, "tiny.json"))
+	if !ok {
+		return false
+	}
+	if len(config.Plugins) == 0 {
+		return true
+	}
+
+	metadata, ok := loadInstalledDependencyMetadata(root)
+	return ok && metadata.Target == target
+}
+
+func loadInstalledDependencyMetadata(root string) (installedDependencyMetadata, bool) {
+	bytes, err := os.ReadFile(filepath.Join(root, ".tinyinstall.json"))
+	if err != nil {
+		return installedDependencyMetadata{}, false
+	}
+
+	var metadata installedDependencyMetadata
+	if err := json.Unmarshal(bytes, &metadata); err != nil {
+		return installedDependencyMetadata{}, false
+	}
+	return metadata, true
+}
+
+func writeInstalledDependencyMetadata(root string, target string) {
+	writeJSONFile(filepath.Join(root, ".tinyinstall.json"), installedDependencyMetadata{Target: target})
 }
 
 func installPackagePlugins(spec githubPackageSpec, config TinyProjectConfig, packageDir string, target string) {
@@ -536,6 +612,10 @@ func unpackGitHubArchive(data []byte, dest string) {
 }
 
 func copyDirectory(src string, dst string) error {
+	return copyDirectoryWithIgnore(src, dst, nil)
+}
+
+func copyDirectoryWithIgnore(src string, dst string, ignore []string) error {
 	return filepath.WalkDir(src, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -546,6 +626,13 @@ func copyDirectory(src string, dst string) error {
 			return err
 		}
 
+		if shouldIgnorePackagePath(rel, entry.IsDir(), ignore) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
 		target := filepath.Join(dst, rel)
 		if entry.IsDir() {
 			return os.MkdirAll(target, 0755)
@@ -553,4 +640,72 @@ func copyDirectory(src string, dst string) error {
 
 		return copyFile(path, target)
 	})
+}
+
+func shouldIgnorePackagePath(rel string, isDir bool, ignore []string) bool {
+	rel = filepath.ToSlash(filepath.Clean(rel))
+	if rel == "." || rel == "" {
+		return false
+	}
+
+	for _, rawPattern := range ignore {
+		pattern := normalizePackageIgnorePattern(rawPattern)
+		if pattern == "" {
+			continue
+		}
+
+		if packageIgnorePatternMatches(pattern, rel, isDir) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func normalizePackageIgnorePattern(pattern string) string {
+	pattern = strings.TrimSpace(filepath.ToSlash(pattern))
+	pattern = strings.TrimPrefix(pattern, "./")
+	pattern = strings.TrimPrefix(pattern, "/")
+	return strings.TrimSuffix(pattern, "/")
+}
+
+func packageIgnorePatternMatches(pattern string, rel string, isDir bool) bool {
+	if pattern == rel {
+		return true
+	}
+
+	if !strings.ContainsAny(pattern, "*?[") {
+		if isDir {
+			return rel == pattern
+		}
+		return strings.HasPrefix(rel, pattern+"/")
+	}
+
+	if strings.HasSuffix(pattern, "/**") {
+		base := strings.TrimSuffix(pattern, "/**")
+		return rel == base || strings.HasPrefix(rel, base+"/")
+	}
+
+	if strings.HasPrefix(pattern, "**/") {
+		suffix := strings.TrimPrefix(pattern, "**/")
+		if ok, _ := path.Match(suffix, rel); ok {
+			return true
+		}
+		return strings.HasSuffix(rel, "/"+suffix)
+	}
+
+	if ok, _ := path.Match(pattern, rel); ok {
+		return true
+	}
+
+	if !strings.Contains(pattern, "/") {
+		parts := strings.Split(rel, "/")
+		for _, part := range parts {
+			if ok, _ := path.Match(pattern, part); ok {
+				return true
+			}
+		}
+	}
+
+	return false
 }

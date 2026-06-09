@@ -500,6 +500,7 @@ func EncodeValue(value any) EncodedValue {
 		return EncodedValue{Type: "array", Data: v}
 
 	case FunctionValue:
+		v.Name = string(xor([]byte(v.Name), 0x5A))
 		return EncodedValue{Type: "functionValue", Data: v}
 
 	case NullValue:
@@ -815,6 +816,8 @@ func DecodeValue(value EncodedValue) any {
 	case "functionValue":
 		var result FunctionValue
 		decodeInto(value.Data, &result)
+
+		result.Name = string(xor([]byte(result.Name), 0x5A))
 		return result
 
 	case "null":

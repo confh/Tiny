@@ -1,4 +1,11 @@
+// Joins multiple path segments together into a single path.
 export fn join(...paths: string): string {}
+
+// Returns the last element of a path (e.g., file name with extension).
 export fn baseName(path: string): string {}
+
+// Returns the directory portion of a path.
 export fn dirName(path: string): string {}
+
+// Returns the file name extension of a path (e.g., ".txt").
 export fn extName(path: string): string {}

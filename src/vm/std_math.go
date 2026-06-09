@@ -67,18 +67,6 @@ func DegToRad(deg float64) float64 {
 	return deg * (math.Pi / 180)
 }
 
-func nativeFib(n int) int {
-	if n < 2 {
-		return n
-	}
-
-	a, b := 0, 1
-	for i := 2; i <= n; i++ {
-		a, b = b, a+b
-	}
-	return b
-}
-
 func getMatrixFields(v ObjectValue, matName string, vm *VM) (int, int, []float64) {
 	rows := v["rows"]
 	if !rows.IsInt {

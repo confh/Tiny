@@ -1,2 +1,5 @@
+// Checks if the input string matches the specified regular expression pattern.
 export fn matchString(input: string, pattern: string): bool {}
+
+// Finds and returns the first regular expression match in the input string.
 export fn findString(input: string, pattern: string): string {}

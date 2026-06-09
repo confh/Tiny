@@ -81,6 +81,9 @@ func TestParserDefaultParams(t *testing.T) {
 fn greet(name, prefix = "Hello") {
     return prefix;
 }
+fn collect(values = [1, "two", false, null, [3],]) {
+    return values;
+}
 `)
 
 	fn := program.Statements[0].(FunctionStmt)
@@ -90,6 +93,32 @@ fn greet(name, prefix = "Hello") {
 
 	if !fn.Params[1].HasDefault || fn.Params[1].DefaultValue.Value != "Hello" {
 		t.Fatalf("expected second param default value, got %#v", fn.Params[1])
+	}
+
+	collect := program.Statements[1].(FunctionStmt)
+	if len(collect.Params) != 1 {
+		t.Fatalf("expected collect to have 1 param, got %d", len(collect.Params))
+	}
+	if !collect.Params[0].HasDefault {
+		t.Fatalf("expected array default param, got %#v", collect.Params[0])
+	}
+
+	arrayValue, ok := collect.Params[0].DefaultValue.Value.(*ArrayValue)
+	if !ok {
+		t.Fatalf("expected array default value, got %T", collect.Params[0].DefaultValue.Value)
+	}
+	if len(arrayValue.Elements) != 5 {
+		t.Fatalf("expected 5 array elements, got %#v", arrayValue.Elements)
+	}
+	if arrayValue.Elements[0].AsInt != 1 || arrayValue.Elements[1].Value != "two" || arrayValue.Elements[2].Value != false {
+		t.Fatalf("unexpected array default elements: %#v", arrayValue.Elements)
+	}
+	if _, ok := arrayValue.Elements[3].Value.(NullValue); !ok {
+		t.Fatalf("expected null element, got %#v", arrayValue.Elements[3])
+	}
+	nested, ok := arrayValue.Elements[4].Value.(*ArrayValue)
+	if !ok || len(nested.Elements) != 1 || nested.Elements[0].AsInt != 3 {
+		t.Fatalf("unexpected nested array element: %#v", arrayValue.Elements[4])
 	}
 }
 

@@ -82,6 +82,17 @@ func dependencyVersionForLibrary(owner string, repo string) string {
 			if dep.Version != "" {
 				return dep.Version
 			}
+			if lock, ok := loadTinyLock(); ok {
+				for name, locked := range lock.Dependencies {
+					configDep, exists := config.Dependencies[name]
+					if !exists || !lockedDependencyMatchesConfig(locked, configDep) {
+						continue
+					}
+					if locked.Owner == owner && locked.Repo == repo && locked.Version != "" {
+						return locked.Version
+					}
+				}
+			}
 			return spec.Ref
 		}
 	}

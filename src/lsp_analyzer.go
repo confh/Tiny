@@ -33,6 +33,7 @@ type SymbolInfo struct {
 	Line      int
 	Column    int
 	SourceURI string
+	Doc       string
 
 	Fields  map[string]SymbolInfo
 	Params  []StdArg
@@ -629,24 +630,35 @@ func objectLiteralCompletions(scope *Scope, text string, pos Position) []Complet
 	var sym SymbolInfo
 	var exists bool
 
-	if strings.Contains(typeName, ".") {
-		parts := strings.SplitN(typeName, ".", 2)
-		nsName := parts[0]
-		memberName := parts[1]
-
-		ns, ok := scope.Resolve(nsName)
-		if ok && ns.Kind == SymbolNamespace {
-			sym, exists = ns.Members[memberName]
+	for _, part := range splitUnionType(typeName) {
+		part = strings.TrimSpace(part)
+		if isNullishLSPType(part) || part == "any" {
+			continue
 		}
-	}
 
-	if !exists {
-		if iface, ok := resolveInterfaceSymbol(scope, typeName); ok {
-			sym = iface
-			exists = true
-		} else if class, ok := resolveClassSymbol(scope, typeName); ok {
-			sym = class
-			exists = true
+		if strings.Contains(part, ".") {
+			parts := strings.SplitN(part, ".", 2)
+			nsName := parts[0]
+			memberName := parts[1]
+
+			ns, ok := scope.Resolve(nsName)
+			if ok && ns.Kind == SymbolNamespace {
+				sym, exists = ns.Members[memberName]
+			}
+		}
+
+		if !exists {
+			if iface, ok := resolveInterfaceSymbol(scope, part); ok {
+				sym = iface
+				exists = true
+			} else if class, ok := resolveClassSymbol(scope, part); ok {
+				sym = class
+				exists = true
+			}
+		}
+
+		if exists {
+			break
 		}
 	}
 
@@ -839,6 +851,7 @@ func scanFullInterfaces(scope *Scope, text string, maxLine int, uri string) {
 		existing.Line = block.Line
 		existing.Column = block.Column
 		existing.SourceURI = uri
+		existing.Doc = findDocumentationComments(text, block.Line-1)
 		if existing.Fields == nil {
 			existing.Fields = map[string]SymbolInfo{}
 		}
@@ -861,6 +874,7 @@ func scanFullInterfaces(scope *Scope, text string, maxLine int, uri string) {
 			Column:    block.Column,
 			SourceURI: uri,
 			Fields:    fields,
+			Doc:       findDocumentationComments(text, block.Line-1),
 		})
 	}
 }
@@ -949,6 +963,7 @@ func scanFullEnums(scope *Scope, text string, maxLine int, uri string) {
 			Column:    block.Column,
 			SourceURI: uri,
 			Members:   members,
+			Doc:       findDocumentationComments(text, block.Line-1),
 		})
 	}
 }
@@ -1271,6 +1286,7 @@ func scanFullFunctions(scope *Scope, text string, maxLine int, uri string) {
 			SourceURI: uri,
 			Params:    params,
 			Returns:   returnType,
+			Doc:       findDocumentationComments(text, block.Line-1),
 		})
 	}
 }
@@ -1389,6 +1405,7 @@ func scanFullClasses(scope *Scope, text string, maxLine int, uri string) {
 		existing.Line = block.Line
 		existing.Column = block.Column
 		existing.SourceURI = uri
+		existing.Doc = findDocumentationComments(text, block.Line-1)
 		if existing.Methods == nil {
 			existing.Methods = map[string]SymbolInfo{}
 		}
@@ -1428,6 +1445,7 @@ func scanFullClasses(scope *Scope, text string, maxLine int, uri string) {
 				SourceURI: uri,
 				Params:    params,
 				Returns:   returnType,
+				Doc:       findDocumentationComments(text, block.Line+methodBlock.Line-2),
 			}
 		}
 
@@ -1441,6 +1459,7 @@ func scanFullClasses(scope *Scope, text string, maxLine int, uri string) {
 			SourceURI: uri,
 			Methods:   methods,
 			Fields:    fields,
+			Doc:       findDocumentationComments(text, block.Line-1),
 		})
 	}
 }
@@ -2368,8 +2387,13 @@ func parseFunctionParams(paramsText string) []StdArg {
 			continue
 		}
 
+		hasDefault := false
+		var defaultValueText string
 		if strings.Contains(raw, "=") {
-			raw = strings.TrimSpace(strings.SplitN(raw, "=", 2)[0])
+			parts := strings.SplitN(raw, "=", 2)
+			raw = strings.TrimSpace(parts[0])
+			defaultValueText = strings.TrimSpace(parts[1])
+			hasDefault = true
 		}
 
 		isVariadic := false
@@ -2393,6 +2417,29 @@ func parseFunctionParams(paramsText string) []StdArg {
 			name = strings.TrimSpace(strings.TrimSuffix(name, "?"))
 		}
 
+		if hasDefault {
+			if defaultValueText == "null" {
+				nullable = true
+			}
+			if typ == "any" && defaultValueText != "" {
+				if strings.HasPrefix(defaultValueText, "\"") || strings.HasPrefix(defaultValueText, "'") || strings.HasPrefix(defaultValueText, "`") {
+					typ = "string"
+				} else if defaultValueText == "true" || defaultValueText == "false" {
+					typ = "bool"
+				} else if defaultValueText == "null" {
+					typ = "null"
+				} else {
+					numText := defaultValueText
+					if strings.HasPrefix(numText, "-") {
+						numText = strings.TrimSpace(strings.TrimPrefix(numText, "-"))
+					}
+					if _, err := strconv.ParseFloat(numText, 64); err == nil {
+						typ = "number"
+					}
+				}
+			}
+		}
+
 		if isVariadic {
 			typ = "array"
 		} else if nullable {
@@ -2402,7 +2449,7 @@ func parseFunctionParams(paramsText string) []StdArg {
 		params = append(params, StdArg{
 			Name:     name,
 			Type:     typ,
-			Optional: nullable,
+			Optional: nullable || hasDefault,
 			Variadic: isVariadic,
 		})
 	}
@@ -2452,6 +2499,7 @@ func scanExportedInterfaces(scope *Scope, text string, exports map[string]Symbol
 			Column:    block.Column,
 			SourceURI: uri,
 			Fields:    fields,
+			Doc:       findDocumentationComments(text, block.Line-1),
 		}
 
 		exports[block.Name] = sym
@@ -2500,6 +2548,7 @@ func loadTinyFileExports(path string, visited map[string]bool) map[string]Symbol
 					Column:    s.Column,
 					SourceURI: uri,
 					Fields:    map[string]SymbolInfo{},
+					Doc:       findDocumentationComments(text, s.Line-1),
 				}
 				for fieldName, fieldHint := range s.Fields {
 					sym.Fields[fieldName] = SymbolInfo{
@@ -2529,6 +2578,7 @@ func loadTinyFileExports(path string, visited map[string]bool) map[string]Symbol
 					SourceURI: uri,
 					Params:    stdArgsFromParams(scope, s.Params),
 					Returns:   returnTypeNameScoped(scope, s.ReturnType),
+					Doc:       findDocumentationComments(text, s.Line-1),
 				}
 				exports[s.Name] = sym
 				scope.Define(sym)
@@ -2657,6 +2707,7 @@ func collectExportsFromAST(scope *Scope, text string, exports map[string]SymbolI
 				SourceURI: uri,
 				Params:    stdArgsFromParams(scope, s.Params),
 				Returns:   returnTypeNameScoped(scope, s.ReturnType),
+				Doc:       findDocumentationComments(text, s.Line-1),
 			}
 			exports[s.Name] = sym
 			scope.Define(sym)
@@ -2675,6 +2726,7 @@ func collectExportsFromAST(scope *Scope, text string, exports map[string]SymbolI
 				Column:    s.Column,
 				SourceURI: uri,
 				Fields:    map[string]SymbolInfo{},
+				Doc:       findDocumentationComments(text, s.Line-1),
 			}
 			for fieldName, fieldHint := range s.Fields {
 				sym.Fields[fieldName] = SymbolInfo{
@@ -2712,6 +2764,7 @@ func collectExportsFromAST(scope *Scope, text string, exports map[string]SymbolI
 				SourceURI: uri,
 				Params:    stdArgsFromParams(scope, s.Params),
 				Returns:   returnTypeNameScoped(scope, s.ReturnType),
+				Doc:       findDocumentationComments(text, s.Line-1),
 			}
 			exports[s.Name] = sym
 			scope.Define(sym)
@@ -2801,6 +2854,7 @@ func classSymbolFromStmt(scope *Scope, cls ClassStmt, uri string, text string) S
 			Line:      f.Line,
 			Column:    f.Column,
 			SourceURI: uri,
+			Doc:       findDocumentationComments(text, f.Line-1),
 		}
 	}
 
@@ -2820,6 +2874,7 @@ func classSymbolFromStmt(scope *Scope, cls ClassStmt, uri string, text string) S
 			SourceURI: uri,
 			Params:    stdArgsFromParams(scope, m.Params),
 			Returns:   returnTypeNameScoped(scope, m.ReturnType),
+			Doc:       findDocumentationComments(text, m.Line-1),
 		}
 	}
 	collectEmbeddedSymbolsFromAST(scope, cls.Embeds, cls.Methods, fields, methods, uri, cls.Line)
@@ -2834,6 +2889,7 @@ func classSymbolFromStmt(scope *Scope, cls ClassStmt, uri string, text string) S
 		SourceURI: uri,
 		Fields:    fields,
 		Methods:   methods,
+		Doc:       findDocumentationComments(text, cls.Line-1),
 	}
 }
 
@@ -3178,6 +3234,7 @@ func scanExportedFunctions(scope *Scope, text string, exports map[string]SymbolI
 			SourceURI: uri,
 			Params:    params,
 			Returns:   returnType,
+			Doc:       findDocumentationComments(text, block.Line-1),
 		}
 
 		exports[block.Name] = sym
@@ -3209,6 +3266,7 @@ func scanExportedClasses(scope *Scope, text string, exports map[string]SymbolInf
 				SourceURI: uri,
 				Params:    params,
 				Returns:   returnType,
+				Doc:       findDocumentationComments(text, block.Line+methodBlock.Line-2),
 			}
 		}
 
@@ -3222,6 +3280,7 @@ func scanExportedClasses(scope *Scope, text string, exports map[string]SymbolInf
 			SourceURI: uri,
 			Methods:   methods,
 			Fields:    fields,
+			Doc:       findDocumentationComments(text, block.Line-1),
 		}
 
 		exports[block.Name] = sym
@@ -3660,15 +3719,15 @@ func getHover(uri string, text string, pos Position) any {
 
 			if memberSym.Kind == SymbolFunction {
 				signature := formatFunctionSignature(receiver+"."+memberSym.Name, memberSym.Params, memberSym.Returns)
-				return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "```tiny\n" + signature + "\n```\n" + memberSym.Detail}}
+				return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "```tiny\n" + signature + "\n```\n" + appendDoc(memberSym.Detail, memberSym.Doc)}}
 			}
 			if memberSym.Kind == SymbolClass {
 				constructor := constructorSymbolFromClass(memberSym, receiver+"."+memberSym.Name)
 				signature := formatFunctionSignature(constructor.Name, constructor.Params, constructor.Returns)
-				return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "```tiny\n" + signature + "\n```\n" + constructor.Detail}}
+				return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "```tiny\n" + signature + "\n```\n" + appendDoc(constructor.Detail, memberSym.Doc)}}
 			}
 
-			return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "**" + receiver + "." + memberSym.Name + "**\n\nType: `" + firstNonEmpty(memberSym.Type, "any") + "`\n\n" + memberSym.Detail}}
+			return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "**" + receiver + "." + memberSym.Name + "**\n\nType: `" + firstNonEmpty(memberSym.Type, "any") + "`\n\n" + appendDoc(memberSym.Detail, memberSym.Doc)}}
 		}
 
 		if strings.HasPrefix(receiverType, "class:") {
@@ -3680,11 +3739,11 @@ func getHover(uri string, text string, pos Position) any {
 
 			if methodSym, ok := classSym.Methods[member]; ok {
 				signature := formatFunctionSignature(className+"."+methodSym.Name, methodSym.Params, methodSym.Returns)
-				return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "```tiny\n" + signature + "\n```\n" + methodSym.Detail}}
+				return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "```tiny\n" + signature + "\n```\n" + appendDoc(methodSym.Detail, methodSym.Doc)}}
 			}
 
 			if fieldSym, ok := classSym.Fields[member]; ok {
-				return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "**" + receiver + "." + fieldSym.Name + "**\n\nType: `" + fieldSym.Type + "`\n\n" + fieldSym.Detail}}
+				return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "**" + receiver + "." + fieldSym.Name + "**\n\nType: `" + fieldSym.Type + "`\n\n" + appendDoc(fieldSym.Detail, fieldSym.Doc)}}
 			}
 		}
 
@@ -3695,7 +3754,7 @@ func getHover(uri string, text string, pos Position) any {
 				return nil
 			}
 			if fieldSym, ok := ifaceSym.Fields[member]; ok {
-				return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "**" + receiver + "." + fieldSym.Name + "**\n\nType: `" + fieldSym.Type + "`\n\n" + fieldSym.Detail}}
+				return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "**" + receiver + "." + fieldSym.Name + "**\n\nType: `" + fieldSym.Type + "`\n\n" + appendDoc(fieldSym.Detail, fieldSym.Doc)}}
 			}
 		}
 
@@ -3736,10 +3795,10 @@ func getHover(uri string, text string, pos Position) any {
 			if classSym, ok := resolveClassSymbol(scope, className); ok && classSym.Kind == SymbolClass {
 				if methodSym, ok := classSym.Methods[word]; ok {
 					signature := formatFunctionSignature(className+"."+methodSym.Name, methodSym.Params, methodSym.Returns)
-					return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "```tiny\n" + signature + "\n```\n" + methodSym.Detail}}
+					return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "```tiny\n" + signature + "\n```\n" + appendDoc(methodSym.Detail, methodSym.Doc)}}
 				}
 				if fieldSym, ok := classSym.Fields[word]; ok {
-					return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "**" + className + "." + fieldSym.Name + "**\n\nType: `" + fieldSym.Type + "`\n\n" + fieldSym.Detail}}
+					return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "**" + className + "." + fieldSym.Name + "**\n\nType: `" + fieldSym.Type + "`\n\n" + appendDoc(fieldSym.Detail, fieldSym.Doc)}}
 				}
 			}
 		}
@@ -3748,15 +3807,15 @@ func getHover(uri string, text string, pos Position) any {
 
 	if sym.Kind == SymbolFunction {
 		signature := formatFunctionSignature(sym.Name, sym.Params, sym.Returns)
-		return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "```tiny\n" + signature + "\n```\n" + sym.Detail}}
+		return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "```tiny\n" + signature + "\n```\n" + appendDoc(sym.Detail, sym.Doc)}}
 	}
 	if sym.Kind == SymbolClass {
 		constructor := constructorSymbolFromClass(sym, sym.Name)
 		signature := formatFunctionSignature(constructor.Name, constructor.Params, constructor.Returns)
-		return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "```tiny\n" + signature + "\n```\n" + constructor.Detail}}
+		return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "```tiny\n" + signature + "\n```\n" + appendDoc(constructor.Detail, sym.Doc)}}
 	}
 
-	return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "**" + sym.Name + "**\n\nType: `" + sym.Type + "`\n\n" + sym.Detail}}
+	return HoverResult{Contents: MarkupContent{Kind: "markdown", Value: "**" + sym.Name + "**\n\nType: `" + sym.Type + "`\n\n" + appendDoc(sym.Detail, sym.Doc)}}
 }
 
 type astSemanticAnalyzer struct {
@@ -4043,6 +4102,12 @@ func stdArgsFromParams(scope *Scope, params []Param) []StdArg {
 	for _, p := range params {
 		name := p.Name
 		typ := typeHintName(p.TypeHint, "any")
+		if typ == "any" && p.HasDefault {
+			typ = TypeName(p.DefaultValue)
+			if typ == "float" {
+				typ = "number"
+			}
+		}
 
 		if p.Variadic {
 			typ = "array"
@@ -4471,6 +4536,12 @@ func (a *astSemanticAnalyzer) typeNameExists(typ string) bool {
 
 func paramSymbol(scope *Scope, param Param, uri string, line int, column int) SymbolInfo {
 	typ := typeHintName(param.TypeHint, "any")
+	if typ == "any" && param.HasDefault {
+		typ = TypeName(param.DefaultValue)
+		if typ == "float" {
+			typ = "number"
+		}
+	}
 
 	if param.Variadic {
 		typ = "array"
@@ -6197,4 +6268,628 @@ func getOutgoingCalls(item CallHierarchyItem) []CallHierarchyOutgoingCall {
 		result = append(result, *call)
 	}
 	return result
+}
+
+type ParseFrameKind int
+
+const (
+	FrameCall ParseFrameKind = iota
+	FrameObject
+	FrameArray
+	FrameBlock
+)
+
+type ParseFrame struct {
+	Kind       ParseFrameKind
+	Name       string
+	ArgIndex   int
+	CurrentKey string
+	Type       string
+	Symbol     SymbolInfo
+}
+
+type EditorContext struct {
+	InsideString         bool
+	StringQuote          byte
+	InsideInterpolation  bool
+	InsideObject         bool
+	ObjectInterfaceType  string
+	ObjectInterfaceSym   SymbolInfo
+	IsObjectKeyPosition  bool
+	IsObjectStringKey    bool
+	TypedStringKeyPrefix string
+	CursorPosition       Position
+	LineText             string
+}
+
+func parseEditorContext(text string, pos Position, scope *Scope) EditorContext {
+	cursor := offsetAtLine(text, pos.Line+1) + pos.Character
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > len(text) {
+		cursor = len(text)
+	}
+
+	var stack []ParseFrame
+
+	inString := byte(0)
+	escaped := false
+	inLineComment := false
+
+	type stringInterpolation struct {
+		braceDepth int
+	}
+	var interpStack []stringInterpolation
+
+	var lastIdent string
+	var lastString string
+	var lastTokenWasString bool
+
+	i := 0
+	for i < cursor {
+		ch := text[i]
+
+		if inLineComment {
+			if ch == '\n' {
+				inLineComment = false
+			}
+			i++
+			continue
+		}
+
+		if inString != 0 {
+			if escaped {
+				escaped = false
+				i++
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				i++
+				continue
+			}
+
+			if inString == '`' && ch == '$' && i+1 < len(text) && text[i+1] == '{' {
+				interpStack = append(interpStack, stringInterpolation{
+					braceDepth: 0,
+				})
+				i += 2
+				continue
+			}
+
+			if ch == inString {
+				lastTokenWasString = true
+				strStart := i - 1
+				for strStart >= 0 {
+					if text[strStart] == inString {
+						escapedCount := 0
+						for k := strStart - 1; k >= 0 && text[k] == '\\'; k-- {
+							escapedCount++
+						}
+						if escapedCount%2 == 0 {
+							break
+						}
+					}
+					strStart--
+				}
+				if strStart >= 0 {
+					lastString = text[strStart+1 : i]
+				} else {
+					lastString = ""
+				}
+				inString = 0
+			}
+			i++
+			continue
+		}
+
+		if i+1 < len(text) && ch == '/' && text[i+1] == '/' {
+			inLineComment = true
+			i += 2
+			continue
+		}
+
+		if ch == '"' || ch == '\'' || ch == '`' {
+			inString = ch
+			lastString = ""
+			i++
+			continue
+		}
+
+		if len(interpStack) > 0 {
+			if ch == '{' {
+				interpStack[len(interpStack)-1].braceDepth++
+			} else if ch == '}' {
+				interpStack[len(interpStack)-1].braceDepth--
+				if interpStack[len(interpStack)-1].braceDepth < 0 {
+					interpStack = interpStack[:len(interpStack)-1]
+					i++
+					continue
+				}
+			}
+		}
+
+		switch ch {
+		case '(':
+			name := extractCalleeBefore(text[:i], i)
+			stack = append(stack, ParseFrame{
+				Kind: FrameCall,
+				Name: name,
+			})
+
+		case ')':
+			for len(stack) > 0 {
+				top := stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+				if top.Kind == FrameCall {
+					break
+				}
+			}
+
+		case '{':
+			if isBlockOpening(text, i) {
+				stack = append(stack, ParseFrame{Kind: FrameBlock})
+			} else {
+				var typ string
+				var sym SymbolInfo
+				var exists bool
+
+				if len(stack) > 0 {
+					parent := &stack[len(stack)-1]
+					if parent.Kind == FrameCall {
+						typ, sym, exists = resolveCallArgType(scope, parent.Name, parent.ArgIndex)
+					} else if parent.Kind == FrameObject {
+						if parent.CurrentKey != "" {
+							typ, sym, exists = resolveObjectFieldType(scope, parent.Symbol, parent.CurrentKey)
+						}
+					}
+				} else {
+					typ, exists = findObjectTypeHintAtOffset(text, i)
+					if exists {
+						sym, exists = resolveTypeSymbol(scope, typ)
+					}
+				}
+
+				stack = append(stack, ParseFrame{
+					Kind:   FrameObject,
+					Type:   typ,
+					Symbol: sym,
+				})
+			}
+
+		case '}':
+			for len(stack) > 0 {
+				top := stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+				if top.Kind == FrameBlock || top.Kind == FrameObject {
+					break
+				}
+			}
+
+		case '[':
+			stack = append(stack, ParseFrame{Kind: FrameArray})
+
+		case ']':
+			for len(stack) > 0 {
+				top := stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+				if top.Kind == FrameArray {
+					break
+				}
+			}
+
+		case ',':
+			if len(stack) > 0 {
+				top := &stack[len(stack)-1]
+				if top.Kind == FrameCall {
+					top.ArgIndex++
+				} else if top.Kind == FrameObject {
+					top.CurrentKey = ""
+				}
+			}
+
+		case ':':
+			if len(stack) > 0 {
+				top := &stack[len(stack)-1]
+				if top.Kind == FrameObject {
+					if lastTokenWasString {
+						top.CurrentKey = lastString
+					} else {
+						top.CurrentKey = lastIdent
+					}
+				}
+			}
+
+		default:
+			if isIdentByte(ch) {
+				startIdent := i
+				for i < cursor && isIdentByte(text[i]) {
+					i++
+				}
+				lastIdent = text[startIdent:i]
+				lastTokenWasString = false
+				continue
+			}
+		}
+
+		i++
+	}
+
+	ctx := EditorContext{
+		CursorPosition: pos,
+		LineText:       getLine(text, pos.Line),
+	}
+
+	if inString != 0 {
+		if len(interpStack) > 0 {
+			ctx.InsideInterpolation = true
+		} else {
+			ctx.InsideString = true
+			ctx.StringQuote = inString
+		}
+	} else if inLineComment {
+		ctx.InsideString = true
+	}
+
+	if len(stack) > 0 {
+		top := stack[len(stack)-1]
+		if top.Kind == FrameObject {
+			ctx.InsideObject = true
+			ctx.ObjectInterfaceType = top.Type
+			ctx.ObjectInterfaceSym = top.Symbol
+
+			if top.CurrentKey == "" {
+				ctx.IsObjectKeyPosition = true
+			}
+
+			if ctx.InsideString && ctx.IsObjectKeyPosition {
+				ctx.IsObjectStringKey = true
+
+				strStart := cursor - 1
+				for strStart >= 0 {
+					if text[strStart] == ctx.StringQuote {
+						escapedCount := 0
+						for k := strStart - 1; k >= 0 && text[k] == '\\'; k-- {
+							escapedCount++
+						}
+						if escapedCount%2 == 0 {
+							break
+						}
+					}
+					strStart--
+				}
+				if strStart >= 0 {
+					ctx.TypedStringKeyPrefix = text[strStart+1 : cursor]
+				}
+			}
+		}
+	}
+
+	return ctx
+}
+
+func resolveCallArgType(scope *Scope, callName string, argIndex int) (string, SymbolInfo, bool) {
+	var sym SymbolInfo
+	var exists bool
+
+	if strings.Contains(callName, ".") {
+		parts := strings.SplitN(callName, ".", 2)
+		nsName := parts[0]
+		memberName := parts[1]
+
+		ns, ok := scope.Resolve(nsName)
+		if ok && ns.Kind == SymbolNamespace {
+			sym, exists = ns.Members[memberName]
+		}
+	} else {
+		sym, exists = scope.Resolve(callName)
+	}
+
+	if !exists {
+		return "", SymbolInfo{}, false
+	}
+
+	if sym.Kind == SymbolClass {
+		sym = constructorSymbolFromClass(sym, sym.Name)
+	}
+
+	if sym.Kind != SymbolFunction {
+		return "", SymbolInfo{}, false
+	}
+
+	if argIndex < 0 || argIndex >= len(sym.Params) {
+		return "", SymbolInfo{}, false
+	}
+
+	param := sym.Params[argIndex]
+	if param.Type == "" {
+		return "", SymbolInfo{}, false
+	}
+
+	typ := param.Type
+	typ = strings.TrimPrefix(typ, "interface:")
+	typ = strings.TrimPrefix(typ, "class:")
+
+	targetSym, ok := resolveTypeSymbol(scope, typ)
+	return typ, targetSym, ok
+}
+
+func resolveObjectFieldType(scope *Scope, parentSym SymbolInfo, key string) (string, SymbolInfo, bool) {
+	if parentSym.Kind == SymbolInterface || parentSym.Kind == SymbolClass {
+		field, ok := parentSym.Fields[key]
+		if ok {
+			typ := field.Type
+			typ = strings.TrimPrefix(typ, "interface:")
+			typ = strings.TrimPrefix(typ, "class:")
+			sym, ok := resolveTypeSymbol(scope, typ)
+			return typ, sym, ok
+		}
+	}
+	return "", SymbolInfo{}, false
+}
+
+func resolveTypeSymbol(scope *Scope, typeName string) (SymbolInfo, bool) {
+	for _, part := range splitUnionType(typeName) {
+		part = strings.TrimSpace(part)
+		if isNullishLSPType(part) || part == "any" {
+			continue
+		}
+
+		var sym SymbolInfo
+		var exists bool
+
+		if strings.Contains(part, ".") {
+			parts := strings.SplitN(part, ".", 2)
+			nsName := parts[0]
+			memberName := parts[1]
+
+			ns, ok := scope.Resolve(nsName)
+			if ok && ns.Kind == SymbolNamespace {
+				sym, exists = ns.Members[memberName]
+			}
+		}
+
+		if !exists {
+			if iface, ok := resolveInterfaceSymbol(scope, part); ok {
+				sym = iface
+				exists = true
+			} else if class, ok := resolveClassSymbol(scope, part); ok {
+				sym = class
+				exists = true
+			}
+		}
+
+		if exists {
+			return sym, true
+		}
+	}
+
+	return SymbolInfo{}, false
+}
+
+func findObjectTypeHintAtOffset(text string, offset int) (string, bool) {
+	lineNum := 0
+	for i := 0; i < offset && i < len(text); i++ {
+		if text[i] == '\n' {
+			lineNum++
+		}
+	}
+
+	lines := strings.Split(text, "\n")
+	if lineNum >= len(lines) {
+		return "", false
+	}
+
+	depth := 0
+	for i := lineNum; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if strings.Contains(line, "}") {
+			depth--
+		}
+		if strings.Contains(line, "{") {
+			depth++
+		}
+		if depth > 0 && strings.Contains(line, ":") && strings.Contains(line, "=") {
+			match := regexp.MustCompile(`(?::\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*))\s*=`).FindStringSubmatch(line)
+			if match != nil {
+				return match[1], true
+			}
+		}
+	}
+	return "", false
+}
+
+func objectLiteralCompletionsWithContext(ctx EditorContext) []CompletionItem {
+	sym := ctx.ObjectInterfaceSym
+	if sym.Kind != SymbolInterface && sym.Kind != SymbolClass {
+		return nil
+	}
+
+	items := []CompletionItem{}
+	names := make([]string, 0, len(sym.Fields))
+	for name := range sym.Fields {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	quoteStr := ""
+	if ctx.IsObjectStringKey {
+		quoteStr = string(ctx.StringQuote)
+	}
+
+	for _, name := range names {
+		field := sym.Fields[name]
+
+		var label string
+		var insertText string
+		var textEdit *TextEdit
+
+		if ctx.IsObjectStringKey {
+			label = quoteStr + field.Name + quoteStr + ": "
+
+			line := ctx.LineText
+			pos := ctx.CursorPosition
+			quoteChar := ctx.StringQuote
+
+			quoteStart := pos.Character - 1
+			for quoteStart >= 0 {
+				if line[quoteStart] == quoteChar {
+					escapedCount := 0
+					for k := quoteStart - 1; k >= 0 && line[k] == '\\'; k-- {
+						escapedCount++
+					}
+					if escapedCount%2 == 0 {
+						break
+					}
+				}
+				quoteStart--
+			}
+
+			quoteEnd := pos.Character
+			hasClosingQuote := false
+			for quoteEnd < len(line) {
+				if line[quoteEnd] == quoteChar {
+					escapedCount := 0
+					for k := quoteEnd - 1; k >= 0 && line[k] == '\\'; k-- {
+						escapedCount++
+					}
+					if escapedCount%2 == 0 {
+						hasClosingQuote = true
+						break
+					}
+				}
+				quoteEnd++
+			}
+
+			endChar := pos.Character
+			if hasClosingQuote {
+				endChar = quoteEnd + 1
+			}
+
+			newText := quoteStr + field.Name + quoteStr + ": $0"
+
+			textEdit = &TextEdit{
+				Range: LSPRange{
+					Start: Position{Line: pos.Line, Character: quoteStart},
+					End:   Position{Line: pos.Line, Character: endChar},
+				},
+				NewText: newText,
+			}
+			insertText = newText
+		} else {
+			label = field.Name + ": "
+			insertText = field.Name + ": $0"
+		}
+
+		kind := 5
+		detail := "interface field: " + field.Type
+		if sym.Kind == SymbolClass {
+			detail = "class field: " + field.Type
+		}
+
+		items = append(items, CompletionItem{
+			Label:            label,
+			Kind:             kind,
+			Detail:           detail,
+			InsertText:       insertText,
+			InsertTextFormat: 2,
+			TextEdit:         textEdit,
+		})
+	}
+
+	return items
+}
+
+func isBlockOpening(text string, braceOffset int) bool {
+	i := braceOffset - 1
+	for i >= 0 && (text[i] == ' ' || text[i] == '\t' || text[i] == '\r' || text[i] == '\n') {
+		i--
+	}
+	if i < 0 {
+		return false
+	}
+	if text[i] == ')' {
+		return true
+	}
+
+	end := i + 1
+	for i >= 0 && isIdentByte(text[i]) {
+		i--
+	}
+	word := text[i+1 : end]
+	if isBlockKeyword(word) {
+		return true
+	}
+
+	for i >= 0 && (text[i] == ' ' || text[i] == '\t' || text[i] == '\r' || text[i] == '\n') {
+		i--
+	}
+	if i >= 0 {
+		end2 := i + 1
+		for i >= 0 && isIdentByte(text[i]) {
+			i--
+		}
+		word2 := text[i+1 : end2]
+		if isBlockKeyword(word2) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func isBlockKeyword(word string) bool {
+	switch word {
+	case "class", "fn", "if", "while", "for", "else", "catch", "interface", "enum", "try", "finally":
+		return true
+	}
+	return false
+}
+
+func findMatchingBackwards(text string, closeIndex int, openChar, closeChar byte) int {
+	depth := 0
+	for i := closeIndex; i >= 0; i-- {
+		if text[i] == closeChar {
+			depth++
+		} else if text[i] == openChar {
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+func findDocumentationComments(text string, lineIndex int) string {
+	lines := strings.Split(text, "\n")
+	if lineIndex <= 0 || lineIndex >= len(lines) {
+		return ""
+	}
+
+	var comments []string
+	for i := lineIndex - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			break
+		}
+		if strings.HasPrefix(line, "//") {
+			content := strings.TrimSpace(strings.TrimPrefix(line, "//"))
+			comments = append([]string{content}, comments...)
+		} else {
+			break
+		}
+	}
+	return strings.Join(comments, "  \n")
+}
+
+func appendDoc(detail string, doc string) string {
+	if doc == "" {
+		return detail
+	}
+	if detail == "" {
+		return doc
+	}
+	return detail + "\n\n" + doc
 }

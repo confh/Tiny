@@ -16,6 +16,7 @@ type TinyProjectConfig struct {
 	Target          string                          `json:"target"`
 	Scripts         map[string]string               `json:"scripts"`
 	Dependencies    map[string]TinyDependencyConfig `json:"dependencies"`
+	Ignore          []string                        `json:"ignore"`
 	Plugins         []TinyProjectPluginConfig       `json:"plugins"`
 	CompilerOptions TinyCompilerOptions             `json:"compilerOptions"`
 }
@@ -51,6 +52,7 @@ func defaultTinyConfig(projectName string) TinyProjectConfig {
 			"dist":  "tiny dist",
 		},
 		Dependencies: map[string]TinyDependencyConfig{},
+		Ignore:       []string{},
 		Plugins:      []TinyProjectPluginConfig{},
 		CompilerOptions: TinyCompilerOptions{
 			StackTraces: true,

@@ -1,6 +1,10 @@
+// Represents an application interface with commands and execution control.
 class App {
+    // Registers a callback for a specific command name.
     fn command(name: string, callback: function): App {}
+    // Runs the application main loop.
     fn run(): null {}
 }
 
+// Creates a new App instance with the given application name.
 export fn new(name: string): App {}

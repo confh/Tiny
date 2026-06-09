@@ -1,26 +1,80 @@
+// Represents a signal sent to a process.
 export enum Signal {
+    // Interrupts the process (SIGINT).
     interrupt,
+    // Terminates the process immediately (SIGKILL).
     kill
 }
 
+// Represents a running subprocess instance.
 class Process {
+    // Returns the process ID (PID) of the subprocess.
     fn pid(): number {}
+    // Waits for the subprocess to finish executing.
     fn wait(): null {}
+    // Kills the subprocess.
     fn kill(): null {}
+    // Kills the subprocess and all of its child processes.
     fn killTree(): null {}
+    // Sends an interrupt signal to the subprocess.
     fn interrupt(): null {}
+    // Checks if the subprocess is currently running.
     fn isRunning(): bool {}
+    // Sends a specified signal string to the subprocess.
     fn signal(signal: string): null {}
 }
 
+// Options for configuring a spawned subprocess.
+export interface ProcessOptions {
+    // The working directory for the subprocess.
+    cwd?: string,
+    // Whether to capture standard output as a string.
+    stdout?: bool,
+    // Whether to capture standard error as a string.
+    stderr?: bool
+}
+
+// The result of a finished subprocess execution.
+export interface ProcessResult {
+    // The exit status code returned by the subprocess.
+    exitCode: number,
+    // Captured stdout content (if stdout was enabled).
+    stdout?: string,
+    // Captured stderr content (if stderr was enabled).
+    stderr?: string,
+    // True if the exit code is 0.
+    success: bool
+}
+
+// Returns the command-line arguments passed to the current process.
 export fn args(): array {}
+
+// Exits the current process with the specified exit code.
 export fn exit(code: number): null {}
+
+// Closes the standard input stream of the current process.
 export fn close(): null {}
+
+// Returns the current working directory of the process.
 export fn cwd(): string {}
+
+// Retrieves the value of the specified environment variable.
 export fn getEnv(key: string): string {}
+
+// Sets the value of the specified environment variable.
 export fn setEnv(key: string, value: string): null {}
+
+// Unsets (deletes) the specified environment variable.
 export fn unsetEnv(key: string): null {}
+
+// Halts execution of the current process immediately.
 export fn halt(): null {}
-export fn run(command: string, args?: array, options?: object): object {}
-export fn shell(command: string, options?: object): object {}
-export fn start(command: string, args?: array, options?: object): Process {}
+
+// Runs a command synchronously with arguments and options, blocking until complete.
+export fn run(command: string, args?: array, options?: ProcessOptions): ProcessResult {}
+
+// Runs a command synchronously in a system shell, blocking until complete.
+export fn shell(command: string, options?: ProcessOptions): ProcessResult {}
+
+// Starts a subprocess asynchronously and returns its Process control handle.
+export fn start(command: string, args?: array, options?: ProcessOptions): Process {}

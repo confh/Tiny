@@ -1,5 +1,14 @@
+// Serializes the given object or array into a JSON string.
 export fn stringify(value: object | array): string {}
+
+// Serializes the given object or array into a formatted, human-readable JSON string.
 export fn pretty(value: object | array): string {}
+
+// Parses the specified JSON string and returns the resulting object.
 export fn parse(stringified: string): object {}
+
+// Reads a JSON file and parses its contents as an object.
 export fn readFile(fileName: string): object {}
+
+// Serializes the given object and writes it as a JSON file.
 export fn writeFile(value: object, fileName: string): null {}

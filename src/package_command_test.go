@@ -172,6 +172,191 @@ func TestLoaderResolvesLibraryFileImport(t *testing.T) {
 	}
 }
 
+func TestInstallPackagesCommandUsesTinyLockAndCachedDependency(t *testing.T) {
+	dir := t.TempDir()
+	withWorkingDir(t, dir)
+	t.Setenv("TINY_HOME", filepath.Join(dir, "tiny-home"))
+
+	depRoot := libraryGlobalRoot("owner", "dep", "v1")
+	writeConfigForTest(t, filepath.Join(depRoot, "tiny.json"), TinyProjectConfig{Entry: "main.tiny"})
+	writeConfigForTest(t, filepath.Join(dir, "tiny.json"), TinyProjectConfig{
+		Dependencies: map[string]TinyDependencyConfig{
+			"dep": {Source: "github:owner/dep"},
+		},
+	})
+	writeTinyLock(TinyLockFile{
+		Version: tinyLockVersion,
+		Dependencies: map[string]TinyLockedDependency{
+			"dep": {
+				Source:   "github:owner/dep",
+				Version:  "v1",
+				Resolved: "github:owner/dep@v1",
+				Owner:    "owner",
+				Repo:     "dep",
+			},
+		},
+	})
+
+	installPackagesCommand(nil)
+
+	lock, ok := loadTinyLock()
+	if !ok {
+		t.Fatalf("tiny.lock missing")
+	}
+	if got := lock.Dependencies["dep"].Version; got != "v1" {
+		t.Fatalf("locked dependency version = %q, want v1", got)
+	}
+}
+
+func TestInstalledDependencyCacheChecksPluginTarget(t *testing.T) {
+	dir := t.TempDir()
+	withWorkingDir(t, dir)
+	t.Setenv("TINY_HOME", filepath.Join(dir, "tiny-home"))
+
+	plainRoot := libraryGlobalRoot("owner", "plain", "v1")
+	writeConfigForTest(t, filepath.Join(plainRoot, "tiny.json"), TinyProjectConfig{})
+	if !installedDependencyExists("owner", "plain", "v1", "windows-amd64") {
+		t.Fatalf("expected plain cached dependency to be reusable without target metadata")
+	}
+
+	pluginRoot := libraryGlobalRoot("owner", "plugin", "v1")
+	writeConfigForTest(t, filepath.Join(pluginRoot, "tiny.json"), TinyProjectConfig{
+		Plugins: []TinyProjectPluginConfig{{Name: "native", Path: "native/plugin"}},
+	})
+	if installedDependencyExists("owner", "plugin", "v1", "windows-amd64") {
+		t.Fatalf("expected plugin dependency without target metadata not to be reused")
+	}
+
+	writeInstalledDependencyMetadata(pluginRoot, "linux-amd64")
+	if installedDependencyExists("owner", "plugin", "v1", "windows-amd64") {
+		t.Fatalf("expected plugin dependency for another target not to be reused")
+	}
+	if !installedDependencyExists("owner", "plugin", "v1", "linux-amd64") {
+		t.Fatalf("expected plugin dependency for matching target to be reused")
+	}
+}
+
+func TestCopyDirectoryWithIgnoreSkipsPackagePaths(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	dst := filepath.Join(dir, "dst")
+
+	files := map[string]string{
+		"tiny.json":              "{}",
+		"src/main.tiny":          "main",
+		"docs/readme.md":         "docs",
+		"examples/demo.tiny":     "demo",
+		"README.md":              "readme",
+		"notes.txt":              "notes",
+		"assets/screenshot.png":  "png",
+		"assets/runtime.keep":    "keep",
+		"nested/tests/test.tiny": "test",
+	}
+
+	for name, content := range files {
+		path := filepath.Join(src, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatalf("create source dir: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatalf("write source file %s: %v", name, err)
+		}
+	}
+
+	err := copyDirectoryWithIgnore(src, dst, []string{
+		"docs",
+		"examples/**",
+		"*.md",
+		"assets/*.png",
+		"**/tests",
+	})
+	if err != nil {
+		t.Fatalf("copy with ignore: %v", err)
+	}
+
+	for _, name := range []string{"tiny.json", "src/main.tiny", "notes.txt", "assets/runtime.keep"} {
+		if !fileExists(filepath.Join(dst, filepath.FromSlash(name))) {
+			t.Fatalf("expected copied file %s", name)
+		}
+	}
+
+	for _, name := range []string{"docs/readme.md", "examples/demo.tiny", "README.md", "assets/screenshot.png", "nested/tests/test.tiny"} {
+		if fileExists(filepath.Join(dst, filepath.FromSlash(name))) {
+			t.Fatalf("expected ignored file %s not to be copied", name)
+		}
+	}
+}
+
+func TestAddPackageCommandWritesTinyLock(t *testing.T) {
+	dir := t.TempDir()
+	withWorkingDir(t, dir)
+	t.Setenv("TINY_HOME", filepath.Join(dir, "tiny-home"))
+
+	depRoot := libraryGlobalRoot("owner", "dep", "v1")
+	writeConfigForTest(t, filepath.Join(depRoot, "tiny.json"), TinyProjectConfig{Entry: "main.tiny"})
+	writeConfigForTest(t, filepath.Join(dir, "tiny.json"), TinyProjectConfig{})
+
+	addPackageCommand([]string{"dep", "github:owner/dep@v1"})
+
+	config, ok := loadTinyConfig()
+	if !ok {
+		t.Fatalf("tiny.json missing")
+	}
+	if got := config.Dependencies["dep"].Version; got != "v1" {
+		t.Fatalf("tiny.json dependency version = %q, want v1", got)
+	}
+
+	lock, ok := loadTinyLock()
+	if !ok {
+		t.Fatalf("tiny.lock missing")
+	}
+	locked := lock.Dependencies["dep"]
+	if locked.Source != "github:owner/dep" || locked.Version != "v1" || locked.Resolved != "github:owner/dep@v1" {
+		t.Fatalf("unexpected lock entry: %#v", locked)
+	}
+}
+
+func TestLoaderUsesTinyLockVersionForUnpinnedDependency(t *testing.T) {
+	dir := t.TempDir()
+	withWorkingDir(t, dir)
+	t.Setenv("TINY_HOME", filepath.Join(dir, "tiny-home"))
+
+	depRoot := libraryGlobalRoot("owner", "dep", "v2")
+	writeConfigForTest(t, filepath.Join(depRoot, "tiny.json"), TinyProjectConfig{Entry: "main.tiny"})
+	writeConfigForTest(t, filepath.Join(dir, "tiny.json"), TinyProjectConfig{
+		Dependencies: map[string]TinyDependencyConfig{
+			"dep": {Source: "github:owner/dep"},
+		},
+	})
+	writeTinyLock(TinyLockFile{
+		Version: tinyLockVersion,
+		Dependencies: map[string]TinyLockedDependency{
+			"dep": {
+				Source:   "github:owner/dep",
+				Version:  "v2",
+				Resolved: "github:owner/dep@v2",
+				Owner:    "owner",
+				Repo:     "dep",
+			},
+		},
+	})
+
+	if err := os.MkdirAll(filepath.Join(dir, "src"), 0755); err != nil {
+		t.Fatalf("create src dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "src", "main.tiny"), []byte(`import library "owner/dep" as Dep;`), 0644); err != nil {
+		t.Fatalf("write main source: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(depRoot, "main.tiny"), []byte(`export const value = "ok";`), 0644); err != nil {
+		t.Fatalf("write dependency source: %v", err)
+	}
+
+	program := LoadProgram(filepath.Join("src", "main.tiny"))
+	if len(program.Statements) != 1 {
+		t.Fatalf("expected dependency namespace statement, got %#v", program.Statements)
+	}
+}
+
 func TestRemovePackageCommandRemovesConfigAndGlobalDependency(t *testing.T) {
 	dir := t.TempDir()
 	withWorkingDir(t, dir)
@@ -188,6 +373,25 @@ func TestRemovePackageCommandRemovesConfigAndGlobalDependency(t *testing.T) {
 		},
 	})
 	writeConfigForTest(t, filepath.Join(depRoot, "tiny.json"), TinyProjectConfig{Entry: "main.tiny"})
+	writeTinyLock(TinyLockFile{
+		Version: tinyLockVersion,
+		Dependencies: map[string]TinyLockedDependency{
+			"dep": {
+				Source:   "github:owner/dep",
+				Version:  "v1",
+				Resolved: "github:owner/dep@v1",
+				Owner:    "owner",
+				Repo:     "dep",
+			},
+			"keep": {
+				Source:   "github:owner/keep",
+				Version:  "v1",
+				Resolved: "github:owner/keep@v1",
+				Owner:    "owner",
+				Repo:     "keep",
+			},
+		},
+	})
 
 	removePackageCommand([]string{"dep"})
 
@@ -203,6 +407,17 @@ func TestRemovePackageCommandRemovesConfigAndGlobalDependency(t *testing.T) {
 	}
 	if fileExists(filepath.Join(depRoot, "tiny.json")) {
 		t.Fatalf("global dependency folder was not removed")
+	}
+
+	lock, ok := loadTinyLock()
+	if !ok {
+		t.Fatalf("tiny.lock missing")
+	}
+	if _, exists := lock.Dependencies["dep"]; exists {
+		t.Fatalf("removed dependency still present in lock: %#v", lock.Dependencies)
+	}
+	if _, exists := lock.Dependencies["keep"]; !exists {
+		t.Fatalf("unrelated lock dependency was removed: %#v", lock.Dependencies)
 	}
 }
 

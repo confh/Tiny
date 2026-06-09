@@ -169,6 +169,9 @@ func TestLSPHoverNestedStdFunctionCall(t *testing.T) {
 	if !strings.Contains(hover.Contents.Value, "server(port: number)") {
 		t.Fatalf("unexpected hover contents: %s", hover.Contents.Value)
 	}
+	if !strings.Contains(hover.Contents.Value, "Creates a new Server instance listening on the specified port.") {
+		t.Fatalf("expected std stub documentation in hover contents: %s", hover.Contents.Value)
+	}
 }
 
 func TestLSPInlayHintsInferVariableAndParameterNames(t *testing.T) {
@@ -2026,5 +2029,299 @@ func TestLSPCrossFileCallHierarchy(t *testing.T) {
 	}
 	if !strings.Contains(incoming[0].From.URI, "main.tiny") {
 		t.Fatalf("expected incoming call source to be main.tiny, got %q", incoming[0].From.URI)
+	}
+}
+
+func TestLSPDefaultParameterFixes(t *testing.T) {
+	// 1. Test parameter type inference inside function body
+	textTypeInference := strings.Join([]string{
+		`fn loadEnv(path = ".env") {`,
+		`    const p = path;`,
+		`}`,
+	}, "\n")
+	scope := scopeAtPosition("file:///test1.tiny", textTypeInference, Position{
+		Line:      1,
+		Character: len("    const p = path;"),
+	})
+	sym, ok := scope.Resolve("p")
+	if !ok {
+		t.Fatalf("expected p in scope")
+	}
+	if sym.Type != "string" {
+		t.Fatalf("expected p to have type string, got %q", sym.Type)
+	}
+
+	// 2. Test calling function with no args (argument count check passes)
+	textDiagnostics := strings.Join([]string{
+		`fn loadEnv(path = ".env") {`,
+		`}`,
+		`loadEnv();`,
+	}, "\n")
+	diagnostics := semanticDiagnostics("file:///test2.tiny", textDiagnostics)
+	if len(diagnostics) > 0 {
+		t.Fatalf("expected no diagnostics for loadEnv() call, got %#v", diagnostics)
+	}
+
+	// 3. Test interface autocomplete for process.start() options
+	textAutocomplete := strings.Join([]string{
+		`import std "process";`,
+		`process.start("cmd", [], {`,
+		`    `,
+		`})`,
+	}, "\n")
+	completions := getCompletions("file:///test3.tiny", textAutocomplete, Position{
+		Line:      2,
+		Character: 4,
+	})
+	if !completionLabelsContain(completions, "cwd: ") {
+		t.Fatalf("expected completions to include cwd: , got %#v", completionLabels(completions))
+	}
+
+	// 4. Test interface autocomplete for process.shell() options
+	textAutocompleteShell := strings.Join([]string{
+		`import std "process";`,
+		`process.shell("cmd", {`,
+		`    `,
+		`})`,
+	}, "\n")
+	completionsShell := getCompletions("file:///test4.tiny", textAutocompleteShell, Position{
+		Line:      2,
+		Character: 4,
+	})
+	if !completionLabelsContain(completionsShell, "cwd: ") {
+		t.Fatalf("expected completions to include cwd: , got %#v", completionLabels(completionsShell))
+	}
+
+	// 5. Test interface autocomplete for process.start() multiline
+	textAutocompleteMultiline := strings.Join([]string{
+		`import std "process";`,
+		`process.start(`,
+		`    "cmd",`,
+		`    [],`,
+		`    {`,
+		`        `,
+		`    }`,
+		`)`,
+	}, "\n")
+	completionsMultiline := getCompletions("file:///test5.tiny", textAutocompleteMultiline, Position{
+		Line:      5,
+		Character: 8,
+	})
+	if !completionLabelsContain(completionsMultiline, "cwd: ") {
+		t.Fatalf("expected completions to include cwd: , got %#v", completionLabels(completionsMultiline))
+	}
+
+	// 6. Test interface autocomplete for process.start() multiline unclosed
+	textAutocompleteMultilineUnclosed := strings.Join([]string{
+		`import std "process";`,
+		`process.start(`,
+		`    "cmd",`,
+		`    [],`,
+		`    {`,
+		`        `,
+	}, "\n")
+	completionsMultilineUnclosed := getCompletions("file:///test6.tiny", textAutocompleteMultilineUnclosed, Position{
+		Line:      5,
+		Character: 8,
+	})
+	if !completionLabelsContain(completionsMultilineUnclosed, "cwd: ") {
+		t.Fatalf("expected completions to include cwd: , got %#v", completionsMultilineUnclosed)
+	}
+
+	// 7. Test interface autocomplete for process.start() multiline unclosed CRLF
+	textAutocompleteMultilineCRLF := strings.Join([]string{
+		`import std "process";` + "\r",
+		`process.start(` + "\r",
+		`    "cmd",` + "\r",
+		`    [],` + "\r",
+		`    {` + "\r",
+		`        `,
+	}, "\n")
+	completionsMultilineCRLF := getCompletions("file:///test7.tiny", textAutocompleteMultilineCRLF, Position{
+		Line:      5,
+		Character: 8,
+	})
+	if !completionLabelsContain(completionsMultilineCRLF, "cwd: ") {
+		t.Fatalf("expected completions to include cwd: , got %#v", completionsMultilineCRLF)
+	}
+}
+
+func TestLSPAutocompleteSuppressionAndQuotedKeys(t *testing.T) {
+	// 1. Inside normal string: verify no autocomplete items
+	textString := `const s = "test";`
+	completionsString := getCompletions("file:///test_string.tiny", textString, Position{
+		Line:      0,
+		Character: len("const s = \"test"),
+	})
+	if len(completionsString) > 0 {
+		t.Fatalf("expected no completions inside normal string, got %#v", completionLabels(completionsString))
+	}
+
+	// 2. Inside backtick interpolation: verify autocomplete items are present
+	textBacktick := strings.Join([]string{
+		`const name = "Tiny";`,
+		`const s = ` + "`" + `hello ${na}` + "`" + `;`,
+	}, "\n")
+	completionsBacktick := getCompletions("file:///test_backtick.tiny", textBacktick, Position{
+		Line:      1,
+		Character: len("const s = `hello ${na"),
+	})
+	if !completionLabelsContain(completionsBacktick, "name") {
+		t.Fatalf("expected completions inside backtick interpolation to contain 'name', got %#v", completionLabels(completionsBacktick))
+	}
+
+	// 3. Inside non-interface object: verify no autocomplete items
+	textNonInterfaceObj := strings.Join([]string{
+		`const x = {`,
+		`    `,
+		`};`,
+	}, "\n")
+	completionsNonInterfaceObj := getCompletions("file:///test_non_iface.tiny", textNonInterfaceObj, Position{
+		Line:      1,
+		Character: 4,
+	})
+	if len(completionsNonInterfaceObj) > 0 {
+		t.Fatalf("expected no completions inside non-interface object literal, got %#v", completionLabels(completionsNonInterfaceObj))
+	}
+
+	// 4. Inside interface object with quotes: typing "" suggests "cwd": with TextEdit
+	textQuotedQuotes := strings.Join([]string{
+		`import std "process";`,
+		`process.start("cmd", [], {`,
+		`    ""`,
+		`})`,
+	}, "\n")
+	completionsQuotes := getCompletions("file:///test_quotes.tiny", textQuotedQuotes, Position{
+		Line:      2,
+		Character: len("    \""),
+	})
+	if !completionLabelsContain(completionsQuotes, "\"cwd\": ") {
+		t.Fatalf("expected completions to contain '\"cwd\": ', got %#v", completionLabels(completionsQuotes))
+	}
+	var cwdItem *CompletionItem
+	for _, item := range completionsQuotes {
+		if item.Label == "\"cwd\": " {
+			cwdItem = &item
+			break
+		}
+	}
+	if cwdItem == nil || cwdItem.TextEdit == nil {
+		t.Fatalf("expected cwd completion item to have TextEdit, got %#v", cwdItem)
+	}
+	if cwdItem.TextEdit.Range.Start.Character != 4 || cwdItem.TextEdit.Range.End.Character != 6 {
+		t.Fatalf("unexpected TextEdit range: start=%d, end=%d", cwdItem.TextEdit.Range.Start.Character, cwdItem.TextEdit.Range.End.Character)
+	}
+	if cwdItem.TextEdit.NewText != "\"cwd\": $0" {
+		t.Fatalf("unexpected TextEdit newText: %q", cwdItem.TextEdit.NewText)
+	}
+
+	// 5. Inside interface object with quoted prefix: typing "c suggests "cwd":
+	textQuotedC := strings.Join([]string{
+		`import std "process";`,
+		`process.start("cmd", [], {`,
+		`    "c"`,
+		`})`,
+	}, "\n")
+	completionsQuotedC := getCompletions("file:///test_quoted_c.tiny", textQuotedC, Position{
+		Line:      2,
+		Character: len("    \"c"),
+	})
+	if !completionLabelsContain(completionsQuotedC, "\"cwd\": ") {
+		t.Fatalf("expected completions to contain '\"cwd\": ', got %#v", completionLabels(completionsQuotedC))
+	}
+
+	// 6. Multiline nested object literal autocomplete
+	textNested := strings.Join([]string{
+		`import std "process";`,
+		`process.start("cmd", [], {`,
+		`    env: {`,
+		`        `,
+		`    }`,
+		`})`,
+	}, "\n")
+	completionsNested := getCompletions("file:///test_nested.tiny", textNested, Position{
+		Line:      3,
+		Character: 8,
+	})
+	if completionLabelsContain(completionsNested, "cwd: ") {
+		t.Fatalf("expected nested env object not to suggest outer ProcessOptions fields, got %#v", completionLabels(completionsNested))
+	}
+}
+
+func TestLSPHoverDocumentationComments(t *testing.T) {
+	text := strings.Join([]string{
+		`// This is my test function.`,
+		`// It does wonderful things.`,
+		`fn myFunc() {}`,
+		``,
+		`// This is my class description.`,
+		`class MyClass {`,
+		`    // This is method doc.`,
+		`    fn myMethod() {}`,
+		`}`,
+		``,
+		`// This is interface doc.`,
+		`interface MyInterface {}`,
+		``,
+		`// This is enum doc.`,
+		`enum MyEnum {`,
+		`    Val`,
+		`}`,
+		``,
+		`fn test() {`,
+		`    myFunc();`,
+		`    const c = MyClass();`,
+		`    c.myMethod();`,
+		`}`,
+	}, "\n")
+
+	// 1. Verify function hover doc
+	resFunc := getHover("file:///test_doc.tiny", text, Position{Line: 19, Character: 4})
+	hoverFunc, ok := resFunc.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover result, got %#v", resFunc)
+	}
+	if !strings.Contains(hoverFunc.Contents.Value, "This is my test function.  \nIt does wonderful things.") {
+		t.Fatalf("unexpected hover content for function: %q", hoverFunc.Contents.Value)
+	}
+
+	// 2. Verify class hover doc
+	resClass := getHover("file:///test_doc.tiny", text, Position{Line: 20, Character: 14})
+	hoverClass, ok := resClass.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover result, got %#v", resClass)
+	}
+	if !strings.Contains(hoverClass.Contents.Value, "This is my class description.") {
+		t.Fatalf("unexpected hover content for class: %q", hoverClass.Contents.Value)
+	}
+
+	// 3. Verify class method hover doc
+	resMethod := getHover("file:///test_doc.tiny", text, Position{Line: 21, Character: 6})
+	hoverMethod, ok := resMethod.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover result, got %#v", resMethod)
+	}
+	if !strings.Contains(hoverMethod.Contents.Value, "This is method doc.") {
+		t.Fatalf("unexpected hover content for method: %q", hoverMethod.Contents.Value)
+	}
+
+	// 4. Verify interface hover doc
+	resInterface := getHover("file:///test_doc.tiny", text, Position{Line: 11, Character: 10})
+	hoverInterface, ok := resInterface.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover result, got %#v", resInterface)
+	}
+	if !strings.Contains(hoverInterface.Contents.Value, "This is interface doc.") {
+		t.Fatalf("unexpected hover content for interface: %q", hoverInterface.Contents.Value)
+	}
+
+	// 5. Verify enum hover doc
+	resEnum := getHover("file:///test_doc.tiny", text, Position{Line: 14, Character: 5})
+	hoverEnum, ok := resEnum.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover result, got %#v", resEnum)
+	}
+	if !strings.Contains(hoverEnum.Contents.Value, "This is enum doc.") {
+		t.Fatalf("unexpected hover content for enum: %q", hoverEnum.Contents.Value)
 	}
 }

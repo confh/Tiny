@@ -1,14 +1,24 @@
+// Represents a TCP server capable of listening for incoming connections.
 class TcpServer {
+    // Starts the TCP server, optionally in asynchronous mode.
     fn start(isAsync?: bool): null {}
+    // Registers a callback function to handle incoming client connections.
     fn onConnection(callback: function): null {}
 }
 
+// Represents an active TCP connection to a client or remote host.
 export class TcpConnection {
+    // Reads a single line of text from the connection. Returns null on EOF.
     fn readLine(): string | null {}
+    // Reads up to size bytes from the connection and returns them as a string.
     fn read(size: number): string {}
+    // Writes the specified string or buffer data to the connection.
     fn write(data: string | buffer): null {}
+    // Closes the TCP connection.
     fn close(): null {}
+    // Returns the remote address string of the connection.
     fn address(): string {}
 }
 
+// Creates a new TCP server bound to the specified host and port.
 export fn tcpServer(host: string, port: number): TcpServer {}

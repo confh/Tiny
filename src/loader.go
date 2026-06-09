@@ -139,6 +139,13 @@ func (l *Loader) resolveSourceImportPath(baseDir string, importPath string) stri
 		if version == "" {
 			version = spec.Ref
 		}
+		if version == "" {
+			if lock, ok := loadTinyLock(); ok {
+				if locked, exists := lock.Dependencies[parts[0]]; exists && lockedDependencyMatchesConfig(locked, dep) {
+					version = locked.Version
+				}
+			}
+		}
 		root = libraryGlobalRoot(spec.Owner, spec.Repo, version)
 	}
 

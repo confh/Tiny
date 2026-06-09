@@ -1,15 +1,44 @@
+// Moves the mouse pointer instantly to the specified x and y coordinates.
 export fn moveMouse(x: number, y: number): null {}
+
+// Moves the mouse pointer smoothly to the specified x and y coordinates.
 export fn moveMouseSmooth(x: number, y: number): null {}
+
+// Simulates a left mouse button click.
 export fn click(): null {}
+
+// Simulates a right mouse button click.
 export fn rightClick(): null {}
+
+// Simulates a double left mouse button click.
 export fn doubleClick(): null {}
+
+// Simulates pressing down the specified mouse button ("left", "right", or "middle").
 export fn mouseDown(button: string): null {}
+
+// Simulates releasing the specified mouse button ("left", "right", or "middle").
 export fn mouseUp(button: string): null {}
+
+// Simulates pressing and releasing a single keyboard key.
 export fn press(key: string): null {}
+
+// Simulates pressing a key combination of two keys simultaneously.
 export fn hotKey(key1: string, key2: string): null {}
+
+// Simulates typing the specified string of text.
 export fn type(text: string): null {}
+
+// Returns an object containing the current x and y coordinates of the mouse.
 export fn mousePosition(): object {}
+
+// Returns an object containing the screen width and height.
 export fn screenSize(): object {}
+
+// Captures a screenshot and saves it to the specified file path.
 export fn screenshot(filename: string): null {}
+
+// Returns the current text contents of the system clipboard.
 export fn getClipboard(): string {}
+
+// Sets the system clipboard text to the specified string.
 export fn setClipboard(text: string): null {}

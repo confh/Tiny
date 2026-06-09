@@ -1770,6 +1770,9 @@ func (p *Parser) parseDefaultParamValue() TinyValue {
 		p.advance()
 		return NewNull()
 
+	case TOKEN_LBRACKET:
+		return p.parseDefaultParamArrayValue()
+
 	case TOKEN_MINUS:
 		p.advance()
 
@@ -1802,6 +1805,32 @@ func (p *Parser) parseDefaultParamValue() TinyValue {
 		)
 		return NewNull()
 	}
+}
+
+func (p *Parser) parseDefaultParamArrayValue() TinyValue {
+	p.expect(TOKEN_LBRACKET)
+
+	elements := []TinyValue{}
+	if p.current.Type == TOKEN_RBRACKET {
+		p.advance()
+		return NewNative(&ArrayValue{Elements: elements})
+	}
+
+	for {
+		elements = append(elements, p.parseDefaultParamValue())
+
+		if p.current.Type != TOKEN_COMMA {
+			break
+		}
+		p.advance()
+
+		if p.current.Type == TOKEN_RBRACKET {
+			break
+		}
+	}
+
+	p.expect(TOKEN_RBRACKET)
+	return NewNative(&ArrayValue{Elements: elements})
 }
 
 func (p *Parser) parseConstStatement() Stmt {

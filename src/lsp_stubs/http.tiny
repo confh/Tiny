@@ -1,29 +1,57 @@
+// Represents an incoming HTTP request object.
 export interface RequestObject {
+    // The requested URL path.
     path: string,
+    // The HTTP method used (e.g., "GET", "POST").
     method: string,
+    // The request body content.
     body: string,
+    // Route parameters parsed from the path.
     params: object,
+    // Query parameters parsed from the URL search query.
     query: object,
+    // HTTP headers associated with the request.
     headers: object
 }
 
+// Represents an HTTP response returned by a request or handler.
 export interface HttpResponse {
+    // The HTTP status code (e.g., 200, 404).
     status: number;
+    // The response body content.
     body: string;
+    // HTTP headers associated with the response.
     headers: object;
 }
 
+// Represents an HTTP server instance.
 class Server {
+    // Registers a GET request handler for the specified path.
     fn get(path: string, handler: string | function) {}
+    // Registers a POST request handler for the specified path.
     fn post(path: string, handler: string | function) {}
+    // Registers a generic request handler for all incoming requests.
     fn onRequest(handler: string | function) {}
+    // Stops the HTTP server.
     fn stop() {}
+    // Starts the HTTP server, optionally in asynchronous mode.
     fn start(isAsync?: bool) {}
 }
 
+// Performs an HTTP GET request to the specified URL.
 export fn get(url: string, options?: object): HttpResponse {}
+
+// Performs an HTTP POST request to the specified URL with a body.
 export fn post(url: string, body: object, options?: object): HttpResponse {}
+
+// Downloads a file from the specified URL and saves it to filePath.
 export fn downloadFile(filePath: string, url: string): any {}
+
+// Creates a new Server instance listening on the specified port.
 export fn server(port: number): Server {}
+
+// Helper function to return a JSON response object.
 export fn json(data: object): any {}
+
+// Helper function to return a plain text response object.
 export fn text(data: string): any {}

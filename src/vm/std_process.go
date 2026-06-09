@@ -93,6 +93,8 @@ func processSetEnv(vm *VM, args []TinyValue) {
 	key := argString(vm, "process.setEnv", args, 0)
 	value := argString(vm, "process.setEnv", args, 1)
 	os.Setenv(key, value)
+
+	vm.push(NewNull())
 }
 
 func processUnsetEnv(vm *VM, args []TinyValue) {
@@ -100,6 +102,8 @@ func processUnsetEnv(vm *VM, args []TinyValue) {
 
 	key := argString(vm, "process.unsetEnv", args, 0)
 	os.Unsetenv(key)
+
+	vm.push(NewNull())
 }
 
 func processHalt(vm *VM, args []TinyValue) {

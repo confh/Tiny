@@ -163,6 +163,7 @@ type CompletionItem struct {
 	InsertTextFormat    int        `json:"insertTextFormat,omitempty"`
 	SortText            string     `json:"sortText,omitempty"`
 	AdditionalTextEdits []TextEdit `json:"additionalTextEdits,omitempty"`
+	TextEdit            *TextEdit  `json:"textEdit,omitempty"`
 }
 
 type MarkupContent struct {
@@ -4018,11 +4019,23 @@ func getCompletions(uri string, text string, pos Position) []CompletionItem {
 
 	scope := scopeAtPosition(uri, text, pos)
 
-	if receiver == "" {
-		if objItems := objectLiteralCompletions(scope, text, pos); len(objItems) > 0 {
-			return rankedCompletionItems(objItems)
-		}
+	editorCtx := parseEditorContext(text, pos, scope)
 
+	if editorCtx.InsideString {
+		if editorCtx.InsideObject && editorCtx.ObjectInterfaceType != "" && editorCtx.IsObjectStringKey {
+			return rankedCompletionItems(objectLiteralCompletionsWithContext(editorCtx))
+		}
+		return nil
+	}
+
+	if editorCtx.InsideObject && editorCtx.IsObjectKeyPosition {
+		if editorCtx.ObjectInterfaceType != "" {
+			return rankedCompletionItems(objectLiteralCompletionsWithContext(editorCtx))
+		}
+		return nil
+	}
+
+	if receiver == "" {
 		return rankedCompletionItems(scopeCompletions(scope, uri, text, hasParens))
 	}
 

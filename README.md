@@ -12,61 +12,68 @@
   </p>
 </div>
 
----
+***
 
-Tiny bridges the gap between high-level dynamic languages and strict compiled systems. It compiles human-readable source code into compact binary bytecode instructions executed on a custom stack-based VM. It is highly optimized for concurrent network services, desktop automation, and lightweight standalone tool distribution.
+Tiny is a concurrent programming language and runtime system. It compiles source files into compact, stack-based bytecode instructions (`.tbc`) which run on a highly optimized, register-less virtual machine written in Go.
+
+The runtime engine features direct OS-level parallel threading, native WebAssembly compilation for inline Go extensions, zero-copy matrix linear algebra, a built-in Language Server (LSP), and standalone binary distribution packaging.
 
 Read the full documentation at [tiny-lang-docs.github.io](https://tiny-lang-docs.github.io/), or check out the [examples](https://github.com/confh/Tiny/tree/master/examples) to see Tiny in action.
 
-## Install
-
-Download the latest Tiny binary from [the release page](https://github.com/confh/Tiny/releases/latest):
-
-* Windows: `tiny_windows_amd64.exe`
-* Linux: `tiny_linux_amd64`
-* macOS Apple Silicon: `tiny_darwin_arm64`
-
-Rename the downloaded file to `tiny` (`tiny.exe` on Windows). Create a folder such as `.tiny` in your user/home directory, move the binary into that folder, then add that folder to your `PATH` environment variable.
-
-For manual builds from source, follow the install guide at [docs](https://tiny-lang-docs.github.io/#install).
-
 ---
+
+## Installation
+
+Precompiled binaries are available on the release page:
+
+- Windows: `tiny_windows_amd64.exe`
+- Linux: `tiny_linux_amd64`
+- macOS (Apple Silicon): `tiny_darwin_arm64`
+
+To install:
+
+1. Download the binary for your operating system.
+2. Rename the file to `tiny` (or `tiny.exe` on Windows).
+3. Move the binary into a directory in your system path (for example, `~/.tiny/bin` on Unix or `%USERPROFILE%\.tiny` on Windows).
+4. Add that directory to your system `PATH` environment variable.
+
+For compilation from source instructions, see the online documentation.
+
+***
 
 <p align="center">
   <img src="examples/showcase.gif" alt="Tiny Showcase">
 </p>
 
-## Core Features
+***
 
-* **True Concurrency:** Native OS-level multi-threading via Go-backed scheduler loops. Spawn parallel tasks seamlessly using the `spawn` keyword.
-* **Thread Safety:** Built-in mutex engine featuring a native `lock` block syntax to automatically manage mutex acquisition and release, preventing common deadlock scenarios.
-* **Hybrid Type System:** Dynamically typed for rapid prototyping, with full support for optional static type hints and structural interfaces (shape-based validation).
-* **Compiled Performance:** Translates source code into structured bytecode (`.tbc`). Features in-place instruction fusing, constant folding, and flat slot-based variable lookups.
-* **Self-Contained Distribution:** Single-command packaging (`tiny pack`) bundles your bytecode and the runtime interpreter into an independent, obfuscated ~9MB native executable.
-* **Production-Ready Standard Library:** (CGO-Free)
-  * `http` (Fully concurrent HTTP client and microservices server architecture - capable of handling 45,000+ requests per second)
-  * `desktop` (Cross-platform mouse, keyboard, and clipboard automation)
-  * `json` (High-performance parsing/serialization directly mapped to Go streams)
-  * `io`, `fs`, `math` (featuring matrix multiplication), `regex`, `sync`, and `test` (integrated unit testing framework).
-* **Native Plugin Architecture:** High-performance FFI layer using lazyloading (Windows) and `purego` (Linux, Darwin). Link external DLLs/SOs cleanly via JSON-serialized message protocols without breaking cross-compilation.
-* **Inline Go Extensions:** Use the `native fn` keyword to write high-performance Go logic directly in your code. Code is compiled to WebAssembly via TinyGo for near-native speeds.
+## Language Specifications
 
-## VS Code Support
+### Dynamic Typing with Optional Hints
 
-Tiny includes a native Language Server (LSP) providing advanced static analysis, type narrowing (refining types following conditional blocks), autocomplete, diagnostics, and jump-to-definition tracking.
+Tiny is dynamically typed by default. You can write untyped code for rapid prototyping, or apply optional static type hints to variables, parameters, and function returns.
 
-<p align="center">
-  <img src="examples/extension.png" alt="VS Code Extension" width="500">
-</p>
+```js
+import std "io";
 
-Download the VS Code extension by searching "Tiny" in the extension marketplace.
+// Untyped variable
+let data = "untyped string";
 
----
+// Explicitly typed variable
+const port: number = 8080;
 
-## Language Tour
+// Typed function parameters and return type
+fn calculatePayout(base: number, multiplier: number): number {
+    return base * multiplier;
+}
 
-### Structural Interfaces & Shape Validation
-Objects are implicitly validated against structural interfaces at runtime based entirely on their properties.
+io.println(calculatePayout(100, 1.5));
+```
+
+### Structural Interfaces and Shape Validation
+
+Tiny uses structural typing (shape-based validation). Objects are validated against interfaces at runtime based entirely on their properties and methods, rather than explicit inheritance declarations.
+
 ```js
 import std "io";
 
@@ -75,57 +82,179 @@ interface Task {
     done: bool
 }
 
-fn complete(t: Task) {
-    io.println(`Completing: ${t.title}`);
+fn printTask(t: Task) {
+    let status = t.done ? "Completed" : "Pending";
+    io.println(`${t.title} - Status: ${status}`);
 }
 
-complete({ title: "Write Documentation", done: false });
+// Valid structural matches
+printTask({ title: "Write Compiler Tests", done: true });
+printTask({ title: "Optimize VM Dispatcher", done: false, priority: 1 });
 ```
 
-### Native Classes & Encapsulation
+### Class Composition and Embedding
+
+Tiny does not use deep class inheritance hierarchies. Instead, it supports composition via the `embed` keyword. When a class embeds another class instance, any methods and fields from the embedded instance are delegated automatically if they are not defined on the parent class.
 
 ```js
 import std "io";
+import std "json";
 
-class Greeter {
-    field prefix = "Hello";
-    fn init(p) { this.prefix = p; }
-    fn greet(name) {
-        return `${this.prefix}, ${name}!`;
+class Logger {
+    field messages = []
+
+    fn log(message: string) {
+        this.messages.push(message);
+        io.println(`Log: ${message}`);
+    }
+
+    fn dump() {
+        return this.messages;
     }
 }
 
-let g = Greeter("Welcome");
-io.println(g.greet("Tiny"));
+class SessionManager {
+    field active = true
+    embed logger
+
+    fn init() {
+        this.active = true;
+        this.logger = Logger();
+        // Call to embedded class method
+        this.log("Session manager initialized");
+    }
+
+    fn close() {
+        this.active = false;
+        this.log("Session closed");
+    }
+}
+
+let session = SessionManager();
+session.close();
+
+// Directly calls the embedded Logger.dump method
+io.println(json.pretty(session.dump()));
 ```
 
-### Concurrency & Parallel Threading
+### Pattern Matching
 
-Tiny bypasses single-threaded event loops and Global Interpreter Locks (GIL). Tasks spawned run in parallel, backed by independent, isolated VM state spaces.
+The `match` block provides a clean syntax for branch dispatching, supporting literal values, variable variables, enums, and a default fallback case (`_`).
+
+```js
+import std "io";
+
+enum Status {
+    Idle,
+    Running,
+    Failed
+}
+
+let current = Status.Running;
+
+match current {
+    "Idle" {
+        io.println("System is idling");
+    }
+    "Running" {
+        io.println("System is actively running");
+    }
+    _ {
+        io.println("System encountered an error or unknown state");
+    }
+}
+```
+
+### Scoped Cleanups with Defer
+
+The `defer` statement schedules a function call to execute immediately before the current surrounding function scope exits. This ensures that resource cleanups, file closures, and synchronization locks are released regardless of early returns or errors.
+
+```js
+import std "fs";
+import std "io";
+
+fn processFile(path: string) {
+    io.println("Opening file stream...");
+    let file = fs.open(path);
+
+    defer fn() {
+        io.println("Running defer block: closing file stream.");
+        // Cleanup logic runs here
+    }
+
+    io.println("Processing file data...");
+}
+
+processFile("README.md");
+```
+
+### Loop Unpacking
+
+The `for` loop supports unpacking both elements and their indices directly when iterating over collections.
+
+```js
+import std "io";
+
+const names = ["Alice", "Bob", "Charlie"];
+
+for name, index in names {
+    io.println(`Index ${index}: ${name}`);
+}
+```
+
+***
+
+## Concurrency Model
+
+### Parallel Thread Execution
+
+Tiny executes parallel operations by using OS-level multi-threading backed by the Go scheduler. The `spawn` keyword starts a new execution routine running on an independent, isolated VM state space containing its own call frame stack.
+
+Unlike event-loop models or runtimes with a Global Interpreter Lock (GIL), Tiny runs tasks concurrently across all available CPU cores.
 
 ```js
 import std "io";
 import std "time";
 
-let task = spawn () fn() {
+let worker = spawn () fn() {
     time.sleep(1000);
-    return "Result from parallel thread!";
+    return "Worker thread complete";
 };
 
-io.println("Main thread continuing execution...");
-io.println(await task);
+io.println("Main thread proceeding...");
+let result = await worker;
+io.println(result);
 ```
 
-### High-Performance Native Functions (Go)
-Write performance-critical logic in Go directly inside your Tiny code. Native functions are compiled to WebAssembly via [TinyGo](https://tinygo.org/) for near-native throughput. For example, a recursive Fibonacci implementation (`fib(30)`) executes in approximately **10ms**.
+### Thread Safety and Mutex Locking
 
-> **Note:** Compiling code with `native fn` requires **Go** and **TinyGo** to be installed on the host machine.
+Shared memory operations can be coordinated using mutexes and native `lock` blocks. The compiler guarantees that the mutex is automatically released when execution leaves the lock block scope, preventing common deadlock mistakes.
+
+```js
+import std "io";
+import std "sync";
+
+let counter = 0;
+const m = sync.mutex();
+
+fn increment() {
+    lock m {
+        counter = counter + 1;
+    }
+}
+```
+
+***
+
+## Inline Go Extensions (WebAssembly)
+
+For performance-critical code segments, Tiny allows you to write Go logic directly in the source file using the `native fn` keyword. During compilation, the compiler extracts these blocks and compiles them to WebAssembly bytecode via TinyGo, loading them at runtime for near-native execution speed.
 
 ```js
 import std "io";
 import std "time";
 
-native fn gosha256(input: string): string {
+native fn calculateSha256(input: string): string {
     go {
         import "crypto/sha256"
         import "encoding/hex"
@@ -135,73 +264,251 @@ native fn gosha256(input: string): string {
     }
 }
 
-// Direct recursion within native blocks
-native fn goFib(n: number): number {
+native fn computeFibonacci(n: number): number {
     go {
-        if n < 2 {return n }
-        return goFib(n - 1) + goFib(n - 2)
+        if n < 2 {
+            return n
+        }
+        return computeFibonacci(n - 1) + computeFibonacci(n - 2)
     }
 }
 
-io.println(gosha256("Tiny is fast"));
+const text = "Tiny runtime speed";
+io.println(`SHA256: ${calculateSha256(text)}`);
 
-const start = time.nowMs()
+const start = time.nowMs();
+const fibResult = computeFibonacci(30);
+const duration = time.nowMs() - start;
 
-io.println(`Fibonacci(30): ${goFib(30)}`);
-
-const end = time.nowMs()
-
-io.println(`Native Fibonacci took ${end-start}ms`)
+io.println(`Fibonacci(30) = ${fibResult} (calculated in ${duration}ms)`);
 ```
 
----
+> **Note**: Utilizing `native fn` Go extensions requires Go and TinyGo installations on the host system.
 
-## Virtual Machine Architecture & Optimizations
+***
 
-Tiny compiles plain text source files into a dense, binary bytecode stream (`.tbc`) before execution. The stack-based VM utilizes several modern architectural design choices to maximize throughput:
+## Standard Library Reference
 
-* **Isolated VM State Cloning:** When `spawn` is invoked, the engine duplicates the call frame tracking structures and memory stack to isolate concurrent execution spaces. Shared resource operations are wrapped cleanly using native synchronization blocks:
+Tiny includes a CGO-free standard library designed for networking, UI creation, scripting, and calculations.
+
+### `http` (High-Throughput Web Services)
+
+The `http` module contains a fully concurrent web server and client. The server uses a multiplexed routing engine that can process more than 45,000 requests per second.
+
 ```js
-lock communicationMutex {
-    // Thread-safe mutations happen here
+import std "http";
+import std "io";
+
+let server = http.server(8080);
+
+server.get("/", fn(req) {
+    return http.json({
+        status: "online",
+        system: "Tiny VM"
+    });
+});
+
+server.get("/users/:id", fn(req) {
+    const userId: string = req.params["id"];
+    return http.json({
+        id: userId,
+        query: req.query
+    });
+});
+
+io.println("Web server listening on port 8080");
+server.start();
+```
+
+### `ui` (WebView Desktop Applications)
+
+The `ui` module provides a Webview container to construct lightweight desktop applications using HTML, CSS, and JavaScript, while binding underlying system logic to Tiny functions.
+
+```js
+import std "ui";
+import std "io";
+
+// Embed index.html and its directory assets
+embeddir "./ui" const assets
+
+let clicks = 0;
+const win = ui.new(true); // Argument enables developer tools
+
+win.setTitle("Tiny Desktop UI");
+win.setSize(500, 400);
+
+// Bind a function accessible from JavaScript
+win.callback("registerClick", fn(args) {
+    clicks = clicks + 1;
+    io.println(`Clicks registered: ${clicks}`);
+    return clicks;
+});
+
+// Load embedded HTML content
+win.setHtml(assets["index.html"]);
+win.run();
+```
+
+Inside `ui/index.html`, invoke the bound function using standard JavaScript promises:
+
+```html
+<script>
+    async function handleClick() {
+        const count = await window.registerClick("");
+        document.getElementById("counter").innerText = count;
+    }
+</script>
+```
+
+### `desktop` (OS Automation)
+
+The `desktop` module wraps native OS level interfaces for automating keyboard inputs, mouse actions, screen parsing, and clipboard interactions.
+
+```js
+import std "desktop";
+import std "time";
+
+// Move mouse smoothly to coordinates (800, 600) over 1 second
+desktop.moveMouseSmooth(800, 600);
+desktop.click();
+
+// Simulate keyboard input
+desktop.type("Tiny Automation");
+desktop.hotKey("ctrl", "a");
+
+// Screenshot and Clipboard operations
+let clipboardText = desktop.getClipboard();
+desktop.setClipboard("New Clipboard Content");
+```
+
+### `math` (Linear Algebra and Matrix Operations)
+
+The `math` module leverages Go's Gonum package for high-speed matrix computations. It utilizes unsafe zero-copy casting of raw `Buffer` binary payloads to perform memory-efficient linear algebra calculations.
+
+```js
+import std "io";
+import std "math";
+
+// Define two 2x2 matrices using flat data arrays inside a Buffer
+const matrixA = {
+    rows: 2,
+    cols: 2,
+    data: math.toFloat([1.0, 2.0, 3.0, 4.0]) // Floats packed into a buffer
+};
+
+const matrixB = {
+    rows: 2,
+    cols: 2,
+    data: math.toFloat([5.0, 6.0, 7.0, 8.0])
+};
+
+// Perform high-speed matrix multiplication
+let result = math.matMul(matrixA, matrixB);
+
+io.println(`Product rows: ${result.rows}, cols: ${result.cols}`);
+```
+
+### `process` and `fs` (System and Files)
+
+Run external commands, check execution status, pipes outputs, and manipulate files directly.
+
+```js
+import std "fs";
+import std "io";
+import std "process";
+
+// Direct file access
+if fs.exists("config.json") {
+    let content = fs.readFile("config.json");
+    io.println(content);
+}
+
+// Spawn and wait for a shell command, capturing standard output
+let res = process.run("git", ["status"], { stdout: true });
+if res.success {
+    io.println("Git Status Output:");
+    io.println(res.stdout);
 }
 ```
 
+***
 
-* **Flat Slot-Based Access:** Resolution of local and global variables happens entirely during compilation. Variables are mapped to numerical indices within flat arrays inside execution frames, eliminating string-map lookups during runtime.
-* **Instruction Fusing:** The pipeline runs an optimization pass over generated bytecode to compress patterns (e.g., fusing sequential loading, incrementing, and assignment operations into singular opcodes like `OP_INC_LOCAL`).
-* **Automated Memory Tracking:** Tiny primitives integrate natively with Go's concurrent garbage collector, maintaining automatic memory cycles without manual allocation tracking.
+## Tooling and Ecosystem
 
----
+### Project Configuration (`tiny.json`)
 
-## Bundling & Bytecode Security
+Manage scripts, dependencies, targets, and compilation rules using a project-level `tiny.json` file.
 
-### Standalone Packaging (`tiny pack`)
-
-Compress and compile your script assets straight into a single native runtime executable:
-
-```bash
-tiny pack src/main.tiny -o mytool
+```json
+{
+  "name": "my-tiny-project",
+  "version": "1.0.0",
+  "entry": "src/main.tiny",
+  "outDir": "dist",
+  "target": "windows-amd64",
+  "scripts": {
+    "start": "tiny run",
+    "build": "tiny build",
+    "pack": "tiny pack"
+  },
+  "dependencies": {
+    "TinyDotEnv": {
+      "source": "github:confh/TinyDotEnv",
+      "version": "main"
+    }
+  },
+  "plugins": [],
+  "compilerOptions": {
+    "stackTraces": true,
+    "strict": true
+  }
+}
 ```
 
-### Cryptographic Asset Embedding
+### Command Line Interface (CLI)
 
-The `embedstr` and `embedbin` operations securely compile internal text configurations or assets straight into the binary stream, passing them through an automated XOR obfuscation layer to shield keys and strings from simple binary extraction attacks (such as the standard `strings` command):
+The `tiny` binary acts as a compiler, package manager, and execution runtime:
+
+- **`tiny run <file>`**: Compiles and runs a `.tiny` or `.tbc` file. Direct execution of `.tiny` files utilizes `.tinycache` tracking to skip compilation if source files have not been modified.
+- **`tiny build <file> -o <out>`**: Compiles a source file into a distribution bytecode file (`.tbc`).
+- **`tiny pack <file> -o <binary>`**: Compiles and bundles the source bytecode alongside the VM runtime interpreter into a single, standalone native executable (\~9MB).
+- **`tiny dist <file> -o <dir>`**: Packages the application alongside compiled external library plugins (`.dll`/`.so`).
+- **`tiny init`**: Generates a default `tiny.json` config in the current directory.
+- **`tiny add <owner/repo>`**: Downloads and registers a third-party library from GitHub into the global dependency cache.
+- **`tiny install`**: Installs all libraries specified in the `tiny.json` manifest.
+- **`tiny remove <owner/repo>`**: Deletes a library from the project dependencies.
+- **`tiny task <name>`**: Runs a task script defined in the `scripts` section of `tiny.json`.
+- **`tiny lsp`**: Starts the language server.
+
+### [Built-in Language Server (LSP)](https://marketplace.visualstudio.com/items?itemName=Confis.tiny)
+
+Tiny features a native Language Server Protocol implementation. Run `tiny lsp` to interface with editor plugins. The LSP provides:
+
+- Semantic diagnostics and syntax error reporting.
+- Auto-completion for variables, objects, standard library, and custom modules.
+- Jump-to-definition and reference tracking.
+- Automated code formatting.
+- Type narrowing (refining variable types following flow control structures like `if` checks).
+
+<p align="center">
+  <img src="examples/extension.png" alt="VS Code Extension" width="500">
+</p>
+
+### Static Asset Embedding and XOR Obfuscation
+
+You can embed static strings and binary files directly into compiled bytecode using `embedstr` and `embedbin`. Assets are compiled into the `.tbc` stream and automatically obfuscated with an XOR key. This prevents sensitive configurations, keys, or binary assets from being extracted using simple static analysis tools (like the Unix `strings` utility).
 
 ```js
-embedstr "./config.json" const config
-embedbin "./icon.png" const iconBytes
+import std "io";
+
+embedstr "./api_key.txt" const apiKey
+embedbin "./logo.png" const logoBytes
+
+io.println(`API Key securely loaded: ${apiKey}`);
 ```
 
-### Production Shipments (`tiny dist`)
+***
 
-When working with native external shared libraries, the system resolves dependency tracking instantly, packaging the application along with any required `.dll` or `.so` native components into a clean target environment:
-
-```bash
-tiny dist src/main.tiny -o release/app
-```
-
----
 <div align="center">
   <p>Tiny Language © 2026 | MIT Licensed</p>
   <p>

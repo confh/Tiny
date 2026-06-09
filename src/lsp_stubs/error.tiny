@@ -1,1 +1,2 @@
+// Creates a new error instance with the specified error kind and message.
 export fn new(kind: string, message: string): error {}
