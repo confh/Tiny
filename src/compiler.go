@@ -3209,6 +3209,25 @@ func (c *Compiler) inferCompileTimeType(expr Expr) string {
 }
 
 func (c *Compiler) compareCompileTimeTypes(got string, expected string) bool {
+	if dot := strings.Index(expected, "."); dot >= 0 {
+		prefix := expected[:dot]
+		suffix := expected[dot+1:]
+		if c.currentNamespaceVariables != nil {
+			if resolvedPrefix, exists := c.currentNamespaceVariables[prefix]; exists {
+				expected = resolvedPrefix + "." + suffix
+			}
+		}
+	}
+	if dot := strings.Index(got, "."); dot >= 0 {
+		prefix := got[:dot]
+		suffix := got[dot+1:]
+		if c.currentNamespaceVariables != nil {
+			if resolvedPrefix, exists := c.currentNamespaceVariables[prefix]; exists {
+				got = resolvedPrefix + "." + suffix
+			}
+		}
+	}
+
 	if got == "array" {
 		got = "array:any"
 	}

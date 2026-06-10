@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-var tinyFileImportRegex = regexp.MustCompile(`import\s+"([^"]+)"(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?\s*;?`)
+var tinyImportRegex = regexp.MustCompile(`import\s+(?:(lib|library|std|plugin)\s+)?"([^"]+)"(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?\s*;?`)
 
 func collectImportedSourceText(entryPath string) (string, error) {
 	visited := map[string]bool{}
@@ -50,16 +50,26 @@ func collectImportedSourceTextInto(path string, visited map[string]bool, builder
 	builder.WriteString(text)
 	builder.WriteString("\n")
 
-	imports := tinyFileImportRegex.FindAllStringSubmatch(text, -1)
+	imports := tinyImportRegex.FindAllStringSubmatch(text, -1)
 
 	dir := filepath.Dir(abs)
 
 	for _, match := range imports {
-		importPath := match[1]
+		modifier := match[1]
+		importPath := match[2]
 
-		resolved := importPath
-		if !filepath.IsAbs(importPath) {
-			resolved = filepath.Join(dir, importPath)
+		if modifier == "std" || modifier == "plugin" {
+			continue
+		}
+
+		var resolved string
+		if modifier == "lib" || modifier == "library" {
+			resolved = resolveLibraryImportPath(importPath, abs)
+		} else {
+			resolved = importPath
+			if !filepath.IsAbs(importPath) {
+				resolved = filepath.Join(dir, importPath)
+			}
 		}
 
 		err := collectImportedSourceTextInto(resolved, visited, builder)

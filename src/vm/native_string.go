@@ -37,7 +37,7 @@ var stringNativeMetadata = NativeTypeInfo{
 		"split": {
 			Name:        "split",
 			Args:        []StdArg{{Name: "separator", Type: "string"}},
-			Returns:     "array",
+			Returns:     "array:string",
 			Description: "Splits the string into an array of substrings using the specified separator.",
 		},
 		"includes": {
@@ -81,7 +81,37 @@ var stringNativeMetadata = NativeTypeInfo{
 			Returns:     "string",
 			Description: "Replaces all occurrences of oldValue with newValue in the string.",
 		},
+		"substring": {
+			Name: "substring",
+			Args: []StdArg{
+				{Name: "start", Type: "number"},
+				{Name: "end", Type: "number"},
+			},
+			Returns:     "string",
+			Description: "Returns a substring from start to end. Negative indexes are treated as 0, indexes beyond the string length are clamped, and start/end are swapped if start is greater than end.",
+		},
+		"slice": {
+			Name: "slice",
+			Args: []StdArg{
+				{Name: "start", Type: "number"},
+				{Name: "end", Type: "number"},
+			},
+			Returns:     "string",
+			Description: "Returns a slice from start to end. Negative indexes count from the end, indexes are clamped, and an empty string is returned if start is greater than end.",
+		},
 	},
+}
+
+func clampInt(n, min, max int) int {
+	if n < min {
+		return min
+	}
+
+	if n > max {
+		return max
+	}
+
+	return n
 }
 
 func init() {
@@ -100,6 +130,8 @@ func init() {
 		"trim":        stringTrim,
 		"replace":     stringReplace,
 		"replaceAll":  stringReplaceAll,
+		"substring":   stringSubstring,
+		"slice":       stringSlice,
 	}
 }
 
@@ -216,4 +248,51 @@ func stringReplaceAll(vm *VM, value string, args []TinyValue) {
 	oldText := argString(vm, "string.replaceAll", args, 0)
 	newText := argString(vm, "string.replaceAll", args, 1)
 	vm.push(NewNative(strings.ReplaceAll(value, oldText, newText)))
+}
+
+func stringSubstring(vm *VM, value string, args []TinyValue) {
+	expectArgs(vm, "string.substring", args, 2)
+
+	start := argInt(vm, "string.substring", args, 0)
+	end := argInt(vm, "string.substring", args, 1)
+
+	runes := []rune(value)
+	length := len(runes)
+
+	start = clampInt(start, 0, length)
+	end = clampInt(end, 0, length)
+
+	if start > end {
+		start, end = end, start
+	}
+
+	vm.push(NewNative(string(runes[start:end])))
+}
+
+func stringSlice(vm *VM, value string, args []TinyValue) {
+	expectArgs(vm, "string.slice", args, 2)
+
+	start := argInt(vm, "string.slice", args, 0)
+	end := argInt(vm, "string.slice", args, 1)
+
+	runes := []rune(value)
+	length := len(runes)
+
+	if start < 0 {
+		start = length + start
+	}
+
+	if end < 0 {
+		end = length + end
+	}
+
+	start = clampInt(start, 0, length)
+	end = clampInt(end, 0, length)
+
+	if start > end {
+		vm.push(NewNative(""))
+		return
+	}
+
+	vm.push(NewNative(string(runes[start:end])))
 }

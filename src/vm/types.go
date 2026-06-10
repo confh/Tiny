@@ -192,16 +192,19 @@ func resolveInterfaceHint(hint string, interfaces map[string]Interface) (Interfa
 		return iface, true
 	}
 
+	for key, iface := range interfaces {
+		if strings.HasSuffix(key, "."+hint) {
+			return iface, true
+		}
+	}
+
 	if dot := strings.LastIndex(hint, "."); dot >= 0 {
 		shortName := hint[dot+1:]
 		if iface, exists := interfaces[shortName]; exists {
 			return iface, true
 		}
-	}
-
-	if !strings.Contains(hint, ".") {
 		for key, iface := range interfaces {
-			if strings.HasSuffix(key, "."+hint) {
+			if strings.HasSuffix(key, "."+shortName) {
 				return iface, true
 			}
 		}

@@ -128,7 +128,7 @@ func TestLSPPrimitiveMethodCallAssignmentInference(t *testing.T) {
 
 	cases := map[string]string{
 		"hasComma":   "bool",
-		"parts":      "array:any",
+		"parts":      "array:string",
 		"joined":     "string",
 		"literalHas": "bool",
 	}
@@ -167,7 +167,7 @@ func TestLSPPrimitiveMethodCallAssignmentInferenceFromFunctionParam(t *testing.T
 	})
 
 	cases := map[string]string{
-		"parts":  "array:any",
+		"parts":  "array:string",
 		"hasDot": "bool",
 	}
 
@@ -425,8 +425,8 @@ func TestLSPTruthyIfNarrowsNullFromUnion(t *testing.T) {
 	if !ok {
 		t.Fatal("expected parts in scope")
 	}
-	if parts.Type != "array:any" {
-		t.Fatalf("parts type = %q, want array:any", parts.Type)
+	if parts.Type != "array:string" {
+		t.Fatalf("parts type = %q, want array:string", parts.Type)
 	}
 }
 
@@ -471,7 +471,7 @@ func TestLSPCodeActionAddsInferredTypeHint(t *testing.T) {
 	for _, action := range actions {
 		if action.Title == "Add inferred type hint" {
 			edits := action.Edit.Changes["file:///actions.tiny"]
-			if len(edits) == 0 || edits[0].NewText != ": array:any" {
+			if len(edits) == 0 || edits[0].NewText != ": array:string" {
 				t.Fatalf("unexpected type hint action edits: %#v", edits)
 			}
 			return

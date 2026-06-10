@@ -453,3 +453,45 @@ func TestTinyPipelineReportsCompileErrors(t *testing.T) {
 		"undefined variable",
 	)
 }
+
+func TestCompileNestedNamespaceInterfaceReturn(t *testing.T) {
+	dir := t.TempDir()
+
+	// Write results.tiny
+	resultsContent := strings.Join([]string{
+		`export interface SuccessResult {`,
+		`    success: bool`,
+		`}`,
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(dir, "results.tiny"), []byte(resultsContent), 0644); err != nil {
+		t.Fatalf("failed to write results.tiny: %v", err)
+	}
+
+	// Write client.tiny
+	clientContent := strings.Join([]string{
+		`import "results.tiny" as results;`,
+		`export fn disconnect(): results.SuccessResult {`,
+		`    return {`,
+		`        success: true`,
+		`    }`,
+		`}`,
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(dir, "client.tiny"), []byte(clientContent), 0644); err != nil {
+		t.Fatalf("failed to write client.tiny: %v", err)
+	}
+
+	// Write main.tiny
+	mainContent := strings.Join([]string{
+		`import "client.tiny" as Client;`,
+		`Client.disconnect();`,
+	}, "\n")
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main.tiny: %v", err)
+	}
+
+	// Compile should succeed without TypeError
+	program := LoadProgram(mainPath)
+	compiler := NewCompiler()
+	_, _, _, _, _ = compiler.CompileProgram(program)
+}

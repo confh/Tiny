@@ -11,7 +11,7 @@ export fn has(object: object, key: string): bool {}
 export fn delete(object: object, key: string): bool {}
 
 // Returns an array containing all key names of the specified object.
-export fn keys(object: object): array {}
+export fn keys(object: object): array:string {}
 
 // Returns an array containing all property values of the specified object.
 export fn values(object: object): array {}

@@ -85,3 +85,39 @@ func TestCheckTypeHintTypedArray(t *testing.T) {
 	}
 }
 
+func TestCheckTypeHintNamespacedInterface(t *testing.T) {
+	interfaces := map[string]Interface{
+		"Client.Results.ConnectResult": {
+			Name: "Client.Results.ConnectResult",
+			Fields: map[string]TypeHint{
+				"client": stdTypeHint("number"),
+			},
+		},
+	}
+
+	val := NewNative(ObjectValue{
+		"client": NewInt(42),
+	})
+
+	// 1. Matches using prefix path suffix: Results.ConnectResult
+	ok, reason := CheckTypeHint(val, stdTypeHint("Results.ConnectResult"), interfaces)
+	if !ok {
+		t.Fatalf("expected Results.ConnectResult to resolve and match Client.Results.ConnectResult: %s", reason)
+	}
+
+	// 2. Matches using shortName: ConnectResult
+	ok, reason = CheckTypeHint(val, stdTypeHint("ConnectResult"), interfaces)
+	if !ok {
+		t.Fatalf("expected ConnectResult to resolve and match Client.Results.ConnectResult: %s", reason)
+	}
+
+	// 3. Fails when key matches but fields mismatch
+	badVal := NewNative(ObjectValue{
+		"client": NewNative("not-a-number"),
+	})
+	ok, reason = CheckTypeHint(badVal, stdTypeHint("Results.ConnectResult"), interfaces)
+	if ok {
+		t.Fatal("expected Results.ConnectResult to reject value due to field type mismatch")
+	}
+}
+
