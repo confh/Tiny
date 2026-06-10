@@ -84,6 +84,9 @@ fn greet(name, prefix = "Hello") {
 fn collect(values = [1, "two", false, null, [3],]) {
     return values;
 }
+fn configure(options = { name: "tiny", retries: 3, flags: [true, false], nested: { ok: true }, }) {
+    return options;
+}
 `)
 
 	fn := program.Statements[0].(FunctionStmt)
@@ -119,6 +122,27 @@ fn collect(values = [1, "two", false, null, [3],]) {
 	nested, ok := arrayValue.Elements[4].Value.(*ArrayValue)
 	if !ok || len(nested.Elements) != 1 || nested.Elements[0].AsInt != 3 {
 		t.Fatalf("unexpected nested array element: %#v", arrayValue.Elements[4])
+	}
+
+	configure := program.Statements[2].(FunctionStmt)
+	if len(configure.Params) != 1 || !configure.Params[0].HasDefault {
+		t.Fatalf("expected configure to have object default param, got %#v", configure.Params)
+	}
+
+	objectValue, ok := configure.Params[0].DefaultValue.Value.(ObjectValue)
+	if !ok {
+		t.Fatalf("expected object default value, got %T", configure.Params[0].DefaultValue.Value)
+	}
+	if objectValue["name"].Value != "tiny" || objectValue["retries"].AsInt != 3 {
+		t.Fatalf("unexpected object default fields: %#v", objectValue)
+	}
+	flags, ok := objectValue["flags"].Value.(*ArrayValue)
+	if !ok || len(flags.Elements) != 2 || flags.Elements[0].Value != true || flags.Elements[1].Value != false {
+		t.Fatalf("unexpected object default flags: %#v", objectValue["flags"])
+	}
+	nestedObject, ok := objectValue["nested"].Value.(ObjectValue)
+	if !ok || nestedObject["ok"].Value != true {
+		t.Fatalf("unexpected nested object default: %#v", objectValue["nested"])
 	}
 }
 

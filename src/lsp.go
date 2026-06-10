@@ -228,7 +228,6 @@ type CallHierarchyOutgoingCall struct {
 	FromRanges []LSPRange        `json:"fromRanges"`
 }
 
-
 //go:embed lsp_stubs/*
 var lspStubs embed.FS
 
@@ -837,7 +836,6 @@ func getSignatureHelp(uri string, text string, pos Position) any {
 				}
 			}
 		}
-
 
 		if sym.Kind == SymbolNamespace {
 			member, ok := sym.Members[ctx.Method]
@@ -2084,6 +2082,13 @@ func refreshLSPDocument(uri string, text string) {
 	publishDiagnosticsForImportDependents(uri)
 }
 
+func refreshLSPDocumentFast(uri string, text string) {
+	path := URIToPath(uri)
+	lspDocs[path] = text
+	invalidateLSPImportCacheForURI(path)
+	publishParseDiagnostics(uri, text)
+}
+
 func handleLSPMessage(msg LSPMessage) {
 	switch msg.Method {
 	case "initialize":
@@ -2146,7 +2151,7 @@ func handleLSPMessage(msg LSPMessage) {
 
 		if len(params.ContentChanges) > 0 {
 			text := params.ContentChanges[0].Text
-			refreshLSPDocument(params.TextDocument.URI, text)
+			refreshLSPDocumentFast(params.TextDocument.URI, text)
 		}
 
 	case "textDocument/didSave":
@@ -2542,6 +2547,14 @@ func semanticDiagnostics(uri string, text string) []map[string]any {
 }
 
 func publishDiagnostics(uri string, text string) {
+	publishDiagnosticsWithMode(uri, text, true)
+}
+
+func publishParseDiagnostics(uri string, text string) {
+	publishDiagnosticsWithMode(uri, text, false)
+}
+
+func publishDiagnosticsWithMode(uri string, text string, includeSlowChecks bool) {
 	if text == "" {
 		params, _ := json.Marshal(map[string]any{
 			"uri":         uri,
@@ -2561,7 +2574,7 @@ func publishDiagnostics(uri string, text string) {
 
 	for _, diagnostic := range parseDiagnostics {
 		line := diagnostic.Line
-		column := diagnostic.Column - 1
+		column := diagnostic.Column
 
 		if line < 0 || column < 0 {
 			name := extractNameFromMessage(diagnostic.Message)
@@ -2599,10 +2612,12 @@ func publishDiagnostics(uri string, text string) {
 		})
 	}
 
-	if len(parseDiagnostics) == 0 {
+	if includeSlowChecks && len(parseDiagnostics) == 0 {
 		diagnostics = append(diagnostics, semanticDiagnostics(uri, text)...)
 	}
-	diagnostics = append(diagnostics, importDiagnostics(uri, text)...)
+	if includeSlowChecks {
+		diagnostics = append(diagnostics, importDiagnostics(uri, text)...)
+	}
 
 	diagnostics = normalizeDiagnosticRangesForLSP(text, diagnostics)
 
@@ -2995,7 +3010,6 @@ func libraryPackageCompletions() []CompletionItem {
 	}
 	return rankedCompletionItems(dedupeCompletionItems(items))
 }
-
 
 func stdModuleNameCompletions() []CompletionItem {
 	items := []CompletionItem{}
@@ -3503,7 +3517,6 @@ func resolveMemberFromStaticType(scope *Scope, typ string, member string) (Symbo
 		return SymbolInfo{}, "unknown", false
 	}
 
-	// --- NEW: RESOLVE FROM NAMESPACE STATIC TYPE ---
 	if strings.HasPrefix(typ, "namespace:") {
 		nsName := strings.TrimPrefix(typ, "namespace:")
 		ns, ok := scope.Resolve(nsName)
@@ -3564,6 +3577,51 @@ func resolveMemberFromStaticType(scope *Scope, typ string, member string) (Symbo
 	return SymbolInfo{}, "unknown", false
 }
 
+func stripIndexAccesses(part string) (string, int) {
+	base := part
+	count := 0
+	for {
+		base = strings.TrimSpace(base)
+		if !strings.HasSuffix(base, "]") {
+			break
+		}
+		depth := 0
+		found := -1
+		for i := len(base) - 1; i >= 0; i-- {
+			if base[i] == ']' {
+				depth++
+			} else if base[i] == '[' {
+				depth--
+				if depth == 0 {
+					found = i
+					break
+				}
+			}
+		}
+		if found >= 0 {
+			base = base[:found]
+			count++
+		} else {
+			break
+		}
+	}
+	return strings.TrimSpace(base), count
+}
+
+func applyIndexAccessType(typ string, count int) string {
+	for i := 0; i < count; i++ {
+		typ = strings.TrimSpace(typ)
+		if strings.HasPrefix(typ, "array:") {
+			typ = strings.TrimPrefix(typ, "array:")
+		} else if typ == "array" {
+			typ = "any"
+		} else {
+			return "any"
+		}
+	}
+	return typ
+}
+
 func resolveReceiverPath(scope *Scope, text string, pos Position, receiver string) (SymbolInfo, string, bool) {
 	parts := splitReceiverPath(receiver)
 	if len(parts) == 0 {
@@ -3573,9 +3631,10 @@ func resolveReceiverPath(scope *Scope, text string, pos Position, receiver strin
 	var sym SymbolInfo
 	var typ string
 	ok := false
-	qualified := parts[0]
 
-	if parts[0] == "this" {
+	baseName, indexCount := stripIndexAccesses(parts[0])
+
+	if baseName == "this" {
 		className := classNameAtPosition(text, pos)
 		if className == "" {
 			return SymbolInfo{}, "", false
@@ -3588,20 +3647,22 @@ func resolveReceiverPath(scope *Scope, text string, pos Position, receiver strin
 		typ = "class:" + className
 		ok = true
 	} else {
-		sym, ok = scope.Resolve(parts[0])
+		sym, ok = scope.Resolve(baseName)
 		if !ok {
 			return SymbolInfo{}, "", false
 		}
-		typ = staticTypeOfSymbol(parts[0], sym)
+		typ = staticTypeOfSymbol(baseName, sym)
 	}
+
+	typ = applyIndexAccessType(typ, indexCount)
 
 	if len(parts) == 1 {
 		return sym, typ, true
 	}
 
 	for _, member := range parts[1:] {
-		qualified += "." + member
-		cleanMember := cleanMemberName(member)
+		cleanMember, memberIndexCount := stripIndexAccesses(member)
+		cleanMember = cleanMemberName(cleanMember)
 
 		if sym.Kind == SymbolNamespace {
 			memberSym, exists := sym.Members[cleanMember]
@@ -3609,37 +3670,28 @@ func resolveReceiverPath(scope *Scope, text string, pos Position, receiver strin
 				return SymbolInfo{}, "unknown", false
 			}
 			sym = memberSym
-			typ = staticTypeOfSymbol(qualified, memberSym)
-			continue
-		}
-
-		if fieldSym, exists := sym.Fields[cleanMember]; exists {
+			typ = staticTypeOfSymbol(cleanMember, memberSym)
+		} else if fieldSym, exists := sym.Fields[cleanMember]; exists {
 			sym = fieldSym
 			typ = fieldSym.Type
-			continue
-		}
-
-		if methodSym, exists := sym.Methods[cleanMember]; exists {
+		} else if methodSym, exists := sym.Methods[cleanMember]; exists {
 			sym = methodSym
 			typ = firstNonEmpty(methodSym.Returns, "function")
-			continue
-		}
-
-		if nextSym, nextType, exists := resolveMemberFromStaticType(scope, typ, cleanMember); exists {
+		} else if nextSym, nextType, exists := resolveMemberFromStaticType(scope, typ, cleanMember); exists {
 			sym = nextSym
 			typ = nextType
-			continue
-		}
-
-		if sym.Type == "object" && sym.Fields != nil {
+		} else if sym.Type == "object" && sym.Fields != nil {
 			if fieldSym, exists := sym.Fields[cleanMember]; exists {
 				sym = fieldSym
 				typ = fieldSym.Type
-				continue
+			} else {
+				return SymbolInfo{}, "unknown", false
 			}
+		} else {
+			return SymbolInfo{}, "unknown", false
 		}
 
-		return SymbolInfo{}, "unknown", false
+		typ = applyIndexAccessType(typ, memberIndexCount)
 	}
 
 	return sym, typ, true
@@ -4150,6 +4202,7 @@ func receiverBeforeDot(text string) string {
 
 	i := len(text) - 1
 	depthParen := 0
+	depthBracket := 0
 
 	for i >= 0 {
 		ch := text[i]
@@ -4165,6 +4218,17 @@ func receiverBeforeDot(text string) string {
 			continue
 		}
 
+		if depthBracket > 0 {
+			switch ch {
+			case ']':
+				depthBracket++
+			case '[':
+				depthBracket--
+			}
+			i--
+			continue
+		}
+
 		if isIdentChar(ch) || ch == '.' || ch == '?' {
 			i--
 			continue
@@ -4172,6 +4236,12 @@ func receiverBeforeDot(text string) string {
 
 		if ch == ')' {
 			depthParen++
+			i--
+			continue
+		}
+
+		if ch == ']' {
+			depthBracket++
 			i--
 			continue
 		}

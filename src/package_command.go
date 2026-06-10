@@ -281,6 +281,10 @@ func looksLikeGitHubPackageSource(target string) bool {
 }
 
 func installOneDependency(name string, dep TinyDependencyConfig, target string) TinyDependencyConfig {
+	return installOneDependencyWithVisited(name, dep, target, map[string]bool{})
+}
+
+func installOneDependencyWithVisited(name string, dep TinyDependencyConfig, target string, visited map[string]bool) TinyDependencyConfig {
 	if name == "" {
 		LangError(ErrorRuntime, "dependency name cannot be empty")
 	}
@@ -300,6 +304,12 @@ func installOneDependency(name string, dep TinyDependencyConfig, target string) 
 	})
 	dep.Path = ""
 
+	packageKey := strings.ToLower(spec.Owner + "/" + spec.Repo + "@" + spec.Ref)
+	if visited[packageKey] {
+		return dep
+	}
+	visited[packageKey] = true
+
 	if target == "" {
 		target = normalizeTarget("")
 	} else {
@@ -310,6 +320,21 @@ func installOneDependency(name string, dep TinyDependencyConfig, target string) 
 
 	if installedDependencyExists(spec.Owner, spec.Repo, spec.Ref, target) {
 		fmt.Printf("Using cached %s from %s@%s\n", name, spec.Owner+"/"+spec.Repo, spec.Ref)
+
+		// Recursively install cached dependencies
+		if pkgConfig, ok := loadTinyConfigFrom(filepath.Join(dest, "tiny.json")); ok {
+			subLock := emptyTinyLock()
+			if bytes, err := os.ReadFile(filepath.Join(dest, "tiny.lock")); err == nil {
+				json.Unmarshal(bytes, &subLock)
+			}
+			for subName, subDep := range pkgConfig.Dependencies {
+				if locked, ok := subLock.Dependencies[subName]; ok {
+					subDep = applyLockedDependency(subDep, locked)
+				}
+				installOneDependencyWithVisited(subName, subDep, target, visited)
+			}
+		}
+
 		return dep
 	}
 
@@ -341,6 +366,18 @@ func installOneDependency(name string, dep TinyDependencyConfig, target string) 
 		LangError(ErrorRuntime, "failed to install dependency %s: %v", name, err)
 	}
 	writeInstalledDependencyMetadata(dest, target)
+
+	// Recursively install dependencies of the newly installed package
+	subLock := emptyTinyLock()
+	if bytes, err := os.ReadFile(filepath.Join(tempDir, "tiny.lock")); err == nil {
+		json.Unmarshal(bytes, &subLock)
+	}
+	for subName, subDep := range packageConfig.Dependencies {
+		if locked, ok := subLock.Dependencies[subName]; ok {
+			subDep = applyLockedDependency(subDep, locked)
+		}
+		installOneDependencyWithVisited(subName, subDep, target, visited)
+	}
 
 	invalidateInstalledLibraryImportCache()
 
@@ -389,12 +426,18 @@ func installPackagePlugins(spec githubPackageSpec, config TinyProjectConfig, pac
 		if plugin.Path == "" {
 			LangError(ErrorRuntime, "plugin %s in %s/%s tiny.json is missing path", plugin.Name, spec.Owner, spec.Repo)
 		}
+		if !pluginPathAppliesToTarget(plugin.Path, target) {
+			continue
+		}
 
 		pluginPath := normalizePluginPathForTarget(plugin.Path, target)
 		downloadReleaseAssetTo(release, filepath.Base(pluginPath), filepath.Join(packageDir, pluginPath), spec)
 
 		for _, file := range plugin.Files {
 			if file == "" {
+				continue
+			}
+			if !pluginPathAppliesToTarget(file, target) {
 				continue
 			}
 			downloadReleaseAssetTo(release, filepath.Base(file), filepath.Join(packageDir, file), spec)

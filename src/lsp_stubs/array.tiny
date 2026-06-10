@@ -1,4 +1,4 @@
 // Generates an array containing numbers from min (inclusive) to max (exclusive).
-export fn range(min: number, max: number): array {}
+export fn range(min: number, max: number): array:number {}
 // Creates a new array cloned from the source array.
 export fn from(src: array): array {}

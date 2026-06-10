@@ -97,6 +97,57 @@ func TestConfiguredPluginPathsIncludeProjectAndDependencyConfigs(t *testing.T) {
 	}
 }
 
+func TestConfiguredPluginPathsFilterNativePluginEntriesByTarget(t *testing.T) {
+	dir := t.TempDir()
+	withWorkingDir(t, dir)
+	t.Setenv("TINY_HOME", filepath.Join(dir, "tiny-home"))
+
+	writeConfigForTest(t, filepath.Join(dir, "tiny.json"), TinyProjectConfig{
+		Plugins: []TinyProjectPluginConfig{
+			{Name: "tiny_sqlite.dll", Path: filepath.Join("plugins", "tiny_sqlite.dll")},
+			{Name: "tiny_sqlite.so", Path: filepath.Join("plugins", "tiny_sqlite.so")},
+			{Name: "tiny_sqlite.dylib", Path: filepath.Join("plugins", "tiny_sqlite.dylib")},
+			{Name: "config", Path: filepath.Join("plugins", "tiny_sqlite"), Files: []string{
+				filepath.Join("plugins", "helper.dll"),
+				filepath.Join("plugins", "helper.so"),
+				filepath.Join("plugins", "metadata.dat"),
+			}},
+		},
+	})
+
+	linuxPaths := configuredPluginPaths("linux-amd64")
+	if !stringSliceContains(linuxPaths, filepath.Clean(filepath.Join("plugins", "tiny_sqlite.so"))) {
+		t.Fatalf("expected linux plugin paths to include .so, got %#v", linuxPaths)
+	}
+	if stringSliceContains(linuxPaths, filepath.Clean(filepath.Join("plugins", "tiny_sqlite.dll"))) ||
+		stringSliceContains(linuxPaths, filepath.Clean(filepath.Join("plugins", "tiny_sqlite.dylib"))) ||
+		stringSliceContains(linuxPaths, filepath.Clean(filepath.Join("plugins", "helper.dll"))) {
+		t.Fatalf("expected linux plugin paths to exclude non-linux native plugins, got %#v", linuxPaths)
+	}
+	if !stringSliceContains(linuxPaths, filepath.Clean(filepath.Join("plugins", "metadata.dat"))) {
+		t.Fatalf("expected linux plugin paths to keep non-native support files, got %#v", linuxPaths)
+	}
+
+	windowsPaths := configuredPluginPaths("windows-amd64")
+	if !stringSliceContains(windowsPaths, filepath.Clean(filepath.Join("plugins", "tiny_sqlite.dll"))) {
+		t.Fatalf("expected windows plugin paths to include .dll, got %#v", windowsPaths)
+	}
+	if stringSliceContains(windowsPaths, filepath.Clean(filepath.Join("plugins", "tiny_sqlite.so"))) ||
+		stringSliceContains(windowsPaths, filepath.Clean(filepath.Join("plugins", "tiny_sqlite.dylib"))) ||
+		stringSliceContains(windowsPaths, filepath.Clean(filepath.Join("plugins", "helper.so"))) {
+		t.Fatalf("expected windows plugin paths to exclude non-windows native plugins, got %#v", windowsPaths)
+	}
+}
+
+func stringSliceContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestLoaderResolvesDependencyEntryImport(t *testing.T) {
 	dir := t.TempDir()
 	withWorkingDir(t, dir)
@@ -439,5 +490,47 @@ func TestListDownloadedDependenciesUsesGlobalCache(t *testing.T) {
 	}
 	if libs[1].Owner != "team" || libs[1].Repo != "beta" || len(libs[1].Versions) != 1 {
 		t.Fatalf("unexpected second downloaded library: %#v", libs[1])
+	}
+}
+
+func TestRecursiveDependencyInstallation(t *testing.T) {
+	dir := t.TempDir()
+	withWorkingDir(t, dir)
+	t.Setenv("TINY_HOME", filepath.Join(dir, "tiny-home"))
+
+	alphaRoot := libraryGlobalRoot("owner", "alpha", "v1")
+	betaRoot := libraryGlobalRoot("owner", "beta", "v2")
+	gammaRoot := libraryGlobalRoot("owner", "gamma", "v3")
+
+	writeConfigForTest(t, filepath.Join(dir, "tiny.json"), TinyProjectConfig{
+		Dependencies: map[string]TinyDependencyConfig{
+			"alpha": {Source: "github:owner/alpha@v1"},
+		},
+	})
+
+	writeConfigForTest(t, filepath.Join(alphaRoot, "tiny.json"), TinyProjectConfig{
+		Dependencies: map[string]TinyDependencyConfig{
+			"beta": {Source: "github:owner/beta@v2"},
+		},
+	})
+
+	writeConfigForTest(t, filepath.Join(betaRoot, "tiny.json"), TinyProjectConfig{
+		Dependencies: map[string]TinyDependencyConfig{
+			"gamma": {Source: "github:owner/gamma@v3"},
+		},
+	})
+
+	writeConfigForTest(t, filepath.Join(gammaRoot, "tiny.json"), TinyProjectConfig{})
+
+	installPackagesCommand(nil)
+
+	if !installedDependencyExists("owner", "alpha", "v1", defaultProjectTarget()) {
+		t.Fatalf("expected alpha to be cached and checked")
+	}
+	if !installedDependencyExists("owner", "beta", "v2", defaultProjectTarget()) {
+		t.Fatalf("expected beta to be recursively installed/cached")
+	}
+	if !installedDependencyExists("owner", "gamma", "v3", defaultProjectTarget()) {
+		t.Fatalf("expected gamma to be recursively installed/cached")
 	}
 }

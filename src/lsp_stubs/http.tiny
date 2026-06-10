@@ -2,26 +2,74 @@
 export interface RequestObject {
     // The requested URL path.
     path: string,
-    // The HTTP method used (e.g., "GET", "POST").
+    // The path plus query string.
+    url: string,
+    // The HTTP method used, such as "GET", "POST", "PUT", "PATCH", or "DELETE".
     method: string,
-    // The request body content.
+    // The request body content as a string.
     body: string,
-    // Route parameters parsed from the path.
+    // Route parameters parsed from paths like "/users/:id".
     params: object,
     // Query parameters parsed from the URL search query.
     query: object,
     // HTTP headers associated with the request.
+    headers: object,
+    // The request content length.
+    contentLength: number,
+    // The remote network address.
+    remoteAddr: string
+}
+
+// Represents an HTTP response returned by a client request.
+export interface HttpResponse {
+    // The HTTP status code.
+    status: number,
+    // The status line text.
+    statusText: string,
+    // The response body content.
+    body: string,
+    // HTTP headers associated with the response.
     headers: object
 }
 
-// Represents an HTTP response returned by a request or handler.
-export interface HttpResponse {
-    // The HTTP status code (e.g., 200, 404).
-    status: number;
-    // The response body content.
-    body: string;
-    // HTTP headers associated with the response.
-    headers: object;
+// Options accepted by http.server().
+export interface ServerOptions {
+    // Port to listen on.
+    port: number,
+    // Host interface to bind. Use "127.0.0.1" for local-only servers.
+    host?: string,
+    // Request read timeout in milliseconds.
+    readTimeoutMs?: number,
+    // Response write timeout in milliseconds.
+    writeTimeoutMs?: number,
+    // Maximum request body size in bytes.
+    maxBodySize?: number
+}
+
+// Options accepted by client request helpers.
+export interface RequestOptions {
+    // HTTP headers to send.
+    headers?: object,
+    // Request timeout in milliseconds.
+    timeoutMs?: number,
+    // Return response body as bytes instead of string.
+    bytes?: bool
+}
+
+// Options accepted by http.request().
+export interface FullRequestOptions {
+    // HTTP method to use.
+    method?: string,
+    // Request URL.
+    url: string,
+    // HTTP headers to send.
+    headers?: object,
+    // Request body.
+    body?: any,
+    // Request timeout in milliseconds.
+    timeoutMs?: number,
+    // Return response body as bytes instead of string.
+    bytes?: bool
 }
 
 // Represents an HTTP server instance.
@@ -30,28 +78,69 @@ class Server {
     fn get(path: string, handler: string | function) {}
     // Registers a POST request handler for the specified path.
     fn post(path: string, handler: string | function) {}
+    // Registers a PUT request handler for the specified path.
+    fn put(path: string, handler: string | function) {}
+    // Registers a PATCH request handler for the specified path.
+    fn patch(path: string, handler: string | function) {}
+    // Registers a DELETE request handler for the specified path.
+    fn delete(path: string, handler: string | function) {}
     // Registers a generic request handler for all incoming requests.
     fn onRequest(handler: string | function) {}
+    // Serves static files from dir under prefix.
+    fn static(prefix: string, dir: string) {}
     // Stops the HTTP server.
     fn stop() {}
     // Starts the HTTP server, optionally in asynchronous mode.
     fn start(isAsync?: bool) {}
 }
 
+// Creates a new Server instance from a port or options object.
+export fn server(port: number | ServerOptions): Server {}
+
+// Performs a fully configurable HTTP client request.
+export fn request(options: FullRequestOptions): HttpResponse {}
+
 // Performs an HTTP GET request to the specified URL.
-export fn get(url: string, options?: object): HttpResponse {}
+export fn get(url: string, options?: RequestOptions): HttpResponse {}
 
 // Performs an HTTP POST request to the specified URL with a body.
-export fn post(url: string, body: object, options?: object): HttpResponse {}
+export fn post(url: string, body: any, options?: RequestOptions): HttpResponse {}
+
+// Performs an HTTP PUT request to the specified URL with a body.
+export fn put(url: string, body: any, options?: RequestOptions): HttpResponse {}
+
+// Performs an HTTP PATCH request to the specified URL with a body.
+export fn patch(url: string, body: any, options?: RequestOptions): HttpResponse {}
+
+// Performs an HTTP DELETE request to the specified URL.
+export fn delete(url: string, options?: RequestOptions): HttpResponse {}
 
 // Downloads a file from the specified URL and saves it to filePath.
 export fn downloadFile(filePath: string, url: string): any {}
 
-// Creates a new Server instance listening on the specified port.
-export fn server(port: number): Server {}
-
 // Helper function to return a JSON response object.
-export fn json(data: object): any {}
+export fn json(data: any): any {}
 
 // Helper function to return a plain text response object.
-export fn text(data: string): any {}
+export fn text(data: any): any {}
+
+// Helper function to return an HTML response object.
+export fn html(data: any): any {}
+
+// Creates a response with a status code and body.
+export fn status(code: number, body: any): any {}
+
+// Creates a response with status, body, and headers.
+export fn response(status: number, body: any, headers?: object): any {}
+
+// Creates an HTTP redirect response.
+export fn redirect(url: string, status?: number): any {}
+
+// Creates a 204 No Content response.
+export fn noContent(): any {}
+
+// Sends a file as the response body.
+export fn file(path: string): any {}
+
+// Sends a file as an attachment.
+export fn download(path: string, filename?: string): any {}

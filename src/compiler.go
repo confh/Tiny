@@ -3171,6 +3171,13 @@ func (c *Compiler) inferCompileTimeType(expr Expr) string {
 }
 
 func (c *Compiler) compareCompileTimeTypes(got string, expected string) bool {
+	if got == "array" {
+		got = "array:any"
+	}
+	if expected == "array" {
+		expected = "array:any"
+	}
+
 	if expected == "any" || got == "any" {
 		return true
 	}
@@ -3178,8 +3185,20 @@ func (c *Compiler) compareCompileTimeTypes(got string, expected string) bool {
 	expectedParts := strings.Split(expected, "|")
 	for _, part := range expectedParts {
 		part = strings.TrimSpace(part)
+		if part == "array" {
+			part = "array:any"
+		}
 		if got == part {
 			return true
+		}
+
+		// Handle array:elementType compatibility
+		if strings.HasPrefix(got, "array:") && strings.HasPrefix(part, "array:") {
+			gotElem := strings.TrimPrefix(got, "array:")
+			partElem := strings.TrimPrefix(part, "array:")
+			if c.compareCompileTimeTypes(gotElem, partElem) {
+				return true
+			}
 		}
 
 		if part == "object" && (strings.HasPrefix(got, "class:") || strings.HasPrefix(got, "interface:") || got == "object") {

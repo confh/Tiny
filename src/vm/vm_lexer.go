@@ -694,6 +694,8 @@ func (l *Lexer) readEscapedRune() rune {
 		return '$'
 	case '0':
 		return '\x00'
+	case 'e':
+		return '\x1b'
 	default:
 		l.fatalError(ErrorSyntax, "unknown escape sequence: \\%c", esc)
 		return esc
