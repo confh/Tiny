@@ -7342,7 +7342,6 @@ func resolveUnionInterfaceSymbols(scope *Scope, typeName string) []SymbolInfo {
 	return symbols
 }
 
-
 func findObjectTypeHintAtOffset(text string, offset int) (string, bool) {
 	lineNum := 0
 	for i := 0; i < offset && i < len(text); i++ {

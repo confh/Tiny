@@ -610,4 +610,3 @@ export const v2 = httpxs.value;
 		t.Fatalf("expected namespaces 'httpx' and 'httpxs' to be resolved, got foundHttpx=%v, foundHttpxs=%v", foundHttpx, foundHttpxs)
 	}
 }
-

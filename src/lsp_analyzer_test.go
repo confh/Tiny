@@ -1397,7 +1397,6 @@ func TestLSPLibraryAutoImportCompletion(t *testing.T) {
 	}
 }
 
-
 func TestLSPReferencesAndRename(t *testing.T) {
 	text := strings.Join([]string{
 		"const total = 1;",
@@ -2921,6 +2920,3 @@ func TestLSPUnionInterfaceObjectLiteralCompletions(t *testing.T) {
 		t.Fatalf("expected completions4 to NOT include 'url: ' due to narrowing, got %#v", completionLabels(completions4))
 	}
 }
-
-
-
