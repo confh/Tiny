@@ -358,6 +358,18 @@ func NewCompiler() *Compiler {
 	return c
 }
 
+func (c *Compiler) predeclareNamespaceFunctions(prefix string, ns NamespaceStmt) {
+	for _, nsStmt := range ns.Statements {
+		if fn, ok := nsStmt.(FunctionStmt); ok {
+			fullName := prefix + "." + ns.Name + "." + fn.Name
+			c.declaredFunctions[fullName] = true
+			c.getFunctionID(fullName)
+		} else if nestedNs, ok := nsStmt.(NamespaceStmt); ok {
+			c.predeclareNamespaceFunctions(prefix + "." + ns.Name, nestedNs)
+		}
+	}
+}
+
 func (c *Compiler) predeclareFunctions(statements []Stmt) {
 	for _, stmt := range statements {
 		switch s := stmt.(type) {
@@ -375,6 +387,8 @@ func (c *Compiler) predeclareFunctions(statements []Stmt) {
 					fullName := s.Name + "." + fn.Name
 					c.declaredFunctions[fullName] = true
 					c.getFunctionID(fullName)
+				} else if nestedNs, ok := nsStmt.(NamespaceStmt); ok {
+					c.predeclareNamespaceFunctions(s.Name, nestedNs)
 				}
 			}
 		}
@@ -622,6 +636,27 @@ func (c *Compiler) resolveVariable(name string) (Binding, bool) {
 	return Binding{}, false
 }
 
+func (c *Compiler) resolveFullyQualifiedName(expr Expr) (string, bool) {
+	switch e := expr.(type) {
+	case IdentExpr:
+		name := e.Name
+		if c.currentNamespaceVariables != nil {
+			if fullName, exists := c.currentNamespaceVariables[name]; exists {
+				return fullName, true
+			}
+		}
+		return name, true
+
+	case PropertyExpr:
+		parentName, ok := c.resolveFullyQualifiedName(e.Object)
+		if !ok {
+			return "", false
+		}
+		return parentName + "." + e.Name, true
+	}
+	return "", false
+}
+
 func (c *Compiler) compileScopedBlock(body []Stmt) {
 	c.beginScope()
 
@@ -686,9 +721,14 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 			continue
 		}
 
+		originalName := ns.Name
+		ns.Name = stmt.Name + "." + ns.Name
+
 		c.compileNamespace(ns)
 
-		members[ns.Name] = NewNative(NamespaceMemberRef{
+		namespaceVariables[originalName] = ns.Name
+
+		members[originalName] = NewNative(NamespaceMemberRef{
 			GlobalName: ns.Name,
 		})
 	}
@@ -2986,12 +3026,10 @@ func (c *Compiler) compileExpr(expr Expr) {
 			c.compileExpr(arg)
 		}
 
-		ident, ok := e.Object.(IdentExpr)
-
-		if ok {
-			_, ok := c.functions[ident.Name+"."+e.Method]
-			if ok {
-				c.usedFunctions[ident.Name+"."+e.Method] = true
+		if objName, ok := c.resolveFullyQualifiedName(e.Object); ok {
+			funcName := objName + "." + e.Method
+			if _, exists := c.functions[funcName]; exists {
+				c.usedFunctions[funcName] = true
 			}
 		}
 
@@ -3171,6 +3209,13 @@ func (c *Compiler) inferCompileTimeType(expr Expr) string {
 }
 
 func (c *Compiler) compareCompileTimeTypes(got string, expected string) bool {
+	if got == "array" {
+		got = "array:any"
+	}
+	if expected == "array" {
+		expected = "array:any"
+	}
+
 	if expected == "any" || got == "any" {
 		return true
 	}
@@ -3178,8 +3223,20 @@ func (c *Compiler) compareCompileTimeTypes(got string, expected string) bool {
 	expectedParts := strings.Split(expected, "|")
 	for _, part := range expectedParts {
 		part = strings.TrimSpace(part)
+		if part == "array" {
+			part = "array:any"
+		}
 		if got == part {
 			return true
+		}
+
+		// Handle array:elementType compatibility
+		if strings.HasPrefix(got, "array:") && strings.HasPrefix(part, "array:") {
+			gotElem := strings.TrimPrefix(got, "array:")
+			partElem := strings.TrimPrefix(part, "array:")
+			if c.compareCompileTimeTypes(gotElem, partElem) {
+				return true
+			}
 		}
 
 		if part == "object" && (strings.HasPrefix(got, "class:") || strings.HasPrefix(got, "interface:") || got == "object") {

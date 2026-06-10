@@ -280,6 +280,129 @@ func TestTinyPipelineNamespaceMethodReturnsInterfaceObjectLiteral(t *testing.T) 
 	}
 }
 
+func TestTinyPipelineNamespacedLibraryImportsCollision(t *testing.T) {
+	program := vm.Program{
+		Statements: []vm.Stmt{
+			vm.NamespaceStmt{
+				Name: "NS1",
+				Statements: []vm.Stmt{
+					vm.NamespaceStmt{
+						Name: "Dep",
+						Statements: []vm.Stmt{
+							vm.FunctionStmt{
+								Name: "val",
+								ReturnType: vm.TypeHint{Name: "string"},
+								Body: []vm.Stmt{
+									vm.ReturnStmt{
+										HasValue: true,
+										Value: vm.StringExpr{Value: "NS1.Dep"},
+									},
+								},
+							},
+						},
+					},
+					vm.FunctionStmt{
+						Name: "test",
+						ReturnType: vm.TypeHint{Name: "string"},
+						Body: []vm.Stmt{
+							vm.ReturnStmt{
+								HasValue: true,
+								Value: vm.MemberCallExpr{
+									Object: vm.IdentExpr{Name: "Dep"},
+									Method: "val",
+									Args: []vm.Expr{},
+								},
+							},
+						},
+					},
+				},
+			},
+			vm.NamespaceStmt{
+				Name: "NS2",
+				Statements: []vm.Stmt{
+					vm.NamespaceStmt{
+						Name: "Dep",
+						Statements: []vm.Stmt{
+							vm.FunctionStmt{
+								Name: "val",
+								ReturnType: vm.TypeHint{Name: "string"},
+								Body: []vm.Stmt{
+									vm.ReturnStmt{
+										HasValue: true,
+										Value: vm.StringExpr{Value: "NS2.Dep"},
+									},
+								},
+							},
+						},
+					},
+					vm.FunctionStmt{
+						Name: "test",
+						ReturnType: vm.TypeHint{Name: "string"},
+						Body: []vm.Stmt{
+							vm.ReturnStmt{
+								HasValue: true,
+								Value: vm.MemberCallExpr{
+									Object: vm.IdentExpr{Name: "Dep"},
+									Method: "val",
+									Args: []vm.Expr{},
+								},
+							},
+						},
+					},
+				},
+			},
+			vm.ImportStmt{
+				Path:  "io",
+				Std:   true,
+				Alias: "io",
+			},
+			vm.ExprStmt{
+				Value: vm.MemberCallExpr{
+					Object: vm.IdentExpr{Name: "io"},
+					Method: "println",
+					Args: []vm.Expr{
+						vm.MemberCallExpr{
+							Object: vm.IdentExpr{Name: "NS1"},
+							Method: "test",
+							Args:   []vm.Expr{},
+						},
+					},
+				},
+			},
+			vm.ExprStmt{
+				Value: vm.MemberCallExpr{
+					Object: vm.IdentExpr{Name: "io"},
+					Method: "println",
+					Args: []vm.Expr{
+						vm.MemberCallExpr{
+							Object: vm.IdentExpr{Name: "NS2"},
+							Method: "test",
+							Args:   []vm.Expr{},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	compiler := NewCompiler()
+	mainInstructions, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
+
+	mainInstructions = vm.OptimizeBytecode(mainInstructions)
+	for name, fn := range functions {
+		fn.Instructions = vm.OptimizeBytecode(fn.Instructions)
+		functions[name] = fn
+	}
+
+	res := runTinyBytecode(t, mainInstructions, functions, classes, interfaces, globalIndex)
+	out := requireTinySuccess(t, res)
+
+	const want = "NS1.Dep\nNS2.Dep\n"
+	if out != want {
+		t.Fatalf("unexpected output: want %q, got %q", want, out)
+	}
+}
+
 func TestTinyPipelineBytecodeRoundTrip(t *testing.T) {
 	mainInstructions, functions, classes, interfaces, globalIndex := compileTinyFile(t, fixturePath("arithmetic.tiny"))
 

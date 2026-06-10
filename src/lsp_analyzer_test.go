@@ -34,6 +34,60 @@ func TestLSPThisCompletionInPartialClass(t *testing.T) {
 	}
 }
 
+func TestLSPCompletionInsideFunctionWithReturnType(t *testing.T) {
+	text := strings.Join([]string{
+		`let enabled = true`,
+		`export fn style(text: string, code: string): string {`,
+		`    te`,
+		`}`,
+	}, "\n")
+
+	items := getCompletions("file:///return_type_completion.tiny", text, Position{
+		Line:      2,
+		Character: len("    te"),
+	})
+
+	if !completionLabelsContain(items, "text") {
+		t.Fatalf("expected completion inside return-typed function to include parameter text, got %#v", completionLabels(items))
+	}
+}
+
+func TestLSPCompletionInsideParenthesislessForBlock(t *testing.T) {
+	text := strings.Join([]string{
+		`class Context {`,
+		`    fn json(data: any) {}`,
+		`}`,
+		`class App {`,
+		`    field middlewares = []`,
+		`    fn runMiddlewares(ctx: Context) {`,
+		`        for let i = 0; i < this.middlewares.length(); i++ {`,
+		`            this.`,
+		`            ctx.`,
+		`        }`,
+		`    }`,
+		`}`,
+	}, "\n")
+
+	thisItems := getCompletions("file:///loop_completion.tiny", text, Position{
+		Line:      7,
+		Character: len(`            this.`),
+	})
+	if !completionLabelsContain(thisItems, "middlewares") {
+		t.Fatalf("expected this. completions inside for block to include field middlewares, got %#v", completionLabels(thisItems))
+	}
+	if !completionLabelsContain(thisItems, "runMiddlewares") {
+		t.Fatalf("expected this. completions inside for block to include method runMiddlewares, got %#v", completionLabels(thisItems))
+	}
+
+	ctxItems := getCompletions("file:///loop_completion.tiny", text, Position{
+		Line:      8,
+		Character: len(`            ctx.`),
+	})
+	if !completionLabelsContain(ctxItems, "json") {
+		t.Fatalf("expected ctx. completions inside for block to include Context method json, got %#v", completionLabels(ctxItems))
+	}
+}
+
 func TestLSPThisFieldChainCompletionUsesFieldType(t *testing.T) {
 	text := strings.Join([]string{
 		"class TaskManager {",
@@ -74,7 +128,7 @@ func TestLSPPrimitiveMethodCallAssignmentInference(t *testing.T) {
 
 	cases := map[string]string{
 		"hasComma":   "bool",
-		"parts":      "array",
+		"parts":      "array:any",
 		"joined":     "string",
 		"literalHas": "bool",
 	}
@@ -113,7 +167,7 @@ func TestLSPPrimitiveMethodCallAssignmentInferenceFromFunctionParam(t *testing.T
 	})
 
 	cases := map[string]string{
-		"parts":  "array",
+		"parts":  "array:any",
 		"hasDot": "bool",
 	}
 
@@ -166,11 +220,55 @@ func TestLSPHoverNestedStdFunctionCall(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected hover for nested http.server call, got %#v", result)
 	}
-	if !strings.Contains(hover.Contents.Value, "server(port: number)") {
+	if !strings.Contains(hover.Contents.Value, "server(port: number | interface:ServerOptions)") {
 		t.Fatalf("unexpected hover contents: %s", hover.Contents.Value)
 	}
-	if !strings.Contains(hover.Contents.Value, "Creates a new Server instance listening on the specified port.") {
+	if !strings.Contains(hover.Contents.Value, "Creates a new Server instance from a port or options object.") {
 		t.Fatalf("expected std stub documentation in hover contents: %s", hover.Contents.Value)
+	}
+}
+
+func TestLSPHoverPrefersInterfaceFieldDeclarationOverFunctionNameCollision(t *testing.T) {
+	line := `    status: number,`
+	text := strings.Join([]string{
+		`export interface HttpResponse {`,
+		line,
+		`}`,
+		`export fn status(code: number, body: any) {}`,
+	}, "\n")
+
+	result := getHover("file:///collision.tiny", text, Position{
+		Line:      1,
+		Character: strings.Index(line, "status") + len("sta"),
+	})
+	hover, ok := result.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover for interface field declaration, got %#v", result)
+	}
+	if !strings.Contains(hover.Contents.Value, "HttpResponse.status") || strings.Contains(hover.Contents.Value, "status(code") {
+		t.Fatalf("expected interface field hover, got %q", hover.Contents.Value)
+	}
+}
+
+func TestLSPHoverPrefersClassMethodDeclarationOverFunctionNameCollision(t *testing.T) {
+	line := `    fn get(path: string, handler: function) {}`
+	text := strings.Join([]string{
+		`class Server {`,
+		line,
+		`}`,
+		`export fn get(url: string) {}`,
+	}, "\n")
+
+	result := getHover("file:///collision.tiny", text, Position{
+		Line:      1,
+		Character: strings.Index(line, "get") + len("ge"),
+	})
+	hover, ok := result.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover for class method declaration, got %#v", result)
+	}
+	if !strings.Contains(hover.Contents.Value, "Server.get(path: string") || strings.Contains(hover.Contents.Value, "get(url") {
+		t.Fatalf("expected class method hover, got %q", hover.Contents.Value)
 	}
 }
 
@@ -327,8 +425,8 @@ func TestLSPTruthyIfNarrowsNullFromUnion(t *testing.T) {
 	if !ok {
 		t.Fatal("expected parts in scope")
 	}
-	if parts.Type != "array" {
-		t.Fatalf("parts type = %q, want array", parts.Type)
+	if parts.Type != "array:any" {
+		t.Fatalf("parts type = %q, want array:any", parts.Type)
 	}
 }
 
@@ -373,7 +471,7 @@ func TestLSPCodeActionAddsInferredTypeHint(t *testing.T) {
 	for _, action := range actions {
 		if action.Title == "Add inferred type hint" {
 			edits := action.Edit.Changes["file:///actions.tiny"]
-			if len(edits) == 0 || edits[0].NewText != ": array" {
+			if len(edits) == 0 || edits[0].NewText != ": array:any" {
 				t.Fatalf("unexpected type hint action edits: %#v", edits)
 			}
 			return
@@ -1215,6 +1313,90 @@ func TestLSPFileAutoImportCompletion(t *testing.T) {
 		t.Fatalf("expected todo import edit, got %#v", item)
 	}
 }
+
+func TestLSPLibraryAutoImportCompletion(t *testing.T) {
+	dir := t.TempDir()
+	withWorkingDir(t, dir)
+	t.Setenv("TINY_HOME", filepath.Join(dir, "tiny-home"))
+
+	// Create local library dependency root
+	libRoot := filepath.Join(dir, "TinyHttpx")
+	if err := os.MkdirAll(filepath.Join(libRoot, "src"), 0755); err != nil {
+		t.Fatalf("create libRoot src dir: %v", err)
+	}
+
+	// Write tiny.json in project root referencing local path dependency
+	projRoot := filepath.Join(dir, "myproject")
+	writeConfigForTest(t, filepath.Join(projRoot, "tiny.json"), TinyProjectConfig{
+		Dependencies: map[string]TinyDependencyConfig{
+			"TinyHttpx": {
+				Source: "github:confh/TinyHttpx",
+				Path:   "../TinyHttpx",
+			},
+		},
+	})
+
+	// Write files in local dependency
+	writeConfigForTest(t, filepath.Join(libRoot, "tiny.json"), TinyProjectConfig{
+		Entry: "src/httpx.tiny",
+	})
+	if err := os.WriteFile(filepath.Join(libRoot, "src", "httpx.tiny"), []byte(strings.Join([]string{
+		"export class Context {",
+		"}",
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("write httpx.tiny: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(libRoot, "src", "file2.tiny"), []byte(strings.Join([]string{
+		"export class User {",
+		"}",
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("write file2.tiny: %v", err)
+	}
+
+	mainPath := filepath.Join(projRoot, "src", "main.tiny")
+	if err := os.MkdirAll(filepath.Dir(mainPath), 0755); err != nil {
+		t.Fatalf("create main.tiny dir: %v", err)
+	}
+
+	// 1. Completion for Context from the main entry file of the library
+	// (Should resolve to import lib "confh/TinyHttpx" as TinyHttpx)
+	text := "Cont"
+	items := getCompletions(pathToFileURI(mainPath), text, Position{
+		Line:      0,
+		Character: len("Cont"),
+	})
+
+	item, ok := completionItemByLabel(items, "Context")
+	if !ok {
+		t.Fatalf("expected Context auto-import completion, got %#v", completionLabels(items))
+	}
+	if item.InsertText != "TinyHttpx.Context($0)" || item.InsertTextFormat != 2 {
+		t.Fatalf("expected Context constructor insert text, got %#v", item)
+	}
+	if len(item.AdditionalTextEdits) != 1 || item.AdditionalTextEdits[0].NewText != "import lib \"confh/TinyHttpx\" as TinyHttpx;\n" {
+		t.Fatalf("expected library import edit, got %#v", item)
+	}
+
+	// 2. Completion for User from the sub-path file of the library
+	// (Should resolve to import lib "confh/TinyHttpx/src/file2.tiny" as File2)
+	text2 := "Us"
+	items2 := getCompletions(pathToFileURI(mainPath), text2, Position{
+		Line:      0,
+		Character: len("Us"),
+	})
+
+	item2, ok := completionItemByLabel(items2, "User")
+	if !ok {
+		t.Fatalf("expected User auto-import completion, got %#v", completionLabels(items2))
+	}
+	if item2.InsertText != "File2.User($0)" || item2.InsertTextFormat != 2 {
+		t.Fatalf("expected User constructor insert text, got %#v", item2)
+	}
+	if len(item2.AdditionalTextEdits) != 1 || item2.AdditionalTextEdits[0].NewText != "import lib \"confh/TinyHttpx/src/file2.tiny\" as File2;\n" {
+		t.Fatalf("expected sub-path library import edit, got %#v", item2)
+	}
+}
+
 
 func TestLSPReferencesAndRename(t *testing.T) {
 	text := strings.Join([]string{
@@ -2325,3 +2507,420 @@ func TestLSPHoverDocumentationComments(t *testing.T) {
 		t.Fatalf("unexpected hover content for enum: %q", hoverEnum.Contents.Value)
 	}
 }
+
+func TestLSPLoopVariables(t *testing.T) {
+	text := strings.Join([]string{
+		`fn test() {`,
+		`    for let idx = 0; idx < 10; idx++ {`,
+		`        const current = idx;`,
+		`    }`,
+		`    // outside standard loop`,
+		`    for (let idxHint: number = 0; idxHint < 5; idxHint++) {`,
+		`        const currentHint = idxHint;`,
+		`    }`,
+		`    // outside standard loop with hint`,
+		`    for item in "hello" {`,
+		`        const val = item;`,
+		`    }`,
+		`    // outside value string loop`,
+		`    for x, i in [1, 2, 3] {`,
+		`        const valx = x;`,
+		`        const indexi = i;`,
+		`    }`,
+		`    // outside index-value loop`,
+		`}`,
+	}, "\n")
+
+	uri := "file:///test_loop_vars.tiny"
+
+	// 1. Inside standard for loop let idx = 0
+	scopeIdx := scopeAtPosition(uri, text, Position{Line: 2, Character: 8}) // line 3 (index 2)
+	if sym, ok := scopeIdx.Resolve("idx"); !ok {
+		t.Fatalf("expected idx to be in scope inside standard loop")
+	} else if sym.Type != "number" {
+		t.Fatalf("expected idx to have type number, got %q", sym.Type)
+	}
+
+	// 2. Outside standard loop let idx = 0
+	scopeIdxOut := scopeAtPosition(uri, text, Position{Line: 4, Character: 4}) // line 5 (index 4)
+	if _, ok := scopeIdxOut.Resolve("idx"); ok {
+		t.Fatalf("expected idx to NOT be in scope outside standard loop")
+	}
+
+	// 3. Inside standard loop with type hint let idxHint: number
+	scopeIdxHint := scopeAtPosition(uri, text, Position{Line: 6, Character: 8}) // line 7 (index 6)
+	if sym, ok := scopeIdxHint.Resolve("idxHint"); !ok {
+		t.Fatalf("expected idxHint to be in scope inside loop with hint")
+	} else if sym.Type != "number" {
+		t.Fatalf("expected idxHint to have type number, got %q", sym.Type)
+	}
+
+	// 4. Outside standard loop with type hint
+	scopeIdxHintOut := scopeAtPosition(uri, text, Position{Line: 8, Character: 4}) // line 9 (index 8)
+	if _, ok := scopeIdxHintOut.Resolve("idxHint"); ok {
+		t.Fatalf("expected idxHint to NOT be in scope outside loop")
+	}
+
+	// 5. Inside string for-in loop (item should be string)
+	scopeItem := scopeAtPosition(uri, text, Position{Line: 10, Character: 8}) // line 11 (index 10)
+	if sym, ok := scopeItem.Resolve("item"); !ok {
+		t.Fatalf("expected item to be in scope inside string loop")
+	} else if sym.Type != "string" {
+		t.Fatalf("expected item to have type string, got %q", sym.Type)
+	}
+
+	// 6. Outside string for-in loop
+	scopeItemOut := scopeAtPosition(uri, text, Position{Line: 12, Character: 4}) // line 13 (index 12)
+	if _, ok := scopeItemOut.Resolve("item"); ok {
+		t.Fatalf("expected item to NOT be in scope outside string loop")
+	}
+
+	// 7. Inside index-value loop (x should be any, i should be number)
+	scopeX := scopeAtPosition(uri, text, Position{Line: 14, Character: 8}) // line 15 (index 14)
+	if sym, ok := scopeX.Resolve("x"); !ok {
+		t.Fatalf("expected x to be in scope inside index-val loop")
+	} else if sym.Type != "number" {
+		t.Fatalf("expected x to have type number, got %q", sym.Type)
+	}
+
+	if sym, ok := scopeX.Resolve("i"); !ok {
+		t.Fatalf("expected i to be in scope inside index-val loop")
+	} else if sym.Type != "number" {
+		t.Fatalf("expected i to have type number, got %q", sym.Type)
+	}
+
+	// 8. Outside index-value loop
+	scopeXOut := scopeAtPosition(uri, text, Position{Line: 17, Character: 4}) // line 18 (index 17)
+	if _, ok := scopeXOut.Resolve("x"); ok {
+		t.Fatalf("expected x to NOT be in scope outside loop")
+	}
+	if _, ok := scopeXOut.Resolve("i"); ok {
+		t.Fatalf("expected i to NOT be in scope outside loop")
+	}
+}
+
+func TestLSPTypedArrayVariables(t *testing.T) {
+	text := strings.Join([]string{
+		`fn test() {`,
+		`    let strings: array:string = ["a", "b"];`,
+		`    for item in strings {`,
+		`        const val = item;`,
+		`    }`,
+		`}`,
+	}, "\n")
+
+	uri := "file:///test_typed_array_vars.tiny"
+
+	// Check scope inside the loop (line 4, index 3 in 0-indexed terms)
+	scope := scopeAtPosition(uri, text, Position{Line: 3, Character: 8})
+	if sym, ok := scope.Resolve("item"); !ok {
+		t.Fatalf("expected item to be in scope")
+	} else if sym.Type != "string" {
+		t.Fatalf("expected item to have type string, got %q", sym.Type)
+	}
+}
+
+func TestLSPAnonymousFunctionParameterScoping(t *testing.T) {
+	text := strings.Join([]string{
+		`const logger = fn(ctx: httpx.Context, next) {`,
+		`    ctx.`,
+		`}`,
+		`const test = fn() {`,
+		`    ctx.`,
+		`}`,
+	}, "\n")
+
+	uri := "file:///test_param_leak.tiny"
+
+	// 1. Inside logger: ctx should be resolved
+	scopeInside := scopeAtPosition(uri, text, Position{Line: 1, Character: 4})
+	if _, ok := scopeInside.Resolve("ctx"); !ok {
+		t.Fatal("expected ctx to be in scope inside logger")
+	}
+
+	// 2. Inside test: ctx should NOT be resolved (since it has no ctx parameter)
+	scopeOutside := scopeAtPosition(uri, text, Position{Line: 4, Character: 4})
+	if _, ok := scopeOutside.Resolve("ctx"); ok {
+		t.Fatal("expected ctx to NOT leak into test function body")
+	}
+}
+
+func TestLSPTypedArrayExtensions(t *testing.T) {
+	text := strings.Join([]string{
+		`import std "array";`,
+		`const arr = ["a", "b"];`,
+		`const mixed = ["a", 1];`,
+		`const first = arr[0];`,
+		`const nested = [["a"]];`,
+		`const nestedElem = nested[0][0];`,
+		`const arr2 = array.from(arr);`,
+		`const arr3 = array.from("hello");`,
+		`const gotten = arr.get(0);`,
+		`const popped = arr.pop();`,
+		`const pushed = arr.push("c");`,
+		`const reversed = arr.reverse();`,
+		`class User {}`,
+		`const users: array:User = [];`,
+		`users.push(7);`,
+		`users.push();`,
+	}, "\n")
+
+	uri := "file:///test_typed_array_ext.tiny"
+	lspDocs[uri] = text
+	defer delete(lspDocs, uri)
+
+	// Trigger type inference by resolving the scope at the end
+	scope := scopeAtPosition(uri, text, Position{Line: 11, Character: 0})
+
+	// 1. Array literal inference
+	if sym, ok := scope.Resolve("arr"); !ok {
+		t.Fatalf("expected arr to be in scope")
+	} else if sym.Type != "array:string" {
+		t.Fatalf("expected arr type array:string, got %q", sym.Type)
+	}
+
+	if sym, ok := scope.Resolve("mixed"); !ok {
+		t.Fatalf("expected mixed to be in scope")
+	} else if sym.Type != "array:any" {
+		t.Fatalf("expected mixed type array:any, got %q", sym.Type)
+	}
+
+	// 2. Index access type inference
+	if sym, ok := scope.Resolve("first"); !ok {
+		t.Fatalf("expected first to be in scope")
+	} else if sym.Type != "string" {
+		t.Fatalf("expected first type string, got %q", sym.Type)
+	}
+
+	if sym, ok := scope.Resolve("nestedElem"); !ok {
+		t.Fatalf("expected nestedElem to be in scope")
+	} else if sym.Type != "string" {
+		t.Fatalf("expected nestedElem type string, got %q", sym.Type)
+	}
+
+	// 3. array.from return type propagation
+	if sym, ok := scope.Resolve("arr2"); !ok {
+		t.Fatalf("expected arr2 to be in scope")
+	} else if sym.Type != "array:string" {
+		t.Fatalf("expected arr2 type array:string, got %q", sym.Type)
+	}
+
+	if sym, ok := scope.Resolve("arr3"); !ok {
+		t.Fatalf("expected arr3 to be in scope")
+	} else if sym.Type != "array:string" {
+		t.Fatalf("expected arr3 type array:string, got %q", sym.Type)
+	}
+
+	// 4. Native method get/pop
+	if sym, ok := scope.Resolve("gotten"); !ok {
+		t.Fatalf("expected gotten to be in scope")
+	} else if sym.Type != "string" {
+		t.Fatalf("expected gotten type string, got %q", sym.Type)
+	}
+
+	if sym, ok := scope.Resolve("popped"); !ok {
+		t.Fatalf("expected popped to be in scope")
+	} else if sym.Type != "string" {
+		t.Fatalf("expected popped type string, got %q", sym.Type)
+	}
+
+	// 5. Native method push/reverse
+	if sym, ok := scope.Resolve("pushed"); !ok {
+		t.Fatalf("expected pushed to be in scope")
+	} else if sym.Type != "array:string" {
+		t.Fatalf("expected pushed type array:string, got %q", sym.Type)
+	}
+
+	if sym, ok := scope.Resolve("reversed"); !ok {
+		t.Fatalf("expected reversed to be in scope")
+	} else if sym.Type != "array:string" {
+		t.Fatalf("expected reversed type array:string, got %q", sym.Type)
+	}
+
+	// 6. Index access receiver resolution for autocomplete
+	_, resolvedType, ok := resolveReceiverPath(scope, text, Position{Line: 11, Character: 0}, "arr[0]")
+	if !ok {
+		t.Fatalf("expected resolveReceiverPath for arr[0] to succeed")
+	} else if resolvedType != "string" {
+		t.Fatalf("expected receiver type for arr[0] to be string, got %q", resolvedType)
+	}
+
+	// 7. Verify no "unknown type" diagnostics for typed arrays
+	statements, _ := parseTinyForLSP(uri, text)
+	for i, stmt := range statements {
+		t.Logf("STMT %d: %T %+v", i, stmt, stmt)
+	}
+
+	// and verify argument type check + correct position for wrong arg count
+	diagnostics := semanticDiagnostics(uri, text)
+	hasTypeError := false
+	hasArgCountErrorAtCorrectLine := false
+
+	for _, diag := range diagnostics {
+		message, _ := diag["message"].(string)
+		t.Logf("DIAGNOSTIC: %q", message)
+		if strings.Contains(message, "unknown type:") {
+			t.Fatalf("unexpected diagnostic: %q", message)
+		}
+		if strings.Contains(message, "cannot pass type 'number' to parameter 'value' of function 'array:class:User.push'") {
+			hasTypeError = true
+		}
+		if strings.Contains(message, "wrong argument count for array:class:User.push: expected 1, got 0") {
+			// Check line (0-indexed line range in LSP represents the actual line)
+			rng, _ := diag["range"].(map[string]any)
+			start, _ := rng["start"].(map[string]any)
+			var lineVal int
+			if val, ok := start["line"].(int); ok {
+				lineVal = val
+			} else if val, ok := start["line"].(float64); ok {
+				lineVal = int(val)
+			}
+			t.Logf("Found wrong argument count error at line: %v", lineVal)
+			// users.push() is on line 15 (0-indexed)
+			if lineVal == 15 {
+				hasArgCountErrorAtCorrectLine = true
+			}
+		}
+	}
+
+	if !hasTypeError {
+		t.Fatalf("expected type checking error for users.push(7), but none was found")
+	}
+	if !hasArgCountErrorAtCorrectLine {
+		t.Fatalf("expected wrong argument count error for users.push() at line 15, but none was found")
+	}
+}
+
+func TestLSPUnionInterfaceObjectLiteralCompletions(t *testing.T) {
+	// 1. Test union with a primitive and an interface: server(opt: number | ServerOptions)
+	text1 := strings.Join([]string{
+		`export interface ServerOptions {`,
+		`    port: number,`,
+		`    host: string`,
+		`}`,
+		``,
+		`export fn server(opt: number | ServerOptions) {}`,
+		``,
+		`fn test() {`,
+		`    server({`,
+		`        `,
+		`    })`,
+		`}`,
+	}, "\n")
+
+	completions1 := getCompletions("file:///test1.tiny", text1, Position{
+		Line:      9,
+		Character: 8,
+	})
+
+	if !completionLabelsContain(completions1, "port: ") {
+		t.Fatalf("expected completions1 to include 'port: ', got %#v", completionLabels(completions1))
+	}
+	if !completionLabelsContain(completions1, "host: ") {
+		t.Fatalf("expected completions1 to include 'host: ', got %#v", completionLabels(completions1))
+	}
+
+	// 2. Test union with multiple interfaces: ServerOptions | ClientOptions
+	text2 := strings.Join([]string{
+		`export interface ServerOptions {`,
+		`    port: number,`,
+		`    host: string`,
+		`}`,
+		`export interface ClientOptions {`,
+		`    url: string,`,
+		`    timeout: number`,
+		`}`,
+		``,
+		`export fn request(opt: ServerOptions | ClientOptions) {}`,
+		``,
+		`fn test() {`,
+		`    request({`,
+		`        `,
+		`    })`,
+		`}`,
+	}, "\n")
+
+	completions2 := getCompletions("file:///test2.tiny", text2, Position{
+		Line:      13,
+		Character: 8,
+	})
+
+	// Should merge fields from both ServerOptions and ClientOptions
+	if !completionLabelsContain(completions2, "port: ") {
+		t.Fatalf("expected completions2 to include 'port: ', got %#v", completionLabels(completions2))
+	}
+	if !completionLabelsContain(completions2, "url: ") {
+		t.Fatalf("expected completions2 to include 'url: ', got %#v", completionLabels(completions2))
+	}
+
+	// 3. Test narrowing when typing a field unique to one interface
+	text3 := strings.Join([]string{
+		`export interface ServerOptions {`,
+		`    port: number,`,
+		`    host: string`,
+		`}`,
+		`export interface ClientOptions {`,
+		`    url: string,`,
+		`    timeout: number`,
+		`}`,
+		``,
+		`export fn request(opt: ServerOptions | ClientOptions) {}`,
+		``,
+		`fn test() {`,
+		`    request({`,
+		`        url: "http://localhost",`,
+		`        `,
+		`    })`,
+		`}`,
+	}, "\n")
+
+	completions3 := getCompletions("file:///test3.tiny", text3, Position{
+		Line:      14,
+		Character: 8,
+	})
+
+	// Should narrow to ClientOptions, so only 'timeout' (and not 'port') should be suggested.
+	if !completionLabelsContain(completions3, "timeout: ") {
+		t.Fatalf("expected completions3 to include 'timeout: ', got %#v", completionLabels(completions3))
+	}
+	if completionLabelsContain(completions3, "port: ") {
+		t.Fatalf("expected completions3 to NOT include 'port: ' due to narrowing, got %#v", completionLabels(completions3))
+	}
+
+	// 4. Test narrowing to ServerOptions when typing port
+	text4 := strings.Join([]string{
+		`export interface ServerOptions {`,
+		`    port: number,`,
+		`    host: string`,
+		`}`,
+		`export interface ClientOptions {`,
+		`    url: string,`,
+		`    timeout: number`,
+		`}`,
+		``,
+		`export fn request(opt: ServerOptions | ClientOptions) {}`,
+		``,
+		`fn test() {`,
+		`    request({`,
+		`        port: 80,`,
+		`        `,
+		`    })`,
+		`}`,
+	}, "\n")
+
+	completions4 := getCompletions("file:///test4.tiny", text4, Position{
+		Line:      14,
+		Character: 8,
+	})
+
+	// Should narrow to ServerOptions, so only 'host' (and not 'url') should be suggested.
+	if !completionLabelsContain(completions4, "host: ") {
+		t.Fatalf("expected completions4 to include 'host: ', got %#v", completionLabels(completions4))
+	}
+	if completionLabelsContain(completions4, "url: ") {
+		t.Fatalf("expected completions4 to NOT include 'url: ' due to narrowing, got %#v", completionLabels(completions4))
+	}
+}
+
+
+

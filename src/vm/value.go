@@ -24,6 +24,12 @@ type HttpResponseType = int
 const (
 	HttpJson HttpResponseType = iota
 	HttpText
+	HttpHtml
+	HttpResponse
+	HttpRedirect
+	HttpNoContent
+	HttpFile
+	HttpDownload
 )
 
 type NullValue struct{}
@@ -78,12 +84,19 @@ type FunctionValue struct {
 }
 
 type NativeServerValue struct {
-	Port         int
-	GetRoutes    map[string]TinyValue
-	PostRoutes   map[string]TinyValue
-	GenericRoute TinyValue
-	mux          *http.ServeMux
-	closed       bool
+	Host           string
+	Port           int
+	ReadTimeoutMs  int
+	WriteTimeoutMs int
+	MaxBodySize    int64
+	Routes         map[string]map[string]TinyValue
+	GetRoutes      map[string]TinyValue
+	PostRoutes     map[string]TinyValue
+	StaticRoutes   map[string]string
+	GenericRoute   TinyValue
+	mux            *http.ServeMux
+	httpServer     *http.Server
+	closed         bool
 }
 
 type NativeWebViewValue struct {
@@ -103,8 +116,13 @@ type NativeTcpConnectionValue struct {
 }
 
 type NativeHttpResponseValue struct {
-	Type  HttpResponseType
-	Value TinyValue
+	Type         HttpResponseType
+	Value        TinyValue
+	Status       int
+	Headers      ObjectValue
+	Path         string
+	DownloadName string
+	RedirectURL  string
 }
 
 type NativeAppValue struct {

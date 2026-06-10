@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf16"
 
 	. "language.com/src/vm"
@@ -227,7 +228,6 @@ type CallHierarchyOutgoingCall struct {
 	To         CallHierarchyItem `json:"to"`
 	FromRanges []LSPRange        `json:"fromRanges"`
 }
-
 
 //go:embed lsp_stubs/*
 var lspStubs embed.FS
@@ -690,7 +690,12 @@ func readLSPMessage(reader *bufio.Reader) (LSPMessage, error) {
 	return msg, nil
 }
 
+var lspWriteMu sync.Mutex
+
 func writeLSPMessage(msg LSPMessage) {
+	lspWriteMu.Lock()
+	defer lspWriteMu.Unlock()
+
 	msg.JSONRPC = "2.0"
 
 	bytes, _ := json.Marshal(msg)
@@ -837,7 +842,6 @@ func getSignatureHelp(uri string, text string, pos Position) any {
 				}
 			}
 		}
-
 
 		if sym.Kind == SymbolNamespace {
 			member, ok := sym.Members[ctx.Method]
@@ -1105,7 +1109,7 @@ func importLocationAtPosition(uri string, line string, pos Position) (Location, 
 
 	switch {
 	case strings.Contains(prefix, "import lib"):
-		targetPath = resolveLibraryImportPath(pathText)
+		targetPath = resolveLibraryImportPath(pathText, uri)
 	case strings.Contains(prefix, "import std"):
 		targetPath = "std:" + pathText
 	case strings.Contains(prefix, "import"):
@@ -1815,7 +1819,7 @@ func collectImportedReferenceDocuments(uri string, text string, docs map[string]
 
 	libraryMatches := libraryImportRegex.FindAllStringSubmatch(text, -1)
 	for _, match := range libraryMatches {
-		resolved := resolveLibraryImportPath(match[1])
+		resolved := resolveLibraryImportPath(match[1], uri)
 		importURI := pathToFileURI(resolved)
 		if _, exists := docs[importURI]; exists {
 			continue
@@ -2084,6 +2088,13 @@ func refreshLSPDocument(uri string, text string) {
 	publishDiagnosticsForImportDependents(uri)
 }
 
+func refreshLSPDocumentFast(uri string, text string) {
+	path := URIToPath(uri)
+	lspDocs[path] = text
+	invalidateLSPImportCacheForURI(path)
+	publishParseDiagnostics(uri, text)
+}
+
 func handleLSPMessage(msg LSPMessage) {
 	switch msg.Method {
 	case "initialize":
@@ -2146,7 +2157,7 @@ func handleLSPMessage(msg LSPMessage) {
 
 		if len(params.ContentChanges) > 0 {
 			text := params.ContentChanges[0].Text
-			refreshLSPDocument(params.TextDocument.URI, text)
+			refreshLSPDocumentFast(params.TextDocument.URI, text)
 		}
 
 	case "textDocument/didSave":
@@ -2542,6 +2553,14 @@ func semanticDiagnostics(uri string, text string) []map[string]any {
 }
 
 func publishDiagnostics(uri string, text string) {
+	publishDiagnosticsWithMode(uri, text, true)
+}
+
+func publishParseDiagnostics(uri string, text string) {
+	publishDiagnosticsWithMode(uri, text, false)
+}
+
+func publishDiagnosticsWithMode(uri string, text string, includeSlowChecks bool) {
 	if text == "" {
 		params, _ := json.Marshal(map[string]any{
 			"uri":         uri,
@@ -2561,7 +2580,7 @@ func publishDiagnostics(uri string, text string) {
 
 	for _, diagnostic := range parseDiagnostics {
 		line := diagnostic.Line
-		column := diagnostic.Column - 1
+		column := diagnostic.Column
 
 		if line < 0 || column < 0 {
 			name := extractNameFromMessage(diagnostic.Message)
@@ -2599,10 +2618,12 @@ func publishDiagnostics(uri string, text string) {
 		})
 	}
 
-	if len(parseDiagnostics) == 0 {
+	if includeSlowChecks && len(parseDiagnostics) == 0 {
 		diagnostics = append(diagnostics, semanticDiagnostics(uri, text)...)
 	}
-	diagnostics = append(diagnostics, importDiagnostics(uri, text)...)
+	if includeSlowChecks {
+		diagnostics = append(diagnostics, importDiagnostics(uri, text)...)
+	}
 
 	diagnostics = normalizeDiagnosticRangesForLSP(text, diagnostics)
 
@@ -2648,7 +2669,7 @@ func importDiagnostics(uri string, text string) []map[string]any {
 			message := ""
 			switch {
 			case imp.Kind == "library":
-				resolved = resolveLibraryImportPath(imp.Path)
+				resolved = resolveLibraryImportPath(imp.Path, uri)
 				if resolved == imp.Path {
 					message = "library is not installed: " + imp.Path
 				} else if _, err := os.Stat(resolved); err != nil {
@@ -2755,7 +2776,7 @@ func documentImportsPath(uri string, text string, targetPath string, visited map
 	}
 
 	for _, match := range libraryImportRegex.FindAllStringSubmatch(text, -1) {
-		importPath := filepath.Clean(resolveLibraryImportPath(match[1]))
+		importPath := filepath.Clean(resolveLibraryImportPath(match[1], uri))
 		if importPath == targetPath {
 			return true
 		}
@@ -2861,7 +2882,7 @@ func fileImportPrefixAt(line string, character int) string {
 	return before[idx+len(`import "`):]
 }
 
-func libraryImportPathCompletions(line string, character int) []CompletionItem {
+func libraryImportPathCompletions(uri string, line string, character int) []CompletionItem {
 	prefix := libraryImportPrefixAt(line, character)
 	if prefix == "" || strings.Count(prefix, "/") < 2 {
 		return libraryPackageCompletions()
@@ -2872,13 +2893,7 @@ func libraryImportPathCompletions(line string, character int) []CompletionItem {
 		return libraryPackageCompletions()
 	}
 
-	root := ""
-	version := dependencyVersionForLibrary(lib.Owner, lib.Repo)
-	if version != "" {
-		root = libraryGlobalRoot(lib.Owner, lib.Repo, version)
-	} else {
-		root = firstInstalledLibraryRoot(lib.Owner, lib.Repo)
-	}
+	root := resolveLibraryRoot(lib.Owner, lib.Repo, uri)
 	if root == "" {
 		return libraryPackageCompletions()
 	}
@@ -2995,7 +3010,6 @@ func libraryPackageCompletions() []CompletionItem {
 	}
 	return rankedCompletionItems(dedupeCompletionItems(items))
 }
-
 
 func stdModuleNameCompletions() []CompletionItem {
 	items := []CompletionItem{}
@@ -3170,6 +3184,7 @@ func scopeCompletions(scope *Scope, uri string, text string, hasParens bool) []C
 
 	items = append(items, stdAutoImportCompletions(scope, text)...)
 	items = append(items, fileAutoImportCompletions(scope, uri, text, hasParens)...)
+	items = append(items, libraryAutoImportCompletions(scope, uri, text, hasParens)...)
 
 	return rankedCompletionItems(dedupeCompletionItems(items))
 }
@@ -3329,6 +3344,180 @@ func fileImportAlreadyPresent(text string, importPath string) bool {
 		}
 	}
 	return false
+}
+
+func libraryImportAlreadyPresent(text string, importPath string) bool {
+	for _, match := range libraryImportRegex.FindAllStringSubmatch(text, -1) {
+		if filepath.ToSlash(match[1]) == filepath.ToSlash(importPath) {
+			return true
+		}
+	}
+	return false
+}
+
+func libraryImportAlias(importPath string) string {
+	lib, ok := parseLibraryImportPath(importPath)
+	if !ok {
+		return "Lib"
+	}
+	if lib.Rest == "" {
+		return cleanAliasString(lib.Repo)
+	}
+	base := strings.TrimSuffix(filepath.Base(lib.Rest), filepath.Ext(lib.Rest))
+	return cleanAliasString(base)
+}
+
+func cleanAliasString(s string) string {
+	parts := strings.FieldsFunc(s, func(r rune) bool {
+		return r == '-' || r == '_' || r == ' ' || r == '.'
+	})
+	alias := ""
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		alias += strings.ToUpper(part[:1]) + part[1:]
+	}
+	if alias == "" {
+		return s
+	}
+	return alias
+}
+
+func libraryAutoImportCompletions(scope *Scope, uri string, text string, hasParens bool) []CompletionItem {
+	currentPath := URIToPath(uri)
+	if currentPath == "" {
+		return nil
+	}
+
+	type libraryRef struct {
+		Owner string
+		Repo  string
+	}
+	libs := []libraryRef{}
+	seenLib := map[string]bool{}
+
+	addLib := func(owner, repo string) {
+		if owner == "" || repo == "" {
+			return
+		}
+		key := strings.ToLower(owner + "/" + repo)
+		if seenLib[key] {
+			return
+		}
+		seenLib[key] = true
+		libs = append(libs, libraryRef{Owner: owner, Repo: repo})
+	}
+
+	var config TinyProjectConfig
+	var configOk bool
+	config, configOk = loadTinyConfigFromPath(currentPath)
+	if !configOk {
+		config, configOk = loadTinyConfig()
+	}
+	if configOk {
+		for _, dep := range config.Dependencies {
+			if dep.Source != "" {
+				spec := parseGitHubPackageSource(dep.Source)
+				addLib(spec.Owner, spec.Repo)
+			}
+		}
+	}
+
+	for _, lib := range scanInstalledLibraries() {
+		addLib(lib.Owner, lib.Repo)
+	}
+
+	items := []CompletionItem{}
+
+	for _, lib := range libs {
+		root := resolveLibraryRoot(lib.Owner, lib.Repo, currentPath)
+		if root == "" {
+			continue
+		}
+		info, err := os.Stat(root)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+
+		entryFile := "main.tiny"
+		libConfig, ok := loadTinyConfigFrom(filepath.Join(root, "tiny.json"))
+		if ok && libConfig.Entry != "" {
+			entryFile = filepath.Clean(libConfig.Entry)
+		}
+
+		filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil
+			}
+			if info.IsDir() {
+				if strings.HasPrefix(info.Name(), ".") || info.Name() == "node_modules" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if filepath.Ext(path) != ".tiny" {
+				return nil
+			}
+
+			relPath, err := filepath.Rel(root, path)
+			if err != nil {
+				return nil
+			}
+
+			relImport := filepath.ToSlash(relPath)
+			libImportPath := lib.Owner + "/" + lib.Repo + "/" + relImport
+
+			if filepath.Clean(relPath) == filepath.Clean(entryFile) {
+				libImportPath = lib.Owner + "/" + lib.Repo
+			}
+
+			if libraryImportAlreadyPresent(text, libImportPath) {
+				return nil
+			}
+
+			exports := loadTinyFileExports(path, map[string]bool{})
+			if len(exports) == 0 {
+				return nil
+			}
+
+			alias := libraryImportAlias(libImportPath)
+			importEdit := importTextEdit(text, `import lib "`+libImportPath+`" as `+alias+`;`)
+
+			names := make([]string, 0, len(exports))
+			for name := range exports {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+
+			for _, name := range names {
+				sym := exports[name]
+				if _, exists := scope.Resolve(name); exists {
+					continue
+				}
+
+				insert := alias + "." + sym.Name
+				format := 0
+				if sym.Kind == SymbolClass || sym.Kind == SymbolFunction || sym.Kind == SymbolVariable {
+					insert = alias + "." + callableInsertText(sym.Name, hasParens)
+					format = 2
+				}
+
+				items = append(items, CompletionItem{
+					Label:               sym.Name,
+					Kind:                symbolKindToCompletionKind(sym.Kind),
+					Detail:              "auto import from lib " + libImportPath,
+					InsertText:          insert,
+					InsertTextFormat:    format,
+					AdditionalTextEdits: []TextEdit{importEdit},
+				})
+			}
+
+			return nil
+		})
+	}
+
+	return items
 }
 
 func importAliasForPath(path string) string {
@@ -3503,7 +3692,6 @@ func resolveMemberFromStaticType(scope *Scope, typ string, member string) (Symbo
 		return SymbolInfo{}, "unknown", false
 	}
 
-	// --- NEW: RESOLVE FROM NAMESPACE STATIC TYPE ---
 	if strings.HasPrefix(typ, "namespace:") {
 		nsName := strings.TrimPrefix(typ, "namespace:")
 		ns, ok := scope.Resolve(nsName)
@@ -3564,6 +3752,51 @@ func resolveMemberFromStaticType(scope *Scope, typ string, member string) (Symbo
 	return SymbolInfo{}, "unknown", false
 }
 
+func stripIndexAccesses(part string) (string, int) {
+	base := part
+	count := 0
+	for {
+		base = strings.TrimSpace(base)
+		if !strings.HasSuffix(base, "]") {
+			break
+		}
+		depth := 0
+		found := -1
+		for i := len(base) - 1; i >= 0; i-- {
+			if base[i] == ']' {
+				depth++
+			} else if base[i] == '[' {
+				depth--
+				if depth == 0 {
+					found = i
+					break
+				}
+			}
+		}
+		if found >= 0 {
+			base = base[:found]
+			count++
+		} else {
+			break
+		}
+	}
+	return strings.TrimSpace(base), count
+}
+
+func applyIndexAccessType(typ string, count int) string {
+	for i := 0; i < count; i++ {
+		typ = strings.TrimSpace(typ)
+		if strings.HasPrefix(typ, "array:") {
+			typ = strings.TrimPrefix(typ, "array:")
+		} else if typ == "array" {
+			typ = "any"
+		} else {
+			return "any"
+		}
+	}
+	return typ
+}
+
 func resolveReceiverPath(scope *Scope, text string, pos Position, receiver string) (SymbolInfo, string, bool) {
 	parts := splitReceiverPath(receiver)
 	if len(parts) == 0 {
@@ -3573,9 +3806,10 @@ func resolveReceiverPath(scope *Scope, text string, pos Position, receiver strin
 	var sym SymbolInfo
 	var typ string
 	ok := false
-	qualified := parts[0]
 
-	if parts[0] == "this" {
+	baseName, indexCount := stripIndexAccesses(parts[0])
+
+	if baseName == "this" {
 		className := classNameAtPosition(text, pos)
 		if className == "" {
 			return SymbolInfo{}, "", false
@@ -3588,20 +3822,22 @@ func resolveReceiverPath(scope *Scope, text string, pos Position, receiver strin
 		typ = "class:" + className
 		ok = true
 	} else {
-		sym, ok = scope.Resolve(parts[0])
+		sym, ok = scope.Resolve(baseName)
 		if !ok {
 			return SymbolInfo{}, "", false
 		}
-		typ = staticTypeOfSymbol(parts[0], sym)
+		typ = staticTypeOfSymbol(baseName, sym)
 	}
+
+	typ = applyIndexAccessType(typ, indexCount)
 
 	if len(parts) == 1 {
 		return sym, typ, true
 	}
 
 	for _, member := range parts[1:] {
-		qualified += "." + member
-		cleanMember := cleanMemberName(member)
+		cleanMember, memberIndexCount := stripIndexAccesses(member)
+		cleanMember = cleanMemberName(cleanMember)
 
 		if sym.Kind == SymbolNamespace {
 			memberSym, exists := sym.Members[cleanMember]
@@ -3609,37 +3845,28 @@ func resolveReceiverPath(scope *Scope, text string, pos Position, receiver strin
 				return SymbolInfo{}, "unknown", false
 			}
 			sym = memberSym
-			typ = staticTypeOfSymbol(qualified, memberSym)
-			continue
-		}
-
-		if fieldSym, exists := sym.Fields[cleanMember]; exists {
+			typ = staticTypeOfSymbol(cleanMember, memberSym)
+		} else if fieldSym, exists := sym.Fields[cleanMember]; exists {
 			sym = fieldSym
 			typ = fieldSym.Type
-			continue
-		}
-
-		if methodSym, exists := sym.Methods[cleanMember]; exists {
+		} else if methodSym, exists := sym.Methods[cleanMember]; exists {
 			sym = methodSym
 			typ = firstNonEmpty(methodSym.Returns, "function")
-			continue
-		}
-
-		if nextSym, nextType, exists := resolveMemberFromStaticType(scope, typ, cleanMember); exists {
+		} else if nextSym, nextType, exists := resolveMemberFromStaticType(scope, typ, cleanMember); exists {
 			sym = nextSym
 			typ = nextType
-			continue
-		}
-
-		if sym.Type == "object" && sym.Fields != nil {
+		} else if sym.Type == "object" && sym.Fields != nil {
 			if fieldSym, exists := sym.Fields[cleanMember]; exists {
 				sym = fieldSym
 				typ = fieldSym.Type
-				continue
+			} else {
+				return SymbolInfo{}, "unknown", false
 			}
+		} else {
+			return SymbolInfo{}, "unknown", false
 		}
 
-		return SymbolInfo{}, "unknown", false
+		typ = applyIndexAccessType(typ, memberIndexCount)
 	}
 
 	return sym, typ, true
@@ -3994,7 +4221,7 @@ func getCompletions(uri string, text string, pos Position) []CompletionItem {
 	}
 
 	if isInsideLibraryImportString(line, pos.Character) {
-		return rankedCompletionItems(libraryImportPathCompletions(line, pos.Character))
+		return rankedCompletionItems(libraryImportPathCompletions(uri, line, pos.Character))
 	}
 
 	if isInsidePluginImportString(line, pos.Character) {
@@ -4150,6 +4377,7 @@ func receiverBeforeDot(text string) string {
 
 	i := len(text) - 1
 	depthParen := 0
+	depthBracket := 0
 
 	for i >= 0 {
 		ch := text[i]
@@ -4165,6 +4393,17 @@ func receiverBeforeDot(text string) string {
 			continue
 		}
 
+		if depthBracket > 0 {
+			switch ch {
+			case ']':
+				depthBracket++
+			case '[':
+				depthBracket--
+			}
+			i--
+			continue
+		}
+
 		if isIdentChar(ch) || ch == '.' || ch == '?' {
 			i--
 			continue
@@ -4172,6 +4411,12 @@ func receiverBeforeDot(text string) string {
 
 		if ch == ')' {
 			depthParen++
+			i--
+			continue
+		}
+
+		if ch == ']' {
+			depthBracket++
 			i--
 			continue
 		}

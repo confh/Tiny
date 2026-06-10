@@ -3884,18 +3884,61 @@ func (vm *VM) step() bool {
 	return false
 }
 
-func writeServerResponse(w http.ResponseWriter, value TinyValue, responseType HttpResponseType) {
-	switch responseType {
+func writeServerResponse(w http.ResponseWriter, r *http.Request, response NativeHttpResponseValue) {
+	status := response.Status
+	if status == 0 {
+		status = http.StatusOK
+	}
+
+	for key, value := range response.Headers {
+		w.Header().Set(valueToString(ToValue(key)), valueToString(value))
+	}
+
+	switch response.Type {
 	case HttpJson:
 		w.Header().Set("Content-Type", "application/json")
-		jsonValue := valueToJSONCompatible(ToValue(value))
+		jsonValue := valueToJSONCompatible(ToValue(response.Value))
 		bytes, _ := json.Marshal(jsonValue)
+		w.WriteHeader(status)
 		fmt.Fprint(w, string(bytes))
 
 	case HttpText:
-		stringValue, _ := value.Value.(string)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		stringValue := valueToString(response.Value)
 		trimmed := strings.TrimSpace(stringValue)
+		w.WriteHeader(status)
 		fmt.Fprint(w, trimmed)
+
+	case HttpHtml:
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(status)
+		fmt.Fprint(w, valueToString(response.Value))
+
+	case HttpResponse:
+		w.WriteHeader(status)
+		fmt.Fprint(w, valueToString(response.Value))
+
+	case HttpRedirect:
+		redirectStatus := status
+		if redirectStatus == http.StatusOK {
+			redirectStatus = http.StatusFound
+		}
+		http.Redirect(w, r, response.RedirectURL, redirectStatus)
+
+	case HttpNoContent:
+		w.WriteHeader(http.StatusNoContent)
+
+	case HttpFile:
+		http.ServeFile(w, r, response.Path)
+
+	case HttpDownload:
+		name := response.DownloadName
+		if name == "" {
+			parts := strings.Split(strings.ReplaceAll(response.Path, "\\", "/"), "/")
+			name = parts[len(parts)-1]
+		}
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name))
+		http.ServeFile(w, r, response.Path)
 	}
 }
 

@@ -54,6 +54,31 @@ func CheckTypeHint(value TinyValue, hint TypeHint, interfaces map[string]Interfa
 }
 
 func checkSingleTypeHint(value TinyValue, hint string, interfaces map[string]Interface) (bool, string) {
+	if hint == "array" {
+		hint = "array:any"
+	}
+
+	if strings.HasPrefix(hint, "array:") {
+		var arrObj []TinyValue
+		switch v := value.Value.(type) {
+		case ArrayValue:
+			arrObj = v.Elements
+		case *ArrayValue:
+			arrObj = v.Elements
+		default:
+			return false, ": expected array"
+		}
+
+		elementType := strings.TrimPrefix(hint, "array:")
+		elementHint := TypeHint{Name: elementType, Types: []string{elementType}}
+		for idx, elem := range arrObj {
+			if ok, subReason := CheckTypeHint(elem, elementHint, interfaces); !ok {
+				return false, fmt.Sprintf(" (at index %d: expected %s, got %s%s)", idx, elementType, TypeName(elem), subReason)
+			}
+		}
+		return true, ""
+	}
+
 	switch hint {
 	case "any":
 		return true, ""
@@ -204,9 +229,10 @@ var standardInterfaceHints = map[string]Interface{
 	"http.HttpResponse": {
 		Name: "http.HttpResponse",
 		Fields: map[string]TypeHint{
-			"status":  stdTypeHint("number"),
-			"body":    stdTypeHint("string"),
-			"headers": stdTypeHint("object"),
+			"status":     stdTypeHint("number"),
+			"statusText": stdTypeHint("string"),
+			"body":       stdTypeHint("string"),
+			"headers":    stdTypeHint("object"),
 		},
 	},
 }

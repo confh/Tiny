@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	json "github.com/goccy/go-json"
 
@@ -25,10 +26,21 @@ var stdHttpMethods map[string]StdModuleFunc
 func init() {
 	stdHttpMethods = map[string]StdModuleFunc{
 		"server":       stdHttpServer,
+		"request":      stdHttpRequest,
 		"get":          stdHttpGet,
 		"post":         stdHttpPost,
+		"put":          stdHttpPut,
+		"patch":        stdHttpPatch,
+		"delete":       stdHttpDelete,
 		"json":         stdHttpJsonResponse,
 		"text":         stdHttpTextResponse,
+		"html":         stdHttpHtmlResponse,
+		"status":       stdHttpStatusResponse,
+		"response":     stdHttpResponse,
+		"redirect":     stdHttpRedirect,
+		"noContent":    stdHttpNoContent,
+		"file":         stdHttpFile,
+		"download":     stdHttpDownload,
 		"downloadFile": stdHttpDownloadFile,
 	}
 	registerStdModule(stdHttpMetadata)
@@ -46,142 +58,137 @@ func (vm *VM) callStdHttp(method string, args []TinyValue) {
 func stdHttpServer(vm *VM, args []TinyValue) {
 	expectArgs(vm, "http.server", args, 1)
 
-	port := asInt(args[0])
 	server := &NativeServerValue{
-		Port:         port,
-		GetRoutes:    map[string]TinyValue{},
-		PostRoutes:   map[string]TinyValue{},
-		GenericRoute: NewNull(),
+		Host:           "",
+		ReadTimeoutMs:  0,
+		WriteTimeoutMs: 0,
+		MaxBodySize:    0,
+		Routes:         map[string]map[string]TinyValue{},
+		GetRoutes:      map[string]TinyValue{},
+		PostRoutes:     map[string]TinyValue{},
+		StaticRoutes:   map[string]string{},
+		GenericRoute:   NewNull(),
 	}
+
+	if args[0].IsInt {
+		server.Port = args[0].AsInt
+	} else if config, ok := args[0].Value.(ObjectValue); ok {
+		server.Port = objectInt(config, "port", 0)
+		server.Host = objectString(config, "host", "")
+		server.ReadTimeoutMs = objectInt(config, "readTimeoutMs", 0)
+		server.WriteTimeoutMs = objectInt(config, "writeTimeoutMs", 0)
+		server.MaxBodySize = int64(objectInt(config, "maxBodySize", 0))
+	} else {
+		vm.runtimeError(ErrorType, "http.server expects port number or options object")
+		return
+	}
+
+	if server.Port == 0 {
+		vm.runtimeError(ErrorRuntime, "http.server requires a non-zero port")
+		return
+	}
+
+	ensureServerRoutes(server)
 	vm.push(NewNative(server))
 }
 
 func stdHttpGet(vm *VM, args []TinyValue) {
 	expectArgsRange(vm, "http.get", args, 1, 2)
-
 	url := argString(vm, "http.get", args, 0)
-
-	var headers ObjectValue = ObjectValue{}
-
-	if len(args) > 1 {
-		extra := argObject(vm, "http.get", args, 1)
-
-		if h, hasHeaders := extra["headers"]; hasHeaders {
-			if val, ok := h.Value.(ObjectValue); ok {
-				headers = val
-			}
-		}
-	}
-
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		vm.runtimeError(ErrorRuntime, "http.get request creation failed: %s", err.Error())
-		return
-	}
-	for key, value := range headers {
-		strKey := valueToString(ToValue(key))
-		var valStr string
-		if s, ok := value.Value.(string); ok {
-			valStr = s
-		} else if value.IsInt {
-			valStr = valueToString(value)
-		} else {
-			valStr = valueToString(value)
-		}
-		req.Header.Set(strKey, valStr)
-	}
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		vm.runtimeError(ErrorRuntime, "http.get failed: %s", err.Error())
-		return
-	}
-
-	defer resp.Body.Close()
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		vm.runtimeError(ErrorRuntime, "http.get read response failed: %s", err.Error())
-		return
-	}
-
-	headersObj := ObjectValue{}
-	for k, v := range resp.Header {
-		headersObj[k] = NewNative(strings.Join(v, ","))
-	}
-
-	result := ObjectValue{
-		"status":  NewInt(resp.StatusCode),
-		"headers": NewNative(headersObj),
-		"body":    NewNative(string(bodyBytes)),
-	}
-
-	vm.push(NewNative(result))
+	options := optionalObjectArg(args, 1)
+	vm.push(doHTTPRequest(vm, "http.get", http.MethodGet, url, NewNull(), options))
 }
 
 func stdHttpPost(vm *VM, args []TinyValue) {
 	expectArgsRange(vm, "http.post", args, 2, 3)
-
 	url := argString(vm, "http.post", args, 0)
-	data := argObject(vm, "http.post", args, 1)
+	options := optionalObjectArg(args, 2)
+	vm.push(doHTTPRequest(vm, "http.post", http.MethodPost, url, args[1], options))
+}
 
-	var headers ObjectValue = ObjectValue{}
-	returnBytes := false
-	if len(args) == 3 {
-		options := asObject(args[2], vm)
-		if h, hasHeaders := options["headers"]; hasHeaders {
-			if val, ok := h.Value.(ObjectValue); ok {
-				headers = val
-			}
-		}
+func stdHttpPut(vm *VM, args []TinyValue) {
+	expectArgsRange(vm, "http.put", args, 2, 3)
+	url := argString(vm, "http.put", args, 0)
+	options := optionalObjectArg(args, 2)
+	vm.push(doHTTPRequest(vm, "http.put", http.MethodPut, url, args[1], options))
+}
 
-		if h, hasHeaders := options["bytes"]; hasHeaders {
-			if val, ok := h.Value.(bool); ok {
-				returnBytes = val
-			}
-		}
-	}
+func stdHttpPatch(vm *VM, args []TinyValue) {
+	expectArgsRange(vm, "http.patch", args, 2, 3)
+	url := argString(vm, "http.patch", args, 0)
+	options := optionalObjectArg(args, 2)
+	vm.push(doHTTPRequest(vm, "http.patch", http.MethodPatch, url, args[1], options))
+}
 
-	cleanedData := cleanMapForJSON(data)
-	jsonData, err := json.Marshal(cleanedData)
-	if err != nil {
-		vm.runtimeError(ErrorRuntime, "http.post failed to encode JSON data: %s", err.Error())
+func stdHttpDelete(vm *VM, args []TinyValue) {
+	expectArgsRange(vm, "http.delete", args, 1, 2)
+	url := argString(vm, "http.delete", args, 0)
+	options := optionalObjectArg(args, 1)
+	vm.push(doHTTPRequest(vm, "http.delete", http.MethodDelete, url, NewNull(), options))
+}
+
+func stdHttpRequest(vm *VM, args []TinyValue) {
+	expectArgs(vm, "http.request", args, 1)
+	config := argObject(vm, "http.request", args, 0)
+
+	method := strings.ToUpper(objectString(config, "method", http.MethodGet))
+	url := objectString(config, "url", "")
+	if url == "" {
+		vm.runtimeError(ErrorRuntime, "http.request requires url")
 		return
 	}
 
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		vm.runtimeError(ErrorRuntime, "http.post request creation failed: %s", err.Error())
-		return
+	body := NewNull()
+	if value, ok := config["body"]; ok {
+		body = value
 	}
 
-	req.Header.Set("Content-Type", "application/json")
+	vm.push(doHTTPRequest(vm, "http.request", method, url, body, config))
+}
 
+func doHTTPRequest(vm *VM, name string, method string, url string, body TinyValue, options ObjectValue) TinyValue {
+	reader, contentType, err := requestBodyReader(body)
+	if err != nil {
+		vm.runtimeError(ErrorType, "%s body error: %s", name, err.Error())
+		return NewNull()
+	}
+
+	req, err := http.NewRequest(method, url, reader)
+	if err != nil {
+		vm.runtimeError(ErrorRuntime, "%s request creation failed: %s", name, err.Error())
+		return NewNull()
+	}
+
+	headers := ObjectValue{}
+	if h, hasHeaders := options["headers"]; hasHeaders {
+		if val, ok := h.Value.(ObjectValue); ok {
+			headers = val
+		}
+	}
 	for key, value := range headers {
-		strKey := valueToString(ToValue(key))
-		var valStr string
-		if s, ok := value.Value.(string); ok {
-			valStr = s
-		} else if value.IsInt {
-			valStr = valueToString(value)
-		} else {
-			valStr = valueToString(value)
-		}
-		req.Header.Set(strKey, valStr)
+		req.Header.Set(valueToString(ToValue(key)), valueToString(value))
+	}
+	if contentType != "" && req.Header.Get("Content-Type") == "" {
+		req.Header.Set("Content-Type", contentType)
 	}
 
 	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		vm.runtimeError(ErrorRuntime, "http.post failed: %s", err.Error())
-		return
+	timeoutMs := objectInt(options, "timeoutMs", 0)
+	if timeoutMs > 0 {
+		client.Timeout = time.Duration(timeoutMs) * time.Millisecond
 	}
 
+	resp, err := client.Do(req)
+	if err != nil {
+		vm.runtimeError(ErrorRuntime, "%s failed: %s", name, err.Error())
+		return NewNull()
+	}
 	defer resp.Body.Close()
+
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		vm.runtimeError(ErrorRuntime, "http.post read response failed: %s", err.Error())
-		return
+		vm.runtimeError(ErrorRuntime, "%s read response failed: %s", name, err.Error())
+		return NewNull()
 	}
 
 	headersObj := ObjectValue{}
@@ -190,38 +197,134 @@ func stdHttpPost(vm *VM, args []TinyValue) {
 	}
 
 	result := ObjectValue{
-		"status":  NewInt(resp.StatusCode),
-		"headers": NewNative(headersObj),
+		"status":     NewInt(resp.StatusCode),
+		"statusText": NewNative(resp.Status),
+		"headers":    NewNative(headersObj),
 	}
 
-	if returnBytes {
+	if objectBool(options, "bytes", false) {
 		result["body"] = NewNative(bodyBytes)
 	} else {
 		result["body"] = NewNative(string(bodyBytes))
 	}
 
-	vm.push(NewNative(result))
+	return NewNative(result)
+}
+
+func requestBodyReader(body TinyValue) (io.Reader, string, error) {
+	if isNullish(body) {
+		return nil, "", nil
+	}
+
+	if body.IsInt {
+		return strings.NewReader(valueToString(body)), "text/plain; charset=utf-8", nil
+	}
+
+	switch v := body.Value.(type) {
+	case string:
+		return strings.NewReader(v), "text/plain; charset=utf-8", nil
+	case []byte:
+		return bytes.NewReader(v), "application/octet-stream", nil
+	case *BufferValue:
+		return bytes.NewReader(v.Bytes), "application/octet-stream", nil
+	case ObjectValue, ArrayValue, *ArrayValue:
+		cleaned := cleanValueForJSON(body)
+		jsonData, err := json.Marshal(cleaned)
+		if err != nil {
+			return nil, "", err
+		}
+		return bytes.NewReader(jsonData), "application/json", nil
+	default:
+		return strings.NewReader(valueToString(body)), "text/plain; charset=utf-8", nil
+	}
 }
 
 func stdHttpJsonResponse(vm *VM, args []TinyValue) {
 	expectArgs(vm, "http.json", args, 1)
-
-	jsonValue := argObject(vm, "http.json", args, 0)
-
 	vm.push(NewNative(NativeHttpResponseValue{
 		Type:  HttpJson,
-		Value: NewNative(jsonValue),
+		Value: args[0],
 	}))
 }
 
 func stdHttpTextResponse(vm *VM, args []TinyValue) {
 	expectArgs(vm, "http.text", args, 1)
-
-	strValue := argString(vm, "http.text", args, 0)
-
 	vm.push(NewNative(NativeHttpResponseValue{
 		Type:  HttpText,
-		Value: NewNative(strValue),
+		Value: args[0],
+	}))
+}
+
+func stdHttpHtmlResponse(vm *VM, args []TinyValue) {
+	expectArgs(vm, "http.html", args, 1)
+	vm.push(NewNative(NativeHttpResponseValue{
+		Type:  HttpHtml,
+		Value: args[0],
+	}))
+}
+
+func stdHttpStatusResponse(vm *VM, args []TinyValue) {
+	expectArgs(vm, "http.status", args, 2)
+	vm.push(NewNative(NativeHttpResponseValue{
+		Type:   HttpResponse,
+		Status: asInt(args[0]),
+		Value:  args[1],
+	}))
+}
+
+func stdHttpResponse(vm *VM, args []TinyValue) {
+	expectArgsRange(vm, "http.response", args, 2, 3)
+	headers := ObjectValue{}
+	if len(args) == 3 {
+		headers = argObject(vm, "http.response", args, 2)
+	}
+	vm.push(NewNative(NativeHttpResponseValue{
+		Type:    HttpResponse,
+		Status:  asInt(args[0]),
+		Value:   args[1],
+		Headers: headers,
+	}))
+}
+
+func stdHttpRedirect(vm *VM, args []TinyValue) {
+	expectArgsRange(vm, "http.redirect", args, 1, 2)
+	status := http.StatusFound
+	if len(args) == 2 {
+		status = asInt(args[1])
+	}
+	vm.push(NewNative(NativeHttpResponseValue{
+		Type:        HttpRedirect,
+		Status:      status,
+		RedirectURL: argString(vm, "http.redirect", args, 0),
+	}))
+}
+
+func stdHttpNoContent(vm *VM, args []TinyValue) {
+	expectArgs(vm, "http.noContent", args, 0)
+	vm.push(NewNative(NativeHttpResponseValue{
+		Type:   HttpNoContent,
+		Status: http.StatusNoContent,
+	}))
+}
+
+func stdHttpFile(vm *VM, args []TinyValue) {
+	expectArgs(vm, "http.file", args, 1)
+	vm.push(NewNative(NativeHttpResponseValue{
+		Type: HttpFile,
+		Path: argString(vm, "http.file", args, 0),
+	}))
+}
+
+func stdHttpDownload(vm *VM, args []TinyValue) {
+	expectArgsRange(vm, "http.download", args, 1, 2)
+	name := ""
+	if len(args) == 2 && !isNullish(args[1]) {
+		name = argString(vm, "http.download", args, 1)
+	}
+	vm.push(NewNative(NativeHttpResponseValue{
+		Type:         HttpDownload,
+		Path:         argString(vm, "http.download", args, 0),
+		DownloadName: name,
 	}))
 }
 
@@ -246,8 +349,45 @@ func stdHttpDownloadFile(vm *VM, args []TinyValue) {
 	defer resp.Body.Close()
 
 	_, err = io.Copy(out, resp.Body)
+	if err != nil {
+		vm.runtimeError(ErrorRuntime, "error while saving downloaded file: %s", err)
+		return
+	}
 
 	vm.push(NewNative(true))
+}
+
+func optionalObjectArg(args []TinyValue, index int) ObjectValue {
+	if len(args) <= index || isNullish(args[index]) {
+		return ObjectValue{}
+	}
+	if object, ok := args[index].Value.(ObjectValue); ok {
+		return object
+	}
+	return ObjectValue{}
+}
+
+func objectString(object ObjectValue, key string, fallback string) string {
+	if value, ok := object[key]; ok {
+		return valueToString(value)
+	}
+	return fallback
+}
+
+func objectInt(object ObjectValue, key string, fallback int) int {
+	if value, ok := object[key]; ok {
+		return asInt(value)
+	}
+	return fallback
+}
+
+func objectBool(object ObjectValue, key string, fallback bool) bool {
+	if value, ok := object[key]; ok {
+		if boolValue, ok := value.Value.(bool); ok {
+			return boolValue
+		}
+	}
+	return fallback
 }
 
 func cleanMapForJSON(vmMap ObjectValue) map[string]any {
@@ -263,6 +403,13 @@ func cleanMapForJSON(vmMap ObjectValue) map[string]any {
 
 func cleanValueForJSON(val any) any {
 	switch v := val.(type) {
+	case TinyValue:
+		if v.IsInt {
+			return v.AsInt
+		}
+		return cleanValueForJSON(v.Value)
+	case NullValue:
+		return nil
 	case ObjectValue:
 		return cleanMapForJSON(v)
 	case ArrayValue:

@@ -50,7 +50,7 @@ func TestBytecodeRoundTripPreservesFunctionMetadata(t *testing.T) {
 		"Test": {
 			Name: "Test",
 			Fields: map[string]vm.TypeHint{
-				"testData": vm.TypeHint{Name: "string"},
+				"testData": {Name: "string"},
 			},
 		},
 	}

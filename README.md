@@ -388,18 +388,19 @@ The `math` module leverages Go's Gonum package for high-speed matrix computation
 ```js
 import std "io";
 import std "math";
+import std "buffer";
 
 // Define two 2x2 matrices using flat data arrays inside a Buffer
 const matrixA = {
     rows: 2,
     cols: 2,
-    data: math.toFloat([1.0, 2.0, 3.0, 4.0]) // Floats packed into a buffer
+    data: buffer.fromArray([1.0, 2.0, 3.0, 4.0]) // Floats packed into a buffer
 };
 
 const matrixB = {
     rows: 2,
     cols: 2,
-    data: math.toFloat([5.0, 6.0, 7.0, 8.0])
+    data: buffer.fromArray([5.0, 6.0, 7.0, 8.0])
 };
 
 // Perform high-speed matrix multiplication

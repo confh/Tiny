@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	. "language.com/src/tinyerrors"
 )
@@ -16,7 +18,11 @@ func init() {
 	serverMethods = map[string]NativeModuleFunc[*NativeServerValue]{
 		"get":       serverGet,
 		"post":      serverPost,
+		"put":       serverPut,
+		"patch":     serverPatch,
+		"delete":    serverDelete,
 		"onRequest": serverOnRequest,
+		"static":    serverStatic,
 		"stop":      serverStop,
 		"start":     serverStart,
 	}
@@ -45,36 +51,69 @@ func serverOnRequest(vm *VM, server *NativeServerValue, args []TinyValue) {
 }
 
 func serverGet(vm *VM, server *NativeServerValue, args []TinyValue) {
-	expectArgs(vm, "server.get", args, 2)
-	path := argString(vm, "server.get", args, 0)
+	serverRoute(vm, server, http.MethodGet, "server.get", args)
+}
+
+func serverPost(vm *VM, server *NativeServerValue, args []TinyValue) {
+	serverRoute(vm, server, http.MethodPost, "server.post", args)
+}
+
+func serverPut(vm *VM, server *NativeServerValue, args []TinyValue) {
+	serverRoute(vm, server, http.MethodPut, "server.put", args)
+}
+
+func serverPatch(vm *VM, server *NativeServerValue, args []TinyValue) {
+	serverRoute(vm, server, http.MethodPatch, "server.patch", args)
+}
+
+func serverDelete(vm *VM, server *NativeServerValue, args []TinyValue) {
+	serverRoute(vm, server, http.MethodDelete, "server.delete", args)
+}
+
+func serverRoute(vm *VM, server *NativeServerValue, method string, name string, args []TinyValue) {
+	expectArgs(vm, name, args, 2)
+	routePath := argString(vm, name, args, 0)
 	handler := args[1]
 	switch handler.Value.(type) {
 	case string, FunctionValue:
-		server.GetRoutes[path] = handler
+		ensureServerRoutes(server)
+		server.Routes[method][routePath] = handler
+		if method == http.MethodGet {
+			server.GetRoutes[routePath] = handler
+		}
+		if method == http.MethodPost {
+			server.PostRoutes[routePath] = handler
+		}
 	default:
-		vm.runtimeError(ErrorType, "server.get expects string or function as second argument")
+		vm.runtimeError(ErrorType, "%s expects string or function as second argument", name)
 		return
 	}
 	vm.push(NewNull())
 }
 
-func serverPost(vm *VM, server *NativeServerValue, args []TinyValue) {
-	expectArgs(vm, "server.post", args, 2)
-	path := argString(vm, "server.post", args, 0)
-	handler := args[1]
-	switch handler.Value.(type) {
-	case string, FunctionValue:
-		server.PostRoutes[path] = handler
-	default:
-		vm.runtimeError(ErrorType, "server.post expects string or function as second argument")
-		return
+func serverStatic(vm *VM, server *NativeServerValue, args []TinyValue) {
+	expectArgs(vm, "server.static", args, 2)
+	prefix := argString(vm, "server.static", args, 0)
+	dir := argString(vm, "server.static", args, 1)
+	if prefix == "" {
+		prefix = "/"
 	}
+	if !strings.HasPrefix(prefix, "/") {
+		prefix = "/" + prefix
+	}
+	if server.StaticRoutes == nil {
+		server.StaticRoutes = map[string]string{}
+	}
+	server.StaticRoutes[prefix] = dir
 	vm.push(NewNull())
 }
 
 func serverStop(vm *VM, server *NativeServerValue, args []TinyValue) {
 	expectArgs(vm, "server.stop", args, 0)
 	server.closed = true
+	if server.httpServer != nil {
+		_ = server.httpServer.Close()
+	}
 	vm.push(NewNative(true))
 }
 
@@ -91,6 +130,7 @@ func serverStart(vm *VM, server *NativeServerValue, args []TinyValue) {
 
 	mux := http.NewServeMux()
 	server.mux = mux
+	ensureServerRoutes(server)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if server.closed {
@@ -100,25 +140,15 @@ func serverStart(vm *VM, server *NativeServerValue, args []TinyValue) {
 		defer func() {
 			if r := recover(); r != nil {
 				fmt.Printf("[http server handler panic] %v\n", r)
-
-				http.Error(w, "Internal Server Error", 500)
+				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			}
 		}()
 
-		var handler TinyValue
-		var params ObjectValue
-		var found bool
-
-		switch r.Method {
-		case http.MethodGet:
-			handler, params, found = findRoute(server.GetRoutes, server.GenericRoute, r.URL.Path)
-		case http.MethodPost:
-			handler, params, found = findRoute(server.PostRoutes, server.GenericRoute, r.URL.Path)
-		default:
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		if serveStaticRoute(w, r, server.StaticRoutes) {
 			return
 		}
 
+		handler, params, found := findRoute(server.Routes[r.Method], server.GenericRoute, r.URL.Path)
 		if !found {
 			http.NotFound(w, r)
 			return
@@ -126,77 +156,151 @@ func serverStart(vm *VM, server *NativeServerValue, args []TinyValue) {
 
 		switch h := handler.Value.(type) {
 		case string:
-			writeServerResponse(w, NewNative(h), HttpText)
+			writeServerResponse(w, r, NativeHttpResponseValue{
+				Type:  HttpText,
+				Value: NewNative(h),
+			})
 		case FunctionValue:
-			bodyBytes, err := io.ReadAll(r.Body)
+			bodyReader := r.Body
+			if server.MaxBodySize > 0 {
+				bodyReader = http.MaxBytesReader(w, r.Body, server.MaxBodySize)
+			}
+
+			bodyBytes, err := io.ReadAll(bodyReader)
 			if err != nil {
-				vm.runtimeError(ErrorRuntime, "failed to read request body: %v", err)
+				http.Error(w, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
 				return
 			}
-			body := string(bodyBytes)
 
-			obj := ObjectValue{
-				"path":   NewNative(r.URL.Path),
-				"method": NewNative(r.Method),
-				"body":   NewNative(body),
-				"params": NewNative(params),
-			}
-
-			queryMap := make(ObjectValue)
-			for key, values := range r.URL.Query() {
-				if len(values) > 0 {
-					queryMap[key] = NewNative(values[0])
-				} else {
-					queryMap[key] = NewNative("")
-				}
-			}
-			obj["query"] = NewNative(queryMap)
-
-			headers := make(ObjectValue)
-			for k, v := range r.Header {
-				if len(v) > 0 {
-					headers[k] = NewNative(v[0])
-				} else {
-					headers[k] = NewNative("")
-				}
-			}
-			obj["headers"] = NewNative(headers)
-
-			reqObj := NewNative(obj)
+			reqObj := NewNative(requestObjectFromHTTP(r, string(bodyBytes), params))
 
 			requestVM := vm.CloneForTask()
 			result := requestVM.callFunctionValue(h, []TinyValue{reqObj})
 
 			httpResponseObject, ok := result.Value.(NativeHttpResponseValue)
 			if !ok {
-				vm.runtimeError(ErrorRuntime, "expected httpResponse, got %s.", TypeName(result))
+				writeServerResponse(w, r, NativeHttpResponseValue{
+					Type:  HttpText,
+					Value: result,
+				})
 				return
 			}
 
-			writeServerResponse(w, httpResponseObject.Value, httpResponseObject.Type)
+			writeServerResponse(w, r, httpResponseObject)
 
 		default:
 			vm.runtimeError(ErrorType, "invalid route handler: %s", TypeName(handler))
 		}
 	})
 
-	addr := ":" + strconv.Itoa(server.Port)
+	addr := server.Host + ":" + strconv.Itoa(server.Port)
+	httpServer := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
+	if server.ReadTimeoutMs > 0 {
+		httpServer.ReadTimeout = time.Duration(server.ReadTimeoutMs) * time.Millisecond
+	}
+	if server.WriteTimeoutMs > 0 {
+		httpServer.WriteTimeout = time.Duration(server.WriteTimeoutMs) * time.Millisecond
+	}
+	server.httpServer = httpServer
 
 	if async {
 		go func() {
-			err := http.ListenAndServe(addr, mux)
-			if err != nil {
+			err := httpServer.ListenAndServe()
+			if err != nil && err != http.ErrServerClosed {
 				vm.runtimeError(ErrorRuntime, "server failed: %v", err)
 			}
 		}()
 	} else {
-		err := http.ListenAndServe(addr, mux)
-		if err != nil {
+		err := httpServer.ListenAndServe()
+		if err != nil && err != http.ErrServerClosed {
 			vm.runtimeError(ErrorRuntime, "server failed: %v", err)
 		}
 	}
 
 	vm.push(NewNull())
+}
+
+func ensureServerRoutes(server *NativeServerValue) {
+	if server.Routes == nil {
+		server.Routes = map[string]map[string]TinyValue{}
+	}
+	for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+		if server.Routes[method] == nil {
+			server.Routes[method] = map[string]TinyValue{}
+		}
+	}
+	if server.GetRoutes == nil {
+		server.GetRoutes = map[string]TinyValue{}
+	}
+	if server.PostRoutes == nil {
+		server.PostRoutes = map[string]TinyValue{}
+	}
+	for route, handler := range server.GetRoutes {
+		server.Routes[http.MethodGet][route] = handler
+	}
+	for route, handler := range server.PostRoutes {
+		server.Routes[http.MethodPost][route] = handler
+	}
+	if server.StaticRoutes == nil {
+		server.StaticRoutes = map[string]string{}
+	}
+}
+
+func serveStaticRoute(w http.ResponseWriter, r *http.Request, routes map[string]string) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	for prefix, dir := range routes {
+		cleanPrefix := prefix
+		if !strings.HasSuffix(cleanPrefix, "/") {
+			cleanPrefix += "/"
+		}
+		trimmedPrefix := strings.TrimSuffix(cleanPrefix, "/")
+		if r.URL.Path == trimmedPrefix || strings.HasPrefix(r.URL.Path, cleanPrefix) {
+			trimmed := strings.TrimPrefix(r.URL.Path, trimmedPrefix)
+			trimmed = strings.TrimPrefix(trimmed, "/")
+			http.ServeFile(w, r, filepath.Join(dir, trimmed))
+			return true
+		}
+	}
+	return false
+}
+
+func requestObjectFromHTTP(r *http.Request, body string, params ObjectValue) ObjectValue {
+	obj := ObjectValue{
+		"path":          NewNative(r.URL.Path),
+		"url":           NewNative(r.URL.String()),
+		"method":        NewNative(r.Method),
+		"body":          NewNative(body),
+		"params":        NewNative(params),
+		"contentLength": NewNative(r.ContentLength),
+		"remoteAddr":    NewNative(r.RemoteAddr),
+	}
+
+	queryMap := make(ObjectValue)
+	for key, values := range r.URL.Query() {
+		if len(values) > 0 {
+			queryMap[key] = NewNative(values[0])
+		} else {
+			queryMap[key] = NewNative("")
+		}
+	}
+	obj["query"] = NewNative(queryMap)
+
+	headers := make(ObjectValue)
+	for k, v := range r.Header {
+		if len(v) > 0 {
+			headers[k] = NewNative(v[0])
+		} else {
+			headers[k] = NewNative("")
+		}
+	}
+	obj["headers"] = NewNative(headers)
+
+	return obj
 }
 
 func matchRoute(pattern string, actualPath string) (bool, ObjectValue) {
@@ -243,12 +347,10 @@ func matchRoute(pattern string, actualPath string) (bool, ObjectValue) {
 }
 
 func findRoute(routes map[string]TinyValue, genericRoute TinyValue, actualPath string) (TinyValue, ObjectValue, bool) {
-	// exact match
 	if handler, ok := routes[actualPath]; ok {
 		return handler, ObjectValue{}, true
 	}
 
-	// dynamic match
 	for pattern, handler := range routes {
 		matched, params := matchRoute(pattern, actualPath)
 		if matched {
@@ -256,7 +358,6 @@ func findRoute(routes map[string]TinyValue, genericRoute TinyValue, actualPath s
 		}
 	}
 
-	// // fallback to generic handler
 	if !isNullish(genericRoute) {
 		return genericRoute, ObjectValue{}, true
 	}

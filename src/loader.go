@@ -59,7 +59,7 @@ func (l *Loader) loadFile(path string) []Stmt {
 			}
 
 			if s.Library {
-				importPath := resolveLibraryImportPath(s.Path)
+				importPath := resolveLibraryImportPath(s.Path, absPath)
 				importedStatements := l.loadFile(importPath)
 
 				alias := s.Alias

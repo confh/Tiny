@@ -3,4 +3,4 @@ export fn alloc(size: number, fill: number): buffer {}
 // Creates a new buffer from the specified string representation.
 export fn fromString(text: string): buffer {}
 // Creates a new buffer from the specified array.
-export fn fromArray(text: string): buffer {}
+export fn fromArray(bytes: array:number): buffer {}

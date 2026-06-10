@@ -75,12 +75,12 @@ func configuredPluginSearchPaths(target string) []string {
 
 func addPluginConfigPaths(baseDir string, config TinyProjectConfig, target string, add func(string)) {
 	for _, plugin := range config.Plugins {
-		if plugin.Path != "" {
+		if plugin.Path != "" && pluginPathAppliesToTarget(plugin.Path, target) {
 			add(filepath.Join(baseDir, normalizePluginPathForTarget(plugin.Path, target)))
 		}
 
 		for _, file := range plugin.Files {
-			if file != "" {
+			if file != "" && pluginPathAppliesToTarget(file, target) {
 				add(filepath.Join(baseDir, file))
 			}
 		}

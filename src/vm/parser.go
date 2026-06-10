@@ -220,6 +220,11 @@ func (p *Parser) parseTypeName() string {
 		p.advance()
 	}
 
+	if name == "array" && p.current.Type == TOKEN_COLON {
+		p.advance()
+		name += ":" + p.parseTypeName()
+	}
+
 	return name
 }
 
@@ -1773,6 +1778,9 @@ func (p *Parser) parseDefaultParamValue() TinyValue {
 	case TOKEN_LBRACKET:
 		return p.parseDefaultParamArrayValue()
 
+	case TOKEN_LBRACE:
+		return p.parseDefaultParamObjectValue()
+
 	case TOKEN_MINUS:
 		p.advance()
 
@@ -1831,6 +1839,50 @@ func (p *Parser) parseDefaultParamArrayValue() TinyValue {
 
 	p.expect(TOKEN_RBRACKET)
 	return NewNative(&ArrayValue{Elements: elements})
+}
+
+func (p *Parser) parseDefaultParamObjectValue() TinyValue {
+	p.expect(TOKEN_LBRACE)
+
+	object := ObjectValue{}
+	if p.current.Type == TOKEN_RBRACE {
+		p.advance()
+		return NewNative(object)
+	}
+
+	for {
+		if p.current.Type != TOKEN_IDENT && p.current.Type != TOKEN_STRING {
+			LangErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"expected object field name in default argument",
+			)
+		}
+
+		name := p.current.Literal
+		p.advance()
+		p.expect(TOKEN_COLON)
+
+		object[name] = p.parseDefaultParamValue()
+
+		for p.current.Type == TOKEN_SEMI {
+			p.advance()
+		}
+
+		if p.current.Type != TOKEN_COMMA {
+			break
+		}
+		p.advance()
+
+		if p.current.Type == TOKEN_RBRACE {
+			break
+		}
+	}
+
+	p.expect(TOKEN_RBRACE)
+	return NewNative(object)
 }
 
 func (p *Parser) parseConstStatement() Stmt {
@@ -2217,13 +2269,15 @@ func cloneDefaultValue(value TinyValue) TinyValue {
 	switch v := value.Value.(type) {
 	case *ArrayValue:
 		copied := make([]TinyValue, len(v.Elements))
-		copy(copied, v.Elements)
+		for i, item := range v.Elements {
+			copied[i] = cloneDefaultValue(item)
+		}
 		return NewNative(&ArrayValue{Elements: copied})
 
 	case ObjectValue:
 		copied := ObjectValue{}
 		for key, item := range v {
-			copied[key] = item
+			copied[key] = cloneDefaultValue(item)
 		}
 		return NewNative(copied)
 

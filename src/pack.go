@@ -58,6 +58,33 @@ func normalizePluginPathForTarget(path string, target string) string {
 	}
 }
 
+func pluginPathAppliesToTarget(path string, target string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	if ext == "" {
+		return true
+	}
+
+	switch ext {
+	case ".dll", ".so", ".dylib":
+		return ext == pluginExtensionForTarget(target)
+	default:
+		return true
+	}
+}
+
+func pluginExtensionForTarget(target string) string {
+	switch target {
+	case "windows-amd64":
+		return ".dll"
+	case "linux-amd64":
+		return ".so"
+	case "darwin-arm64":
+		return ".dylib"
+	default:
+		return ""
+	}
+}
+
 func normalizeTarget(target string) string {
 	if target == "" {
 		if runtime.GOOS == "windows" && runtime.GOARCH == "amd64" {

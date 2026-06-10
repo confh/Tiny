@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sort"
@@ -23,6 +24,110 @@ type installedLibraryInfo struct {
 
 var installedLibraryImportCacheRoot string
 var installedLibraryImportCache []string
+
+func findProjectRoot(startPath string) string {
+	if startPath == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(startPath)
+	if err != nil {
+		abs = startPath
+	}
+	dir := abs
+	if info, err := os.Stat(dir); err == nil && !info.IsDir() {
+		dir = filepath.Dir(dir)
+	}
+
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "tiny.json")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return ""
+}
+
+func loadTinyConfigFromPath(startPath string) (TinyProjectConfig, bool) {
+	projRoot := findProjectRoot(startPath)
+	if projRoot == "" {
+		return TinyProjectConfig{}, false
+	}
+	return loadTinyConfigFrom(filepath.Join(projRoot, "tiny.json"))
+}
+
+func loadTinyLockFromPath(projRoot string) (TinyLockFile, bool) {
+	lockPath := filepath.Join(projRoot, "tiny.lock")
+	bytes, err := os.ReadFile(lockPath)
+	if err != nil {
+		return emptyTinyLock(), false
+	}
+	lock := emptyTinyLock()
+	if err := json.Unmarshal(bytes, &lock); err != nil {
+		LangError(ErrorRuntime, "failed to parse %s: %v", lockPath, err)
+	}
+	if lock.Version == 0 {
+		lock.Version = tinyLockVersion
+	}
+	if lock.Dependencies == nil {
+		lock.Dependencies = map[string]TinyLockedDependency{}
+	}
+	return lock, true
+}
+
+func resolveLibraryRoot(owner string, repo string, currentFilePath string) string {
+	if strings.HasPrefix(currentFilePath, "file://") {
+		currentFilePath = URIToPath(currentFilePath)
+	}
+
+	var config TinyProjectConfig
+	var ok bool
+	projRoot := ""
+	if currentFilePath != "" {
+		projRoot = findProjectRoot(currentFilePath)
+		if projRoot != "" {
+			config, ok = loadTinyConfigFrom(filepath.Join(projRoot, "tiny.json"))
+		}
+	}
+	if !ok {
+		config, ok = loadTinyConfig()
+	}
+
+	if ok {
+		for _, dep := range config.Dependencies {
+			if dep.Source == "" {
+				continue
+			}
+			spec := parseGitHubPackageSource(dep.Source)
+			if spec.Owner == owner && spec.Repo == repo {
+				if dep.Path != "" {
+					baseDir := projRoot
+					if baseDir == "" {
+						baseDir = "."
+					}
+					return filepath.Clean(filepath.Join(baseDir, dep.Path))
+				}
+				break
+			}
+		}
+	}
+
+	version := dependencyVersionForLibrary(owner, repo, currentFilePath)
+	root := ""
+
+	if version != "" {
+		root = libraryGlobalRoot(owner, repo, version)
+	} else {
+		root = firstInstalledLibraryRoot(owner, repo)
+		if root == "" {
+			root = libraryGlobalRoot(owner, repo, "")
+		}
+	}
+	return root
+}
 
 func tinyGlobalDepsDir() string {
 	if tinyHome := strings.TrimSpace(os.Getenv("TINY_HOME")); tinyHome != "" {
@@ -67,8 +172,23 @@ func parseLibraryImportPath(path string) (libraryImportPath, bool) {
 	}, true
 }
 
-func dependencyVersionForLibrary(owner string, repo string) string {
-	config, ok := loadTinyConfig()
+func dependencyVersionForLibrary(owner string, repo string, currentFilePath string) string {
+	if strings.HasPrefix(currentFilePath, "file://") {
+		currentFilePath = URIToPath(currentFilePath)
+	}
+
+	var config TinyProjectConfig
+	var ok bool
+	projRoot := ""
+	if currentFilePath != "" {
+		projRoot = findProjectRoot(currentFilePath)
+		if projRoot != "" {
+			config, ok = loadTinyConfigFrom(filepath.Join(projRoot, "tiny.json"))
+		}
+	}
+	if !ok {
+		config, ok = loadTinyConfig()
+	}
 	if !ok {
 		return ""
 	}
@@ -82,7 +202,14 @@ func dependencyVersionForLibrary(owner string, repo string) string {
 			if dep.Version != "" {
 				return dep.Version
 			}
-			if lock, ok := loadTinyLock(); ok {
+			var lock TinyLockFile
+			var lockOk bool
+			if projRoot != "" {
+				lock, lockOk = loadTinyLockFromPath(projRoot)
+			} else {
+				lock, lockOk = loadTinyLock()
+			}
+			if lockOk {
 				for name, locked := range lock.Dependencies {
 					configDep, exists := config.Dependencies[name]
 					if !exists || !lockedDependencyMatchesConfig(locked, configDep) {
@@ -100,23 +227,13 @@ func dependencyVersionForLibrary(owner string, repo string) string {
 	return ""
 }
 
-func resolveLibraryImportPath(importPath string) string {
+func resolveLibraryImportPath(importPath string, currentFilePath string) string {
 	lib, ok := parseLibraryImportPath(importPath)
 	if !ok {
 		return importPath
 	}
 
-	version := dependencyVersionForLibrary(lib.Owner, lib.Repo)
-	root := ""
-
-	if version != "" {
-		root = libraryGlobalRoot(lib.Owner, lib.Repo, version)
-	} else {
-		root = firstInstalledLibraryRoot(lib.Owner, lib.Repo)
-		if root == "" {
-			root = libraryGlobalRoot(lib.Owner, lib.Repo, "")
-		}
-	}
+	root := resolveLibraryRoot(lib.Owner, lib.Repo, currentFilePath)
 
 	if lib.Rest == "" {
 		config, ok := loadTinyConfigFrom(filepath.Join(root, "tiny.json"))
