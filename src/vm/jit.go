@@ -144,10 +144,38 @@ func findDepth(activeBlocks []JitBlock, target int) (int, bool) {
 }
 
 func TryCompileJit(runtime wazero.Runtime, ctx context.Context, fn Function) (*JitFunction, bool) {
+	if len(fn.Captures) > 0 {
+		return nil, false
+	}
+	if !fn.ReturnType.IsEmpty() {
+		if fn.ReturnType.Name != "number" && fn.ReturnType.Name != "bool" {
+			return nil, false
+		}
+	}
 	isBoolRet := fn.ReturnType.Name == "bool"
 	for _, instr := range fn.Instructions {
 		switch instr.Op {
-		case OP_CONST, OP_RETURN, OP_POP,
+		case OP_CONST:
+			if !instr.IsInt {
+				ok := false
+				switch v := instr.Value.(type) {
+				case int, int64, float64, float32, bool:
+					ok = true
+				case TinyValue:
+					if v.IsInt {
+						ok = true
+					} else {
+						switch v.Value.(type) {
+						case int, int64, float64, float32, bool:
+							ok = true
+						}
+					}
+				}
+				if !ok {
+					return nil, false
+				}
+			}
+		case OP_RETURN, OP_POP,
 			OP_LOAD_LOCAL, OP_STORE_LOCAL, OP_ASSIGN_LOCAL,
 			OP_LOAD_LOCAL_0, OP_LOAD_LOCAL_1, OP_LOAD_LOCAL_2, OP_LOAD_LOCAL_3,
 			OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
