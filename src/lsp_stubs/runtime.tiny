@@ -15,3 +15,6 @@ export fn memoryStats(): object {}
 
 // Triggers a garbage collection run to reclaim unused memory.
 export fn gc(): null {}
+
+// Returns whether or not the running app was packed by `tiny pack`
+export fn isPacked(): bool {}

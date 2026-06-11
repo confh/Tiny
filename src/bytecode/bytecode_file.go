@@ -930,10 +930,6 @@ func asIntInternal(v any) (int, bool) {
 		return int(n), true
 	case uint64:
 		return int(n), true
-	case float32:
-		return int(n), true
-	case float64:
-		return int(n), true
 	default:
 		return 0, false
 	}

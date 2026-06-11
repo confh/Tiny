@@ -2,6 +2,8 @@ class Payload {
 }
 
 class Checker {
+    field value: any = null
+    
     fn init(value: Payload) {
         this.value = value;
     }

@@ -271,7 +271,7 @@ func runBytecodeFile(path string) {
 		functions[name] = fn
 	}
 
-	vm := NewVM(mainBytecode, functions, classes, interfaces, globalIndex)
+	vm := NewVM(mainBytecode, functions, classes, interfaces, globalIndex, false)
 	SetPluginSearchPaths(configuredPluginSearchPaths(normalizeTarget("")))
 	vm.SetCLIArgs(getScriptArgs())
 	vm.Run()
@@ -306,7 +306,7 @@ func compileAndRun(entryFile string, cliArgs []string) {
 		functions[name] = fn
 	}
 
-	vm := NewVM(mainBytecode, functions, classes, interfaces, globalIndex)
+	vm := NewVM(mainBytecode, functions, classes, interfaces, globalIndex, false)
 	SetPluginSearchPaths(configuredPluginSearchPaths(normalizeTarget("")))
 	vm.SetCLIArgs(cliArgs)
 	vm.Run()

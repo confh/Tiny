@@ -67,7 +67,15 @@ type VM struct {
 	framePool        []*Frame
 	functionList     []Function
 
+	packed bool
+
 	jitFunctions map[string]*JitFunction
+
+	objectShapes   [][]string
+	objectShapeIDs map[string]uint32
+
+	propertyOffsets    map[string]uint32
+	nextPropertyOffset uint32
 
 	nativeFrames []NativeCallFrame
 	currentInstr Instruction
@@ -99,6 +107,7 @@ type VM struct {
 	wazeroRuntime wazero.Runtime
 	wazeroCtx     context.Context
 	wasmModule    api.Module
+	jitModule     api.Module
 	wasmMu        *sync.Mutex
 }
 
@@ -163,32 +172,41 @@ func isClass(value ObjectValue) bool {
 	return exists
 }
 
-func NewVM(mainInstructions []Instruction, functions map[string]Function, classes map[string]Class, interfaces map[string]Interface, globalIndex map[string]int) *VM {
+func NewVM(mainInstructions []Instruction, functions map[string]Function, classes map[string]Class, interfaces map[string]Interface, globalIndex map[string]int, packed bool) *VM {
 	mainInstructions, functions, functionList := normalizeFunctionIDs(mainInstructions, functions)
 
 	globalsSlice := make([]TinyValue, 0, 256)
 
-	return &VM{
-		start:            time.Now().UnixMilli(),
-		mainInstructions: mainInstructions,
-		functions:        functions,
-		interfaces:       interfaces,
-		functionList:     functionList,
-		classes:          classes,
-		globals:          &globalsSlice,
-		jitFunctions:     map[string]*JitFunction{},
-		globalNames:      map[string]int{},
-		globalConstants:  map[string]bool{},
-		mu:               &sync.RWMutex{},
-		cliArgs:          []string{},
-		globalTypes:      map[string]TypeHint{},
-		top:              0,
-		stack:            make([]TinyValue, 1024),
-		framePool:        make([]*Frame, 0, 1024),
-		frames:           []*Frame{},
-		wazeroCtx:        context.Background(),
-		wasmMu:           &sync.Mutex{},
+	vm := &VM{
+		start:              time.Now().UnixMilli(),
+		mainInstructions:   mainInstructions,
+		functions:          functions,
+		interfaces:         interfaces,
+		functionList:       functionList,
+		classes:            classes,
+		globals:            &globalsSlice,
+		jitFunctions:       map[string]*JitFunction{},
+		globalNames:        map[string]int{},
+		globalConstants:    map[string]bool{},
+		mu:                 &sync.RWMutex{},
+		cliArgs:            []string{},
+		globalTypes:        map[string]TypeHint{},
+		packed:             packed,
+		top:                0,
+		stack:              make([]TinyValue, 1024),
+		framePool:          make([]*Frame, 0, 1024),
+		frames:             []*Frame{},
+		wazeroCtx:          context.Background(),
+		wasmMu:             &sync.Mutex{},
+		propertyOffsets:    map[string]uint32{},
+		nextPropertyOffset: 16,
+		objectShapes:       [][]string{},
+		objectShapeIDs:     map[string]uint32{},
 	}
+
+	vm.CompileAllJit()
+
+	return vm
 }
 
 func normalizeFunctionIDs(
@@ -276,7 +294,7 @@ func isJitCompatible(val TinyValue) bool {
 		return true
 	}
 	switch val.Value.(type) {
-	case float64, float32, int, int64, bool:
+	case float64, float32, int, int64, bool, WasmObjectValue, WasmArrayValue:
 		return true
 	default:
 		return false
@@ -362,7 +380,6 @@ func (vm *VM) releaseFrame(frame *Frame) {
 		return
 	}
 
-	// Keep pool from growing forever.
 	if len(vm.framePool) >= 1024 {
 		return
 	}
@@ -397,14 +414,22 @@ func (vm *VM) CloneForTask() *VM {
 		globalConstants: vm.globalConstants,
 		globalTypes:     vm.globalTypes,
 
+		packed: vm.packed,
+
 		mu: vm.mu,
 
 		cliArgs: vm.cliArgs,
 
-		wazeroRuntime: vm.wazeroRuntime,
-		wazeroCtx:     vm.wazeroCtx,
-		wasmModule:    vm.wasmModule,
-		wasmMu:        vm.wasmMu,
+		wazeroRuntime:      vm.wazeroRuntime,
+		wazeroCtx:          vm.wazeroCtx,
+		wasmModule:         vm.wasmModule,
+		jitModule:          vm.jitModule,
+		jitFunctions:       vm.jitFunctions,
+		wasmMu:             vm.wasmMu,
+		propertyOffsets:    vm.propertyOffsets,
+		nextPropertyOffset: vm.nextPropertyOffset,
+		objectShapes:       vm.objectShapes,
+		objectShapeIDs:     vm.objectShapeIDs,
 	}
 }
 
@@ -472,6 +497,9 @@ func cloneValue(value TinyValue) TinyValue {
 		return NewNative(&BufferValue{
 			Bytes: bytes,
 		})
+
+	case WasmArrayValue:
+		return value
 
 	default:
 		return value
@@ -580,107 +608,278 @@ func multiplyByInt(value TinyValue, factor int) TinyValue {
 	}
 }
 
-func addValues(left TinyValue, right TinyValue) TinyValue {
-	var leftVal any
-	if left.IsInt {
-		leftVal = left.AsInt
-	} else {
-		leftVal = left.Value
+type WasmObjectValue struct {
+	Address float64
+	VM      *VM
+}
+
+func (o WasmObjectValue) TinyTypeName() string {
+	return "object"
+}
+
+type WasmArrayValue struct {
+	Address float64
+	VM      *VM
+}
+
+func (a WasmArrayValue) TinyTypeName() string {
+	return "array"
+}
+
+func (vm *VM) readWasmFloatMaybe(addr uint32) (float64, bool) {
+	if vm == nil || vm.jitModule == nil {
+		return 0, false
+	}
+	bytes, ok := vm.jitModule.Memory().Read(addr, 8)
+	if !ok {
+		return 0, false
+	}
+	bits := binary.LittleEndian.Uint64(bytes)
+	return math.Float64frombits(bits), true
+}
+
+func (a WasmArrayValue) String() string {
+	if a.VM == nil {
+		return "[]"
 	}
 
-	var rightVal any
-	if right.IsInt {
-		rightVal = right.AsInt
-	} else {
-		rightVal = right.Value
+	lengthF, ok := a.VM.readWasmFloatMaybe(uint32(a.Address) + 8)
+	if !ok {
+		return "[]"
+	}
+	elemPtrF, ok := a.VM.readWasmFloatMaybe(uint32(a.Address) + 16)
+	if !ok {
+		return "[]"
 	}
 
-	switch l := leftVal.(type) {
-	case int:
-		switch r := rightVal.(type) {
-		case int:
-			return NewInt(l + r)
-		case float64:
-			return NewNative(float64(l) + r)
-		case uint64:
-			return NewNative(uint64(l) + r)
-		case int64:
-			return NewNative(int64(l) + r)
-		case string:
-			return NewNative(intToString(l) + r)
-		default:
-			LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
+	length := int(lengthF)
+	elemPtr := uint32(elemPtrF)
+	var parts []string
+
+	for i := 0; i < length; i++ {
+		addr := elemPtr + uint32(i*16)
+		tag, ok1 := a.VM.readWasmFloatMaybe(addr)
+		val, ok2 := a.VM.readWasmFloatMaybe(addr + 8)
+		if !ok1 || !ok2 {
+			parts = append(parts, "null")
+			continue
 		}
 
-	case int64:
-		switch r := rightVal.(type) {
-		case int:
-			return NewNative(l + int64(r))
-		case int64:
-			return NewNative(l + r)
-		case float64:
-			return NewNative(float64(l) + r)
-		case uint64:
-			return NewNative(uint64(l) + r)
-		case string:
-			return NewNative(int64ToString(l) + r)
-		default:
-			LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
+		if tag == 1.0 {
+			parts = append(parts, fmt.Sprintf("%g", val))
+		} else if tag == 2.0 {
+			if val != 0.0 {
+				parts = append(parts, "true")
+			} else {
+				parts = append(parts, "false")
+			}
+		} else if tag == 4.0 {
+			parts = append(parts, WasmObjectValue{Address: val, VM: a.VM}.String())
+		} else if tag == 5.0 {
+			parts = append(parts, WasmArrayValue{Address: val, VM: a.VM}.String())
+		} else {
+			parts = append(parts, "null")
+		}
+	}
+
+	return "[" + strings.Join(parts, ", ") + "]"
+}
+
+func (vm *VM) getPropertyOffset(name string) uint32 {
+	if offset, ok := vm.propertyOffsets[name]; ok {
+		return offset
+	}
+	offset := vm.nextPropertyOffset
+	vm.propertyOffsets[name] = offset
+	vm.nextPropertyOffset += 16
+	return offset
+}
+
+func (vm *VM) ReadWasmFloat(addr uint32) float64 {
+	mod := vm.jitModule
+	if mod == nil {
+		panic("JIT module not initialized")
+	}
+	bytes, ok := mod.Memory().Read(addr, 8)
+	if !ok {
+		panic("Wasm memory read out of bounds")
+	}
+	bits := binary.LittleEndian.Uint64(bytes)
+	return math.Float64frombits(bits)
+}
+
+func (vm *VM) WriteWasmFloat(addr uint32, val float64) {
+	mod := vm.jitModule
+	if mod == nil {
+		panic("JIT module not initialized")
+	}
+	bits := math.Float64bits(val)
+	bytes := make([]byte, 8)
+	binary.LittleEndian.PutUint64(bytes, bits)
+	ok := mod.Memory().Write(addr, bytes)
+	if !ok {
+		panic("Wasm memory write out of bounds")
+	}
+}
+
+func (o WasmObjectValue) String() string {
+	if o.VM == nil {
+		return "{}"
+	}
+
+	shapeIDF, ok := o.VM.readWasmFloatMaybe(uint32(o.Address) + 8)
+	if !ok {
+		return "{}"
+	}
+
+	shapeID := int(shapeIDF)
+	if shapeID < 0 || shapeID >= len(o.VM.objectShapes) {
+		return "{}"
+	}
+
+	names := o.VM.objectShapes[shapeID]
+	var parts []string
+
+	for _, name := range names {
+		offset := o.VM.getPropertyOffset(name)
+		addr := uint32(o.Address) + offset
+
+		tag, ok1 := o.VM.readWasmFloatMaybe(addr)
+		val, ok2 := o.VM.readWasmFloatMaybe(addr + 8)
+		if !ok1 || !ok2 {
+			continue
 		}
 
+		switch tag {
+		case 1.0:
+			parts = append(parts, fmt.Sprintf("%s: %g", name, val))
+		case 2.0:
+			if val != 0.0 {
+				parts = append(parts, fmt.Sprintf("%s: true", name))
+			} else {
+				parts = append(parts, fmt.Sprintf("%s: false", name))
+			}
+		case 4.0:
+			parts = append(parts, fmt.Sprintf("%s: %s", name, WasmObjectValue{Address: val, VM: o.VM}.String()))
+		case 5.0:
+			parts = append(parts, fmt.Sprintf("%s: %s", name, WasmArrayValue{Address: val, VM: o.VM}.String()))
+		}
+	}
+
+	return fmt.Sprintf("{%s}", strings.Join(parts, ", "))
+}
+
+func asFloat64T(val TinyValue) (float64, bool) {
+	if val.IsInt {
+		return float64(val.AsInt), true
+	}
+	switch v := val.Value.(type) {
 	case float64:
-		switch r := rightVal.(type) {
-		case int:
-			return NewNative(l + float64(r))
-		case float64:
-			return NewNative(l + r)
-		case uint64:
-			return NewNative(l + float64(r))
-		case int64:
-			return NewNative(l + float64(r))
-		case string:
-			return NewNative(FloatToString(l) + r)
-		default:
-			LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
-		}
-
-	case string:
-		switch r := rightVal.(type) {
-		case string:
-			return NewNative(l + r)
-		case float64:
-			return NewNative(l + FloatToString(r))
-		case int:
-			return NewNative(l + intToString(r))
-		case int64:
-			return NewNative(l + int64ToString(r))
-		case uint64:
-			return NewNative(l + uintToString(r))
-		default:
-			LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
-		}
-
+		return v, true
 	case uint64:
-		switch r := rightVal.(type) {
-		case uint64:
-			return NewNative(l + r)
-		case int:
-			return NewNative(l + uint64(r))
-		case int64:
-			return NewNative(l + uint64(r))
-		case float64:
-			return NewNative(float64(l) + r)
-		case string:
-			return NewNative(uintToString(l) + r)
-		default:
-			LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
-		}
+		return float64(v), true
+	case float32:
+		return float64(v), true
+	}
+	return 0, false
+}
 
-	default:
-		LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
+func addValues(left TinyValue, right TinyValue) TinyValue {
+	lStr, lIsStr := left.Value.(string)
+	if left.IsInt {
+		lIsStr = false
+	}
+	rStr, rIsStr := right.Value.(string)
+	if right.IsInt {
+		rIsStr = false
 	}
 
+	if lIsStr && rIsStr {
+		return NewNative(lStr + rStr)
+	}
+	if lIsStr {
+		if rNum, ok := asFloat64T(right); ok {
+			return NewNative(lStr + FloatToString(rNum))
+		}
+	}
+	if rIsStr {
+		if lNum, ok := asFloat64T(left); ok {
+			return NewNative(FloatToString(lNum) + rStr)
+		}
+	}
+
+	lNum, lOK := asFloat64T(left)
+	rNum, rOK := asFloat64T(right)
+	if lOK && rOK {
+		return NewNative(lNum + rNum)
+	}
+	LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
 	return TinyValue{}
+}
+
+func subValues(left TinyValue, right TinyValue) TinyValue {
+	lNum, lOK := asFloat64T(left)
+	rNum, rOK := asFloat64T(right)
+	if lOK && rOK {
+		return NewNative(lNum - rNum)
+	}
+	LangError(ErrorType, "cannot subtract %s and %s", TypeName(left), TypeName(right))
+	return TinyValue{}
+}
+
+func mulValues(left TinyValue, right TinyValue) TinyValue {
+	lNum, lOK := asFloat64T(left)
+	rNum, rOK := asFloat64T(right)
+	if lOK && rOK {
+		return NewNative(lNum * rNum)
+	}
+	LangError(ErrorType, "cannot multiply %s and %s", TypeName(left), TypeName(right))
+	return TinyValue{}
+}
+
+func divValues(left TinyValue, right TinyValue) TinyValue {
+	lNum, lOK := asFloat64T(left)
+	rNum, rOK := asFloat64T(right)
+	if lOK && rOK {
+		if rNum == 0 {
+			LangError(ErrorRuntime, "cannot divide by zero")
+		}
+		return NewNative(lNum / rNum)
+	}
+	LangError(ErrorType, "cannot divide %s and %s", TypeName(left), TypeName(right))
+	return TinyValue{}
+}
+
+func modValues(left TinyValue, right TinyValue) TinyValue {
+	lNum, lOK := asFloat64T(left)
+	rNum, rOK := asFloat64T(right)
+	if lOK && rOK {
+		if rNum == 0 {
+			LangError(ErrorRuntime, "cannot modulo by zero")
+		}
+		return NewNative(math.Mod(lNum, rNum))
+	}
+	LangError(ErrorType, "cannot modulo %s and %s", TypeName(left), TypeName(right))
+	return TinyValue{}
+}
+
+func objectShapeKey(names []string) string {
+	return strings.Join(names, "\x00")
+}
+
+func (vm *VM) getObjectShapeID(names []string) uint32 {
+	key := objectShapeKey(names)
+	if id, ok := vm.objectShapeIDs[key]; ok {
+		return id
+	}
+
+	id := uint32(len(vm.objectShapes))
+	copied := make([]string, len(names))
+	copy(copied, names)
+
+	vm.objectShapes = append(vm.objectShapes, copied)
+	vm.objectShapeIDs[key] = id
+	return id
 }
 
 func (vm *VM) setGlobalUnlocked(slot int, value TinyValue) {
@@ -754,6 +953,24 @@ func (vm *VM) canAccessMethod(object ObjectValue, method string) bool {
 }
 
 func (vm *VM) getProperty(objectValue TinyValue, name string, safe bool) TinyValue {
+	if obj, ok := objectValue.Value.(WasmObjectValue); ok {
+		offset := vm.getPropertyOffset(name)
+		addr := uint32(obj.Address) + offset
+
+		tag := vm.ReadWasmFloat(addr)
+		val := vm.ReadWasmFloat(addr + 8)
+
+		if tag == 1.0 {
+			return NewNative(val)
+		} else if tag == 2.0 {
+			return NewNative(val != 0.0)
+		} else if tag == 4.0 {
+			return NewNative(WasmObjectValue{Address: val, VM: vm})
+		} else if tag == 5.0 {
+			return NewNative(WasmArrayValue{Address: val, VM: vm})
+		}
+	}
+
 	if safe && isNullish(objectValue) {
 		return NewNull()
 	}
@@ -1151,31 +1368,19 @@ func (vm *VM) objectIsOrEmbedsClass(object ObjectValue, className string) bool {
 }
 
 func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableName string) {
-	if vm.wazeroRuntime == nil {
-		vm.wazeroRuntime = wazero.NewRuntime(vm.wazeroCtx)
-	}
+	jitFn := vm.jitFunctions[fn.Name]
 
-	jitFn, exists := vm.jitFunctions[fn.Name]
-	if !exists {
-		compiled, success := TryCompileJit(vm.wazeroRuntime, vm.wazeroCtx, fn)
-		if success {
-			vm.jitFunctions[fn.Name] = compiled
-			jitFn = compiled
-		} else {
-			vm.jitFunctions[fn.Name] = nil
+	if jitFn != nil && argCount == jitFn.paramCount && vm.stackArgsMatchJit(argCount) {
+		args := vm.popArgs(argCount)
+		res, err := jitFn.Call(vm.wazeroCtx, args)
+		if err == nil {
+			vm.push(res)
+			return
 		}
-	}
+		vm.jitFunctions[fn.Name] = nil
 
-	if jitFn != nil {
-		if vm.stackArgsMatchJit(argCount) {
-			args := vm.popArgs(argCount)
-			res, err := jitFn.Call(vm.wazeroCtx, args)
-			if err == nil {
-				vm.push(res)
-				return
-			}
-			vm.fatalError(ErrorRuntime, "JIT crashed: %v", err)
-		}
+		vm.callFunctionDirect(fn, args)
+		return
 	}
 
 	expected := len(fn.Params)
@@ -1444,20 +1649,7 @@ func makeErrorObject(value TinyValue) ObjectValue {
 func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []TinyValue) {
 	fn, ok := vm.functions[fnValue.Name]
 	if ok {
-		if vm.wazeroRuntime == nil {
-			vm.wazeroRuntime = wazero.NewRuntime(vm.wazeroCtx)
-		}
-
-		jitFn, exists := vm.jitFunctions[fn.Name]
-		if !exists {
-			compiled, success := TryCompileJit(vm.wazeroRuntime, vm.wazeroCtx, fn)
-			if success {
-				vm.jitFunctions[fn.Name] = compiled
-				jitFn = compiled
-			} else {
-				vm.jitFunctions[fn.Name] = nil
-			}
-		}
+		jitFn := vm.jitFunctions[fn.Name]
 
 		if jitFn != nil && vm.argsMatchJit(args) {
 			res, err := jitFn.Call(vm.wazeroCtx, args)
@@ -1465,7 +1657,8 @@ func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []TinyValue)
 				vm.push(res)
 				return
 			}
-			vm.fatalError(ErrorRuntime, "JIT crashed: %v", err)
+
+			vm.jitFunctions[fn.Name] = nil
 		}
 	}
 
@@ -1604,20 +1797,7 @@ func (vm *VM) runFrameToCompletion(frame *Frame) TinyValue {
 }
 
 func (vm *VM) callFunctionDirect(fn Function, args []TinyValue) {
-	if vm.wazeroRuntime == nil {
-		vm.wazeroRuntime = wazero.NewRuntime(vm.wazeroCtx)
-	}
-
-	jitFn, exists := vm.jitFunctions[fn.Name]
-	if !exists {
-		compiled, success := TryCompileJit(vm.wazeroRuntime, vm.wazeroCtx, fn)
-		if success {
-			vm.jitFunctions[fn.Name] = compiled
-			jitFn = compiled
-		} else {
-			vm.jitFunctions[fn.Name] = nil
-		}
-	}
+	jitFn := vm.jitFunctions[fn.Name]
 
 	if jitFn != nil && vm.argsMatchJit(args) {
 		res, err := jitFn.Call(vm.wazeroCtx, args)
@@ -1625,7 +1805,8 @@ func (vm *VM) callFunctionDirect(fn Function, args []TinyValue) {
 			vm.push(res)
 			return
 		}
-		vm.fatalError(ErrorRuntime, "JIT crashed: %v", err)
+
+		vm.jitFunctions[fn.Name] = nil
 	}
 
 	args = vm.applyDefaultArgs(fn, args, 0, "function "+fn.Name)
@@ -3175,192 +3356,27 @@ func (vm *VM) step() bool {
 	case OP_ADD:
 		right := vm.popFast()
 		left := vm.popFast()
-
-		if left.IsInt && right.IsInt {
-			vm.push(NewInt(left.AsInt + right.AsInt))
-		} else {
-			vm.push(addValues(left, right))
-		}
+		vm.push(addValues(left, right))
 
 	case OP_SUB:
 		right := vm.popFast()
 		left := vm.popFast()
-
-		if left.IsInt && right.IsInt {
-			vm.push(NewInt(left.AsInt - right.AsInt))
-			break
-		}
-
-		var leftVal any
-		if left.IsInt {
-			leftVal = left.AsInt
-		} else {
-			leftVal = left.Value
-		}
-
-		var rightVal any
-		if right.IsInt {
-			rightVal = right.AsInt
-		} else {
-			rightVal = right.Value
-		}
-
-		if !isNumber(left) || !isNumber(right) {
-			vm.fatalError(ErrorType, "cannot subtract %s and %s", TypeName(left), TypeName(right))
-		}
-
-		if _, ok := leftVal.(float64); ok {
-			vm.push(NewNative(asFloat(left, vm) - asFloat(right, vm)))
-			break
-		}
-
-		if _, ok := rightVal.(float64); ok {
-			vm.push(NewNative(asFloat(left, vm) - asFloat(right, vm)))
-			break
-		}
-
-		if _, ok := leftVal.(uint64); ok {
-			vm.push(NewNative(asUint(left) - asUint(right)))
-			break
-		}
-
-		if _, ok := rightVal.(uint64); ok {
-			vm.push(NewNative(asUint(left) - asUint(right)))
-			break
-		}
-
-		if _, ok := leftVal.(int64); ok {
-			vm.push(NewNative(asInt64(left) - asInt64(right)))
-			break
-		}
-
-		if _, ok := rightVal.(int64); ok {
-			vm.push(NewNative(asInt64(left) - asInt64(right)))
-			break
-		}
-
-		vm.push(NewInt(leftVal.(int) - rightVal.(int)))
+		vm.push(subValues(left, right))
 
 	case OP_MUL:
 		right := vm.popFast()
 		left := vm.popFast()
-
-		if left.IsInt && right.IsInt {
-			vm.push(NewInt(left.AsInt * right.AsInt))
-			break
-		}
-
-		var leftVal any
-		if left.IsInt {
-			leftVal = left.AsInt
-		} else {
-			leftVal = left.Value
-		}
-
-		var rightVal any
-		if right.IsInt {
-			rightVal = right.AsInt
-		} else {
-			rightVal = right.Value
-		}
-
-		if !isNumber(left) || !isNumber(right) {
-			vm.fatalError(ErrorType, "cannot multiply %s and %s", TypeName(left), TypeName(right))
-		}
-
-		if _, ok := leftVal.(float64); ok {
-			vm.push(NewNative(asFloat(left, vm) * asFloat(right, vm)))
-			break
-		}
-
-		if _, ok := rightVal.(float64); ok {
-			vm.push(NewNative(asFloat(left, vm) * asFloat(right, vm)))
-			break
-		}
-
-		if _, ok := leftVal.(uint64); ok {
-			vm.push(NewNative(asUint(left) * asUint(right)))
-			break
-		}
-
-		if _, ok := rightVal.(uint64); ok {
-			vm.push(NewNative(asUint(left) * asUint(right)))
-			break
-		}
-
-		if _, ok := leftVal.(int64); ok {
-			vm.push(NewNative(asInt64(left) * asInt64(right)))
-			break
-		}
-
-		if _, ok := rightVal.(int64); ok {
-			vm.push(NewNative(asInt64(left) * asInt64(right)))
-			break
-		}
-
-		vm.push(NewInt(leftVal.(int) * rightVal.(int)))
+		vm.push(mulValues(left, right))
 
 	case OP_DIV:
 		right := vm.popFast()
 		left := vm.popFast()
+		vm.push(divValues(left, right))
 
-		if left.IsInt && right.IsInt {
-			if right.AsInt == 0 {
-				vm.fatalError(ErrorRuntime, "cannot divide by zero")
-			}
-			vm.push(NewInt(left.AsInt / right.AsInt))
-			break
-		}
-
-		var leftVal any
-		if left.IsInt {
-			leftVal = left.AsInt
-		} else {
-			leftVal = left.Value
-		}
-
-		var rightVal any
-		if right.IsInt {
-			rightVal = right.AsInt
-		} else {
-			rightVal = right.Value
-		}
-
-		if !isNumber(left) || !isNumber(right) {
-			vm.fatalError(ErrorType, "cannot divide %s and %s", TypeName(left), TypeName(right))
-		}
-
-		if _, ok := leftVal.(float64); ok {
-			vm.push(NewNative(asFloat(left, vm) / asFloat(right, vm)))
-			break
-		}
-
-		if _, ok := rightVal.(float64); ok {
-			vm.push(NewNative(asFloat(left, vm) / asFloat(right, vm)))
-			break
-		}
-
-		if _, ok := leftVal.(uint64); ok {
-			vm.push(NewNative(asUint(left) / asUint(right)))
-			break
-		}
-
-		if _, ok := rightVal.(uint64); ok {
-			vm.push(NewNative(asUint(left) / asUint(right)))
-			break
-		}
-
-		if _, ok := leftVal.(int64); ok {
-			vm.push(NewNative(asInt64(left) / asInt64(right)))
-			break
-		}
-
-		if _, ok := rightVal.(int64); ok {
-			vm.push(NewNative(asInt64(left) / asInt64(right)))
-			break
-		}
-
-		vm.push(NewInt(leftVal.(int) / rightVal.(int)))
+	case OP_MOD:
+		right := vm.popFast()
+		left := vm.popFast()
+		vm.push(modValues(left, right))
 
 	case OP_EQ:
 		right := vm.popFast()
@@ -3685,66 +3701,6 @@ func (vm *VM) step() bool {
 		info := instr.Value.(BuiltinCallInfo)
 		vm.callBuiltin(info.Object, info.Method, info.ArgCount)
 
-	case OP_MOD:
-		right := vm.popFast()
-		left := vm.popFast()
-
-		if left.IsInt && right.IsInt {
-			if right.AsInt == 0 {
-				vm.fatalError(ErrorRuntime, "cannot modulo by zero")
-			}
-			vm.push(NewInt(left.AsInt % right.AsInt))
-			break
-		}
-
-		var leftVal any
-		if left.IsInt {
-			leftVal = left.AsInt
-		} else {
-			leftVal = left.Value
-		}
-
-		switch l := leftVal.(type) {
-		case int:
-			r := asInt(right)
-
-			if r == 0 {
-				vm.fatalError(ErrorRuntime, "cannot modulo by zero")
-			}
-
-			vm.push(NewInt(l % r))
-
-		case int64:
-			r := int64(asInt(right))
-
-			if r == 0 {
-				vm.fatalError(ErrorRuntime, "cannot modulo by zero")
-			}
-
-			vm.push(NewNative(l % r))
-
-		case float32:
-			r := asFloat64(right)
-
-			if r == 0 {
-				vm.fatalError(ErrorRuntime, "cannot modulo by zero")
-			}
-
-			vm.push(NewNative(math.Mod(float64(l), r)))
-
-		case float64:
-			r := asFloat64(right)
-
-			if r == 0 {
-				vm.fatalError(ErrorRuntime, "cannot modulo by zero")
-			}
-
-			vm.push(NewNative(math.Mod(l, r)))
-
-		default:
-			vm.fatalError(ErrorType, "cannot modulo %s and %s", TypeName(left), TypeName(right))
-		}
-
 	case OP_ARRAY:
 		info := instr.Value.(ArrayInfo)
 
@@ -3789,6 +3745,37 @@ func (vm *VM) step() bool {
 			}
 
 			vm.push(obj.Elements[index])
+
+		case WasmArrayValue:
+			var index int
+			if indexValue.IsInt {
+				index = indexValue.AsInt
+			} else {
+				index = asInt(indexValue)
+			}
+
+			length := int(vm.ReadWasmFloat(uint32(obj.Address) + 8))
+			if index < 0 || index >= length {
+				vm.runtimeError(ErrorRuntime, "array index out of range: %d", index)
+				return false
+			}
+
+			elemPtr := uint32(vm.ReadWasmFloat(uint32(obj.Address) + 16))
+			addr := elemPtr + uint32(index*16)
+			tag := vm.ReadWasmFloat(addr)
+			val := vm.ReadWasmFloat(addr + 8)
+
+			if tag == 1.0 {
+				vm.push(NewNative(val))
+			} else if tag == 2.0 {
+				vm.push(NewNative(val != 0.0))
+			} else if tag == 4.0 {
+				vm.push(NewNative(WasmObjectValue{Address: val, VM: vm}))
+			} else if tag == 5.0 {
+				vm.push(NewNative(WasmArrayValue{Address: val, VM: vm}))
+			} else {
+				vm.push(NewNull())
+			}
 
 		case ObjectValue:
 			var key string
@@ -3836,6 +3823,49 @@ func (vm *VM) step() bool {
 			}
 
 			obj.Elements[index] = value
+
+		case WasmArrayValue:
+			var index int
+			if indexValue.IsInt {
+				index = indexValue.AsInt
+			} else {
+				index = asInt(indexValue)
+			}
+
+			length := int(vm.ReadWasmFloat(uint32(obj.Address) + 8))
+			if index < 0 || index >= length {
+				vm.fatalError(ErrorRuntime, "array index out of range: %d", index)
+			}
+
+			elemPtr := uint32(vm.ReadWasmFloat(uint32(obj.Address) + 16))
+			addr := elemPtr + uint32(index*16)
+			var tag float64 = 1.0
+			var val float64 = 0.0
+
+			if value.IsInt {
+				val = float64(value.AsInt)
+			} else {
+				switch v := value.Value.(type) {
+				case float64:
+					val = v
+				case int:
+					val = float64(v)
+				case bool:
+					tag = 2.0
+					if v {
+						val = 1.0
+					}
+				case WasmObjectValue:
+					tag = 4.0
+					val = v.Address
+				case WasmArrayValue:
+					tag = 5.0
+					val = v.Address
+				}
+			}
+
+			vm.WriteWasmFloat(addr, tag)
+			vm.WriteWasmFloat(addr+8, val)
 
 		case ObjectValue:
 			var key string
@@ -4669,7 +4699,6 @@ func (vm *VM) callMethodResolved(method string, objectValue TinyValue, args []Ti
 	if isVariadic {
 		fixedCount := userParamCount - 1
 
-		// normal params before ...args
 		for i := range fixedCount {
 			paramIndex := paramOffset + i
 			param := fn.Params[paramIndex]
@@ -4694,7 +4723,6 @@ func (vm *VM) callMethodResolved(method string, objectValue TinyValue, args []Ti
 			frame.localTypes[paramIndex] = param.TypeHint
 		}
 
-		// rest param
 		restSlot := paramOffset + fixedCount
 		restParam := fn.Params[restSlot]
 

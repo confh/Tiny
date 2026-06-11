@@ -20,6 +20,7 @@ func init() {
 		"clearFatalHandler": stdRuntimeClearOnFatal,
 		"memoryStats":       stdRuntimeMemoryStats,
 		"gc":                stdRuntimeGC,
+		"isPacked":          stdIsPacked,
 	}
 	registerStdModule(stdRuntimeMetadata)
 }
@@ -37,6 +38,11 @@ func stdRuntimeGC(vm *VM, args []TinyValue) {
 	dontExpectArgs(vm, "runtime.gc", args)
 	runtime.GC()
 	vm.push(NewNull())
+}
+
+func stdIsPacked(vm *VM, args []TinyValue) {
+	dontExpectArgs(vm, "runtime.isPacked", args)
+	vm.push(NewNative(vm.packed))
 }
 
 func stdRuntimeLockThread(vm *VM, args []TinyValue) {

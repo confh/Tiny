@@ -18,6 +18,7 @@ var stdoutCaptureMu sync.Mutex
 
 type tinyRunResult struct {
 	Stdout string
+	Stderr string
 	Panic  any
 }
 
@@ -67,13 +68,19 @@ func runTinyBytecode(
 	defer stdoutCaptureMu.Unlock()
 
 	oldStdout := os.Stdout
+	oldStderr := os.Stderr
 
-	reader, writer, err := os.Pipe()
+	stdoutReader, stdoutWriter, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("create stdout pipe: %v", err)
 	}
+	stderrReader, stderrWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stderr pipe: %v", err)
+	}
 
-	os.Stdout = writer
+	os.Stdout = stdoutWriter
+	os.Stderr = stderrWriter
 
 	var panicValue any
 	func() {
@@ -81,30 +88,46 @@ func runTinyBytecode(
 			panicValue = recover()
 		}()
 
-		tinyVM := vm.NewVM(mainInstructions, functions, classes, interfaces, globalIndex)
+		tinyVM := vm.NewVM(mainInstructions, functions, classes, interfaces, globalIndex, false)
 		tinyVM.SetCLIArgs(args)
 		tinyVM.Run()
 	}()
 
-	writeErr := writer.Close()
+	stdoutWriteErr := stdoutWriter.Close()
+	stderrWriteErr := stderrWriter.Close()
 	os.Stdout = oldStdout
+	os.Stderr = oldStderr
 
-	var output bytes.Buffer
-	_, copyErr := io.Copy(&output, reader)
-	closeErr := reader.Close()
+	var stdoutOutput bytes.Buffer
+	_, stdoutCopyErr := io.Copy(&stdoutOutput, stdoutReader)
+	stdoutCloseErr := stdoutReader.Close()
 
-	if writeErr != nil {
-		t.Fatalf("close stdout writer: %v", writeErr)
+	var stderrOutput bytes.Buffer
+	_, stderrCopyErr := io.Copy(&stderrOutput, stderrReader)
+	stderrCloseErr := stderrReader.Close()
+
+	if stdoutWriteErr != nil {
+		t.Fatalf("close stdout writer: %v", stdoutWriteErr)
 	}
-	if copyErr != nil {
-		t.Fatalf("read captured stdout: %v", copyErr)
+	if stderrWriteErr != nil {
+		t.Fatalf("close stderr writer: %v", stderrWriteErr)
 	}
-	if closeErr != nil {
-		t.Fatalf("close stdout reader: %v", closeErr)
+	if stdoutCopyErr != nil {
+		t.Fatalf("read captured stdout: %v", stdoutCopyErr)
+	}
+	if stderrCopyErr != nil {
+		t.Fatalf("read captured stderr: %v", stderrCopyErr)
+	}
+	if stdoutCloseErr != nil {
+		t.Fatalf("close stdout reader: %v", stdoutCloseErr)
+	}
+	if stderrCloseErr != nil {
+		t.Fatalf("close stderr reader: %v", stderrCloseErr)
 	}
 
 	return tinyRunResult{
-		Stdout: output.String(),
+		Stdout: stdoutOutput.String(),
+		Stderr: stderrOutput.String(),
 		Panic:  panicValue,
 	}
 }
@@ -298,19 +321,19 @@ func TestTinyPipelineNamespacedLibraryImportsCollision(t *testing.T) {
 						Name: "Dep",
 						Statements: []vm.Stmt{
 							vm.FunctionStmt{
-								Name: "val",
+								Name:       "val",
 								ReturnType: vm.TypeHint{Name: "string"},
 								Body: []vm.Stmt{
 									vm.ReturnStmt{
 										HasValue: true,
-										Value: vm.StringExpr{Value: "NS1.Dep"},
+										Value:    vm.StringExpr{Value: "NS1.Dep"},
 									},
 								},
 							},
 						},
 					},
 					vm.FunctionStmt{
-						Name: "test",
+						Name:       "test",
 						ReturnType: vm.TypeHint{Name: "string"},
 						Body: []vm.Stmt{
 							vm.ReturnStmt{
@@ -318,7 +341,7 @@ func TestTinyPipelineNamespacedLibraryImportsCollision(t *testing.T) {
 								Value: vm.MemberCallExpr{
 									Object: vm.IdentExpr{Name: "Dep"},
 									Method: "val",
-									Args: []vm.Expr{},
+									Args:   []vm.Expr{},
 								},
 							},
 						},
@@ -332,19 +355,19 @@ func TestTinyPipelineNamespacedLibraryImportsCollision(t *testing.T) {
 						Name: "Dep",
 						Statements: []vm.Stmt{
 							vm.FunctionStmt{
-								Name: "val",
+								Name:       "val",
 								ReturnType: vm.TypeHint{Name: "string"},
 								Body: []vm.Stmt{
 									vm.ReturnStmt{
 										HasValue: true,
-										Value: vm.StringExpr{Value: "NS2.Dep"},
+										Value:    vm.StringExpr{Value: "NS2.Dep"},
 									},
 								},
 							},
 						},
 					},
 					vm.FunctionStmt{
-						Name: "test",
+						Name:       "test",
 						ReturnType: vm.TypeHint{Name: "string"},
 						Body: []vm.Stmt{
 							vm.ReturnStmt{
@@ -352,7 +375,7 @@ func TestTinyPipelineNamespacedLibraryImportsCollision(t *testing.T) {
 								Value: vm.MemberCallExpr{
 									Object: vm.IdentExpr{Name: "Dep"},
 									Method: "val",
-									Args: []vm.Expr{},
+									Args:   []vm.Expr{},
 								},
 							},
 						},
@@ -523,6 +546,28 @@ func TestTinyPipelineEnumValidation(t *testing.T) {
 	requireTinySuccess(t, runTinyFile(t, mainPath))
 }
 
+func TestTinyPipelineFloatDivisionJit(t *testing.T) {
+	dir := t.TempDir()
+
+	mainContent := strings.Join([]string{
+		`import std "io" as io;`,
+		`fn divide(a: number, b: number): number {`,
+		`    return a / b;`,
+		`}`,
+		`io.println(divide(7.5, 2).toString());`,
+	}, "\n")
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main.tiny: %v", err)
+	}
+
+	out := requireTinySuccess(t, runTinyFile(t, mainPath))
+	const want = "3.75\n"
+	if out != want {
+		t.Fatalf("unexpected output: want %q, got %q", want, out)
+	}
+}
+
 func TestTinyPipelineGenericInterfaces(t *testing.T) {
 	dir := t.TempDir()
 
@@ -625,4 +670,79 @@ func TestTinyPipelineGenericTypeErrors(t *testing.T) {
 	}()
 
 	requireTinyError(t, result, tinyerrors.ErrorType, "cannot pass string to parameter 'val' of function 'class Box constructor' (expected number)")
+}
+
+func TestTinyPipelineArrayLoopJit(t *testing.T) {
+	dir := t.TempDir()
+
+	mainContent := strings.Join([]string{
+		`import std "io" as io;`,
+		`fn arrayLoop(limit: number): number {`,
+		`    let arr = [];`,
+		`    let i = 0;`,
+		`    while i < limit {`,
+		`        arr.push(i * 3 + 1);`,
+		`        i = i + 1;`,
+		`    }`,
+		`    let total = 0;`,
+		`    i = 0;`,
+		`    while i < limit {`,
+		`        total = total + arr[i];`,
+		`        i = i + 1;`,
+		`    }`,
+		`    return total;`,
+		`}`,
+		`io.println(arrayLoop(5).toString());`,
+	}, "\n")
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main.tiny: %v", err)
+	}
+
+	out := requireTinySuccess(t, runTinyFile(t, mainPath))
+	const want = "35\n"
+	if out != want {
+		t.Fatalf("unexpected output: want %q, got %q", want, out)
+	}
+}
+
+func TestTinyPipelineJitDirectCallFromAnonymousFunction(t *testing.T) {
+	dir := t.TempDir()
+
+	mainContent := strings.Join([]string{
+		`import std "io" as io;`,
+		`import std "tests" as tests;`,
+		`fn arrayLoop(limit: number): number {`,
+		`    let arr = [];`,
+		`    let i = 0;`,
+		`    while i < limit {`,
+		`        arr.push(i * 3 + 1);`,
+		`        i = i + 1;`,
+		`    }`,
+		`    let total = 0;`,
+		`    i = 0;`,
+		`    while i < limit {`,
+		`        total = total + arr[i];`,
+		`        i = i + 1;`,
+		`    }`,
+		`    return total;`,
+		`}`,
+		`io.println(arrayLoop(5).toString());`,
+		`io.println(tests.measureMs(fn() { arrayLoop(5); }).toString());`,
+	}, "\n")
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main.tiny: %v", err)
+	}
+
+	result := runTinyFile(t, mainPath)
+	out := requireTinySuccess(t, result)
+	if strings.Contains(result.Stderr, "[JIT ERROR]") {
+		t.Fatalf("unexpected JIT error:\n%s", result.Stderr)
+	}
+
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 2 || lines[0] != "35" {
+		t.Fatalf("unexpected output lines: %q", lines)
+	}
 }

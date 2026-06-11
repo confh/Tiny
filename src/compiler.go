@@ -1891,6 +1891,9 @@ func (c *Compiler) evalConstantExpr(expr Expr, err string) TinyValue {
 	case NumberExpr:
 		return NewInt(e.Value)
 
+	case FloatExpr:
+		return NewNative(e.Value)
+
 	case BoolExpr:
 		return NewNative(e.Value)
 
@@ -1914,7 +1917,6 @@ func (c *Compiler) evalConstantExpr(expr Expr, err string) TinyValue {
 		for _, pair := range e.Fields {
 			obj[pair.Name] = c.evalConstantExpr(pair.Value, err)
 		}
-
 		return NewNative(obj)
 
 	default:
