@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	webview "github.com/abemedia/go-webview"
+	"github.com/gorilla/websocket"
 
 	_ "github.com/abemedia/go-webview/embedded"
 
@@ -113,6 +114,40 @@ type NativeTcpServerValue struct {
 type NativeTcpConnectionValue struct {
 	Connection net.Conn
 	Reader     *bufio.Reader
+}
+
+type NativeWebsocketServerValue struct {
+	Port           int
+	Host           string
+	Path           string
+	MaxMessageSize int
+
+	OnConnection *FunctionValue
+	OnMessage    *FunctionValue
+	OnClose      *FunctionValue
+	OnError      *FunctionValue
+
+	Running  bool
+	server   *http.Server
+	upgrader websocket.Upgrader
+
+	mu    sync.Mutex
+	conns map[*NativeWebsocketConnValue]bool
+}
+
+type NativeWebsocketConnValue struct {
+	Url string
+
+	OnMessage *FunctionValue
+	OnClose   *FunctionValue
+	OnError   *FunctionValue
+
+	conn   *websocket.Conn
+	mu     sync.Mutex
+	closed bool
+
+	headers ObjectValue
+	server  *NativeWebsocketServerValue // If this came from a server
 }
 
 type NativeHttpResponseValue struct {
@@ -413,6 +448,12 @@ func TypeNameStandard(value TinyValue) string {
 		return "tcp server"
 	case *NativeTcpConnectionValue:
 		return "tcp connection"
+	case *NativeWebsocketServerValue:
+		return "websocket server"
+	case *NativeWebsocketConnValue:
+		return "websocket connection"
+	case *NativeTrayValue:
+		return "tray"
 	case *NativeMutexValue:
 		return "mutex"
 	case *NativeProcessValue:

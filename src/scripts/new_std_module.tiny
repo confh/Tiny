@@ -3,14 +3,13 @@ import std "process";
 import std "io";
 
 const args = process.args();
-let moduleName = "";
 
 if (args.length() != 1) {
     io.println("usage: tiny new_std_module.tiny <module_name>");
     return;
 }
 
-moduleName = args[0];
+const moduleName = args[0]
 
 const fileName = `./src/vm/std_${moduleName}.go`;
 

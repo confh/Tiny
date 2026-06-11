@@ -1,0 +1,491 @@
+// A WebSocket message received from a connection.
+//
+// Message types are usually:
+//
+// `text
+// text
+// binary
+// ping
+// pong
+// close
+// `
+//
+// For text messages, data contains the message text.
+// For binary messages, data depends on the runtime binary representation.
+export interface Message {
+    type: string,
+    data: any
+}
+
+// Options used when connecting to a WebSocket server.
+//
+// Example:
+// ```tiny
+// const conn = websocket.connect("wss://example.com/ws", {
+//     headers: {
+//         Authorization: "Bearer token"
+//     },
+//     timeoutMs: 10000,
+//     maxMessageSize: 1048576
+// })
+// ```
+export interface ClientOptions {
+    headers?: object,
+    timeoutMs?: number,
+    maxMessageSize?: number
+}
+
+// Options used when creating a WebSocket server.
+//
+// Example:
+// ```tiny
+// const server = websocket.server({
+//     port: 3000,
+//     host: "127.0.0.1",
+//     path: "/ws",
+//     maxMessageSize: 1048576
+// })
+// ```
+export interface ServerOptions {
+    port: number,
+    host?: string,
+    path?: string,
+    readTimeoutMs?: number,
+    writeTimeoutMs?: number,
+    maxMessageSize?: number
+}
+
+// Information about a WebSocket close event.
+//
+// Example:
+// ```tiny
+// conn.onClose(fn(event: websocket.CloseEvent) {
+//     io.println(event.code)
+//     io.println(event.reason)
+// })
+// ```
+export interface CloseEvent {
+    code: number,
+    reason: string,
+    wasClean: bool
+}
+
+// Represents one WebSocket connection.
+//
+// Conn is used for both client connections and server-side accepted connections.
+//
+// Example:
+// ```tiny
+// const conn = websocket.connect("ws://localhost:3000/ws")
+// conn.sendText("hello")
+// conn.close()
+// ```
+export class Conn {
+    // Sends data through the connection.
+    //
+    // If data is a string, it is sent as a text message.
+    // Binary support depends on the runtime implementation.
+    //
+    // Example:
+    // ```tiny
+    // conn.send("hello")
+    // ```
+    fn send(data: string) {}
+    // Sends a text message.
+    //
+    // Example:
+    // ```tiny
+    // conn.sendText("hello")
+    // ```
+    fn sendText(data: string) {}
+
+    // Encodes a value as JSON and sends it as a text message.
+    //
+    // Example:
+    // ```tiny
+    // conn.sendJson({
+    //     op: 1,
+    //     d: null
+    // })
+    // ```
+    fn sendJson(data: object) {}
+
+    // Sends a binary message.
+    //
+    // The accepted data type depends on Tiny's runtime binary representation.
+    //
+    // Example:
+    // ```tiny
+    // conn.sendBytes(buffer)
+    // ```
+    fn sendBytes(data: buffer) {}
+
+    // Reads one message from the connection.
+    //
+    // This blocks until a message is received or the connection closes.
+    //
+    // Example:
+    // ```tiny
+    // const msg = conn.read()
+    //
+    // if msg.type == "text" {
+    //     io.println(msg.data)
+    // }
+    // ```
+    fn read(): Message {}
+
+    // Reads one text message from the connection.
+    //
+    // This throws if the next message is not a text message.
+    //
+    // Example:
+    // ```tiny
+    // const text = conn.readText()
+    // io.println(text)
+    // ```
+    fn readText(): string {}
+
+    // Reads one text message and parses it as JSON.
+    //
+    // This is useful for APIs like Discord Gateway.
+    //
+    // Example:
+    // ```tiny
+    // const payload = conn.readJson()
+    // io.println(payload.op)
+    // ```
+    fn readJson(): object {}
+
+    // Registers a handler that runs when a message is received.
+    //
+    // Calling onMessage starts a background read loop if one is not already running.
+    //
+    // Example:
+    // ```tiny
+    // conn.onMessage(fn(msg: websocket.Message) {
+    //     io.println(msg.data)
+    // })
+    // ```
+    fn onMessage(handler: function) {}
+
+    // Registers a handler that runs when the connection closes.
+    //
+    // Example:
+    // ```tiny
+    // conn.onClose(fn(event: websocket.CloseEvent) {
+    //     io.println("closed: " + event.reason)
+    // })
+    // ```
+    fn onClose(handler: function) {}
+
+    // Registers a handler that runs when a WebSocket error happens.
+    //
+    // Example:
+    // ```tiny
+    // conn.onError(fn(err) {
+    //     io.println(err)
+    // })
+    // ```
+    fn onError(handler: function) {}
+
+    // Sends a WebSocket ping frame.
+    //
+    // Example:
+    // ```tiny
+    // conn.ping()
+    // ```
+    //
+    // Example with data:
+    // ```tiny
+    // conn.ping("heartbeat")
+    // ```
+    fn ping(data = "") {}
+
+    // Sends a WebSocket pong frame.
+    //
+    // Usually pong replies are handled automatically by the runtime.
+    //
+    // Example:
+    // ```tiny
+    // conn.pong()
+    // ```
+    fn pong(data = "") {}
+
+    // Closes the connection.
+    //
+    // The default close code is 1000, which means normal closure.
+    //
+    // Example:
+    // ```tiny
+    // conn.close()
+    // ```
+    //
+    // Example with a reason:
+    // ```tiny
+    // conn.close(1000, "done")
+    // ```
+    fn close(code = 1000, reason = "") {}
+
+    // Returns true if the connection is still open.
+    //
+    // Example:
+    // ```tiny
+    // if conn.isOpen() {
+    //     conn.sendText("still connected")
+    // }
+    // ```
+    fn isOpen(): bool {}
+
+    // Returns the remote network address if available.
+    //
+    // Example:
+    // ```tiny
+    // io.println(conn.remoteAddr())
+    // ```
+    fn remoteAddr(): string {}
+
+    // Returns request headers associated with the connection.
+    //
+    // This is mostly useful for server-side connections.
+    //
+    // Example:
+    // ```tiny
+    // const headers = conn.headers()
+    // io.println(headers["User-Agent"])
+    // ```
+    fn headers(): object {}
+
+}
+
+// Represents a WebSocket server.
+//
+// Example:
+// ```tiny
+// const server = websocket.server({
+//     port: 3000,
+//     path: "/ws"
+// })
+//
+// server.onConnection(fn(conn: websocket.Conn) {
+//     conn.sendText("welcome")
+// })
+//
+// server.start()
+// ```
+export class Server {
+    // Registers a handler that runs when a client connects.
+    //
+    // Example:
+    // ```tiny
+    // server.onConnection(fn(conn: websocket.Conn) {
+    //     conn.sendText("welcome")
+    // })
+    // ```
+    fn onConnection(handler: function) {}
+
+    // Registers a global message handler for all connected clients.
+    //
+    // The handler receives the connection and the message.
+    //
+    // Example:
+    // ```tiny
+    // server.onMessage(fn(conn: websocket.Conn, msg: websocket.Message) {
+    //     conn.sendText("echo: " + msg.data)
+    // })
+    // ```
+    fn onMessage(handler: function) {}
+
+    // Registers a global close handler for all connected clients.
+    //
+    // Example:
+    // ```tiny
+    // server.onClose(fn(conn: websocket.Conn, event: websocket.CloseEvent) {
+    //     io.println("client disconnected")
+    // })
+    // ```
+    fn onClose(handler: function) {}
+
+    // Registers a global error handler.
+    //
+    // Example:
+    // ```tiny
+    // server.onError(fn(err) {
+    //     io.println(err)
+    // })
+    // ```
+    fn onError(handler: function) {}
+
+    // Starts the WebSocket server.
+    //
+    // If isAsync is true, the server runs in the background.
+    //
+    // Example:
+    // ```tiny
+    // server.start()
+    // ```
+    //
+    // Example async:
+    // ```tiny
+    // server.start(true)
+    // ```
+    fn start(isAsync = false) {}
+
+    // Stops the WebSocket server and closes the listening socket.
+    //
+    // Example:
+    // ```tiny
+    // server.stop()
+    // ```
+    fn stop() {}
+
+    // Returns true if the server is running.
+    //
+    // Example:
+    // ```tiny
+    // if server.isRunning() {
+    //     io.println("server is running")
+    // }
+    // ```
+    fn isRunning(): bool {}
+
+    // Sends a text message to every connected client.
+    //
+    // Example:
+    // ```tiny
+    // server.broadcastText("hello everyone")
+    // ```
+    fn broadcastText(data: string) {}
+
+    // Encodes a value as JSON and sends it to every connected client.
+    //
+    // Example:
+    // ```tiny
+    // server.broadcastJson({
+    //     type: "reload"
+    // })
+    // ```
+    fn broadcastJson(data: object) {}
+
+    // Closes all connected clients without stopping the server.
+    //
+    // Example:
+    // ```tiny
+    // server.closeAll()
+    // ```
+    //
+    // Example with reason:
+    // ```tiny
+    // server.closeAll(1000, "server restarting")
+    // ```
+    fn closeAll(code = 1000, reason = "") {}
+
+}
+
+// Connects to a WebSocket server and returns a connection.
+//
+// Supports ws:// and wss:// URLs.
+//
+// Example:
+// ```tiny
+// const conn = websocket.connect("ws://localhost:3000/ws")
+// conn.sendText("hello")
+// ```
+//
+// Example with headers:
+// ```tiny
+// const conn = websocket.connect("wss://example.com/ws", {
+//     headers: {
+//         Authorization: "Bearer token"
+//     }
+// })
+// ```
+export fn connect(url: string, options?: ClientOptions): Conn {}
+
+// Creates a WebSocket server.
+//
+// Example:
+// ```tiny
+// const server = websocket.server(3000)
+// server.start()
+// ```
+//
+// Example with options:
+// ```tiny
+// const server = websocket.server({
+//     port: 3000,
+//     host: "127.0.0.1",
+//     path: "/ws"
+// })
+//
+// server.start()
+// ```
+export fn server(port: number | ServerOptions): Server {}
+
+// Creates a text message object.
+//
+// Example:
+// ```tiny
+// const msg = websocket.text("hello")
+// ```
+export fn text(data: string): Message {}
+
+// Creates a JSON text message object.
+//
+// The value is encoded as JSON and stored as message data.
+//
+// Example:
+// ```tiny
+// const msg = websocket.json({
+//     op: 1,
+//     d: null
+// })
+// ```
+export fn json(data: object): Message {}
+
+// Creates a binary message object.
+//
+// Example:
+// ```tiny
+// const msg = websocket.binary(buffer)
+// ```
+export fn binary(data: buffer): Message {}
+
+// Returns true if the message is a text message.
+//
+// Example:
+// ```tiny
+// if websocket.isText(msg) {
+//     io.println(msg.data)
+// }
+// ```
+export fn isText(message: Message): bool {}
+
+// Returns true if the message is a binary message.
+//
+// Example:
+// ```tiny
+// if websocket.isBinary(msg) {
+//     io.println("binary message")
+// }
+// ```
+export fn isBinary(message: Message): bool {}
+
+// Returns true if the message is a close message.
+//
+// Example:
+// ```tiny
+// if websocket.isClose(msg) {
+//     io.println("connection closed")
+// }
+// ```
+export fn isClose(message: Message): bool {}
+
+// Parses a text WebSocket message as JSON.
+//
+// Example:
+// ```tiny
+// const msg = conn.read()
+// const data = websocket.parseJson(msg)
+// io.println(data.op)
+// ```
+export fn parseJson(message: Message): object {}

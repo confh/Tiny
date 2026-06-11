@@ -27,8 +27,21 @@ func getScriptArgs() []string {
 func main() {
 	defer HandleLangError()
 
+	if len(os.Args) < 2 {
+		if _, ok := loadTinyConfig(); ok {
+			runSourceCommand(nil)
+		} else {
+			helpCommand(nil)
+		}
+		return
+	}
+
 	if len(os.Args) >= 2 {
 		switch os.Args[1] {
+		case "help", "--help", "-h":
+			helpCommand(os.Args[2:])
+			return
+
 		case "build":
 			buildCommand(os.Args[2:])
 			return
@@ -84,6 +97,85 @@ func main() {
 	}
 
 	runSourceCommand(os.Args[1:])
+}
+
+func helpCommand(args []string) {
+	if len(args) > 0 {
+		switch args[0] {
+		case "build":
+			fmt.Println("usage: tiny build <file.tiny> -o <file.tbc>")
+			fmt.Println("Compiles a Tiny source file into bytecode.")
+		case "run":
+			fmt.Println("usage: tiny run <file.tbc>")
+			fmt.Println("Runs a compiled Tiny bytecode file.")
+		case "pack":
+			fmt.Println("usage: tiny pack <file.tiny> -o <output>")
+			fmt.Println("Builds a packed executable from a Tiny source file.")
+		case "dist":
+			fmt.Println("usage: tiny dist <file.tiny> -o <output> [--target windows-amd64|linux-amd64] [--plugin <path>]")
+			fmt.Println("Builds a distributable executable for a target platform.")
+		case "init":
+			fmt.Println("usage: tiny init")
+			fmt.Println("Creates a tiny.json project file.")
+		case "add":
+			fmt.Println("usage: tiny add <github:owner/repo[@ref]>")
+			fmt.Println("usage: tiny add <name> <github:owner/repo[@ref]>")
+			fmt.Println("Adds and installs a dependency.")
+		case "install":
+			fmt.Println("usage: tiny install [--target <target>]")
+			fmt.Println("Installs dependencies from tiny.json.")
+		case "remove", "rm":
+			fmt.Println("usage: tiny remove <name|owner/repo> [--global|--project-only]")
+			fmt.Println("Removes a dependency from tiny.json and downloaded libraries.")
+		case "deps", "list":
+			fmt.Println("usage: tiny deps")
+			fmt.Println("Lists downloaded dependencies.")
+		case "task":
+			fmt.Println("usage: tiny task [name] [args...]")
+			fmt.Println("Runs a script from tiny.json, or lists scripts when no name is given.")
+		case "version", "ver", "v":
+			fmt.Println("usage: tiny version")
+			fmt.Println("Prints the Tiny and bytecode versions.")
+		case "update":
+			fmt.Println("usage: tiny update")
+			fmt.Println("Updates Tiny.")
+		case "lsp":
+			fmt.Println("usage: tiny lsp")
+			fmt.Println("Starts the Tiny language server.")
+		default:
+			fmt.Printf("unknown help topic: %s\n\n", args[0])
+			printGeneralHelp()
+		}
+		return
+	}
+
+	printGeneralHelp()
+}
+
+func printGeneralHelp() {
+	fmt.Println("Tiny")
+	fmt.Println()
+	fmt.Println("Usage:")
+	fmt.Println("  tiny <file.tiny> [args...]")
+	fmt.Println("  tiny <command> [args...]")
+	fmt.Println()
+	fmt.Println("Commands:")
+	fmt.Println("  build      Compile a Tiny source file to bytecode")
+	fmt.Println("  run        Run a compiled bytecode file")
+	fmt.Println("  pack       Build a packed executable")
+	fmt.Println("  dist       Build a distributable executable")
+	fmt.Println("  init       Create a tiny.json project file")
+	fmt.Println("  add        Add and install a dependency")
+	fmt.Println("  install    Install dependencies")
+	fmt.Println("  remove     Remove a dependency")
+	fmt.Println("  deps       List downloaded dependencies")
+	fmt.Println("  task       Run or list project tasks")
+	fmt.Println("  version    Print version information")
+	fmt.Println("  update     Update Tiny")
+	fmt.Println("  lsp        Start the language server")
+	fmt.Println("  help       Show help")
+	fmt.Println()
+	fmt.Println("Run 'tiny help <command>' for command-specific help.")
 }
 
 func runSourceCommand(args []string) {

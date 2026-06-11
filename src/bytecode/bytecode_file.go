@@ -48,8 +48,9 @@ type SerializableFunction struct {
 }
 
 type SerializableInterface struct {
-	Name   string              `json:"name"`
-	Fields map[string]TypeHint `json:"fields"`
+	Name           string              `json:"name"`
+	TypeParameters []string            `json:"typeParameters,omitempty"`
+	Fields         map[string]TypeHint `json:"fields"`
 }
 
 type SerializableClassField struct {
@@ -169,8 +170,9 @@ func SaveBytecode(path string, main []Instruction, functions map[string]Function
 
 	for name, interfaceData := range interfaces {
 		file.Interfaces[name] = SerializableInterface{
-			Name:   interfaceData.Name,
-			Fields: interfaceData.Fields,
+			Name:           interfaceData.Name,
+			TypeParameters: interfaceData.TypeParameters,
+			Fields:         interfaceData.Fields,
 		}
 	}
 
@@ -207,8 +209,9 @@ func SaveBytecodeToBytes(main []Instruction, functions map[string]Function, clas
 
 	for name, interfaceData := range interfaces {
 		file.Interfaces[name] = SerializableInterface{
-			Name:   interfaceData.Name,
-			Fields: interfaceData.Fields,
+			Name:           interfaceData.Name,
+			TypeParameters: interfaceData.TypeParameters,
+			Fields:         interfaceData.Fields,
 		}
 	}
 
@@ -255,8 +258,9 @@ func LoadBytecodeFromBytes(data []byte) ([]Instruction, map[string]Function, map
 
 	for name, interfaceData := range file.Interfaces {
 		interfaces[name] = Interface{
-			Name:   interfaceData.Name,
-			Fields: interfaceData.Fields,
+			Name:           interfaceData.Name,
+			TypeParameters: interfaceData.TypeParameters,
+			Fields:         interfaceData.Fields,
 		}
 	}
 

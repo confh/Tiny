@@ -1,6 +1,9 @@
 package vm
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestCheckTypeHintStdHttpRequestObject(t *testing.T) {
 	request := NewNative(ObjectValue{
@@ -32,6 +35,31 @@ func TestCheckTypeHintStdHttpRequestObjectRejectsMissingField(t *testing.T) {
 		t.Fatal("expected http.RequestObject to reject request object without headers")
 	}
 	if reason != " (missing field 'headers')" {
+		t.Fatalf("unexpected rejection reason: %q", reason)
+	}
+}
+
+func TestCheckTypeHintStdAliasInterface(t *testing.T) {
+	bounds := NewNative(ObjectValue{
+		"x":      NewInt(1),
+		"y":      NewInt(2),
+		"width":  NewInt(300),
+		"height": NewInt(200),
+	})
+	globals := []TinyValue{NewNative(&StandardModuleValue{Name: "tray"})}
+	globalNames := map[string]int{"t": 0}
+
+	ok, reason := CheckTypeHintWithGlobals(bounds, stdTypeHint("t.Bounds"), map[string]Interface{}, globals, globalNames)
+	if !ok {
+		t.Fatalf("expected t.Bounds to resolve through tray std alias: %s", reason)
+	}
+
+	empty := NewNative(ObjectValue{})
+	ok, reason = CheckTypeHintWithGlobals(empty, stdTypeHint("t.Bounds"), map[string]Interface{}, globals, globalNames)
+	if ok {
+		t.Fatal("expected t.Bounds to reject missing fields")
+	}
+	if !strings.HasPrefix(reason, " (missing field '") {
 		t.Fatalf("unexpected rejection reason: %q", reason)
 	}
 }
@@ -120,4 +148,3 @@ func TestCheckTypeHintNamespacedInterface(t *testing.T) {
 		t.Fatal("expected Results.ConnectResult to reject value due to field type mismatch")
 	}
 }
-

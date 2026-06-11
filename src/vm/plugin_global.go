@@ -23,4 +23,6 @@ var AvailablePlugins = []string{
 	"sync",
 	"tests",
 	"ui",
+	"websocket",
+	"tray",
 }

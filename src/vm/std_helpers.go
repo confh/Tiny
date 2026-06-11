@@ -93,6 +93,25 @@ func argFn(vm *VM, fnName string, args []TinyValue, index int) FunctionValue {
 	return fn
 }
 
+func argBuffer(vm *VM, fnName string, args []TinyValue, index int) *BufferValue {
+	if index < 0 || index >= len(args) {
+		vm.runtimeError(ErrorRuntime, "%s missing argument %d", fnName, index)
+	}
+
+	buffer, ok := args[index].Value.(*BufferValue)
+	if !ok {
+		vm.runtimeError(
+			ErrorType,
+			"%s argument %d expected buffer, got %s",
+			fnName,
+			index+1,
+			TypeName(args[index]),
+		)
+	}
+
+	return buffer
+}
+
 func argBool(vm *VM, fnName string, args []TinyValue, index int) bool {
 	if index < 0 || index >= len(args) {
 		vm.runtimeError(ErrorRuntime, "%s missing argument %d", fnName, index)

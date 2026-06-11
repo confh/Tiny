@@ -1490,13 +1490,16 @@ func getCodeActions(uri string, text string, params CodeActionParams) []CodeActi
 	if action, ok := removeImportAction(uri, line, lineIndex); ok {
 		actions = append(actions, action)
 	}
-	if action, ok := createMissingFunctionAction(uri, text, params.Range.Start); ok {
+	if action, ok := createMissingFunctionAction(uri, text, params.Range.Start, params.Context.Diagnostics); ok {
 		actions = append(actions, action)
 	}
 	if action, ok := addImportForSymbolAction(uri, text, params.Range.Start); ok {
 		actions = append(actions, action)
 	}
 	if action, ok := installMissingLibraryAction(uri, line); ok {
+		actions = append(actions, action)
+	}
+	if action, ok := implementMissingMethodsAction(uri, text, params.Range.Start); ok {
 		actions = append(actions, action)
 	}
 
@@ -1541,9 +1544,12 @@ func removeImportAction(uri string, line string, lineIndex int) (CodeAction, boo
 	}, true
 }
 
-func createMissingFunctionAction(uri string, text string, pos Position) (CodeAction, bool) {
+func createMissingFunctionAction(uri string, text string, pos Position, diagnostics []map[string]any) (CodeAction, bool) {
 	name := wordAtPosition(text, pos)
 	if name == "" || tinyKeywords[name] {
+		return CodeAction{}, false
+	}
+	if len(diagnostics) > 0 && !diagnosticsContainMessage(diagnostics, "undefined variable: "+name) {
 		return CodeAction{}, false
 	}
 	scope := scopeAtPosition(uri, text, pos)
@@ -1563,6 +1569,15 @@ func createMissingFunctionAction(uri string, text string, pos Position) (CodeAct
 			NewText: "\nfn " + name + "() {\n}\n",
 		}}}},
 	}, true
+}
+
+func diagnosticsContainMessage(diagnostics []map[string]any, message string) bool {
+	for _, diagnostic := range diagnostics {
+		if diagnosticMessage, _ := diagnostic["message"].(string); diagnosticMessage == message {
+			return true
+		}
+	}
+	return false
 }
 
 func addImportForSymbolAction(uri string, text string, pos Position) (CodeAction, bool) {
@@ -1626,6 +1641,136 @@ func installMissingLibraryAction(uri string, line string) (CodeAction, bool) {
 			Title:     "Install library '" + match[1] + "'",
 			Command:   "tiny.installLibrary",
 			Arguments: []any{uri, match[1]},
+		},
+	}, true
+}
+
+func findClassStmtInAST(statements []Stmt, name string) (ClassStmt, bool) {
+	for _, raw := range statements {
+		stmt, _ := unwrapExport(raw)
+		if cls, ok := stmt.(ClassStmt); ok && cls.Name == name {
+			return cls, true
+		}
+		if ns, ok := stmt.(NamespaceStmt); ok {
+			if nested, ok := findClassStmtInAST(ns.Statements, name); ok {
+				return nested, true
+			}
+		}
+	}
+	return ClassStmt{}, false
+}
+
+func implementMissingMethodsAction(uri string, text string, pos Position) (CodeAction, bool) {
+	offset := offsetAtLine(text, pos.Line+1)
+
+	var targetBlock *blockInfo
+	for _, block := range findBlocks(text, "class") {
+		if offset >= block.Start && offset < block.End {
+			targetBlock = &block
+			break
+		}
+	}
+	if targetBlock == nil {
+		return CodeAction{}, false
+	}
+
+	statements, _ := parseTinyForLSP(URIToPath(uri), text)
+	if statements == nil {
+		return CodeAction{}, false
+	}
+
+	cls, found := findClassStmtInAST(statements, targetBlock.Name)
+	if !found {
+		return CodeAction{}, false
+	}
+	if len(cls.Embeds) == 0 {
+		return CodeAction{}, false
+	}
+
+	scope := scopeAtPosition(uri, text, pos)
+
+	localFields := map[string]bool{}
+	for _, f := range cls.Fields {
+		localFields[f.Name] = true
+	}
+	localMethods := map[string]bool{}
+	for _, m := range cls.Methods {
+		localMethods[m.Name] = true
+	}
+
+	newText := ""
+	for _, embedName := range cls.Embeds {
+		var embedSym SymbolInfo
+		var ok bool
+		if embedSym, ok = resolveInterfaceSymbol(scope, embedName); !ok {
+			if embedSym, ok = resolveClassSymbol(scope, embedName); !ok {
+				continue
+			}
+		}
+
+		for fName, fSym := range embedSym.Fields {
+			if fSym.Type == "function" {
+				if !localMethods[fName] {
+					newText += fmt.Sprintf("    fn %s() {\n    }\n\n", fName)
+					localMethods[fName] = true
+				}
+			} else {
+				if !localFields[fName] {
+					defaultVal := "null"
+					switch fSym.Type {
+					case "string":
+						defaultVal = `""`
+					case "number":
+						defaultVal = "0"
+					case "bool":
+						defaultVal = "false"
+					}
+					newText += fmt.Sprintf("    field %s: %s = %s\n", fName, fSym.Type, defaultVal)
+					localFields[fName] = true
+				}
+			}
+		}
+
+		for mName, mSym := range embedSym.Methods {
+			if !localMethods[mName] {
+				paramParts := []string{}
+				for _, param := range mSym.Params {
+					part := param.Name
+					if param.Type != "" {
+						part += ": " + param.Type
+					}
+					paramParts = append(paramParts, part)
+				}
+				paramStr := strings.Join(paramParts, ", ")
+				retStr := ""
+				if mSym.Returns != "" && mSym.Returns != "any" {
+					retStr = ": " + mSym.Returns
+				}
+				newText += fmt.Sprintf("    fn %s(%s)%s {\n    }\n\n", mName, paramStr, retStr)
+				localMethods[mName] = true
+			}
+		}
+	}
+
+	if newText == "" {
+		return CodeAction{}, false
+	}
+
+	insertPos := bytePositionAtOffset(text, targetBlock.End-1)
+	editRange := LSPRange{Start: insertPos, End: insertPos}
+
+	return CodeAction{
+		Title: "Implement missing methods/fields",
+		Kind:  "quickfix",
+		Edit: WorkspaceEdit{
+			Changes: map[string][]TextEdit{
+				uri: {
+					{
+						Range:   editRange,
+						NewText: "\n" + newText,
+					},
+				},
+			},
 		},
 	}, true
 }
@@ -1786,12 +1931,39 @@ func validTinyIdentifier(name string) bool {
 }
 
 func collectReferenceDocuments(uri string, text string) map[string]string {
-	docs := map[string]string{uri: text}
-	for openURI, openText := range lspDocs {
-		docs[openURI] = openText
+	docs := map[string]string{}
+	docKeys := map[string]string{}
+	addReferenceDocument(docs, docKeys, uri, text, true)
+	for openDocument, openText := range lspDocs {
+		openURI := openDocument
+		if !strings.HasPrefix(openURI, "file:") {
+			openURI = pathToFileURI(openURI)
+		}
+		addReferenceDocument(docs, docKeys, openURI, openText, false)
 	}
 	collectImportedReferenceDocuments(uri, text, docs, map[string]bool{})
 	return docs
+}
+
+func addReferenceDocument(docs map[string]string, docKeys map[string]string, uri string, text string, prefer bool) {
+	key := referenceDocumentKey(uri)
+	if existingURI, exists := docKeys[key]; exists {
+		if !prefer {
+			return
+		}
+		delete(docs, existingURI)
+	}
+
+	docs[uri] = text
+	docKeys[key] = uri
+}
+
+func referenceDocumentKey(uri string) string {
+	path := filepath.Clean(URIToPath(uri))
+	if runtime.GOOS == "windows" {
+		path = strings.ToLower(path)
+	}
+	return path
 }
 
 func collectImportedReferenceDocuments(uri string, text string, docs map[string]string, visited map[string]bool) {
@@ -2092,7 +2264,7 @@ func refreshLSPDocumentFast(uri string, text string) {
 	path := URIToPath(uri)
 	lspDocs[path] = text
 	invalidateLSPImportCacheForURI(path)
-	publishParseDiagnostics(uri, text)
+	publishDiagnostics(uri, text)
 }
 
 func handleLSPMessage(msg LSPMessage) {
@@ -3125,12 +3297,12 @@ func scopeCompletions(scope *Scope, uri string, text string, hasParens bool) []C
 		snippetCompletion("throw", "throw error", "throw ${1:error}$0"),
 		snippetCompletion("spawn", "spawn task", "spawn () fn() {\n    $0\n}"),
 		snippetCompletion("defer", "defer statement", "defer fn() {\n    $0\n}"),
+		snippetCompletion("lock", "lock statement", "lock ${0:mutex} {\n\t $1\n}"),
 		snippetCompletion("embedstr", "embedstr statement", "embedstr \"$0\" const $1"),
 		snippetCompletion("embedbin", "embedbin statement", "embedbin \"$0\" const $1"),
 		snippetCompletion("embeddir", "embeddir statement", "embeddir \"$0\" const $1"),
 		snippetCompletion("native fn", "native fn statement", "native fn ${0:Name}(): null {\n\tgo {\n$1\n\t}\n}"),
 		{Label: "await ", Kind: 14, Detail: "await statement"},
-		{Label: "lock ", Kind: 14, Detail: "lock statement"},
 		{Label: "typeof", Kind: 14, Detail: "type operator"},
 		{Label: "instanceof", Kind: 14, Detail: "instance check"},
 		{Label: "true", Kind: 14, Detail: "boolean literal"},
@@ -3664,9 +3836,97 @@ func staticTypeOfSymbol(receiver string, sym SymbolInfo) string {
 
 func splitReceiverPath(receiver string) []string {
 	receiver = strings.TrimSpace(receiver)
-	receiver = strings.ReplaceAll(receiver, "?.", ".")
 	receiver = strings.TrimSuffix(receiver, "?")
-	parts := strings.Split(receiver, ".")
+
+	var parts []string
+	var current strings.Builder
+
+	inString := byte(0)
+	escaped := false
+	parenDepth := 0
+	bracketDepth := 0
+
+	i := 0
+	for i < len(receiver) {
+		ch := receiver[i]
+
+		if inString != 0 {
+			if escaped {
+				escaped = false
+			} else if ch == '\\' {
+				escaped = true
+			} else if ch == inString {
+				inString = 0
+			}
+			current.WriteByte(ch)
+			i++
+			continue
+		}
+
+		if ch == '"' || ch == '\'' || ch == '`' {
+			inString = ch
+			current.WriteByte(ch)
+			i++
+			continue
+		}
+
+		if ch == '(' {
+			parenDepth++
+			current.WriteByte(ch)
+			i++
+			continue
+		}
+		if ch == ')' {
+			if parenDepth > 0 {
+				parenDepth--
+			}
+			current.WriteByte(ch)
+			i++
+			continue
+		}
+		if ch == '[' {
+			bracketDepth++
+			current.WriteByte(ch)
+			i++
+			continue
+		}
+		if ch == ']' {
+			if bracketDepth > 0 {
+				bracketDepth--
+			}
+			current.WriteByte(ch)
+			i++
+			continue
+		}
+
+		// Check for ?. or .
+		if parenDepth == 0 && bracketDepth == 0 {
+			if strings.HasPrefix(receiver[i:], "?.") {
+				if current.Len() > 0 {
+					parts = append(parts, current.String())
+					current.Reset()
+				}
+				i += 2
+				continue
+			}
+			if ch == '.' {
+				if current.Len() > 0 {
+					parts = append(parts, current.String())
+					current.Reset()
+				}
+				i++
+				continue
+			}
+		}
+
+		current.WriteByte(ch)
+		i++
+	}
+
+	if current.Len() > 0 {
+		parts = append(parts, current.String())
+	}
+
 	out := []string{}
 	for _, part := range parts {
 		part = strings.TrimSpace(strings.TrimSuffix(part, "?"))
@@ -3722,12 +3982,34 @@ func resolveMemberFromStaticType(scope *Scope, typ string, member string) (Symbo
 			return SymbolInfo{}, "unknown", false
 		}
 
+		parts := strings.Split(className, ":")
+		parsed, _ := parseOneLSPType(scope, parts)
+		subst := map[string]string{}
+		for i, tp := range classSym.TypeParameters {
+			if i < len(parsed.Args) {
+				subst[tp] = formatLSPTypeStruct(parsed.Args[i])
+			} else {
+				subst[tp] = "any"
+			}
+		}
+
 		if fieldSym, ok := classSym.Fields[member]; ok {
-			return fieldSym, fieldSym.Type, true
+			resolvedSym := fieldSym
+			resolvedSym.Type = substituteLSPType(fieldSym.Type, subst)
+			return resolvedSym, resolvedSym.Type, true
 		}
 
 		if methodSym, ok := classSym.Methods[member]; ok {
-			return methodSym, firstNonEmpty(methodSym.Returns, "function"), true
+			resolvedSym := methodSym
+			resolvedSym.Returns = substituteLSPType(methodSym.Returns, subst)
+			if len(methodSym.Params) > 0 {
+				resolvedSym.Params = make([]StdArg, len(methodSym.Params))
+				for i, param := range methodSym.Params {
+					resolvedSym.Params[i] = param
+					resolvedSym.Params[i].Type = substituteLSPType(param.Type, subst)
+				}
+			}
+			return resolvedSym, firstNonEmpty(resolvedSym.Returns, "function"), true
 		}
 
 		return SymbolInfo{}, "unknown", false
@@ -4055,20 +4337,14 @@ func completionItemsForReceiver(scope *Scope, text string, pos Position, receive
 			ifaceSym = SymbolInfo{Kind: SymbolInterface}
 		}
 
-		items = []CompletionItem{}
-		for _, field := range ifaceSym.Fields {
-			items = append(items, CompletionItem{
-				Label:  field.Name,
-				Kind:   symbolKindToCompletionKind(field.Kind),
-				Detail: "interface field " + field.Name + " : " + field.Type,
-			})
-		}
-		items = dedupeCompletionItems(items)
+		items = completionItemsForInterface(ifaceSym)
 	} else if strings.HasPrefix(typ, "class:") {
 		className := strings.TrimPrefix(typ, "class:")
 		classSym, ok := resolveClassSymbol(scope, className)
 		if !ok || classSym.Kind != SymbolClass {
 			classSym = SymbolInfo{Kind: SymbolClass}
+		} else {
+			classSym = copyAndSubstituteClassSym(scope, classSym, className)
 		}
 		if len(sym.Fields) > 0 || len(sym.Methods) > 0 {
 			if classSym.Fields == nil {
@@ -4172,13 +4448,7 @@ func getUnionTypeCompletions(scope *Scope, typ string, receiver string, hasParen
 			ifaceName := strings.TrimPrefix(part, "interface:")
 			ifaceSym, ok := resolveInterfaceSymbol(scope, ifaceName)
 			if ok {
-				for _, field := range ifaceSym.Fields {
-					items = append(items, CompletionItem{
-						Label:  field.Name,
-						Kind:   symbolKindToCompletionKind(field.Kind),
-						Detail: "interface field " + field.Name + " : " + field.Type,
-					})
-				}
+				items = append(items, completionItemsForInterface(ifaceSym)...)
 			}
 			continue
 		}
@@ -4195,6 +4465,26 @@ func getUnionTypeCompletions(scope *Scope, typ string, receiver string, hasParen
 		}
 
 		items = append(items, getNativeTypeCompletions(part, hasParens)...)
+	}
+
+	return dedupeCompletionItems(items)
+}
+
+func completionItemsForInterface(ifaceSym SymbolInfo) []CompletionItem {
+	items := []CompletionItem{}
+	names := make([]string, 0, len(ifaceSym.Fields))
+	for name := range ifaceSym.Fields {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		field := ifaceSym.Fields[name]
+		items = append(items, CompletionItem{
+			Label:  field.Name,
+			Kind:   symbolKindToCompletionKind(field.Kind),
+			Detail: "interface field " + field.Name + " : " + field.Type,
+		})
 	}
 
 	return dedupeCompletionItems(items)
@@ -4470,4 +4760,47 @@ func symbolKindToCompletionKind(kind SymbolKind) int {
 	default:
 		return 6
 	}
+}
+
+func copyAndSubstituteClassSym(scope *Scope, classSym SymbolInfo, className string) SymbolInfo {
+	parts := strings.Split(className, ":")
+	parsed, _ := parseOneLSPType(scope, parts)
+
+	subst := map[string]string{}
+	for i, tp := range classSym.TypeParameters {
+		if i < len(parsed.Args) {
+			subst[tp] = formatLSPTypeStruct(parsed.Args[i])
+		} else {
+			subst[tp] = "any"
+		}
+	}
+
+	copied := classSym
+
+	if len(classSym.Fields) > 0 {
+		copied.Fields = map[string]SymbolInfo{}
+		for name, field := range classSym.Fields {
+			f := field
+			f.Type = substituteLSPType(field.Type, subst)
+			copied.Fields[name] = f
+		}
+	}
+
+	if len(classSym.Methods) > 0 {
+		copied.Methods = map[string]SymbolInfo{}
+		for name, method := range classSym.Methods {
+			m := method
+			m.Returns = substituteLSPType(method.Returns, subst)
+			if len(method.Params) > 0 {
+				m.Params = make([]StdArg, len(method.Params))
+				for i, p := range method.Params {
+					m.Params[i] = p
+					m.Params[i].Type = substituteLSPType(p.Type, subst)
+				}
+			}
+			copied.Methods[name] = m
+		}
+	}
+
+	return copied
 }

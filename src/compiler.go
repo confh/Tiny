@@ -38,6 +38,7 @@ type Binding struct {
 	Name     string
 	Slot     int
 	Constant bool
+	TypeHint string
 }
 
 type LoopContext struct {
@@ -97,9 +98,10 @@ type Compiler struct {
 	scopes  []map[string]Binding
 	scopeID int
 
-	localCount      int
-	globalIndexes   map[string]int
-	globalConstants map[string]bool
+	localCount       int
+	globalIndexes    map[string]int
+	globalConstants  map[string]bool
+	activeTypeParams []string
 }
 
 func unwrapExport(stmt Stmt) (Stmt, bool) {
@@ -365,7 +367,7 @@ func (c *Compiler) predeclareNamespaceFunctions(prefix string, ns NamespaceStmt)
 			c.declaredFunctions[fullName] = true
 			c.getFunctionID(fullName)
 		} else if nestedNs, ok := nsStmt.(NamespaceStmt); ok {
-			c.predeclareNamespaceFunctions(prefix + "." + ns.Name, nestedNs)
+			c.predeclareNamespaceFunctions(prefix+"."+ns.Name, nestedNs)
 		}
 	}
 }
@@ -464,6 +466,12 @@ func getParamFlags(params []Param) (bool, bool) {
 func (c *Compiler) compileFunctionLiteral(stmt FunctionStmt) {
 	compiledName := c.makeAnonymousFunctionName()
 
+	oldActiveTypeParams := c.activeTypeParams
+	c.activeTypeParams = append(append([]string{}, oldActiveTypeParams...), stmt.TypeParameters...)
+	defer func() {
+		c.activeTypeParams = oldActiveTypeParams
+	}()
+
 	outerBindings := c.collectCapturableBindings()
 
 	oldInstructions := c.currentInstructions
@@ -496,7 +504,9 @@ func (c *Compiler) compileFunctionLiteral(stmt FunctionStmt) {
 	c.beginScope()
 
 	for _, param := range stmt.Params {
-		c.declareVariable(param.Name, false)
+		binding := c.declareVariable(param.Name, false)
+		binding.TypeHint = param.TypeHint.Name
+		c.currentScope()[param.Name] = binding
 	}
 
 	for _, bodyStmt := range stmt.Body {
@@ -515,16 +525,17 @@ func (c *Compiler) compileFunctionLiteral(stmt FunctionStmt) {
 	hasDefaults, hasTypeHints := getParamFlags(stmt.Params)
 
 	c.functions[compiledName] = Function{
-		ID:           c.getFunctionID(compiledName),
-		Name:         compiledName,
-		Params:       stmt.Params,
-		ReturnType:   stmt.ReturnType,
-		Instructions: functionInstructions,
-		LocalCount:   localCount,
-		Captures:     captures,
-		Async:        stmt.Async,
-		HasDefaults:  hasDefaults,
-		HasTypeHints: hasTypeHints,
+		ID:             c.getFunctionID(compiledName),
+		Name:           compiledName,
+		TypeParameters: stmt.TypeParameters,
+		Params:         stmt.Params,
+		ReturnType:     stmt.ReturnType,
+		Instructions:   functionInstructions,
+		LocalCount:     localCount,
+		Captures:       captures,
+		Async:          stmt.Async,
+		HasDefaults:    hasDefaults,
+		HasTypeHints:   hasTypeHints,
 	}
 
 	c.currentInstructions = oldInstructions
@@ -684,6 +695,8 @@ func (c *Compiler) CompileProgram(program Program) ([]Instruction, map[string]Fu
 			delete(c.functions, v)
 		}
 	}
+
+	c.eraseFunctionGenericsForVM()
 
 	return c.mainInstructions, c.functions, c.classes, c.interfaces, c.globalIndexes
 }
@@ -1287,6 +1300,8 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 		c.compileExpr(s.Value)
 
 		binding := c.declareVariable(s.Name, s.Constant)
+		binding.TypeHint = s.TypeHint.Name
+		c.currentScope()[s.Name] = binding
 
 		c.setLocation(s.File, s.Line, s.Column)
 
@@ -1295,13 +1310,13 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 				Name:     s.Name,
 				Slot:     binding.Slot,
 				Constant: s.Constant,
-				TypeHint: s.TypeHint,
+				TypeHint: c.eraseTypeHint(s.TypeHint),
 			})
 		} else {
 			c.emit(OP_STORE_GLOBAL, VariableInfo{
 				Name:     binding.Name,
 				Constant: s.Constant,
-				TypeHint: s.TypeHint,
+				TypeHint: c.eraseTypeHint(s.TypeHint),
 				Slot:     binding.Slot,
 			})
 		}
@@ -1921,6 +1936,12 @@ func (c *Compiler) compileClass(stmt ClassStmt) {
 		c.fatalError(ErrorName, "class %s has the same name as interface %s", stmt.Name, interfaceName.Name)
 	}
 
+	oldActiveTypeParams := c.activeTypeParams
+	c.activeTypeParams = append([]string{}, stmt.TypeParameters...)
+	defer func() {
+		c.activeTypeParams = oldActiveTypeParams
+	}()
+
 	methods := map[string]string{}
 	privateMethods := map[string]bool{}
 	fields := []ClassField{}
@@ -1936,12 +1957,13 @@ func (c *Compiler) compileClass(stmt ClassStmt) {
 		c.usedFunctions[compiledName] = true
 
 		classMethod := FunctionStmt{
-			Name:       method.Name,
-			Params:     method.Params,
-			ReturnType: method.ReturnType,
-			Body:       method.Body,
-			Private:    method.Private,
-			Async:      method.Async,
+			Name:           method.Name,
+			TypeParameters: method.TypeParameters,
+			Params:         method.Params,
+			ReturnType:     method.ReturnType,
+			Body:           method.Body,
+			Private:        method.Private,
+			Async:          method.Async,
 		}
 
 		c.compileMethod(stmt.Name, classMethod)
@@ -1952,21 +1974,31 @@ func (c *Compiler) compileClass(stmt ClassStmt) {
 			Constant: field.Constant,
 			Name:     field.Name,
 			Value:    c.evalConstantExpr(field.Value, "class field default must be constant."),
-			TypeHint: field.TypeHint,
+			TypeHint: c.eraseTypeHint(field.TypeHint),
 			Private:  field.Private,
 		}
 
 		fields = append(fields, classField)
 
-		if ok, _ := CheckTypeHint(c.evalConstantExpr(field.Value, "class field default must be constant."), field.TypeHint, c.interfaces); !ok {
-			c.fatalError(
-				ErrorType,
-				"field %s in class '%s' expected %s, got %s",
-				field.Name,
-				stmt.Name,
-				field.TypeHint.Name,
-				TypeName(c.evalConstantExpr(field.Value, "class field default must be constant.")),
-			)
+		isGenericParam := false
+		for _, tp := range stmt.TypeParameters {
+			if field.TypeHint.Name == tp || strings.Contains(field.TypeHint.Name, tp+"|") || strings.Contains(field.TypeHint.Name, "|"+tp) || strings.Contains(field.TypeHint.Name, tp+":") || strings.Contains(field.TypeHint.Name, ":"+tp) {
+				isGenericParam = true
+				break
+			}
+		}
+
+		if !isGenericParam {
+			if ok, _ := CheckTypeHint(c.evalConstantExpr(field.Value, "class field default must be constant."), field.TypeHint, c.interfaces); !ok {
+				c.fatalError(
+					ErrorType,
+					"field %s in class '%s' expected %s, got %s",
+					field.Name,
+					stmt.Name,
+					field.TypeHint.Name,
+					TypeName(c.evalConstantExpr(field.Value, "class field default must be constant.")),
+				)
+			}
 		}
 
 		c.compileStatement(field)
@@ -1974,6 +2006,7 @@ func (c *Compiler) compileClass(stmt ClassStmt) {
 
 	c.classes[stmt.Name] = Class{
 		Name:           stmt.Name,
+		TypeParameters: stmt.TypeParameters,
 		Methods:        methods,
 		Embeds:         stmt.Embeds,
 		Fields:         fields,
@@ -2145,8 +2178,9 @@ func (c *Compiler) compileInterfaceStatement(stmt InterfaceStmt) {
 	}
 
 	c.interfaces[stmt.Name] = Interface{
-		Name:   stmt.Name,
-		Fields: stmt.Fields,
+		Name:           stmt.Name,
+		TypeParameters: stmt.TypeParameters,
+		Fields:         stmt.Fields,
 	}
 }
 
@@ -2179,15 +2213,23 @@ func (c *Compiler) compileFunction(stmt FunctionStmt) {
 		c.fatalError(ErrorName, "function already defined: %s", stmt.Name)
 	}
 
+	oldActiveTypeParams := c.activeTypeParams
+	c.activeTypeParams = append(append([]string{}, oldActiveTypeParams...), stmt.TypeParameters...)
+	defer func() {
+		c.activeTypeParams = oldActiveTypeParams
+	}()
+
 	hasDefaults, hasTypeHints := getParamFlags(stmt.Params)
 
 	c.functions[stmt.Name] = Function{
-		ID:           c.getFunctionID(stmt.Name),
-		Name:         stmt.Name,
-		Params:       stmt.Params,
-		HasDefaults:  hasDefaults,
-		HasTypeHints: hasTypeHints,
-		Async:        stmt.Async,
+		ID:             c.getFunctionID(stmt.Name),
+		Name:           stmt.Name,
+		TypeParameters: stmt.TypeParameters,
+		Params:         stmt.Params,
+		HasDefaults:    hasDefaults,
+		HasTypeHints:   hasTypeHints,
+		Async:          stmt.Async,
+		ReturnType:     stmt.ReturnType,
 	}
 
 	oldInstructions := c.currentInstructions
@@ -2220,7 +2262,9 @@ func (c *Compiler) compileFunction(stmt FunctionStmt) {
 	c.beginScope()
 
 	for _, param := range stmt.Params {
-		c.declareVariable(param.Name, false)
+		binding := c.declareVariable(param.Name, false)
+		binding.TypeHint = param.TypeHint.Name
+		c.currentScope()[param.Name] = binding
 	}
 
 	for _, bodyStmt := range stmt.Body {
@@ -2233,14 +2277,16 @@ func (c *Compiler) compileFunction(stmt FunctionStmt) {
 	localCount := c.localCount
 
 	c.functions[stmt.Name] = Function{
-		ID:           c.getFunctionID(stmt.Name),
-		Name:         stmt.Name,
-		Params:       stmt.Params,
-		Instructions: functionInstructions,
-		LocalCount:   localCount,
-		HasDefaults:  hasDefaults,
-		HasTypeHints: hasTypeHints,
-		Async:        stmt.Async,
+		ID:             c.getFunctionID(stmt.Name),
+		Name:           stmt.Name,
+		TypeParameters: stmt.TypeParameters,
+		Params:         stmt.Params,
+		Instructions:   functionInstructions,
+		LocalCount:     localCount,
+		HasDefaults:    hasDefaults,
+		HasTypeHints:   hasTypeHints,
+		ReturnType:     stmt.ReturnType,
+		Async:          stmt.Async,
 	}
 
 	c.currentInstructions = oldInstructions
@@ -2403,6 +2449,9 @@ func (c *Compiler) compileExpr(expr Expr) {
 		c.compileExpr(e.ElseExpr)
 
 		c.patchJump(jumpToEnd)
+
+	case InstantiatedExpr:
+		c.compileExpr(e.Object)
 
 	case StringExpr:
 		c.emit(OP_CONST, e.Value)
@@ -2770,7 +2819,40 @@ func (c *Compiler) compileExpr(expr Expr) {
 		}
 
 	case CallExpr:
-		if _, exists := c.classes[e.Name]; exists {
+		if cls, exists := c.classes[e.Name]; exists {
+			inferredArgs := []TypeHint{}
+			if len(cls.TypeParameters) > 0 {
+				initMethodName := e.Name + ".init"
+				if fn, exists := c.functions[initMethodName]; exists {
+					subst := map[string]string{}
+					for _, tp := range cls.TypeParameters {
+						subst[tp] = "any"
+					}
+
+					params := fn.Params
+					if len(params) > 0 && params[0].Name == "this" {
+						params = params[1:]
+					}
+
+					for i, arg := range e.Args {
+						if i >= len(params) {
+							break
+						}
+						param := params[i]
+						argType := c.inferCompileTimeType(arg)
+						for _, tp := range cls.TypeParameters {
+							if res, ok := c.inferTypeParamInCompiler(param.TypeHint.Name, argType, tp); ok {
+								subst[tp] = res
+							}
+						}
+					}
+					for _, tp := range cls.TypeParameters {
+						inferredArgs = append(inferredArgs, TypeHint{Name: subst[tp]})
+					}
+				}
+			}
+			c.checkCompileTimeClassArguments(e.Name, e.Args, inferredArgs, e.Line, e.Column)
+
 			for _, arg := range e.Args {
 				c.compileExpr(arg)
 			}
@@ -2888,6 +2970,38 @@ func (c *Compiler) compileExpr(expr Expr) {
 			}
 		}
 
+		if instantiated, ok := e.Callee.(InstantiatedExpr); ok {
+			if fullName, ok := c.resolveFullyQualifiedName(instantiated.Object); ok {
+				if _, exists := c.classes[fullName]; exists {
+					c.checkCompileTimeClassArguments(fullName, e.Args, instantiated.TypeArgs, e.Line, e.Column)
+					for _, arg := range e.Args {
+						c.compileExpr(arg)
+					}
+					c.setLocation(e.File, e.Line, e.Column)
+					c.emit(OP_CALL, CallInfo{
+						Name:     fullName,
+						ArgCount: len(e.Args),
+					})
+					return
+				}
+
+				if _, exists := c.functions[fullName]; exists {
+					c.checkCompileTimeFunctionArguments(fullName, e.Args, instantiated.TypeArgs, e.Line, e.Column)
+					c.usedFunctions[fullName] = true
+					for _, arg := range e.Args {
+						c.compileExpr(arg)
+					}
+					c.setLocation(e.File, e.Line, e.Column)
+					c.emit(OP_CALL_DIRECT, DirectCallInfo{
+						ID:       c.getFunctionID(fullName),
+						Name:     fullName,
+						ArgCount: len(e.Args),
+					})
+					return
+				}
+			}
+		}
+
 		if ident, ok := e.Callee.(IdentExpr); ok {
 			if c.currentNamespaceClasses != nil {
 				if fullName, exists := c.currentNamespaceClasses[ident.Name]; exists {
@@ -2975,7 +3089,40 @@ func (c *Compiler) compileExpr(expr Expr) {
 				return
 			}
 
-			if _, exists := c.classes[ident.Name]; exists {
+			if cls, exists := c.classes[ident.Name]; exists {
+				inferredArgs := []TypeHint{}
+				if len(cls.TypeParameters) > 0 {
+					initMethodName := ident.Name + ".init"
+					if fn, exists := c.functions[initMethodName]; exists {
+						subst := map[string]string{}
+						for _, tp := range cls.TypeParameters {
+							subst[tp] = "any"
+						}
+
+						params := fn.Params
+						if len(params) > 0 && params[0].Name == "this" {
+							params = params[1:]
+						}
+
+						for i, arg := range e.Args {
+							if i >= len(params) {
+								break
+							}
+							param := params[i]
+							argType := c.inferCompileTimeType(arg)
+							for _, tp := range cls.TypeParameters {
+								if res, ok := c.inferTypeParamInCompiler(param.TypeHint.Name, argType, tp); ok {
+									subst[tp] = res
+								}
+							}
+						}
+						for _, tp := range cls.TypeParameters {
+							inferredArgs = append(inferredArgs, TypeHint{Name: subst[tp]})
+						}
+					}
+				}
+				c.checkCompileTimeClassArguments(ident.Name, e.Args, inferredArgs, e.Line, e.Column)
+
 				for _, arg := range e.Args {
 					c.compileExpr(arg)
 				}
@@ -3072,6 +3219,12 @@ func (c *Compiler) isCompilingMain() bool {
 func (c *Compiler) compileMethod(className string, stmt FunctionStmt) {
 	name := className + "." + stmt.Name
 
+	oldActiveTypeParams := c.activeTypeParams
+	c.activeTypeParams = append(append([]string{}, oldActiveTypeParams...), stmt.TypeParameters...)
+	defer func() {
+		c.activeTypeParams = oldActiveTypeParams
+	}()
+
 	oldInstructions := c.currentInstructions
 	oldScopes := c.scopes
 	oldLocalCount := c.localCount
@@ -3108,7 +3261,9 @@ func (c *Compiler) compileMethod(className string, stmt FunctionStmt) {
 	c.beginScope()
 
 	// slot 0 = this
-	c.declareVariable("this", false)
+	thisBinding := c.declareVariable("this", false)
+	thisBinding.TypeHint = className
+	c.currentScope()["this"] = thisBinding
 
 	// slot 1+ = real user parameters
 	for _, param := range stmt.Params {
@@ -3116,7 +3271,9 @@ func (c *Compiler) compileMethod(className string, stmt FunctionStmt) {
 			continue
 		}
 
-		c.declareVariable(param.Name, false)
+		binding := c.declareVariable(param.Name, false)
+		binding.TypeHint = param.TypeHint.Name
+		c.currentScope()[param.Name] = binding
 	}
 
 	for _, bodyStmt := range stmt.Body {
@@ -3137,15 +3294,16 @@ func (c *Compiler) compileMethod(className string, stmt FunctionStmt) {
 	hasDefaults, hasTypeHints := getParamFlags(stmt.Params)
 
 	c.functions[name] = Function{
-		ID:           c.getFunctionID(name),
-		Name:         name,
-		Params:       params,
-		ReturnType:   stmt.ReturnType,
-		Instructions: functionInstructions,
-		LocalCount:   c.localCount,
-		HasDefaults:  hasDefaults,
-		HasTypeHints: hasTypeHints,
-		Async:        stmt.Async,
+		ID:             c.getFunctionID(name),
+		Name:           name,
+		TypeParameters: stmt.TypeParameters,
+		Params:         params,
+		ReturnType:     stmt.ReturnType,
+		Instructions:   functionInstructions,
+		LocalCount:     c.localCount,
+		HasDefaults:    hasDefaults,
+		HasTypeHints:   hasTypeHints,
+		Async:          stmt.Async,
 	}
 
 	c.currentInstructions = oldInstructions
@@ -3190,7 +3348,7 @@ func (c *Compiler) patchJump(index int) {
 }
 
 func (c *Compiler) inferCompileTimeType(expr Expr) string {
-	switch expr.(type) {
+	switch e := expr.(type) {
 	case StringExpr, InterpolatedStringExpr:
 		return "string"
 	case NumberExpr, FloatExpr:
@@ -3200,12 +3358,175 @@ func (c *Compiler) inferCompileTimeType(expr Expr) string {
 	case NullExpr:
 		return "null"
 	case ArrayExpr:
+		if len(e.Elements) == 0 {
+			return "array:any"
+		}
+		firstType := c.inferCompileTimeType(e.Elements[0])
+		allSame := true
+		for _, elem := range e.Elements {
+			if c.inferCompileTimeType(elem) != firstType {
+				allSame = false
+				break
+			}
+		}
+		if allSame && firstType != "any" {
+			return "array:" + firstType
+		}
 		return "array"
 	case ObjectExpr:
 		return "object"
+	case IdentExpr:
+		if binding, exists := c.resolveVariable(e.Name); exists {
+			if binding.TypeHint != "" {
+				return binding.TypeHint
+			}
+		}
+		return "any"
+	case InstantiatedExpr:
+		if name, ok := c.resolveFullyQualifiedName(e.Object); ok {
+			formattedArgs := []string{}
+			for _, arg := range e.TypeArgs {
+				formattedArgs = append(formattedArgs, arg.Name)
+			}
+			return name + ":" + strings.Join(formattedArgs, ":")
+		}
+		return "any"
+	case CallValueExpr:
+		if instantiated, ok := e.Callee.(InstantiatedExpr); ok {
+			if name, ok := c.resolveFullyQualifiedName(instantiated.Object); ok {
+				if _, isClass := c.classes[name]; isClass {
+					formattedArgs := []string{}
+					for _, arg := range instantiated.TypeArgs {
+						formattedArgs = append(formattedArgs, arg.Name)
+					}
+					return name + ":" + strings.Join(formattedArgs, ":")
+				}
+				if fn, exists := c.functions[name]; exists {
+					subst := map[string]string{}
+					for i, pName := range fn.TypeParameters {
+						if i < len(instantiated.TypeArgs) {
+							subst[pName] = instantiated.TypeArgs[i].Name
+						}
+					}
+					return c.substituteTypeHintName(fn.ReturnType.Name, subst)
+				}
+			}
+		}
+		if ident, ok := e.Callee.(IdentExpr); ok {
+			if name, ok := c.resolveFullyQualifiedName(ident); ok {
+				if cls, isClass := c.classes[name]; isClass {
+					if len(cls.TypeParameters) > 0 {
+						initMethodName := name + ".init"
+						if fn, exists := c.functions[initMethodName]; exists {
+							subst := map[string]string{}
+							for _, tp := range cls.TypeParameters {
+								subst[tp] = "any"
+							}
+
+							params := fn.Params
+							if len(params) > 0 && params[0].Name == "this" {
+								params = params[1:]
+							}
+
+							for i, arg := range e.Args {
+								if i >= len(params) {
+									break
+								}
+								param := params[i]
+								argType := c.inferCompileTimeType(arg)
+								for _, tp := range cls.TypeParameters {
+									if res, ok := c.inferTypeParamInCompiler(param.TypeHint.Name, argType, tp); ok {
+										subst[tp] = res
+									}
+								}
+							}
+
+							formattedArgs := []string{}
+							for _, tp := range cls.TypeParameters {
+								formattedArgs = append(formattedArgs, subst[tp])
+							}
+							return name + ":" + strings.Join(formattedArgs, ":")
+						}
+					}
+					return name
+				}
+				if fn, exists := c.functions[name]; exists {
+					return fn.ReturnType.Name
+				}
+			}
+		}
+		return "any"
+	case CallExpr:
+		if cls, exists := c.classes[e.Name]; exists {
+			if len(cls.TypeParameters) > 0 {
+				initMethodName := e.Name + ".init"
+				if fn, exists := c.functions[initMethodName]; exists {
+					subst := map[string]string{}
+					for _, tp := range cls.TypeParameters {
+						subst[tp] = "any"
+					}
+
+					params := fn.Params
+					if len(params) > 0 && params[0].Name == "this" {
+						params = params[1:]
+					}
+
+					for i, arg := range e.Args {
+						if i >= len(params) {
+							break
+						}
+						param := params[i]
+						argType := c.inferCompileTimeType(arg)
+						for _, tp := range cls.TypeParameters {
+							if res, ok := c.inferTypeParamInCompiler(param.TypeHint.Name, argType, tp); ok {
+								subst[tp] = res
+							}
+						}
+					}
+
+					formattedArgs := []string{}
+					for _, tp := range cls.TypeParameters {
+						formattedArgs = append(formattedArgs, subst[tp])
+					}
+					return e.Name + ":" + strings.Join(formattedArgs, ":")
+				}
+			}
+			return e.Name
+		}
+		if fn, exists := c.functions[e.Name]; exists {
+			return fn.ReturnType.Name
+		}
+		return "any"
 	default:
 		return "any"
 	}
+}
+
+func (c *Compiler) isEnumType(name string) bool {
+	switch name {
+	case "string", "number", "bool", "any", "null", "function", "error", "buffer", "array", "object":
+		return false
+	}
+	if strings.HasPrefix(name, "array:") {
+		return false
+	}
+	if _, exists := c.classes[name]; exists {
+		return false
+	}
+	for key := range c.classes {
+		if strings.HasSuffix(key, "."+name) {
+			return false
+		}
+	}
+	if _, exists := c.interfaces[name]; exists {
+		return false
+	}
+	for key := range c.interfaces {
+		if strings.HasSuffix(key, "."+name) {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Compiler) compareCompileTimeTypes(got string, expected string) bool {
@@ -3239,6 +3560,41 @@ func (c *Compiler) compareCompileTimeTypes(got string, expected string) bool {
 		return true
 	}
 
+	// Handle generic types: e.g. Box:number and Box:any or Box:number and Box:number
+	if strings.Contains(got, ":") && strings.Contains(expected, ":") && !strings.HasPrefix(got, "array:") && !strings.HasPrefix(expected, "array:") {
+		gotParts := strings.Split(got, ":")
+		expectedParts := strings.Split(expected, ":")
+
+		if gotParts[0] != expectedParts[0] {
+			return false
+		}
+
+		if len(gotParts) != len(expectedParts) {
+			return false
+		}
+
+		for i := 1; i < len(gotParts); i++ {
+			if !c.compareCompileTimeTypes(gotParts[i], expectedParts[i]) {
+				return false
+			}
+		}
+		return true
+	}
+
+	// Raw generic type compatibility
+	if strings.Contains(got, ":") && !strings.Contains(expected, ":") && !strings.HasPrefix(got, "array:") {
+		gotBase := strings.Split(got, ":")[0]
+		if gotBase == expected {
+			return true
+		}
+	}
+	if !strings.Contains(got, ":") && strings.Contains(expected, ":") && !strings.HasPrefix(expected, "array:") {
+		expectedBase := strings.Split(expected, ":")[0]
+		if got == expectedBase {
+			return true
+		}
+	}
+
 	expectedParts := strings.Split(expected, "|")
 	for _, part := range expectedParts {
 		part = strings.TrimSpace(part)
@@ -3249,7 +3605,18 @@ func (c *Compiler) compareCompileTimeTypes(got string, expected string) bool {
 			return true
 		}
 
-		// Handle array:elementType compatibility
+		if c.isEnumType(part) {
+			if got == "string" || got == "number" || got == part {
+				return true
+			}
+		}
+
+		if c.isEnumType(got) {
+			if part == "string" || part == "number" || part == got {
+				return true
+			}
+		}
+
 		if strings.HasPrefix(got, "array:") && strings.HasPrefix(part, "array:") {
 			gotElem := strings.TrimPrefix(got, "array:")
 			partElem := strings.TrimPrefix(part, "array:")
@@ -3320,6 +3687,191 @@ func (c *Compiler) checkCompileTimeArguments(fnName string, args []Expr, params 
 			c.setLocation(c.currentFile, line, col)
 			c.fatalError(ErrorType, "cannot pass %s to parameter '%s' of function '%s' (expected %s)", argType, param.Name, fnName, param.TypeHint.Name)
 		}
+	}
+}
+
+func (c *Compiler) checkCompileTimeClassArguments(className string, args []Expr, typeArgs []TypeHint, line int, col int) {
+	cls, exists := c.classes[className]
+	if !exists {
+		return
+	}
+
+	subst := map[string]string{}
+	for i, paramName := range cls.TypeParameters {
+		if i < len(typeArgs) {
+			subst[paramName] = typeArgs[i].Name
+		}
+	}
+
+	initMethodName := className + ".init"
+	if fn, exists := c.functions[initMethodName]; exists {
+		params := fn.Params
+		if len(params) > 0 && params[0].Name == "this" {
+			params = params[1:]
+		}
+
+		substitutedParams := make([]Param, len(params))
+		for i, p := range params {
+			substitutedParams[i] = p
+			substitutedParams[i].TypeHint = TypeHint{
+				Name:  c.substituteTypeHintName(p.TypeHint.Name, subst),
+				Types: p.TypeHint.Types,
+			}
+		}
+
+		c.checkCompileTimeArguments("class "+className+" constructor", args, substitutedParams, line, col)
+	} else {
+		if len(args) > 0 {
+			c.setLocation(c.currentFile, line, col)
+			c.fatalError(ErrorType, "class %s constructor expects 0 arguments, got %d", className, len(args))
+		}
+	}
+}
+
+func (c *Compiler) checkCompileTimeFunctionArguments(fnName string, args []Expr, typeArgs []TypeHint, line int, col int) {
+	fn, exists := c.functions[fnName]
+	if !exists {
+		return
+	}
+
+	subst := map[string]string{}
+	for i, paramName := range fn.TypeParameters {
+		if i < len(typeArgs) {
+			subst[paramName] = typeArgs[i].Name
+		}
+	}
+
+	substitutedParams := make([]Param, len(fn.Params))
+	for i, p := range fn.Params {
+		substitutedParams[i] = p
+		substitutedParams[i].TypeHint = TypeHint{
+			Name:  c.substituteTypeHintName(p.TypeHint.Name, subst),
+			Types: p.TypeHint.Types,
+		}
+	}
+
+	c.checkCompileTimeArguments(fnName, args, substitutedParams, line, col)
+}
+
+func (c *Compiler) substituteTypeHintName(typeName string, subst map[string]string) string {
+	if val, exists := subst[typeName]; exists {
+		return val
+	}
+	if strings.Contains(typeName, "|") {
+		parts := strings.Split(typeName, "|")
+		for i, part := range parts {
+			parts[i] = c.substituteTypeHintName(strings.TrimSpace(part), subst)
+		}
+		return strings.Join(parts, "|")
+	}
+	if strings.Contains(typeName, ":") {
+		parts := strings.Split(typeName, ":")
+		for i, part := range parts {
+			parts[i] = c.substituteTypeHintName(part, subst)
+		}
+		return strings.Join(parts, ":")
+	}
+	return typeName
+}
+
+func (c *Compiler) inferTypeParamInCompiler(paramType string, argType string, tp string) (string, bool) {
+	paramType = strings.TrimSpace(paramType)
+	argType = strings.TrimSpace(argType)
+
+	if paramType == tp {
+		return argType, true
+	}
+
+	if strings.HasPrefix(paramType, "array:") && strings.HasPrefix(argType, "array:") {
+		return c.inferTypeParamInCompiler(strings.TrimPrefix(paramType, "array:"), strings.TrimPrefix(argType, "array:"), tp)
+	}
+
+	if strings.Contains(paramType, ":") && strings.Contains(argType, ":") {
+		pParts := strings.Split(paramType, ":")
+		aParts := strings.Split(argType, ":")
+		if len(pParts) == len(aParts) && pParts[0] == aParts[0] {
+			for i := 1; i < len(pParts); i++ {
+				if res, ok := c.inferTypeParamInCompiler(pParts[i], aParts[i], tp); ok {
+					return res, true
+				}
+			}
+		}
+	}
+
+	return "", false
+}
+
+func (c *Compiler) eraseTypeHint(hint TypeHint) TypeHint {
+	return c.eraseTypeHintWithParams(hint, c.activeTypeParams)
+}
+
+func (c *Compiler) eraseTypeHintWithParams(hint TypeHint, tps []string) TypeHint {
+	if hint.IsEmpty() {
+		return hint
+	}
+
+	erasedName := c.eraseTypeHintNameWithParams(hint.Name, tps)
+	erasedTypes := make([]string, len(hint.Types))
+	for i, t := range hint.Types {
+		erasedTypes[i] = c.eraseTypeHintNameWithParams(t, tps)
+	}
+
+	return TypeHint{
+		Name:  erasedName,
+		Types: erasedTypes,
+	}
+}
+
+func (c *Compiler) eraseTypeHintNameWithParams(name string, tps []string) string {
+	if name == "" {
+		return ""
+	}
+	for _, tp := range tps {
+		if name == tp {
+			return "any"
+		}
+	}
+	if strings.Contains(name, "|") {
+		parts := strings.Split(name, "|")
+		for i, part := range parts {
+			parts[i] = c.eraseTypeHintNameWithParams(strings.TrimSpace(part), tps)
+		}
+		return strings.Join(parts, "|")
+	}
+	if strings.HasPrefix(name, "array:") {
+		elemType := strings.TrimPrefix(name, "array:")
+		return "array:" + c.eraseTypeHintNameWithParams(elemType, tps)
+	}
+	if strings.Contains(name, ":") {
+		parts := strings.Split(name, ":")
+		for i, part := range parts {
+			parts[i] = c.eraseTypeHintNameWithParams(part, tps)
+		}
+		return strings.Join(parts, ":")
+	}
+	return name
+}
+
+func (c *Compiler) eraseFunctionGenericsForVM() {
+	for name, fn := range c.functions {
+		var tps []string
+		if dot := strings.Index(name, "."); dot >= 0 {
+			className := name[:dot]
+			if class, exists := c.classes[className]; exists {
+				tps = append(tps, class.TypeParameters...)
+			}
+		}
+		tps = append(tps, fn.TypeParameters...)
+
+		erasedParams := make([]Param, len(fn.Params))
+		for i, p := range fn.Params {
+			erasedParams[i] = p
+			erasedParams[i].TypeHint = c.eraseTypeHintWithParams(p.TypeHint, tps)
+		}
+		fn.Params = erasedParams
+		fn.ReturnType = c.eraseTypeHintWithParams(fn.ReturnType, tps)
+
+		c.functions[name] = fn
 	}
 }
 

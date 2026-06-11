@@ -37,13 +37,17 @@ func (t TypeHint) String() string {
 }
 
 func CheckTypeHint(value TinyValue, hint TypeHint, interfaces map[string]Interface) (bool, string) {
+	return CheckTypeHintWithGlobals(value, hint, interfaces, nil, nil)
+}
+
+func CheckTypeHintWithGlobals(value TinyValue, hint TypeHint, interfaces map[string]Interface, globals []TinyValue, globalNames map[string]int) (bool, string) {
 	if hint.IsEmpty() || hint.Name == "any" {
 		return true, ""
 	}
 
 	var lastReason string
 	for _, typ := range hint.AllTypes() {
-		ok, reason := checkSingleTypeHint(value, typ, interfaces)
+		ok, reason := checkSingleTypeHintWithGlobals(value, typ, interfaces, globals, globalNames)
 		if ok {
 			return true, ""
 		}
@@ -53,7 +57,7 @@ func CheckTypeHint(value TinyValue, hint TypeHint, interfaces map[string]Interfa
 	return false, lastReason
 }
 
-func checkSingleTypeHint(value TinyValue, hint string, interfaces map[string]Interface) (bool, string) {
+func checkSingleTypeHintWithGlobals(value TinyValue, hint string, interfaces map[string]Interface, globals []TinyValue, globalNames map[string]int) (bool, string) {
 	if hint == "array" {
 		hint = "array:any"
 	}
@@ -72,7 +76,7 @@ func checkSingleTypeHint(value TinyValue, hint string, interfaces map[string]Int
 		elementType := strings.TrimPrefix(hint, "array:")
 		elementHint := TypeHint{Name: elementType, Types: []string{elementType}}
 		for idx, elem := range arrObj {
-			if ok, subReason := CheckTypeHint(elem, elementHint, interfaces); !ok {
+			if ok, subReason := CheckTypeHintWithGlobals(elem, elementHint, interfaces, globals, globalNames); !ok {
 				return false, fmt.Sprintf(" (at index %d: expected %s, got %s%s)", idx, elementType, TypeName(elem), subReason)
 			}
 		}
@@ -91,7 +95,7 @@ func checkSingleTypeHint(value TinyValue, hint string, interfaces map[string]Int
 		case float64, float32, uint64:
 			return true, ""
 		default:
-			return false, ""
+			return false, ": expected number, got " + TypeName(value)
 		}
 
 	case "string":
@@ -99,7 +103,7 @@ func checkSingleTypeHint(value TinyValue, hint string, interfaces map[string]Int
 		case string:
 			return true, ""
 		default:
-			return false, ""
+			return false, ": expected string, got " + TypeName(value)
 		}
 
 	case "bool":
@@ -107,7 +111,7 @@ func checkSingleTypeHint(value TinyValue, hint string, interfaces map[string]Int
 		case bool:
 			return true, ""
 		default:
-			return false, ""
+			return false, ": expected bool, got " + TypeName(value)
 		}
 
 	case "array":
@@ -141,7 +145,7 @@ func checkSingleTypeHint(value TinyValue, hint string, interfaces map[string]Int
 		return false, ""
 
 	default:
-		if iface, exists := resolveInterfaceHint(hint, interfaces); exists {
+		if iface, exists := resolveInterfaceHintWithGlobals(hint, interfaces, globals, globalNames); exists {
 			obj, ok := value.Value.(ObjectValue)
 			if !ok {
 				return false, ": expected object to match interface '" + hint + "'"
@@ -158,7 +162,7 @@ func checkSingleTypeHint(value TinyValue, hint string, interfaces map[string]Int
 					return false, fmt.Sprintf(" (missing field '%s')", fieldName)
 				}
 
-				if ok, subReason := CheckTypeHint(val, expectedHint, interfaces); !ok {
+				if ok, subReason := CheckTypeHintWithGlobals(val, expectedHint, interfaces, globals, globalNames); !ok {
 					return false, fmt.Sprintf(" (field '%s' type mismatch%s)", fieldName, subReason)
 				}
 			}
@@ -170,8 +174,41 @@ func checkSingleTypeHint(value TinyValue, hint string, interfaces map[string]Int
 			classValue, exists := obj["__class"]
 			if exists {
 				className, ok := classValue.Value.(string)
-				if ok && (className == hint || strings.HasSuffix(className, "."+hint)) {
+
+				checkHint := hint
+				if strings.Contains(checkHint, ":") {
+					checkHint = strings.Split(checkHint, ":")[0]
+				}
+
+				if ok && (className == checkHint || strings.HasSuffix(className, "."+checkHint)) {
 					return true, ""
+				}
+			}
+		}
+
+		if globalNames != nil && globals != nil {
+			if idx, exists := globalNames[hint]; exists && idx < len(globals) {
+				if enumObj, ok := globals[idx].Value.(ObjectValue); ok {
+					for _, memberVal := range enumObj {
+						if memberVal.Value == value.Value {
+							return true, ""
+						}
+					}
+					return false, fmt.Sprintf(": expected enum %s member", hint)
+				}
+			} else {
+				// Try with suffix (namespaced enum)
+				for name, idx := range globalNames {
+					if (strings.HasSuffix(name, "."+hint) || name == hint) && idx < len(globals) {
+						if enumObj, ok := globals[idx].Value.(ObjectValue); ok {
+							for _, memberVal := range enumObj {
+								if memberVal.Value == value.Value {
+									return true, ""
+								}
+							}
+							return false, fmt.Sprintf(": expected enum %s member", hint)
+						}
+					}
 				}
 			}
 		}
@@ -183,34 +220,118 @@ func checkSingleTypeHint(value TinyValue, hint string, interfaces map[string]Int
 	}
 }
 
+func substituteTypeHintName(typeName string, subst map[string]string) string {
+	if val, exists := subst[typeName]; exists {
+		return val
+	}
+	if strings.Contains(typeName, "|") {
+		parts := strings.Split(typeName, "|")
+		for i, part := range parts {
+			parts[i] = substituteTypeHintName(strings.TrimSpace(part), subst)
+		}
+		return strings.Join(parts, "|")
+	}
+	if strings.Contains(typeName, ":") {
+		parts := strings.Split(typeName, ":")
+		for i, part := range parts {
+			parts[i] = substituteTypeHintName(part, subst)
+		}
+		return strings.Join(parts, ":")
+	}
+	return typeName
+}
+
 func resolveInterfaceHint(hint string, interfaces map[string]Interface) (Interface, bool) {
-	if iface, exists := interfaces[hint]; exists {
-		return iface, true
+	return resolveInterfaceHintWithGlobals(hint, interfaces, nil, nil)
+}
+
+func resolveInterfaceHintWithGlobals(hint string, interfaces map[string]Interface, globals []TinyValue, globalNames map[string]int) (Interface, bool) {
+	baseName := hint
+	typeArgs := []string{}
+
+	if strings.Contains(hint, ":") {
+		parts := strings.Split(hint, ":")
+		baseName = parts[0]
+		typeArgs = parts[1:]
 	}
 
-	if iface, exists := standardInterfaceHints[hint]; exists {
-		return iface, true
-	}
-
-	for key, iface := range interfaces {
-		if strings.HasSuffix(key, "."+hint) {
+	resolveBase := func(name string) (Interface, bool) {
+		if iface, exists := interfaces[name]; exists {
 			return iface, true
 		}
-	}
-
-	if dot := strings.LastIndex(hint, "."); dot >= 0 {
-		shortName := hint[dot+1:]
-		if iface, exists := interfaces[shortName]; exists {
+		if iface, exists := standardInterfaceHints[name]; exists {
+			return iface, true
+		}
+		if iface, exists := resolveStandardInterfaceAlias(name, globals, globalNames); exists {
 			return iface, true
 		}
 		for key, iface := range interfaces {
-			if strings.HasSuffix(key, "."+shortName) {
+			if strings.HasSuffix(key, "."+name) {
 				return iface, true
 			}
 		}
+		return Interface{}, false
 	}
 
-	return Interface{}, false
+	iface, ok := resolveBase(baseName)
+	if !ok {
+		if dot := strings.LastIndex(baseName, "."); dot >= 0 {
+			iface, ok = resolveBase(baseName[dot+1:])
+		}
+	}
+
+	if !ok {
+		return Interface{}, false
+	}
+
+	if len(typeArgs) > 0 && len(iface.TypeParameters) > 0 {
+		subst := map[string]string{}
+		for i, tp := range iface.TypeParameters {
+			if i < len(typeArgs) {
+				subst[tp] = typeArgs[i]
+			}
+		}
+
+		instantiatedFields := map[string]TypeHint{}
+		for fieldName, fieldHint := range iface.Fields {
+			instantiatedFields[fieldName] = TypeHint{
+				Name: substituteTypeHintName(fieldHint.Name, subst),
+			}
+		}
+
+		return Interface{
+			Name:   iface.Name,
+			Fields: instantiatedFields,
+		}, true
+	}
+
+	return iface, true
+}
+
+func resolveStandardInterfaceAlias(name string, globals []TinyValue, globalNames map[string]int) (Interface, bool) {
+	if globals == nil || globalNames == nil {
+		return Interface{}, false
+	}
+
+	dot := strings.Index(name, ".")
+	if dot <= 0 || dot == len(name)-1 {
+		return Interface{}, false
+	}
+
+	alias := name[:dot]
+	typeName := name[dot+1:]
+	idx, exists := globalNames[alias]
+	if !exists || idx >= len(globals) {
+		return Interface{}, false
+	}
+
+	module, ok := globals[idx].Value.(*StandardModuleValue)
+	if !ok || module == nil {
+		return Interface{}, false
+	}
+
+	iface, exists := standardInterfaceHints[module.Name+"."+typeName]
+	return iface, exists
 }
 
 func stdTypeHint(name string) TypeHint {
@@ -218,6 +339,15 @@ func stdTypeHint(name string) TypeHint {
 }
 
 var standardInterfaceHints = map[string]Interface{
+	"tray.Bounds": {
+		Name: "tray.Bounds",
+		Fields: map[string]TypeHint{
+			"x":      stdTypeHint("number"),
+			"y":      stdTypeHint("number"),
+			"width":  stdTypeHint("number"),
+			"height": stdTypeHint("number"),
+		},
+	},
 	"http.RequestObject": {
 		Name: "http.RequestObject",
 		Fields: map[string]TypeHint{
@@ -236,6 +366,40 @@ var standardInterfaceHints = map[string]Interface{
 			"statusText": stdTypeHint("string"),
 			"body":       stdTypeHint("string"),
 			"headers":    stdTypeHint("object"),
+		},
+	},
+	"websocket.Message": {
+		Name: "websocket.Message",
+		Fields: map[string]TypeHint{
+			"type": stdTypeHint("string"),
+			"data": stdTypeHint("any"),
+		},
+	},
+	"websocket.ClientOptions": {
+		Name: "websocket.ClientOptions",
+		Fields: map[string]TypeHint{
+			"headers":        stdTypeHint("object"),
+			"timeoutMs":      stdTypeHint("number"),
+			"maxMessageSize": stdTypeHint("number"),
+		},
+	},
+	"websocket.ServerOptions": {
+		Name: "websocket.ServerOptions",
+		Fields: map[string]TypeHint{
+			"port":           stdTypeHint("number"),
+			"host":           stdTypeHint("string"),
+			"path":           stdTypeHint("string"),
+			"readTimeoutMs":  stdTypeHint("number"),
+			"writeTimeoutMs": stdTypeHint("number"),
+			"maxMessageSize": stdTypeHint("number"),
+		},
+	},
+	"websocket.CloseEvent": {
+		Name: "websocket.CloseEvent",
+		Fields: map[string]TypeHint{
+			"code":     stdTypeHint("number"),
+			"reason":   stdTypeHint("string"),
+			"wasClean": stdTypeHint("bool"),
 		},
 	},
 }

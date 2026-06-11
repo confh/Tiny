@@ -67,6 +67,8 @@ type VM struct {
 	framePool        []*Frame
 	functionList     []Function
 
+	jitFunctions map[string]*JitFunction
+
 	nativeFrames []NativeCallFrame
 	currentInstr Instruction
 
@@ -174,6 +176,7 @@ func NewVM(mainInstructions []Instruction, functions map[string]Function, classe
 		functionList:     functionList,
 		classes:          classes,
 		globals:          &globalsSlice,
+		jitFunctions:     map[string]*JitFunction{},
 		globalNames:      map[string]int{},
 		globalConstants:  map[string]bool{},
 		mu:               &sync.RWMutex{},
@@ -266,6 +269,40 @@ func (vm *VM) currentMethodClass() string {
 
 func (vm *VM) SetCLIArgs(args []string) {
 	vm.cliArgs = args
+}
+
+func isJitCompatible(val TinyValue) bool {
+	if val.IsInt {
+		return true
+	}
+	switch val.Value.(type) {
+	case float64, float32, int, int64, bool:
+		return true
+	default:
+		return false
+	}
+}
+
+func (vm *VM) argsMatchJit(args []TinyValue) bool {
+	for _, arg := range args {
+		if !isJitCompatible(arg) {
+			return false
+		}
+	}
+	return true
+}
+
+func (vm *VM) stackArgsMatchJit(argCount int) bool {
+	if vm.top < argCount {
+		return false
+	}
+	start := vm.top - argCount
+	for i := 0; i < argCount; i++ {
+		if !isJitCompatible(vm.stack[start+i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func (vm *VM) getFrame(fn Function) *Frame {
@@ -932,12 +969,20 @@ func (vm *VM) callClassByName(name string, args []TinyValue) {
 	vm.callClassWithArgs(class, args)
 }
 
+func (vm *VM) checkTypeHint(value TinyValue, hint TypeHint) (bool, string) {
+	var globals []TinyValue
+	if vm.globals != nil {
+		globals = *vm.globals
+	}
+	return CheckTypeHintWithGlobals(value, hint, vm.interfaces, globals, vm.globalNames)
+}
+
 func (vm *VM) checkCallableArgType(fn Function, callableType string, callableName string, parameterKind string, param Param, arg TinyValue) {
 	if !fn.HasTypeHints || param.TypeHint.IsEmpty() {
 		return
 	}
 
-	if ok, reason := CheckTypeHint(arg, param.TypeHint, vm.interfaces); !ok {
+	if ok, reason := vm.checkTypeHint(arg, param.TypeHint); !ok {
 		vm.fatalError(
 			ErrorType,
 			"%s %s %s %s expected %s, got %s%s",
@@ -1106,6 +1151,33 @@ func (vm *VM) objectIsOrEmbedsClass(object ObjectValue, className string) bool {
 }
 
 func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableName string) {
+	if vm.wazeroRuntime == nil {
+		vm.wazeroRuntime = wazero.NewRuntime(vm.wazeroCtx)
+	}
+
+	jitFn, exists := vm.jitFunctions[fn.Name]
+	if !exists {
+		compiled, success := TryCompileJit(vm.wazeroRuntime, vm.wazeroCtx, fn)
+		if success {
+			vm.jitFunctions[fn.Name] = compiled
+			jitFn = compiled
+		} else {
+			vm.jitFunctions[fn.Name] = nil
+		}
+	}
+
+	if jitFn != nil {
+		if vm.stackArgsMatchJit(argCount) {
+			args := vm.popArgs(argCount)
+			res, err := jitFn.Call(vm.wazeroCtx, args)
+			if err == nil {
+				vm.push(res)
+				return
+			}
+			vm.fatalError(ErrorRuntime, "JIT crashed: %v", err)
+		}
+	}
+
 	expected := len(fn.Params)
 	isVariadic := expected > 0 && fn.Params[expected-1].Variadic
 
@@ -1157,7 +1229,7 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 			param := fn.Params[i]
 
 			if fn.HasTypeHints && !param.TypeHint.IsEmpty() {
-				if ok, reason := CheckTypeHint(arg, param.TypeHint, vm.interfaces); !ok {
+				if ok, reason := vm.checkTypeHint(arg, param.TypeHint); !ok {
 					vm.fatalError(
 						ErrorType,
 						"function %s parameter %s expected %s, got %s%s",
@@ -1186,7 +1258,7 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 			arg := vm.stack[start+i]
 
 			if fn.HasTypeHints && !restParam.TypeHint.IsEmpty() {
-				if ok, reason := CheckTypeHint(arg, restParam.TypeHint, vm.interfaces); !ok {
+				if ok, reason := vm.checkTypeHint(arg, restParam.TypeHint); !ok {
 					vm.fatalError(
 						ErrorType,
 						"function %s rest parameter %s expected %s, got %s%s",
@@ -1218,7 +1290,7 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 			param := fn.Params[i]
 
 			if !param.TypeHint.IsEmpty() {
-				if ok, reason := CheckTypeHint(arg, param.TypeHint, vm.interfaces); !ok {
+				if ok, reason := vm.checkTypeHint(arg, param.TypeHint); !ok {
 					vm.fatalError(
 						ErrorType,
 						"function %s parameter %s expected %s, got %s%s",
@@ -1370,6 +1442,33 @@ func makeErrorObject(value TinyValue) ObjectValue {
 }
 
 func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []TinyValue) {
+	fn, ok := vm.functions[fnValue.Name]
+	if ok {
+		if vm.wazeroRuntime == nil {
+			vm.wazeroRuntime = wazero.NewRuntime(vm.wazeroCtx)
+		}
+
+		jitFn, exists := vm.jitFunctions[fn.Name]
+		if !exists {
+			compiled, success := TryCompileJit(vm.wazeroRuntime, vm.wazeroCtx, fn)
+			if success {
+				vm.jitFunctions[fn.Name] = compiled
+				jitFn = compiled
+			} else {
+				vm.jitFunctions[fn.Name] = nil
+			}
+		}
+
+		if jitFn != nil && vm.argsMatchJit(args) {
+			res, err := jitFn.Call(vm.wazeroCtx, args)
+			if err == nil {
+				vm.push(res)
+				return
+			}
+			vm.fatalError(ErrorRuntime, "JIT crashed: %v", err)
+		}
+	}
+
 	if vm.wasmModule != nil {
 		sanitizedName := strings.ReplaceAll(fnValue.Name, ".", "_")
 		fn := vm.wasmModule.ExportedFunction(sanitizedName)
@@ -1383,7 +1482,7 @@ func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []TinyValue)
 		}
 	}
 
-	fn, ok := vm.functions[fnValue.Name]
+	fn, ok = vm.functions[fnValue.Name]
 	if !ok {
 		vm.fatalError(ErrorName, "undefined function: %s", fnValue.Name)
 	}
@@ -1454,7 +1553,7 @@ func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []TinyValue)
 			param := fn.Params[i]
 
 			if fn.HasTypeHints && !param.TypeHint.IsEmpty() {
-				if ok, reason := CheckTypeHint(arg, param.TypeHint, vm.interfaces); !ok {
+				if ok, reason := vm.checkTypeHint(arg, param.TypeHint); !ok {
 					vm.fatalError(
 						ErrorType,
 						"function %s parameter %s expected %s, got %s%s",
@@ -1505,6 +1604,30 @@ func (vm *VM) runFrameToCompletion(frame *Frame) TinyValue {
 }
 
 func (vm *VM) callFunctionDirect(fn Function, args []TinyValue) {
+	if vm.wazeroRuntime == nil {
+		vm.wazeroRuntime = wazero.NewRuntime(vm.wazeroCtx)
+	}
+
+	jitFn, exists := vm.jitFunctions[fn.Name]
+	if !exists {
+		compiled, success := TryCompileJit(vm.wazeroRuntime, vm.wazeroCtx, fn)
+		if success {
+			vm.jitFunctions[fn.Name] = compiled
+			jitFn = compiled
+		} else {
+			vm.jitFunctions[fn.Name] = nil
+		}
+	}
+
+	if jitFn != nil && vm.argsMatchJit(args) {
+		res, err := jitFn.Call(vm.wazeroCtx, args)
+		if err == nil {
+			vm.push(res)
+			return
+		}
+		vm.fatalError(ErrorRuntime, "JIT crashed: %v", err)
+	}
+
 	args = vm.applyDefaultArgs(fn, args, 0, "function "+fn.Name)
 
 	frame := vm.getFrame(fn)
@@ -1513,7 +1636,7 @@ func (vm *VM) callFunctionDirect(fn Function, args []TinyValue) {
 		param := fn.Params[i]
 
 		if fn.HasTypeHints && !param.TypeHint.IsEmpty() {
-			if ok, reason := CheckTypeHint(arg, param.TypeHint, vm.interfaces); !ok {
+			if ok, reason := vm.checkTypeHint(arg, param.TypeHint); !ok {
 				vm.fatalError(
 					ErrorType,
 					"function %s parameter %s expected %s, got %s%s",
@@ -2572,7 +2695,7 @@ func (vm *VM) step() bool {
 		info := instr.Value.(VariableInfo)
 		value := vm.popFast()
 
-		if ok, reason := CheckTypeHint(value, info.TypeHint, vm.interfaces); !ok {
+		if ok, reason := vm.checkTypeHint(value, info.TypeHint); !ok {
 			vm.fatalError(
 				ErrorType,
 				"variable %s expected %s, got %s%s",
@@ -2681,7 +2804,7 @@ func (vm *VM) step() bool {
 		}
 
 		if !info.TypeHint.IsEmpty() {
-			if ok, reason := CheckTypeHint(value, info.TypeHint, vm.interfaces); !ok {
+			if ok, reason := vm.checkTypeHint(value, info.TypeHint); !ok {
 				vm.fatalError(
 					ErrorType,
 					"variable %s expected %s, got %s%s",
@@ -2729,7 +2852,7 @@ func (vm *VM) step() bool {
 		vm.mu.RUnlock()
 
 		if !hint.IsEmpty() {
-			if ok, reason := CheckTypeHint(value, hint, vm.interfaces); !ok {
+			if ok, reason := vm.checkTypeHint(value, hint); !ok {
 				vm.fatalError(
 					ErrorType,
 					"global %s expected %s, got %s%s",
@@ -3031,7 +3154,7 @@ func (vm *VM) step() bool {
 		hint := frame.localTypes[slot]
 
 		if !hint.IsEmpty() {
-			if ok, reason := CheckTypeHint(value, hint, vm.interfaces); !ok {
+			if ok, reason := vm.checkTypeHint(value, hint); !ok {
 				vm.fatalError(
 					ErrorType,
 					"local variable expected %s, got %s%s",
@@ -3753,7 +3876,7 @@ func (vm *VM) step() bool {
 		vm.frames = vm.frames[:len(vm.frames)-1]
 
 		if !frame.function.ReturnType.IsEmpty() {
-			if ok, reason := CheckTypeHint(returnValue, frame.function.ReturnType, vm.interfaces); !ok {
+			if ok, reason := vm.checkTypeHint(returnValue, frame.function.ReturnType); !ok {
 				vm.fatalError(
 					ErrorType,
 					"function %s should return %s, got %s%s",
@@ -4404,6 +4527,10 @@ func (vm *VM) callMethodResolved(method string, objectValue TinyValue, args []Ti
 		vm.callNativeWebviewMethod(val, method, args)
 		return
 
+	case *NativeTrayValue:
+		vm.callNativeTrayMethod(val, method, args)
+		return
+
 	case *StandardModuleValue:
 		popNative := vm.pushNativeFrame(val.Name + "." + method)
 		defer popNative()
@@ -4421,6 +4548,14 @@ func (vm *VM) callMethodResolved(method string, objectValue TinyValue, args []Ti
 
 	case *NativeTcpConnectionValue:
 		vm.callTcpConnMethod(val, method, args)
+		return
+
+	case *NativeWebsocketServerValue:
+		vm.callNativeWebsocketServerMethod(val, method, args)
+		return
+
+	case *NativeWebsocketConnValue:
+		vm.callNativeWebsocketConnMethod(val, method, args)
 		return
 
 	case *NativeMutexValue:
@@ -4541,7 +4676,7 @@ func (vm *VM) callMethodResolved(method string, objectValue TinyValue, args []Ti
 			arg := args[i]
 
 			if fn.HasTypeHints && !param.TypeHint.IsEmpty() {
-				if ok, reason := CheckTypeHint(arg, param.TypeHint, vm.interfaces); !ok {
+				if ok, reason := vm.checkTypeHint(arg, param.TypeHint); !ok {
 					vm.fatalError(
 						ErrorType,
 						"method %s parameter %s expected %s, got %s%s",
@@ -4571,7 +4706,7 @@ func (vm *VM) callMethodResolved(method string, objectValue TinyValue, args []Ti
 			arg := args[i]
 
 			if fn.HasTypeHints && !restParam.TypeHint.IsEmpty() {
-				if ok, reason := CheckTypeHint(arg, restParam.TypeHint, vm.interfaces); !ok {
+				if ok, reason := vm.checkTypeHint(arg, restParam.TypeHint); !ok {
 					vm.fatalError(
 						ErrorType,
 						"method %s rest parameter %s expected %s, got %s%s",
@@ -4598,7 +4733,7 @@ func (vm *VM) callMethodResolved(method string, objectValue TinyValue, args []Ti
 			param := fn.Params[paramIndex]
 
 			if fn.HasTypeHints && !param.TypeHint.IsEmpty() {
-				if ok, reason := CheckTypeHint(arg, param.TypeHint, vm.interfaces); !ok {
+				if ok, reason := vm.checkTypeHint(arg, param.TypeHint); !ok {
 					vm.fatalError(
 						ErrorType,
 						"method %s parameter %s expected %s, got %s%s",
@@ -4705,7 +4840,7 @@ func (vm *VM) callFunction(name string, argCount int) {
 		param := fn.Params[i]
 
 		if !param.TypeHint.IsEmpty() {
-			if ok, reason := CheckTypeHint(arg, param.TypeHint, vm.interfaces); !ok {
+			if ok, reason := vm.checkTypeHint(arg, param.TypeHint); !ok {
 				vm.fatalError(
 					ErrorType,
 					"function %s parameter %s expected %s, got %s%s",

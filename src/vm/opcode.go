@@ -137,16 +137,17 @@ type Instruction struct {
 }
 
 type Function struct {
-	ID           int           `json:"id"`
-	Name         string        `json:"name"`
-	Params       []Param       `json:"params"`
-	ReturnType   TypeHint      `json:"returnType"`
-	Instructions []Instruction `json:"instructions"`
-	LocalCount   int           `json:"localCount"`
-	Captures     []CapturedVar
-	Async        bool `json:"async"`
-	HasDefaults  bool `json:"hasDefaults"`
-	HasTypeHints bool `json:"hasTypeHints"`
+	ID             int           `json:"id"`
+	Name           string        `json:"name"`
+	TypeParameters []string      `json:"typeParameters,omitempty"`
+	Params         []Param       `json:"params"`
+	ReturnType     TypeHint      `json:"returnType"`
+	Instructions   []Instruction `json:"instructions"`
+	LocalCount     int           `json:"localCount"`
+	Captures       []CapturedVar
+	Async          bool `json:"async"`
+	HasDefaults    bool `json:"hasDefaults"`
+	HasTypeHints   bool `json:"hasTypeHints"`
 }
 
 type CapturedVar struct {
@@ -320,6 +321,7 @@ type CallDirectSubConstInfo struct {
 
 type Class struct {
 	Name           string
+	TypeParameters []string
 	Fields         []ClassField
 	Methods        map[string]string
 	Embeds         []string
@@ -327,8 +329,9 @@ type Class struct {
 }
 
 type Interface struct {
-	Name   string
-	Fields map[string]TypeHint
+	Name           string
+	TypeParameters []string
+	Fields         map[string]TypeHint
 }
 
 type ClassField struct {

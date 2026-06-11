@@ -136,19 +136,23 @@ type MatchStmt struct {
 	Value   Expr
 	Cases   []MatchCase
 	Default []Stmt
+	File    string
+	Line    int
+	Column  int
 }
 
 func (s MatchStmt) stmtNode() {}
 
 type ClassStmt struct {
-	Name    string
-	Methods []FunctionStmt
-	Embeds  []string
-	Locals  []*Cell
-	Fields  []FieldStmt
-	File    string
-	Line    int
-	Column  int
+	Name           string
+	TypeParameters []string
+	Methods        []FunctionStmt
+	Embeds         []string
+	Locals         []*Cell
+	Fields         []FieldStmt
+	File           string
+	Line           int
+	Column         int
 }
 
 func (s ClassStmt) stmtNode() {}
@@ -371,11 +375,12 @@ func (s ThrowStmt) stmtNode() {}
 func (s ExprStmt) stmtNode() {}
 
 type InterfaceStmt struct {
-	Name   string
-	Fields map[string]TypeHint
-	File   string
-	Line   int
-	Column int
+	Name           string
+	TypeParameters []string
+	Fields         map[string]TypeHint
+	File           string
+	Line           int
+	Column         int
 }
 
 func (s InterfaceStmt) stmtNode() {}
@@ -413,15 +418,16 @@ type Param struct {
 }
 
 type FunctionStmt struct {
-	Name       string
-	Params     []Param
-	ReturnType TypeHint
-	Body       []Stmt
-	Async      bool
-	Private    bool
-	File       string
-	Line       int
-	Column     int
+	Name           string
+	TypeParameters []string
+	Params         []Param
+	ReturnType     TypeHint
+	Body           []Stmt
+	Async          bool
+	Private        bool
+	File           string
+	Line           int
+	Column         int
 }
 
 func (s FunctionStmt) stmtNode() {}
@@ -519,6 +525,16 @@ type CallExpr struct {
 }
 
 func (e CallExpr) exprNode() {}
+
+type InstantiatedExpr struct {
+	Object   Expr
+	TypeArgs []TypeHint
+	File     string
+	Line     int
+	Column   int
+}
+
+func (e InstantiatedExpr) exprNode() {}
 
 type CallValueExpr struct {
 	Callee Expr

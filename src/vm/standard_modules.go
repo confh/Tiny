@@ -72,6 +72,12 @@ func (vm *VM) callStandardModule(module string, method string, args []TinyValue)
 	case "ui":
 		vm.callStdUi(method, args)
 
+	case "websocket":
+		vm.callStdWebsocket(method, args)
+
+	case "tray":
+		vm.callStdTray(method, args)
+
 	default:
 		vm.fatalError(ErrorName, "unknown standard module: %s", module)
 	}

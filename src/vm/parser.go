@@ -128,6 +128,7 @@ type Parser struct {
 	next    Token
 
 	deferCountStack []int
+	inTernaryThen   bool
 }
 
 func NewParser(lexer *Lexer) *Parser {
@@ -179,6 +180,16 @@ func (p *Parser) ParseProgram() Program {
 	var statements []Stmt
 
 	for p.current.Type != TOKEN_EOF {
+		if p.current.Type == TOKEN_RBRACE {
+			LangErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"unexpected }",
+			)
+		}
+
 		stmt := p.parseStatement()
 		if stmt != nil {
 			statements = append(statements, stmt)
@@ -220,7 +231,7 @@ func (p *Parser) parseTypeName() string {
 		p.advance()
 	}
 
-	if name == "array" && p.current.Type == TOKEN_COLON {
+	for p.current.Type == TOKEN_COLON {
 		p.advance()
 		name += ":" + p.parseTypeName()
 	}
@@ -698,6 +709,10 @@ func (p *Parser) parseStatement() Stmt {
 }
 
 func (p *Parser) parseMatchStatement() Stmt {
+	file := p.current.File
+	line := p.current.Line
+	column := p.current.Column
+
 	p.expect(TOKEN_MATCH)
 
 	value := p.parseExpression()
@@ -768,6 +783,9 @@ func (p *Parser) parseMatchStatement() Stmt {
 		Value:   value,
 		Cases:   cases,
 		Default: defaultBody,
+		File:    file,
+		Line:    line,
+		Column:  column,
 	}
 }
 
@@ -1159,6 +1177,10 @@ func (p *Parser) parseContinueStatement() Stmt {
 }
 
 func (p *Parser) parseWhileStatement() Stmt {
+	file := p.current.File
+	line := p.current.Line
+	column := p.current.Column
+
 	p.expect(TOKEN_WHILE)
 
 	condition := p.parseExpression()
@@ -1168,9 +1190,9 @@ func (p *Parser) parseWhileStatement() Stmt {
 	return WhileStmt{
 		Condition: condition,
 		Body:      body,
-		Line:      p.current.Line,
-		Column:    p.current.Column,
-		File:      p.current.File,
+		Line:      line,
+		Column:    column,
+		File:      file,
 	}
 }
 
@@ -1358,6 +1380,16 @@ func (p *Parser) parseInterfaceStatement() Stmt {
 	name := p.current.Literal
 	p.expect(TOKEN_IDENT)
 
+	typeParams := []string{}
+	for p.current.Type == TOKEN_COLON {
+		p.advance()
+		if p.current.Type != TOKEN_IDENT {
+			LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "expected type parameter name")
+		}
+		typeParams = append(typeParams, p.current.Literal)
+		p.advance()
+	}
+
 	p.expect(TOKEN_LBRACE)
 
 	fields := map[string]TypeHint{}
@@ -1383,15 +1415,20 @@ func (p *Parser) parseInterfaceStatement() Stmt {
 	p.expect(TOKEN_RBRACE)
 
 	return InterfaceStmt{
-		Name:   name,
-		Fields: fields,
-		File:   file,
-		Line:   line,
-		Column: column,
+		Name:           name,
+		TypeParameters: typeParams,
+		Fields:         fields,
+		File:           file,
+		Line:           line,
+		Column:         column,
 	}
 }
 
 func (p *Parser) parseIfStatement() Stmt {
+	file := p.current.File
+	line := p.current.Line
+	column := p.current.Column
+
 	p.expect(TOKEN_IF)
 
 	condition := p.parseExpression()
@@ -1415,9 +1452,9 @@ func (p *Parser) parseIfStatement() Stmt {
 		Condition: condition,
 		ThenBody:  thenBody,
 		ElseBody:  elseBody,
-		Line:      p.current.Line,
-		Column:    p.current.Column,
-		File:      p.current.File,
+		Line:      line,
+		Column:    column,
+		File:      file,
 	}
 }
 
@@ -2015,17 +2052,28 @@ func (p *Parser) parseFunctionStatement(async bool) Stmt {
 	name := p.current.Literal
 	p.advance()
 
+	typeParams := []string{}
+	for p.current.Type == TOKEN_COLON {
+		p.advance()
+		if p.current.Type != TOKEN_IDENT {
+			LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "expected type parameter name")
+		}
+		typeParams = append(typeParams, p.current.Literal)
+		p.advance()
+	}
+
 	params, returnType, body := p.parseFunctionSignatureAndBody()
 
 	return FunctionStmt{
-		Name:       name,
-		Params:     params,
-		ReturnType: returnType,
-		Body:       body,
-		Async:      async,
-		Line:       line,
-		Column:     column,
-		File:       p.current.File,
+		Name:           name,
+		TypeParameters: typeParams,
+		Params:         params,
+		ReturnType:     returnType,
+		Body:           body,
+		Async:          async,
+		Line:           line,
+		Column:         column,
+		File:           p.current.File,
 	}
 }
 
@@ -2353,7 +2401,10 @@ func (p *Parser) parseTernary() Expr {
 
 	p.advance()
 
+	oldInTernary := p.inTernaryThen
+	p.inTernaryThen = true
 	thenExpr := p.parseExpression()
+	p.inTernaryThen = oldInTernary
 
 	p.expect(TOKEN_COLON)
 
@@ -2586,10 +2637,104 @@ func (p *Parser) parsePostfix() Expr {
 				Index:  index,
 			}
 
+		case TOKEN_COLON:
+			if !p.isGenericColon() {
+				return expr
+			}
+
+			typeArgs := []TypeHint{}
+			for p.current.Type == TOKEN_COLON {
+				p.advance()
+				typeArgs = append(typeArgs, TypeHint{Name: p.parseTypeName()})
+			}
+
+			expr = InstantiatedExpr{
+				Object:   expr,
+				TypeArgs: typeArgs,
+				File:     p.current.File,
+				Line:     p.current.Line,
+				Column:   p.current.Column,
+			}
+
 		default:
 			return expr
 		}
 	}
+}
+
+func (p *Parser) isGenericColon() bool {
+	if p.current.Type != TOKEN_COLON {
+		return false
+	}
+
+	if !p.inTernaryThen {
+		return true
+	}
+
+	pos := p.posOfToken(p.current)
+	if pos < 0 || pos >= len(p.lexer.input) {
+		return false
+	}
+
+	pos++
+
+	skipWhitespace := func(i int) int {
+		for i < len(p.lexer.input) {
+			ch := p.lexer.input[i]
+			if ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' {
+				i++
+				continue
+			}
+			if ch == '/' && i+1 < len(p.lexer.input) && p.lexer.input[i+1] == '/' {
+				i += 2
+				for i < len(p.lexer.input) && p.lexer.input[i] != '\n' {
+					i++
+				}
+				continue
+			}
+			if ch == '/' && i+1 < len(p.lexer.input) && p.lexer.input[i+1] == '*' {
+				i += 2
+				for i+1 < len(p.lexer.input) {
+					if p.lexer.input[i] == '*' && p.lexer.input[i+1] == '/' {
+						i += 2
+						break
+					}
+					i++
+				}
+				continue
+			}
+			break
+		}
+		return i
+	}
+
+	pos = skipWhitespace(pos)
+	if pos >= len(p.lexer.input) {
+		return false
+	}
+
+	isIdentStart := func(ch rune) bool {
+		return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_'
+	}
+	isIdentPart := func(ch rune) bool {
+		return isIdentStart(ch) || (ch >= '0' && ch <= '9')
+	}
+
+	if !isIdentStart(p.lexer.input[pos]) {
+		return false
+	}
+
+	for pos < len(p.lexer.input) && isIdentPart(p.lexer.input[pos]) {
+		pos++
+	}
+
+	pos = skipWhitespace(pos)
+	if pos >= len(p.lexer.input) {
+		return false
+	}
+
+	nextChar := p.lexer.input[pos]
+	return nextChar == '(' || nextChar == ':' || nextChar == '|'
 }
 
 func (p *Parser) parseArrayLiteral() Expr {
@@ -3068,6 +3213,16 @@ func (p *Parser) parseClassStatement() Stmt {
 	name := p.current.Literal
 	p.advance()
 
+	typeParams := []string{}
+	for p.current.Type == TOKEN_COLON {
+		p.advance()
+		if p.current.Type != TOKEN_IDENT {
+			LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "expected type parameter name")
+		}
+		typeParams = append(typeParams, p.current.Literal)
+		p.advance()
+	}
+
 	p.expect(TOKEN_LBRACE)
 
 	var methods []FunctionStmt
@@ -3164,13 +3319,14 @@ func (p *Parser) parseClassStatement() Stmt {
 	p.expect(TOKEN_RBRACE)
 
 	return ClassStmt{
-		Name:    name,
-		Methods: methods,
-		Embeds:  embeds,
-		Fields:  fields,
-		File:    p.current.File,
-		Line:    p.current.Line,
-		Column:  p.current.Column,
+		Name:           name,
+		TypeParameters: typeParams,
+		Methods:        methods,
+		Embeds:         embeds,
+		Fields:         fields,
+		File:           p.current.File,
+		Line:           p.current.Line,
+		Column:         p.current.Column,
 	}
 }
 

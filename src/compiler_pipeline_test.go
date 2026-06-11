@@ -21,8 +21,16 @@ type tinyRunResult struct {
 	Panic  any
 }
 
-func runTinyFile(t *testing.T, path string, args ...string) tinyRunResult {
+func runTinyFile(t *testing.T, path string, args ...string) (res tinyRunResult) {
 	t.Helper()
+
+	defer func() {
+		if r := recover(); r != nil {
+			res = tinyRunResult{
+				Panic: r,
+			}
+		}
+	}()
 
 	mainInstructions, functions, classes, interfaces, globalIndex := compileTinyFile(t, path)
 	return runTinyBytecode(t, mainInstructions, functions, classes, interfaces, globalIndex, args...)
@@ -223,7 +231,7 @@ func TestTinyPipelineMethodTypeHintErrors(t *testing.T) {
 		t,
 		runTinyFile(t, fixturePath("errors", "method_type_hint.tiny")),
 		tinyerrors.ErrorType,
-		"method init parameter value expected Payload",
+		"expected Payload",
 	)
 }
 
@@ -494,4 +502,127 @@ func TestCompileNestedNamespaceInterfaceReturn(t *testing.T) {
 	program := LoadProgram(mainPath)
 	compiler := NewCompiler()
 	_, _, _, _, _ = compiler.CompileProgram(program)
+}
+
+func TestTinyPipelineEnumValidation(t *testing.T) {
+	dir := t.TempDir()
+
+	mainContent := strings.Join([]string{
+		`enum TestEnum {`,
+		`    tester`,
+		`}`,
+		`fn test(ss: TestEnum) {`,
+		`}`,
+		`test(TestEnum.tester);`,
+	}, "\n")
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main.tiny: %v", err)
+	}
+
+	requireTinySuccess(t, runTinyFile(t, mainPath))
+}
+
+func TestTinyPipelineGenericInterfaces(t *testing.T) {
+	dir := t.TempDir()
+
+	mainContent := strings.Join([]string{
+		`import std "io" as io;`,
+		`interface Box:T {`,
+		`    value: T`,
+		`}`,
+		`fn printBox:T(b: Box:T) {`,
+		`    io.println(b.value);`,
+		`}`,
+		`let b: Box:number = { value: 42 };`,
+		`printBox:number(b);`,
+		`let s: Box:string = { value: "hello" };`,
+		`printBox:string(s);`,
+	}, "\n")
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main.tiny: %v", err)
+	}
+
+	out := requireTinySuccess(t, runTinyFile(t, mainPath))
+	const want = "42\nhello\n"
+	if out != want {
+		t.Fatalf("unexpected output: want %q, got %q", want, out)
+	}
+}
+
+func TestTinyPipelineGenericInterfaceErrors(t *testing.T) {
+	dir := t.TempDir()
+
+	mainContent := strings.Join([]string{
+		`interface Box:T {`,
+		`    value: T`,
+		`}`,
+		`let b: Box:number = { value: "not-a-number" };`,
+	}, "\n")
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main.tiny: %v", err)
+	}
+
+	requireTinyError(t, runTinyFile(t, mainPath), tinyerrors.ErrorType, "expected number, got string")
+}
+
+func TestTinyPipelineGenerics(t *testing.T) {
+	dir := t.TempDir()
+
+	mainContent := strings.Join([]string{
+		`import std "io" as io;`,
+		`class Box:T {`,
+		`    field value: T = null`,
+		`    fn init(val: T) {`,
+		`        this.value = val;`,
+		`    }`,
+		`}`,
+		`fn identity:T(x: T): T {`,
+		`    return x;`,
+		`}`,
+		`let b: Box:number = Box:number(42);`,
+		`io.println(b.value.toString());`,
+		`let id: string = identity:string("hello");`,
+		`io.println(id);`,
+	}, "\n")
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main.tiny: %v", err)
+	}
+
+	out := requireTinySuccess(t, runTinyFile(t, mainPath))
+	const want = "42\nhello\n"
+	if out != want {
+		t.Fatalf("unexpected output: want %q, got %q", want, out)
+	}
+}
+
+func TestTinyPipelineGenericTypeErrors(t *testing.T) {
+	dir := t.TempDir()
+
+	mainContent := strings.Join([]string{
+		`class Box:T {`,
+		`    field value: T = null`,
+		`    fn init(val: T) {`,
+		`        this.value = val;`,
+		`    }`,
+		`}`,
+		`let b: Box:number = Box:number("hello");`,
+	}, "\n")
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main.tiny: %v", err)
+	}
+
+	result := tinyRunResult{}
+	func() {
+		defer func() {
+			result.Panic = recover()
+		}()
+		compileTinyFile(t, mainPath)
+	}()
+
+	requireTinyError(t, result, tinyerrors.ErrorType, "cannot pass string to parameter 'val' of function 'class Box constructor' (expected number)")
 }

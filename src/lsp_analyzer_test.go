@@ -1421,6 +1421,76 @@ func TestLSPReferencesAndRename(t *testing.T) {
 	}
 }
 
+func TestLSPRenameUsesURIKeysForOpenDocuments(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "refs.tiny")
+	uri := pathToFileURI(path)
+	text := strings.Join([]string{
+		"const total = 1;",
+		"io.println(total);",
+		"const next = total + 1;",
+	}, "\n")
+
+	lspDocs[path] = text
+	defer delete(lspDocs, path)
+
+	edit := getRenameEdit(uri, text, Position{
+		Line:      0,
+		Character: len("const total") - 1,
+	}, "sum")
+
+	if _, ok := edit.Changes[path]; ok {
+		t.Fatalf("rename edit used path key %q instead of URI key: %#v", path, edit)
+	}
+	if len(edit.Changes[uri]) != 3 {
+		t.Fatalf("expected 3 rename edits for URI %q, got %#v", uri, edit)
+	}
+}
+
+func TestLSPRenameIgnoresShadowedCallbackVariableAfterCallback(t *testing.T) {
+	text := strings.Join([]string{
+		`const test = Httpx.app({`,
+		`    port: 3000`,
+		`})`,
+		``,
+		`test.onRequest(fn(ctx: Httpx.Context, next) {`,
+		`    let path = ctx.path().replace("/", "")`,
+		`    const test = files[path]`,
+		`    return test`,
+		`})`,
+		``,
+		`test.start()`,
+	}, "\n")
+
+	startScope := scopeAtPosition("file:///sample.tiny", text, Position{
+		Line:      10,
+		Character: 1,
+	})
+	sym, ok := startScope.Resolve("test")
+	if !ok {
+		t.Fatal("expected test to resolve at test.start()")
+	}
+	if sym.Line != 1 {
+		t.Fatalf("expected test.start() to resolve to outer declaration on line 1, got %#v", sym)
+	}
+
+	edit := getRenameEdit("file:///sample.tiny", text, Position{
+		Line:      0,
+		Character: len("const test") - 1,
+	}, "app")
+
+	edits := edit.Changes["file:///sample.tiny"]
+	if len(edits) != 3 {
+		t.Fatalf("expected 3 edits for outer test rename, got %#v", edit)
+	}
+	for _, textEdit := range edits {
+		line := textEdit.Range.Start.Line
+		if line != 0 && line != 4 && line != 10 {
+			t.Fatalf("outer rename returned unexpected edit range %#v in %#v", textEdit.Range, edit)
+		}
+	}
+}
+
 func TestLSPUnusedSymbolDiagnostics(t *testing.T) {
 	text := strings.Join([]string{
 		"import std \"io\";",
@@ -1453,6 +1523,24 @@ func TestLSPUnusedSymbolDiagnosticsCountsTemplateInterpolationUses(t *testing.T)
 	}
 	if diagnosticsContain(diagnostics, "unused variable: end") {
 		t.Fatalf("did not expect end to be unused when referenced in interpolation, got %#v", diagnostics)
+	}
+}
+
+func TestLSPSemanticDiagnosticsNewStdModuleScriptDoesNotHang(t *testing.T) {
+	bytes, err := os.ReadFile(filepath.Join("scripts", "new_std_module.tiny"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan []map[string]any, 1)
+	go func() {
+		done <- semanticDiagnostics("file:///scripts/new_std_module.tiny", string(bytes))
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("semantic diagnostics hung for scripts/new_std_module.tiny")
 	}
 }
 
@@ -1875,6 +1963,24 @@ func TestLSPConstructorObjectLiteralCompletions(t *testing.T) {
 	}
 	if !completionLabelsContain(completions, "timeout: ") {
 		t.Fatalf("expected completions to include 'timeout: ', got %#v", completionLabels(completions))
+	}
+}
+
+func TestLSPGenericReturnTypeInference(t *testing.T) {
+	text := strings.Join([]string{
+		`fn identity:T(x: T) {`,
+		`    return x;`,
+		`}`,
+	}, "\n")
+
+	scope := fileBaseScope("file:///test.tiny", text)
+	sym, ok := scope.Resolve("identity")
+	if !ok {
+		t.Fatalf("expected identity to be resolved")
+	}
+
+	if sym.Returns != "T" {
+		t.Fatalf("expected return type T, got %q", sym.Returns)
 	}
 }
 
@@ -2918,5 +3024,781 @@ func TestLSPUnionInterfaceObjectLiteralCompletions(t *testing.T) {
 	}
 	if completionLabelsContain(completions4, "url: ") {
 		t.Fatalf("expected completions4 to NOT include 'url: ' due to narrowing, got %#v", completionLabels(completions4))
+	}
+}
+
+func TestLSPChainingMethodDotCompletion(t *testing.T) {
+	text := strings.Join([]string{
+		`const path = "a.b.c";`,
+		`path.split(".").`,
+	}, "\n")
+
+	completions := getCompletions("file:///chaining.tiny", text, Position{
+		Line:      1,
+		Character: len(`path.split(".").`),
+	})
+
+	// Since path.split() returns array:string, it should autocomplete array methods like 'length' or 'push'
+	if !completionLabelsContain(completions, "length") {
+		t.Fatalf("expected completions to include array method 'length', got %#v", completionLabels(completions))
+	}
+	if !completionLabelsContain(completions, "push") {
+		t.Fatalf("expected completions to include array method 'push', got %#v", completionLabels(completions))
+	}
+}
+
+func TestLSPGenericInterfaceObjectCompletions(t *testing.T) {
+	text := strings.Join([]string{
+		`interface Test:T {`,
+		`    user: T`,
+		`}`,
+		``,
+		`interface User {`,
+		`    name: string,`,
+		`    age: number`,
+		`}`,
+		``,
+		`const testing: Test:User = {`,
+		`    user: {`,
+		`        `,
+		`    }`,
+		`}`,
+		``,
+		`testing.`,
+		`testing.user.`,
+		`const ageValue = testing.user.age`,
+	}, "\n")
+
+	testingItems := getCompletions("file:///generic_interface_object.tiny", text, Position{
+		Line:      15,
+		Character: len("testing."),
+	})
+	if !completionLabelsContain(testingItems, "user") {
+		t.Fatalf("expected testing. completions to include user, got %#v", completionLabels(testingItems))
+	}
+
+	userItems := getCompletions("file:///generic_interface_object.tiny", text, Position{
+		Line:      16,
+		Character: len("testing.user."),
+	})
+	if !completionLabelsContain(userItems, "name") {
+		t.Fatalf("expected testing.user. completions to include name, got %#v", completionLabels(userItems))
+	}
+	if !completionLabelsContain(userItems, "age") {
+		t.Fatalf("expected testing.user. completions to include age, got %#v", completionLabels(userItems))
+	}
+
+	nestedItems := getCompletions("file:///generic_interface_object.tiny", text, Position{
+		Line:      11,
+		Character: len(`        `),
+	})
+	if !completionLabelsContain(nestedItems, "name: ") {
+		t.Fatalf("expected user object completions to include name, got %#v", completionLabels(nestedItems))
+	}
+	if !completionLabelsContain(nestedItems, "age: ") {
+		t.Fatalf("expected user object completions to include age, got %#v", completionLabels(nestedItems))
+	}
+
+	diagnostics := semanticDiagnostics("file:///generic_interface_object.tiny", text)
+	if diagnosticsContain(diagnostics, "undefined method or property: age") {
+		t.Fatalf("expected testing.user.age to pass diagnostics, got %#v", diagnostics)
+	}
+
+	diagnosticText := strings.Join([]string{
+		`import std "io"`,
+		``,
+		`interface Test:T {`,
+		`    user:T`,
+		`}`,
+		``,
+		`interface User {`,
+		`    name: string,`,
+		`    age: string`,
+		`}`,
+		``,
+		`const testing: Test:User = {`,
+		`    user: {`,
+		`        name: "",`,
+		`        age: ""`,
+		`    }`,
+		`}`,
+		``,
+		`io.println(testing.user.age)`,
+	}, "\n")
+	callDiagnostics := semanticDiagnostics("file:///generic_interface_object_call.tiny", diagnosticText)
+	if diagnosticsContain(callDiagnostics, "undefined method or property: age") {
+		t.Fatalf("expected io.println(testing.user.age) to pass diagnostics, got %#v", callDiagnostics)
+	}
+}
+
+func TestLSPCallableTypeCheckAndNarrowing(t *testing.T) {
+	// 1. Call to non-callable variable (string) -> should error
+	text1 := strings.Join([]string{
+		`const x: string = "hello";`,
+		`x();`,
+	}, "\n")
+	diagnostics1 := semanticDiagnostics("file:///test1.tiny", text1)
+	if !diagnosticsContain(diagnostics1, "cannot call non-function type 'string'") {
+		t.Fatalf("expected error for calling non-callable string variable, got %#v", diagnostics1)
+	}
+
+	// 2. Call to non-narrowed union type (function | null) -> should error
+	text2 := strings.Join([]string{
+		`const x: function | null = null;`,
+		`x();`,
+	}, "\n")
+	diagnostics2 := semanticDiagnostics("file:///test2.tiny", text2)
+	if !diagnosticsContain(diagnostics2, "cannot call non-function type 'function | null'") {
+		t.Fatalf("expected error for calling union type containing function directly, got %#v", diagnostics2)
+	}
+
+	// 3. Call to narrowed union type (function | null) inside 'if typeof x == "function"' -> should NOT error
+	text3 := strings.Join([]string{
+		`const x: function | null = null;`,
+		`if typeof x == "function" {`,
+		`    x();`,
+		`}`,
+	}, "\n")
+	diagnostics3 := semanticDiagnostics("file:///test3.tiny", text3)
+	if diagnosticsContain(diagnostics3, "cannot call non-function type") {
+		t.Fatalf("expected no call errors inside narrowed typeof function check, got %#v", diagnostics3)
+	}
+}
+
+func TestLSPUnknownFunctionCallInfersAny(t *testing.T) {
+	text := strings.Join([]string{
+		`fn get(handler: function) {`,
+		`    const item = "value"`,
+		`    const result = handler(item)`,
+		`    if result {`,
+		`        return item`,
+		`    }`,
+		`}`,
+	}, "\n")
+
+	scope := scopeAtPosition("file:///unknown_function_call.tiny", text, Position{Line: 3, Character: 7})
+	sym, ok := scope.Resolve("result")
+	if !ok {
+		t.Fatalf("expected result to be in scope")
+	}
+	if sym.Type != "any" {
+		t.Fatalf("expected result type to be any after calling function-typed handler, got %q", sym.Type)
+	}
+
+	diagnostics := semanticDiagnostics("file:///unknown_function_call.tiny", text)
+	if diagnosticsContain(diagnostics, "cannot call non-function type") {
+		t.Fatalf("expected function-typed handler call to pass diagnostics, got %#v", diagnostics)
+	}
+}
+
+func TestLSPElseBlockAndNegatedTypeNarrowing(t *testing.T) {
+	// 1. Else-block narrowing: x | null is narrowed to non-null in else block
+	text1 := strings.Join([]string{
+		`const x: function | null = null;`,
+		`if x == null {`,
+		`    // do nothing`,
+		`} else {`,
+		`    x();`,
+		`}`,
+	}, "\n")
+	diagnostics1 := semanticDiagnostics("file:///test_else.tiny", text1)
+	if diagnosticsContain(diagnostics1, "cannot call non-function type") {
+		t.Fatalf("expected no errors inside narrowed else block, got %#v", diagnostics1)
+	}
+
+	// 2. Negated check: typeof x != "string" narrows string | number to number
+	text2 := strings.Join([]string{
+		`const x: string | number = 10;`,
+		`if typeof x != "string" {`,
+		`    const y: number = x;`,
+		`}`,
+	}, "\n")
+	diagnostics2 := semanticDiagnostics("file:///test_neg.tiny", text2)
+	if diagnosticsContain(diagnostics2, "cannot pass type") {
+		t.Fatalf("expected x to be narrowed to number, got %#v", diagnostics2)
+	}
+}
+
+func TestLSPMatchEnumExhaustiveness(t *testing.T) {
+	// 1. Missing case -> warning diagnostic
+	text1 := strings.Join([]string{
+		`enum Status { Active, Suspended }`,
+		`const status: Status = Status.Active;`,
+		`match status {`,
+		`    Status.Active {`,
+		`    }`,
+		`}`,
+	}, "\n")
+	diagnostics1 := semanticDiagnostics("file:///test_match1.tiny", text1)
+	if !diagnosticsContain(diagnostics1, "match is not exhaustive on 'Status': missing case 'Suspended'") {
+		t.Fatalf("expected missing case diagnostic, got %#v", diagnostics1)
+	}
+
+	// 2. Default case handles it -> no warning
+	text2 := strings.Join([]string{
+		`enum Status { Active, Suspended }`,
+		`const status: Status = Status.Active;`,
+		`match status {`,
+		`    Status.Active {`,
+		`    }`,
+		`    _ {`,
+		`    }`,
+		`}`,
+	}, "\n")
+	diagnostics2 := semanticDiagnostics("file:///test_match2.tiny", text2)
+	if diagnosticsContain(diagnostics2, "match is not exhaustive") {
+		t.Fatalf("expected no warning with default case, got %#v", diagnostics2)
+	}
+}
+
+func TestLSPImplementMissingMethodsCodeAction(t *testing.T) {
+	text := strings.Join([]string{
+		`export interface BotConfig {`,
+		`    token: string,`,
+		`    run: function`,
+		`}`,
+		`class Bot {`,
+		`    embed BotConfig`,
+		`}`,
+	}, "\n")
+
+	actions := getCodeActions("file:///test_action.tiny", text, CodeActionParams{
+		TextDocument: TextDocumentIdentifier{URI: "file:///test_action.tiny"},
+		Range: LSPRange{
+			Start: Position{Line: 5, Character: 4}, // inside 'class Bot' / 'embed BotConfig'
+			End:   Position{Line: 5, Character: 19},
+		},
+	})
+
+	found := false
+	for _, action := range actions {
+		if action.Title == "Implement missing methods/fields" {
+			found = true
+			edits := action.Edit.Changes["file:///test_action.tiny"]
+			if len(edits) == 0 {
+				t.Fatalf("expected edits in code action")
+			}
+			newText := edits[0].NewText
+			if !strings.Contains(newText, "field token: string =") {
+				t.Fatalf("expected newText to implement field token, got: %q", newText)
+			}
+			if !strings.Contains(newText, "fn run()") {
+				t.Fatalf("expected newText to implement method run, got: %q", newText)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected Implement missing methods/fields code action, got %#v", actions)
+	}
+}
+
+func TestLSPVariadicParameterTypeChecks(t *testing.T) {
+	text := strings.Join([]string{
+		`fn myFunc(name: string, ...handlers: function) {`,
+		`}`,
+		`myFunc("test", "not_a_func");`,
+	}, "\n")
+	diagnostics := semanticDiagnostics("file:///test_var.tiny", text)
+	if !diagnosticsContain(diagnostics, "cannot pass type 'string' to parameter 'handlers'") {
+		t.Fatalf("expected error for passing non-function string to variadic parameter, got %#v", diagnostics)
+	}
+}
+
+func TestLSPCompoundLogicAndNarrowing(t *testing.T) {
+	text := strings.Join([]string{
+		`const x: string | number | null = null;`,
+		`if x and typeof x == "string" {`,
+		`    const y: string = x;`,
+		`}`,
+	}, "\n")
+	diagnostics := semanticDiagnostics("file:///test_compound_and.tiny", text)
+	if diagnosticsContain(diagnostics, "cannot pass type") {
+		t.Fatalf("expected x to be narrowed to string inside compound 'and' block, got %#v", diagnostics)
+	}
+}
+
+func TestLSPEnumMemberAutoCompleteAndValidation(t *testing.T) {
+	// 1. Check autocomplete on enum parameter receiver path is empty
+	text := strings.Join([]string{
+		`enum TestEnum {`,
+		`    tester,`,
+		`    other`,
+		`}`,
+		`fn test(ss: TestEnum) {`,
+		`    ss.`,
+		`}`,
+	}, "\n")
+
+	items := getCompletions("file:///test_enum_ac.tiny", text, Position{Line: 5, Character: 7})
+	if completionLabelsContain(items, "tester") || completionLabelsContain(items, "other") {
+		t.Fatalf("expected no enum member autocomplete suggestions on parameter variable, got %#v", completionLabels(items))
+	}
+
+	// 2. Check hover type feedback on enum members
+	textHover := strings.Join([]string{
+		`enum StringEnum {`,
+		`    tester`,
+		`}`,
+		`enum NumberEnum {`,
+		`    val = 42`,
+		`}`,
+		`enum IotaEnum {`,
+		`    val = iota`,
+		`}`,
+		`const a = StringEnum.tester;`,
+		`const b = NumberEnum.val;`,
+		`const c = IotaEnum.val;`,
+	}, "\n")
+
+	// Hover tester inside StringEnum definition (Line 1, Character 4)
+	resDef1 := getHover("file:///test_enum_hover.tiny", textHover, Position{Line: 1, Character: 4})
+	hDef1, ok := resDef1.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover result on StringEnum definition tester, got %#v", resDef1)
+	}
+	if !strings.Contains(hDef1.Contents.Value, "Type: `string`") || !strings.Contains(hDef1.Contents.Value, "StringEnum.tester") {
+		t.Fatalf("expected hover on StringEnum definition to contain Type: string, got %q", hDef1.Contents.Value)
+	}
+
+	// Hover val inside NumberEnum definition (Line 4, Character 4)
+	resDef2 := getHover("file:///test_enum_hover.tiny", textHover, Position{Line: 4, Character: 4})
+	hDef2, ok := resDef2.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover result on NumberEnum definition val, got %#v", resDef2)
+	}
+	if !strings.Contains(hDef2.Contents.Value, "Type: `number`") || !strings.Contains(hDef2.Contents.Value, "NumberEnum.val") {
+		t.Fatalf("expected hover on NumberEnum definition to contain Type: number, got %q", hDef2.Contents.Value)
+	}
+
+	// Hover val inside IotaEnum definition (Line 7, Character 4)
+	resDef3 := getHover("file:///test_enum_hover.tiny", textHover, Position{Line: 7, Character: 4})
+	hDef3, ok := resDef3.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover result on IotaEnum definition val, got %#v", resDef3)
+	}
+	if !strings.Contains(hDef3.Contents.Value, "Type: `number`") || !strings.Contains(hDef3.Contents.Value, "IotaEnum.val") {
+		t.Fatalf("expected hover on IotaEnum definition to contain Type: number, got %q", hDef3.Contents.Value)
+	}
+
+	// Hover StringEnum.tester (Line 9, Character 21)
+	res1 := getHover("file:///test_enum_hover.tiny", textHover, Position{Line: 9, Character: 21})
+	h1, ok := res1.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover result on StringEnum.tester, got %#v", res1)
+	}
+	if !strings.Contains(h1.Contents.Value, "Type: `string`") {
+		t.Fatalf("expected hover to contain Type: string, got %q", h1.Contents.Value)
+	}
+
+	// Hover NumberEnum.val (Line 10, Character 21)
+	res2 := getHover("file:///test_enum_hover.tiny", textHover, Position{Line: 10, Character: 21})
+	h2, ok := res2.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover result on NumberEnum.val, got %#v", res2)
+	}
+	if !strings.Contains(h2.Contents.Value, "Type: `number`") {
+		t.Fatalf("expected hover to contain Type: number, got %q", h2.Contents.Value)
+	}
+
+	// Hover IotaEnum.val (Line 11, Character 19)
+	res3 := getHover("file:///test_enum_hover.tiny", textHover, Position{Line: 11, Character: 19})
+	h3, ok := res3.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover result on IotaEnum.val, got %#v", res3)
+	}
+	if !strings.Contains(h3.Contents.Value, "Type: `number`") {
+		t.Fatalf("expected hover to contain Type: number, got %q", h3.Contents.Value)
+	}
+
+	// 3. Check variable assignments and parameter type checking compatibility
+	text2 := strings.Join([]string{
+		`enum TestEnum {`,
+		`    tester`,
+		`}`,
+		`fn test(ss: TestEnum) {`,
+		`}`,
+		`test(TestEnum.tester);`,
+		`const s: string = TestEnum.tester;`,
+	}, "\n")
+	diagnostics2 := semanticDiagnostics("file:///test_enum_val.tiny", text2)
+	if diagnosticsContain(diagnostics2, "cannot pass type") || diagnosticsContain(diagnostics2, "cannot assign") {
+		t.Fatalf("expected TestEnum.tester to be compatible with TestEnum parameter and string variable, got %#v", diagnostics2)
+	}
+}
+
+func TestLSPVariadicParameterImprovement(t *testing.T) {
+	// 1. Check signature display has array:function
+	text := strings.Join([]string{
+		`fn test(...handlers: function) {`,
+		`}`,
+	}, "\n")
+	result := getHover("file:///test_var_sig.tiny", text, Position{Line: 0, Character: 3})
+	hover, ok := result.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover result, got %#v", result)
+	}
+	if !strings.Contains(hover.Contents.Value, "array:function") {
+		t.Fatalf("expected hover content to contain array:function, got %q", hover.Contents.Value)
+	}
+
+	// 2. Verify that passing correct function type does not trigger error
+	text2 := strings.Join([]string{
+		`fn test(...handlers: function) {`,
+		`}`,
+		`test(fn() {});`,
+	}, "\n")
+	diagnostics2 := semanticDiagnostics("file:///test_var_sig_ok.tiny", text2)
+	if diagnosticsContain(diagnostics2, "cannot pass type") {
+		t.Fatalf("expected passing function to variadic parameter to succeed, got %#v", diagnostics2)
+	}
+}
+
+func TestLSPUnreachableCodeDetection(t *testing.T) {
+	text := strings.Join([]string{
+		`fn test() {`,
+		`    return;`,
+		`    let x = 1;`,
+		`}`,
+		`fn testIf(cond: bool) {`,
+		`    if cond {`,
+		`        return;`,
+		`        let y = 2;`,
+		`    } else {`,
+		`        throw "error";`,
+		`        let z = 3;`,
+		`    }`,
+		`}`,
+		`fn testIfElseBothExit(cond: bool) {`,
+		`    if cond {`,
+		`        return;`,
+		`    } else {`,
+		`        return;`,
+		`    }`,
+		`    let a = 4;`,
+		`}`,
+		`fn testLiteralTrue() {`,
+		`    if true {`,
+		`        return;`,
+		`    }`,
+		`    let b = 5;`,
+		`}`,
+	}, "\n")
+
+	diagnostics := semanticDiagnostics("file:///test_unreachable.tiny", text)
+	if !diagnosticsContain(diagnostics, "unreachable code detected") {
+		t.Fatalf("expected unreachable code warnings, got %#v", diagnostics)
+	}
+
+	count := 0
+	for _, d := range diagnostics {
+		msg, _ := d["message"].(string)
+		if strings.Contains(msg, "unreachable code detected") {
+			count++
+		}
+	}
+	if count != 5 {
+		t.Fatalf("expected exactly 5 unreachable code warnings, got %d. Diagnostics: %#v", count, diagnostics)
+	}
+}
+
+func TestLSPUnreachableCodeAfterReturnValueWithoutSemicolon(t *testing.T) {
+	text := strings.Join([]string{
+		`import std "io";`,
+		`fn test(): string {`,
+		`    return ""`,
+		``,
+		``,
+		`    io.println("sdf")`,
+		`}`,
+		``,
+		`test()`,
+	}, "\n")
+
+	diagnostics := semanticDiagnostics("file:///test_unreachable_return_value.tiny", text)
+	if !diagnosticsContain(diagnostics, "unreachable code detected") {
+		t.Fatalf("expected unreachable code warning after return value without semicolon, got %#v", diagnostics)
+	}
+
+	var unreachable map[string]any
+	for _, diagnostic := range diagnostics {
+		message, _ := diagnostic["message"].(string)
+		if strings.Contains(message, "unreachable code detected") {
+			unreachable = diagnostic
+			break
+		}
+	}
+	if unreachable == nil {
+		t.Fatalf("expected unreachable diagnostic, got %#v", diagnostics)
+	}
+	rangeValue, _ := unreachable["range"].(map[string]any)
+	start, _ := rangeValue["start"].(map[string]any)
+	end, _ := rangeValue["end"].(map[string]any)
+	lineText := `    io.println("sdf")`
+	if intFromAny(start["line"]) != 5 || intFromAny(start["character"]) != 4 || intFromAny(end["line"]) != 5 || intFromAny(end["character"]) != len(lineText) {
+		t.Fatalf("expected unreachable diagnostic to cover full statement line, got %#v", unreachable)
+	}
+
+	actions := getCodeActions("file:///test_unreachable_return_value.tiny", text, CodeActionParams{
+		TextDocument: TextDocumentIdentifier{URI: "file:///test_unreachable_return_value.tiny"},
+		Range: LSPRange{
+			Start: Position{Line: 5, Character: strings.Index(lineText, "println")},
+			End:   Position{Line: 5, Character: strings.Index(lineText, "println") + len("println")},
+		},
+		Context: CodeActionContext{Diagnostics: []map[string]any{unreachable}},
+	})
+	for _, action := range actions {
+		if strings.Contains(action.Title, "Create function") {
+			t.Fatalf("did not expect create-function quick fix for unreachable member call, got %#v", actions)
+		}
+	}
+}
+
+func TestLSPMissingReturnPathDetection(t *testing.T) {
+	text := strings.Join([]string{
+		`fn testOk(): number {`,
+		`    return 42;`,
+		`}`,
+		`fn testThrowOk(): string {`,
+		`    throw "error";`,
+		`}`,
+		`fn testMissing(): string {`,
+		`    let x = "hello";`,
+		`}`,
+		`fn testIfOk(cond: bool): number {`,
+		`    if cond {`,
+		`        return 1;`,
+		`    } else {`,
+		`        return 2;`,
+		`    }`,
+		`}`,
+		`fn testIfMissing(cond: bool): number {`,
+		`    if cond {`,
+		`        return 1;`,
+		`    }`,
+		`}`,
+		`fn testWhileTrueOk(): number {`,
+		`    while true {`,
+		`        return 1;`,
+		`    }`,
+		`}`,
+		`fn testIfTrueOk(): number {`,
+		`    if true {`,
+		`        return 1;`,
+		`    }`,
+		`}`,
+	}, "\n")
+
+	diagnostics := semanticDiagnostics("file:///test_missing_return.tiny", text)
+	if !diagnosticsContain(diagnostics, "missing return") {
+		t.Fatalf("expected missing return diagnostics, got %#v", diagnostics)
+	}
+
+	hasTestMissing := false
+	hasTestIfMissing := false
+	hasTestOk := false
+	hasTestThrowOk := false
+	hasTestIfOk := false
+	hasTestWhileTrueOk := false
+	hasTestIfTrueOk := false
+
+	for _, d := range diagnostics {
+		msg, _ := d["message"].(string)
+		if strings.Contains(msg, "missing return") {
+			if strings.Contains(msg, "testMissing") {
+				hasTestMissing = true
+			}
+			if strings.Contains(msg, "testIfMissing") {
+				hasTestIfMissing = true
+			}
+			if strings.Contains(msg, "testOk") {
+				hasTestOk = true
+			}
+			if strings.Contains(msg, "testThrowOk") {
+				hasTestThrowOk = true
+			}
+			if strings.Contains(msg, "testIfOk") {
+				hasTestIfOk = true
+			}
+			if strings.Contains(msg, "testWhileTrueOk") {
+				hasTestWhileTrueOk = true
+			}
+			if strings.Contains(msg, "testIfTrueOk") {
+				hasTestIfTrueOk = true
+			}
+		}
+	}
+
+	if !hasTestMissing {
+		t.Fatalf("expected function testMissing to have missing return warning")
+	}
+	if !hasTestIfMissing {
+		t.Fatalf("expected function testIfMissing to have missing return warning")
+	}
+	if hasTestOk || hasTestThrowOk || hasTestIfOk || hasTestWhileTrueOk || hasTestIfTrueOk {
+		t.Fatalf("unexpected missing return warning on valid functions. Diagnostics: %#v", diagnostics)
+	}
+}
+
+func TestLSPGenericsDiagnostics(t *testing.T) {
+	text := strings.Join([]string{
+		`class Box:T {`,
+		`    field value: T = null`,
+		`    fn init(val: T) {`,
+		`        this.value = val;`,
+		`    }`,
+		`}`,
+		`fn identity:T(x: T): T {`,
+		`    return x;`,
+		`}`,
+		`let b: Box:number = Box:number(42);`,
+		`let id: string = identity:string("hello");`,
+		`let valStr: string = b.value.toString();`,
+		`b.init("hello");`,          // Should error: expected number, got string
+		`identity:number("hello");`, // Should error: expected number, got string
+	}, "\n")
+
+	diagnostics := semanticDiagnostics("file:///test_generics.tiny", text)
+
+	hasInitError := false
+	hasIdErrError := false
+
+	for _, d := range diagnostics {
+		msg, _ := d["message"].(string)
+		if strings.Contains(msg, "unused variable:") || strings.Contains(msg, "unused function:") {
+			continue
+		}
+
+		rng, _ := d["range"].(map[string]any)
+		start, _ := rng["start"].(map[string]any)
+		lineVal := intFromAny(start["line"])
+		t.Logf("Line %d diagnostic: %s", lineVal, msg)
+
+		if lineVal < 12 {
+			t.Fatalf("unexpected diagnostic on line %d: %s", lineVal+1, msg)
+		}
+		if lineVal == 12 {
+			if strings.Contains(msg, "cannot pass type 'string' to parameter 'val'") && strings.Contains(msg, "expected 'number'") {
+				hasInitError = true
+			}
+		}
+		if lineVal == 13 {
+			if strings.Contains(msg, "cannot pass type 'string' to parameter 'x'") && strings.Contains(msg, "expected 'number'") {
+				hasIdErrError = true
+			}
+		}
+	}
+
+	if !hasInitError {
+		t.Fatalf("expected type checking error for b.init(\"hello\") on line 13")
+	}
+	if !hasIdErrError {
+		t.Fatalf("expected type checking error for identity:number(\"hello\") on line 14")
+	}
+}
+
+func TestLSPGenericsAutoInferenceAndAutocomplete(t *testing.T) {
+	text := strings.Join([]string{
+		`class Box:T {`,
+		`    field value: T = null`,
+		`    fn init(val: T) {`,
+		`        this.value = val;`,
+		`    }`,
+		`}`,
+		`class Pair:A:B {`,
+		`    field first: A = null`,
+		`    field second: B = null`,
+		`    fn init(f: A, s: B) {`,
+		`        this.first = f;`,
+		`        this.second = s;`,
+		`    }`,
+		`}`,
+		`let b = Box(42);`,
+		`let p = Pair("hello", true);`,
+		`b.`,
+		`p.`,
+		`let val = b.value;`,
+		`let firstVal = p.first;`,
+		`let secondVal = p.second;`,
+	}, "\n")
+
+	// Verify completions on b. (line 16)
+	completionsB := getCompletions("file:///test_inference.tiny", text, Position{
+		Line:      16,
+		Character: len("b."),
+	})
+
+	hasValueB := false
+	for _, item := range completionsB {
+		if item.Label == "value" {
+			hasValueB = true
+			if !strings.Contains(item.Detail, "number") {
+				t.Fatalf("expected completion for b.value to have type number, got detail: %q", item.Detail)
+			}
+		}
+	}
+	if !hasValueB {
+		t.Fatalf("expected completions for b. to include 'value'")
+	}
+
+	// Verify completions on p. (line 17)
+	completionsP := getCompletions("file:///test_inference.tiny", text, Position{
+		Line:      17,
+		Character: len("p."),
+	})
+
+	hasFirstP := false
+	hasSecondP := false
+	for _, item := range completionsP {
+		if item.Label == "first" {
+			hasFirstP = true
+			if !strings.Contains(item.Detail, "string") {
+				t.Fatalf("expected completion for p.first to have type string, got detail: %q", item.Detail)
+			}
+		}
+		if item.Label == "second" {
+			hasSecondP = true
+			if !strings.Contains(item.Detail, "bool") {
+				t.Fatalf("expected completion for p.second to have type bool, got detail: %q", item.Detail)
+			}
+		}
+	}
+	if !hasFirstP || !hasSecondP {
+		t.Fatalf("expected completions for p. to include 'first' and 'second'")
+	}
+
+	// Verify hover on b.value (line 18, character 13)
+	hoverValResult := getHover("file:///test_inference.tiny", text, Position{
+		Line:      18,
+		Character: strings.Index(`let val = b.value;`, "value") + 2,
+	})
+	hoverVal, ok := hoverValResult.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover result on b.value, got %#v", hoverValResult)
+	}
+	if !strings.Contains(hoverVal.Contents.Value, "number") {
+		t.Fatalf("expected hover for b.value to contain 'number', got: %q", hoverVal.Contents.Value)
+	}
+
+	// Verify hover on p.first (line 19, character 17)
+	hoverFirstResult := getHover("file:///test_inference.tiny", text, Position{
+		Line:      19,
+		Character: strings.Index(`let firstVal = p.first;`, "first") + 2,
+	})
+	hoverFirst, ok := hoverFirstResult.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover result on p.first, got %#v", hoverFirstResult)
+	}
+	if !strings.Contains(hoverFirst.Contents.Value, "string") {
+		t.Fatalf("expected hover for p.first to contain 'string', got: %q", hoverFirst.Contents.Value)
+	}
+
+	// Verify diagnostics
+	diagnostics := semanticDiagnostics("file:///test_inference.tiny", text)
+	for _, d := range diagnostics {
+		msg, _ := d["message"].(string)
+		if strings.Contains(msg, "unused variable:") || strings.Contains(msg, "unused function:") {
+			continue
+		}
+		t.Fatalf("unexpected warning/diagnostic: %q", msg)
 	}
 }
