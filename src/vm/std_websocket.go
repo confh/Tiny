@@ -62,7 +62,7 @@ func websocketConnect(vm *VM, args []TinyValue) {
 	}
 
 	dialer := websocket.DefaultDialer
-	if timeout := objectInt(options, "timeoutMs", 0); timeout > 0 {
+	if timeout := objectInt(vm, options, "timeoutMs", 0); timeout > 0 {
 		dialer.HandshakeTimeout = time.Duration(timeout) * time.Millisecond
 	}
 
@@ -72,7 +72,7 @@ func websocketConnect(vm *VM, args []TinyValue) {
 		return
 	}
 
-	if maxMsg := objectInt(options, "maxMessageSize", 0); maxMsg > 0 {
+	if maxMsg := objectInt(vm, options, "maxMessageSize", 0); maxMsg > 0 {
 		conn.SetReadLimit(int64(maxMsg))
 	}
 
@@ -96,7 +96,7 @@ func websocketServer(vm *VM, args []TinyValue) {
 		server.Port = args[0].AsInt
 		server.Path = "/"
 	} else if config, ok := args[0].Value.(ObjectValue); ok {
-		server.Port = objectInt(config, "port", 0)
+		server.Port = objectInt(vm, config, "port", 0)
 		server.Host = objectString(config, "host", "")
 		server.Path = objectString(config, "path", "/")
 
@@ -108,7 +108,7 @@ func websocketServer(vm *VM, args []TinyValue) {
 			server.Path = "/" + server.Path
 		}
 
-		server.MaxMessageSize = objectInt(config, "maxMessageSize", 0)
+		server.MaxMessageSize = objectInt(vm, config, "maxMessageSize", 0)
 	} else {
 		vm.runtimeError(ErrorType, "websocket.server expects port number or options object")
 		return

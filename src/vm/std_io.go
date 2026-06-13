@@ -44,7 +44,7 @@ func stdIOPrintln(vm *VM, args []TinyValue) {
 		if i > 0 {
 			fmt.Print(" ")
 		}
-		fmt.Print(valueToString(arg))
+		fmt.Print(valueToString(arg, true))
 	}
 	fmt.Println()
 	vm.push(NewNull())
@@ -52,7 +52,7 @@ func stdIOPrintln(vm *VM, args []TinyValue) {
 
 func stdIOPrint(vm *VM, args []TinyValue) {
 	for _, arg := range args {
-		fmt.Print(valueToString(arg))
+		fmt.Print(valueToString(arg, true))
 	}
 	vm.push(NewNull())
 }

@@ -2935,7 +2935,7 @@ func (p *Parser) parsePrimary() Expr {
 
 			p.advance()
 
-			return FloatExpr{Value: value}
+			return FloatExpr{Value: value, File: p.current.File, Line: p.current.Line, Column: p.current.Column}
 		}
 
 		value, err := strconv.Atoi(literal)

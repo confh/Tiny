@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"maps"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,12 +34,19 @@ const (
 	BindingLocal
 )
 
+type VarNodeKey struct {
+	File   string
+	Line   int
+	Column int
+}
+
 type Binding struct {
-	Kind     BindingKind
-	Name     string
-	Slot     int
-	Constant bool
-	TypeHint string
+	Kind          BindingKind
+	Name          string
+	Slot          int
+	Constant      bool
+	TypeHint      string
+	VirtualFields map[string]int
 }
 
 type LoopContext struct {
@@ -65,6 +73,8 @@ type Compiler struct {
 
 	importStates map[string]ImportState
 	importStack  []string
+
+	stdImportModules map[string]string
 
 	isCompilingNamespace bool
 
@@ -102,6 +112,11 @@ type Compiler struct {
 	globalIndexes    map[string]int
 	globalConstants  map[string]bool
 	activeTypeParams []string
+
+	virtualObjects map[VarNodeKey]map[string]int
+
+	inlineCandidates map[string]FunctionStmt
+	inlineDepth      int
 }
 
 func unwrapExport(stmt Stmt) (Stmt, bool) {
@@ -121,11 +136,11 @@ func getNumberLiteral(expr Expr) (int, float64, bool, bool) {
 	return num.Value, 0, false, true
 }
 
-func optimizeExpr(expr Expr) Expr {
+func (c *Compiler) optimizeExpr(expr Expr) Expr {
 	switch e := expr.(type) {
 	case BinaryExpr:
-		left := optimizeExpr(e.Left)
-		right := optimizeExpr(e.Right)
+		left := c.optimizeExpr(e.Left)
+		right := c.optimizeExpr(e.Right)
 
 		leftInt, leftIsInt := left.(NumberExpr)
 		rightInt, rightIsInt := right.(NumberExpr)
@@ -142,7 +157,7 @@ func optimizeExpr(expr Expr) Expr {
 				if rightInt.Value == 0 {
 					return BinaryExpr{Left: left, Op: e.Op, Right: right}
 				}
-				return NumberExpr{Value: leftInt.Value / rightInt.Value, File: leftInt.File, Column: leftInt.Column, Line: leftInt.Line}
+				return FloatExpr{Value: float64(leftInt.Value) / float64(rightInt.Value), File: leftInt.File, Column: leftInt.Column, Line: leftInt.Line}
 			case TOKEN_EQ:
 				return BoolExpr{Value: leftInt.Value == rightInt.Value}
 			case TOKEN_NEQ:
@@ -202,15 +217,15 @@ func optimizeExpr(expr Expr) Expr {
 		elements := make([]Expr, len(e.Elements))
 
 		for i, element := range e.Elements {
-			elements[i] = optimizeExpr(element)
+			elements[i] = c.optimizeExpr(element)
 		}
 
 		return ArrayExpr{Elements: elements}
 
 	case TernaryExpr:
-		condition := optimizeExpr(e.Condition)
-		thenExpr := optimizeExpr(e.ThenExpr)
-		elseExpr := optimizeExpr(e.ElseExpr)
+		condition := c.optimizeExpr(e.Condition)
+		thenExpr := c.optimizeExpr(e.ThenExpr)
+		elseExpr := c.optimizeExpr(e.ElseExpr)
 
 		if b, ok := condition.(BoolExpr); ok {
 			if b.Value {
@@ -230,11 +245,11 @@ func optimizeExpr(expr Expr) Expr {
 		args := make([]Expr, len(e.Args))
 
 		for i, arg := range e.Args {
-			args[i] = optimizeExpr(arg)
+			args[i] = c.optimizeExpr(arg)
 		}
 
 		return CallValueExpr{
-			Callee: optimizeExpr(e.Callee),
+			Callee: c.optimizeExpr(e.Callee),
 			Args:   args,
 			File:   e.File,
 			Line:   e.Line,
@@ -255,7 +270,7 @@ func optimizeExpr(expr Expr) Expr {
 			} else {
 				fields[i] = ObjectField{
 					Name:  field.Name,
-					Value: optimizeExpr(field.Value),
+					Value: c.optimizeExpr(field.Value),
 				}
 			}
 		}
@@ -266,7 +281,7 @@ func optimizeExpr(expr Expr) Expr {
 		args := make([]Expr, len(e.Args))
 
 		for i, arg := range e.Args {
-			args[i] = optimizeExpr(arg)
+			args[i] = c.optimizeExpr(arg)
 		}
 
 		return CallExpr{
@@ -280,8 +295,58 @@ func optimizeExpr(expr Expr) Expr {
 	case MemberCallExpr:
 		args := make([]Expr, len(e.Args))
 
+		numLiterals := true
+
+		getFloat := func(expr Expr) float64 {
+			if e, ok := expr.(NumberExpr); ok {
+				return float64(e.Value)
+			} else if e, ok := expr.(FloatExpr); ok {
+				return e.Value
+			}
+
+			return 0
+		}
+
 		for i, arg := range e.Args {
-			args[i] = optimizeExpr(arg)
+			args[i] = c.optimizeExpr(arg)
+			numLiteral := false
+			if _, ok := args[i].(NumberExpr); ok {
+				numLiteral = true
+			} else if _, ok := args[i].(FloatExpr); ok {
+				numLiteral = true
+			}
+
+			if numLiterals && !numLiteral {
+				numLiterals = false
+			}
+		}
+
+		if numLiterals && !e.Safe && len(e.Args) > 0 {
+			module, ok := c.resolveStdImportModuleName(e.Object)
+			if ok && module == "math" {
+				switch e.Method {
+				case "floor":
+					if len(e.Args) == 1 {
+						return FloatExpr{Value: math.Floor(getFloat(e.Args[0]))}
+					}
+				case "ceil":
+					if len(e.Args) == 1 {
+						return FloatExpr{Value: math.Ceil(getFloat(e.Args[0]))}
+					}
+				case "sqrt":
+					if len(e.Args) == 1 {
+						return FloatExpr{Value: math.Sqrt(getFloat(e.Args[0]))}
+					}
+				case "abs":
+					if len(e.Args) == 1 {
+						return FloatExpr{Value: math.Abs(getFloat(e.Args[0]))}
+					}
+				case "pow":
+					if len(e.Args) == 2 {
+						return FloatExpr{Value: math.Pow(getFloat(e.Args[0]), getFloat(e.Args[1]))}
+					}
+				}
+			}
 		}
 
 		return MemberCallExpr{
@@ -296,7 +361,7 @@ func optimizeExpr(expr Expr) Expr {
 
 	case PropertyExpr:
 		return PropertyExpr{
-			Object: optimizeExpr(e.Object),
+			Object: c.optimizeExpr(e.Object),
 			Name:   e.Name,
 			File:   e.File,
 			Line:   e.Line,
@@ -305,7 +370,7 @@ func optimizeExpr(expr Expr) Expr {
 		}
 
 	case UnaryExpr:
-		right := optimizeExpr(e.Right)
+		right := c.optimizeExpr(e.Right)
 
 		switch e.Op {
 		case TOKEN_BANG:
@@ -352,6 +417,9 @@ func NewCompiler() *Compiler {
 		scopes:                 []map[string]Binding{},
 		importStates:           map[string]ImportState{},
 		importStack:            []string{},
+		virtualObjects:         map[VarNodeKey]map[string]int{},
+		stdImportModules:       map[string]string{},
+		inlineCandidates:       map[string]FunctionStmt{},
 	}
 
 	c.currentInstructions = &c.mainInstructions
@@ -366,6 +434,10 @@ func (c *Compiler) predeclareNamespaceFunctions(prefix string, ns NamespaceStmt)
 			fullName := prefix + "." + ns.Name + "." + fn.Name
 			c.declaredFunctions[fullName] = true
 			c.getFunctionID(fullName)
+			if c.inlineCandidates != nil {
+				fn.Name = fullName
+				c.inlineCandidates[fullName] = fn
+			}
 		} else if nestedNs, ok := nsStmt.(NamespaceStmt); ok {
 			c.predeclareNamespaceFunctions(prefix+"."+ns.Name, nestedNs)
 		}
@@ -378,6 +450,9 @@ func (c *Compiler) predeclareFunctions(statements []Stmt) {
 		case FunctionStmt:
 			c.declaredFunctions[s.Name] = true
 			c.getFunctionID(s.Name)
+			if c.inlineCandidates != nil {
+				c.inlineCandidates[s.Name] = s
+			}
 
 		case NativeFnStmt:
 			c.declaredFunctions[s.Name] = true
@@ -389,6 +464,10 @@ func (c *Compiler) predeclareFunctions(statements []Stmt) {
 					fullName := s.Name + "." + fn.Name
 					c.declaredFunctions[fullName] = true
 					c.getFunctionID(fullName)
+					if c.inlineCandidates != nil {
+						fn.Name = fullName
+						c.inlineCandidates[fullName] = fn
+					}
 				} else if nestedNs, ok := nsStmt.(NamespaceStmt); ok {
 					c.predeclareNamespaceFunctions(s.Name, nestedNs)
 				}
@@ -486,6 +565,17 @@ func (c *Compiler) compileFunctionLiteral(stmt FunctionStmt) {
 	c.currentInstructions = &functionInstructions
 	c.scopes = []map[string]Binding{}
 	c.localCount = 0
+
+	c.beginScope()
+
+	for _, param := range stmt.Params {
+		binding := c.declareVariable(param.Name, false)
+		binding.TypeHint = param.TypeHint.Name
+		c.currentScope()[param.Name] = binding
+	}
+
+	c.performEscapeAnalysis(stmt.Body)
+
 	c.inMethod = false
 	c.outerBindings = outerBindings
 	c.currentCaptures = map[string]CapturedVar{}
@@ -500,14 +590,6 @@ func (c *Compiler) compileFunctionLiteral(stmt FunctionStmt) {
 		c.currentReturnType = oldReturnType
 		c.currentFunctionName = oldFunctionName
 	}()
-
-	c.beginScope()
-
-	for _, param := range stmt.Params {
-		binding := c.declareVariable(param.Name, false)
-		binding.TypeHint = param.TypeHint.Name
-		c.currentScope()[param.Name] = binding
-	}
 
 	for _, bodyStmt := range stmt.Body {
 		c.compileStatement(bodyStmt)
@@ -531,6 +613,7 @@ func (c *Compiler) compileFunctionLiteral(stmt FunctionStmt) {
 		Params:         stmt.Params,
 		ReturnType:     stmt.ReturnType,
 		Instructions:   functionInstructions,
+		StatementCount: len(stmt.Body),
 		LocalCount:     localCount,
 		Captures:       captures,
 		Async:          stmt.Async,
@@ -562,7 +645,7 @@ func (c *Compiler) compileNestedFunction(stmt FunctionStmt) {
 
 	binding := c.declareVariable(stmt.Name, true)
 
-	if binding.Kind == BindingLocal {
+	if binding.Kind == BindingLocal && binding.Slot >= 0 {
 		c.emit(OP_STORE_LOCAL, VariableInfo{
 			Name:     stmt.Name,
 			Slot:     binding.Slot,
@@ -570,6 +653,7 @@ func (c *Compiler) compileNestedFunction(stmt FunctionStmt) {
 		})
 	} else {
 		c.emit(OP_STORE_GLOBAL, VariableInfo{
+			Name:     binding.Name,
 			Slot:     binding.Slot,
 			Constant: true,
 		})
@@ -679,7 +763,10 @@ func (c *Compiler) compileScopedBlock(body []Stmt) {
 }
 
 func (c *Compiler) CompileProgram(program Program) ([]Instruction, map[string]Function, map[string]Class, map[string]Interface, map[string]int) {
+	c.virtualObjects = map[VarNodeKey]map[string]int{}
 	c.predeclareFunctions(program.Statements)
+
+	c.performEscapeAnalysis(program.Statements)
 
 	c.compileNativeFunctions(program.Statements)
 
@@ -699,6 +786,148 @@ func (c *Compiler) CompileProgram(program Program) ([]Instruction, map[string]Fu
 	c.eraseFunctionGenericsForVM()
 
 	return c.mainInstructions, c.functions, c.classes, c.interfaces, c.globalIndexes
+}
+
+func (c *Compiler) resolveStdImportModuleName(expr Expr) (string, bool) {
+	ident, ok := expr.(IdentExpr)
+	if !ok {
+		return "", false
+	}
+
+	// 1. If there is a local binding with the same name, do NOT intrinsic-lower.
+	// Example:
+	// import std "math" as m
+	// fn f() {
+	//     let m = {}
+	//     m.floor(1) // should be normal method call
+	// }
+	if binding, exists := c.resolveVariable(ident.Name); exists {
+		if binding.Kind == BindingLocal {
+			return "", false
+		}
+
+		if module, ok := c.stdImportModules[binding.Name]; ok {
+			return module, true
+		}
+	}
+
+	// 2. Global import fallback.
+	// This is the missing part for functions.
+	// compileFunction resets scopes, so global imports are not visible via resolveVariable().
+	if module, ok := c.stdImportModules[ident.Name]; ok {
+		return module, true
+	}
+
+	// 3. Namespace-local import fallback.
+	if c.currentNamespaceVariables != nil {
+		if fullName, exists := c.currentNamespaceVariables[ident.Name]; exists {
+			if module, ok := c.stdImportModules[fullName]; ok {
+				return module, true
+			}
+		}
+	}
+
+	return "", false
+}
+
+func (c *Compiler) tryCompileStdIntrinsic(e MemberCallExpr) bool {
+	if e.Safe {
+		return false
+	}
+
+	module, ok := c.resolveStdImportModuleName(e.Object)
+	if !ok {
+		return false
+	}
+
+	switch module {
+	case "io":
+		switch e.Method {
+		case "println":
+			for _, arg := range e.Args {
+				c.compileExpr(arg)
+			}
+
+			c.setLocation(e.File, e.Line, e.Column)
+
+			c.emit(OP_PRINT, PrintInfo{
+				ArgCount: len(e.Args),
+				NewLine:  true,
+			})
+
+			return true
+
+		case "print":
+			for _, arg := range e.Args {
+				c.compileExpr(arg)
+			}
+
+			c.setLocation(e.File, e.Line, e.Column)
+
+			c.emit(OP_PRINT, PrintInfo{
+				ArgCount: len(e.Args),
+				NewLine:  false,
+			})
+
+			return true
+		}
+	case "json":
+		if e.Method == "stringify" && len(e.Args) == 1 {
+			c.compileExpr(e.Args[0])
+
+			c.setLocation(e.File, e.Line, e.Column)
+
+			c.emit(OP_JSON_STRINGIFY, nil)
+
+			return true
+		} else if e.Method == "parse" && len(e.Args) == 1 {
+			c.compileExpr(e.Args[0])
+
+			c.setLocation(e.File, e.Line, e.Column)
+
+			c.emit(OP_JSON_PARSE, nil)
+
+			return true
+		}
+	case "math":
+		emitUnary := func(op OpCode) bool {
+			if len(e.Args) != 1 {
+				return false
+			}
+
+			c.compileExpr(e.Args[0])
+			c.setLocation(e.File, e.Line, e.Column)
+			c.emit(op, nil)
+			return true
+		}
+
+		emitBinary := func(op OpCode) bool {
+			if len(e.Args) != 2 {
+				return false
+			}
+
+			c.compileExpr(e.Args[0])
+			c.compileExpr(e.Args[1])
+			c.setLocation(e.File, e.Line, e.Column)
+			c.emit(op, nil)
+			return true
+		}
+
+		switch e.Method {
+		case "floor":
+			return emitUnary(OP_MATH_FLOOR)
+		case "ceil":
+			return emitUnary(OP_MATH_CEIL)
+		case "sqrt":
+			return emitUnary(OP_MATH_SQRT)
+		case "abs":
+			return emitUnary(OP_MATH_ABS)
+		case "pow":
+			return emitBinary(OP_MATH_POW)
+		}
+	}
+
+	return false
 }
 
 func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
@@ -803,10 +1032,11 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		} else {
 			fn, _ := inner.(FunctionStmt)
 			c.functions[fullName] = Function{
-				ID:     c.getFunctionID(fullName),
-				Async:  fn.Async,
-				Name:   fullName,
-				Params: fn.Params,
+				ID:             c.getFunctionID(fullName),
+				Async:          fn.Async,
+				Name:           fullName,
+				StatementCount: len(fn.Body),
+				Params:         fn.Params,
 			}
 		}
 	}
@@ -936,9 +1166,17 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		})
 
 		c.globalConstants[fullName] = true
+
+		if imp.Std {
+			if c.stdImportModules == nil {
+				c.stdImportModules = map[string]string{}
+			}
+
+			c.stdImportModules[binding.Name] = imp.Path
+			c.stdImportModules[fullName] = imp.Path
+		}
 	}
 
-	// IMPORTANT: set namespace maps BEFORE compiling enum/var/function bodies.
 	c.currentNamespaceFunctions = namespaceFunctions
 	c.currentNamespaceVariables = namespaceVariables
 	c.currentNamespaceClasses = namespaceClasses
@@ -1297,15 +1535,38 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 		c.compileNamespace(s)
 
 	case VariableStmt:
+		key := VarNodeKey{File: s.File, Line: s.Line, Column: s.Column}
+		if fields, isVirtual := c.virtualObjects[key]; isVirtual {
+			obj := s.Value.(ObjectExpr)
+			for _, field := range obj.Fields {
+				c.compileExpr(field.Value)
+				slot := fields[field.Name]
+				c.emit(OP_STORE_LOCAL, VariableInfo{
+					Name:     s.Name + "." + field.Name,
+					Slot:     slot,
+					Constant: s.Constant,
+				})
+			}
+			c.currentScope()[s.Name] = Binding{
+				Kind:          BindingLocal,
+				Name:          s.Name,
+				Slot:          -1,
+				Constant:      s.Constant,
+				VirtualFields: fields,
+			}
+			return
+		}
+
 		c.compileExpr(s.Value)
 
 		binding := c.declareVariable(s.Name, s.Constant)
 		binding.TypeHint = s.TypeHint.Name
+
 		c.currentScope()[s.Name] = binding
 
 		c.setLocation(s.File, s.Line, s.Column)
 
-		if binding.Kind == BindingLocal {
+		if binding.Kind == BindingLocal && binding.Slot >= 0 {
 			c.emit(OP_STORE_LOCAL, VariableInfo{
 				Name:     s.Name,
 				Slot:     binding.Slot,
@@ -1584,6 +1845,16 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 		c.compileForStatement(s)
 
 	case PropertyAssignStmt:
+		if ident, ok := s.Object.(IdentExpr); ok {
+			if binding, exists := c.resolveVariable(ident.Name); exists && binding.VirtualFields != nil {
+				if slot, ok := binding.VirtualFields[s.Name]; ok {
+					c.compileExpr(s.Value)
+					c.emit(OP_ASSIGN_LOCAL, slot)
+					return
+				}
+			}
+		}
+
 		c.compileExpr(s.Object)
 		c.compileExpr(s.Value)
 		c.emit(OP_SET_PROPERTY, s.Name)
@@ -1639,7 +1910,7 @@ func (c *Compiler) compileEnum(stmt EnumStmt) {
 	}
 }
 
-func (c *Compiler) storeImportedAlias(name string, constant bool) {
+func (c *Compiler) storeImportedAlias(name string, constant bool) Binding {
 	binding := c.declareVariable(name, constant)
 
 	if c.isCompilingNamespace {
@@ -1656,7 +1927,7 @@ func (c *Compiler) storeImportedAlias(name string, constant bool) {
 			Slot:     binding.Slot,
 			Constant: constant,
 		})
-		return
+		return binding
 	}
 
 	c.emit(OP_STORE_GLOBAL, VariableInfo{
@@ -1664,6 +1935,8 @@ func (c *Compiler) storeImportedAlias(name string, constant bool) {
 		Constant: constant,
 		Slot:     binding.Slot,
 	})
+
+	return binding
 }
 
 func (c *Compiler) resolveImportPath(importPath string) string {
@@ -1694,7 +1967,17 @@ func (c *Compiler) compileStdImport(stmt ImportStmt) {
 		ArgCount: 1,
 	})
 
-	c.storeImportedAlias(name, true)
+	binding := c.storeImportedAlias(name, true)
+
+	if c.stdImportModules == nil {
+		c.stdImportModules = map[string]string{}
+	}
+
+	// Actual global/internal name
+	c.stdImportModules[binding.Name] = stmt.Path
+
+	// Source alias name, needed inside functions where global scope is not in c.scopes
+	c.stdImportModules[name] = stmt.Path
 }
 
 func (c *Compiler) compilePluginImport(stmt ImportStmt) {
@@ -2228,6 +2511,7 @@ func (c *Compiler) compileFunction(stmt FunctionStmt) {
 		Name:           stmt.Name,
 		TypeParameters: stmt.TypeParameters,
 		Params:         stmt.Params,
+		StatementCount: len(stmt.Body),
 		HasDefaults:    hasDefaults,
 		HasTypeHints:   hasTypeHints,
 		Async:          stmt.Async,
@@ -2246,6 +2530,17 @@ func (c *Compiler) compileFunction(stmt FunctionStmt) {
 	c.currentInstructions = &functionInstructions
 	c.scopes = []map[string]Binding{}
 	c.localCount = 0
+
+	c.beginScope()
+
+	for _, param := range stmt.Params {
+		binding := c.declareVariable(param.Name, false)
+		binding.TypeHint = param.TypeHint.Name
+		c.currentScope()[param.Name] = binding
+	}
+
+	c.performEscapeAnalysis(stmt.Body)
+
 	c.inMethod = false
 	c.outerBindings = nil
 	c.currentCaptures = nil
@@ -2260,14 +2555,6 @@ func (c *Compiler) compileFunction(stmt FunctionStmt) {
 		c.currentReturnType = oldReturnType
 		c.currentFunctionName = oldFunctionName
 	}()
-
-	c.beginScope()
-
-	for _, param := range stmt.Params {
-		binding := c.declareVariable(param.Name, false)
-		binding.TypeHint = param.TypeHint.Name
-		c.currentScope()[param.Name] = binding
-	}
 
 	for _, bodyStmt := range stmt.Body {
 		c.compileStatement(bodyStmt)
@@ -2284,6 +2571,7 @@ func (c *Compiler) compileFunction(stmt FunctionStmt) {
 		TypeParameters: stmt.TypeParameters,
 		Params:         stmt.Params,
 		Instructions:   functionInstructions,
+		StatementCount: len(stmt.Body),
 		LocalCount:     localCount,
 		HasDefaults:    hasDefaults,
 		HasTypeHints:   hasTypeHints,
@@ -2422,8 +2710,378 @@ func isProbablyStringExpr(expr Expr) bool {
 	}
 }
 
+const maxInlineDepth = 8
+const maxInlineBodyStatements = 2
+
+func (c *Compiler) functionLooksJitCandidate(stmt FunctionStmt) bool {
+	if stmt.Async || len(stmt.TypeParameters) > 0 {
+		return false
+	}
+	if len(stmt.Params) > 0 && stmt.Params[len(stmt.Params)-1].Variadic {
+		return false
+	}
+	for _, param := range stmt.Params {
+		if param.HasDefault {
+			return false
+		}
+	}
+	if c.stmtListHasLoopOrComplexControl(stmt.Body) || c.functionStmtCallsName(stmt, stmt.Name) {
+		return true
+	}
+	return len(stmt.Body) >= 8
+}
+
+func (c *Compiler) stmtListHasLoopOrComplexControl(stmts []Stmt) bool {
+	for _, stmt := range stmts {
+		switch s := stmt.(type) {
+		case WhileStmt, ForStmt, ForInStmt:
+			return true
+		case TryCatchStmt, LockStmt:
+			return true
+		case IfStmt:
+			if c.stmtListHasLoopOrComplexControl(s.ThenBody) || c.stmtListHasLoopOrComplexControl(s.ElseBody) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (c *Compiler) functionStmtCallsName(stmt FunctionStmt, name string) bool {
+	for _, bodyStmt := range stmt.Body {
+		if c.stmtCallsName(bodyStmt, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Compiler) stmtCallsName(stmt Stmt, name string) bool {
+	switch s := stmt.(type) {
+	case ReturnStmt:
+		return s.HasValue && c.exprCallsName(s.Value, name)
+	case ExprStmt:
+		return c.exprCallsName(s.Value, name)
+	case VariableStmt:
+		return c.exprCallsName(s.Value, name)
+	case AssignStmt:
+		return c.exprCallsName(s.Value, name)
+	case PropertyAssignStmt:
+		return c.exprCallsName(s.Object, name) || c.exprCallsName(s.Value, name)
+	case IndexAssignStmt:
+		return c.exprCallsName(s.Object, name) || c.exprCallsName(s.Index, name) || c.exprCallsName(s.Value, name)
+	case ThrowStmt:
+		return c.exprCallsName(s.Value, name)
+	case IfStmt:
+		if c.exprCallsName(s.Condition, name) {
+			return true
+		}
+		for _, inner := range s.ThenBody {
+			if c.stmtCallsName(inner, name) {
+				return true
+			}
+		}
+		for _, inner := range s.ElseBody {
+			if c.stmtCallsName(inner, name) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (c *Compiler) exprCallsName(expr Expr, name string) bool {
+	switch e := expr.(type) {
+	case CallExpr:
+		if e.Name == name {
+			return true
+		}
+		for _, arg := range e.Args {
+			if c.exprCallsName(arg, name) {
+				return true
+			}
+		}
+	case CallValueExpr:
+		if c.exprCallsName(e.Callee, name) {
+			return true
+		}
+		for _, arg := range e.Args {
+			if c.exprCallsName(arg, name) {
+				return true
+			}
+		}
+	case MemberCallExpr:
+		if c.exprCallsName(e.Object, name) {
+			return true
+		}
+		for _, arg := range e.Args {
+			if c.exprCallsName(arg, name) {
+				return true
+			}
+		}
+	case BinaryExpr:
+		return c.exprCallsName(e.Left, name) || c.exprCallsName(e.Right, name)
+	case UnaryExpr:
+		return c.exprCallsName(e.Right, name)
+	case TernaryExpr:
+		return c.exprCallsName(e.Condition, name) || c.exprCallsName(e.ThenExpr, name) || c.exprCallsName(e.ElseExpr, name)
+	case NullishCoalescingExpr:
+		return c.exprCallsName(e.Left, name) || c.exprCallsName(e.Right, name)
+	case PropertyExpr:
+		return c.exprCallsName(e.Object, name)
+	case IndexExpr:
+		return c.exprCallsName(e.Object, name) || c.exprCallsName(e.Index, name)
+	case ArrayExpr:
+		for _, element := range e.Elements {
+			if c.exprCallsName(element, name) {
+				return true
+			}
+		}
+	case ObjectExpr:
+		for _, field := range e.Fields {
+			if field.HasCopy {
+				if c.exprCallsName(field.Copy, name) {
+					return true
+				}
+			} else if c.exprCallsName(field.Value, name) {
+				return true
+			}
+		}
+	case TypeOfExpr:
+		return c.exprCallsName(e.Value, name)
+	case InstanceOfExpr:
+		return c.exprCallsName(e.Object, name) || c.exprCallsName(e.Class, name)
+	case ObjectInExpr:
+		return c.exprCallsName(e.Object, name) || c.exprCallsName(e.Key, name)
+	case InterpolatedStringExpr:
+		for _, part := range e.Parts {
+			if part.IsExpr && c.exprCallsName(part.Expr, name) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (c *Compiler) tryCompileInlineCall(name string, args []Expr, file string, line int, column int) bool {
+	if c.inlineDepth >= maxInlineDepth {
+		return false
+	}
+	stmt, ok := c.inlineCandidates[name]
+	if !ok {
+		return false
+	}
+	inlineExpr, ok := c.inlineReturnExpr(name, stmt, args)
+	if !ok {
+		return false
+	}
+	c.checkCompileTimeArguments(name, args, stmt.Params, line, column)
+
+	c.inlineDepth++
+
+	c.compileExpr(inlineExpr)
+	c.inlineDepth--
+	return true
+}
+
+func (c *Compiler) inlineReturnExpr(name string, stmt FunctionStmt, args []Expr) (Expr, bool) {
+	if len(args) != len(stmt.Params) || len(args) == 0 && len(stmt.Params) != 0 {
+		return nil, false
+	}
+	if stmt.Async || stmt.Private || len(stmt.TypeParameters) > 0 || c.functionLooksJitCandidate(stmt) {
+		return nil, false
+	}
+	for _, param := range stmt.Params {
+		if param.HasDefault || param.Variadic {
+			return nil, false
+		}
+	}
+	if len(stmt.Body) == 0 || len(stmt.Body) > maxInlineBodyStatements {
+		return nil, false
+	}
+	ret, ok := stmt.Body[len(stmt.Body)-1].(ReturnStmt)
+	if !ok || !ret.HasValue {
+		return nil, false
+	}
+	if len(stmt.Body) != 1 {
+		return nil, false
+	}
+	if !c.exprIsInlineSafe(ret.Value) {
+		return nil, false
+	}
+
+	params := map[string]Expr{}
+	usage := map[string]int{}
+	for i, param := range stmt.Params {
+		params[param.Name] = args[i]
+		usage[param.Name] = 0
+	}
+	c.countInlineParamUses(ret.Value, usage)
+	for name, count := range usage {
+		if count > 1 && !c.exprSafeToDuplicate(params[name]) {
+			return nil, false
+		}
+	}
+	return c.substituteInlineParams(ret.Value, params), true
+}
+
+func (c *Compiler) exprIsInlineSafe(expr Expr) bool {
+	switch e := expr.(type) {
+	case NumberExpr, FloatExpr, StringExpr, BoolExpr, NullExpr, IdentExpr, ThisExpr:
+		return true
+	case UnaryExpr:
+		return c.exprIsInlineSafe(e.Right)
+	case BinaryExpr:
+		return c.exprIsInlineSafe(e.Left) && c.exprIsInlineSafe(e.Right)
+	case TernaryExpr:
+		return c.exprIsInlineSafe(e.Condition) && c.exprIsInlineSafe(e.ThenExpr) && c.exprIsInlineSafe(e.ElseExpr)
+	case NullishCoalescingExpr:
+		return c.exprIsInlineSafe(e.Left) && c.exprIsInlineSafe(e.Right)
+	case TypeOfExpr:
+		return c.exprIsInlineSafe(e.Value)
+	case PropertyExpr:
+		return !e.Safe && c.exprIsInlineSafe(e.Object)
+	case IndexExpr:
+		return c.exprIsInlineSafe(e.Object) && c.exprIsInlineSafe(e.Index)
+	case ArrayExpr:
+		for _, element := range e.Elements {
+			if !c.exprIsInlineSafe(element) {
+				return false
+			}
+		}
+		return true
+	case ObjectExpr:
+		for _, field := range e.Fields {
+			if field.HasCopy || !c.exprIsInlineSafe(field.Value) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Compiler) exprSafeToDuplicate(expr Expr) bool {
+	switch e := expr.(type) {
+	case NumberExpr, FloatExpr, StringExpr, BoolExpr, NullExpr, IdentExpr, ThisExpr:
+		return true
+	case UnaryExpr:
+		return c.exprSafeToDuplicate(e.Right)
+	case BinaryExpr:
+		return c.exprSafeToDuplicate(e.Left) && c.exprSafeToDuplicate(e.Right)
+	default:
+		return false
+	}
+}
+
+func (c *Compiler) countInlineParamUses(expr Expr, usage map[string]int) {
+	switch e := expr.(type) {
+	case IdentExpr:
+		if _, ok := usage[e.Name]; ok {
+			usage[e.Name]++
+		}
+	case UnaryExpr:
+		c.countInlineParamUses(e.Right, usage)
+	case BinaryExpr:
+		c.countInlineParamUses(e.Left, usage)
+		c.countInlineParamUses(e.Right, usage)
+	case TernaryExpr:
+		c.countInlineParamUses(e.Condition, usage)
+		c.countInlineParamUses(e.ThenExpr, usage)
+		c.countInlineParamUses(e.ElseExpr, usage)
+	case NullishCoalescingExpr:
+		c.countInlineParamUses(e.Left, usage)
+		c.countInlineParamUses(e.Right, usage)
+	case TypeOfExpr:
+		c.countInlineParamUses(e.Value, usage)
+	case PropertyExpr:
+		c.countInlineParamUses(e.Object, usage)
+	case IndexExpr:
+		c.countInlineParamUses(e.Object, usage)
+		c.countInlineParamUses(e.Index, usage)
+	case ArrayExpr:
+		for _, element := range e.Elements {
+			c.countInlineParamUses(element, usage)
+		}
+	case ObjectExpr:
+		for _, field := range e.Fields {
+			if field.HasCopy {
+				c.countInlineParamUses(field.Copy, usage)
+			} else {
+				c.countInlineParamUses(field.Value, usage)
+			}
+		}
+	case InterpolatedStringExpr:
+		for _, part := range e.Parts {
+			if part.IsExpr {
+				c.countInlineParamUses(part.Expr, usage)
+			}
+		}
+	}
+}
+
+func (c *Compiler) substituteInlineParams(expr Expr, params map[string]Expr) Expr {
+	switch e := expr.(type) {
+	case IdentExpr:
+		if repl, ok := params[e.Name]; ok {
+			return repl
+		}
+		return e
+	case UnaryExpr:
+		e.Right = c.substituteInlineParams(e.Right, params)
+		return e
+	case BinaryExpr:
+		e.Left = c.substituteInlineParams(e.Left, params)
+		e.Right = c.substituteInlineParams(e.Right, params)
+		return e
+	case TernaryExpr:
+		e.Condition = c.substituteInlineParams(e.Condition, params)
+		e.ThenExpr = c.substituteInlineParams(e.ThenExpr, params)
+		e.ElseExpr = c.substituteInlineParams(e.ElseExpr, params)
+		return e
+	case NullishCoalescingExpr:
+		e.Left = c.substituteInlineParams(e.Left, params)
+		e.Right = c.substituteInlineParams(e.Right, params)
+		return e
+	case TypeOfExpr:
+		e.Value = c.substituteInlineParams(e.Value, params)
+		return e
+	case PropertyExpr:
+		e.Object = c.substituteInlineParams(e.Object, params)
+		return e
+	case IndexExpr:
+		e.Object = c.substituteInlineParams(e.Object, params)
+		e.Index = c.substituteInlineParams(e.Index, params)
+		return e
+	case ArrayExpr:
+		for i := range e.Elements {
+			e.Elements[i] = c.substituteInlineParams(e.Elements[i], params)
+		}
+		return e
+	case ObjectExpr:
+		for i := range e.Fields {
+			if e.Fields[i].HasCopy {
+				e.Fields[i].Copy = c.substituteInlineParams(e.Fields[i].Copy, params).(IdentExpr)
+			} else {
+				e.Fields[i].Value = c.substituteInlineParams(e.Fields[i].Value, params)
+			}
+		}
+		return e
+	case InterpolatedStringExpr:
+		for i := range e.Parts {
+			if e.Parts[i].IsExpr {
+				e.Parts[i].Expr = c.substituteInlineParams(e.Parts[i].Expr, params)
+			}
+		}
+		return e
+	default:
+		return e
+	}
+}
+
 func (c *Compiler) compileExpr(expr Expr) {
-	expr = optimizeExpr(expr)
+	expr = c.optimizeExpr(expr)
 
 	switch e := expr.(type) {
 	case InstanceOfExpr:
@@ -2537,16 +3195,17 @@ func (c *Compiler) compileExpr(expr Expr) {
 		hasDefaults, hasTypeHints := getParamFlags(e.Params)
 
 		c.functions[name] = Function{
-			ID:           c.getFunctionID(name),
-			Name:         name,
-			Params:       e.Params,
-			ReturnType:   e.ReturnType,
-			Instructions: functionInstructions,
-			LocalCount:   localCount,
-			Captures:     captures,
-			HasDefaults:  hasDefaults,
-			HasTypeHints: hasTypeHints,
-			Async:        false,
+			ID:             c.getFunctionID(name),
+			Name:           name,
+			Params:         e.Params,
+			ReturnType:     e.ReturnType,
+			Instructions:   functionInstructions,
+			StatementCount: len(e.Body),
+			LocalCount:     localCount,
+			Captures:       captures,
+			HasDefaults:    hasDefaults,
+			HasTypeHints:   hasTypeHints,
+			Async:          false,
 		}
 
 		c.currentInstructions = oldInstructions
@@ -2596,6 +3255,15 @@ func (c *Compiler) compileExpr(expr Expr) {
 		c.emit(OP_COALESCE_JUMP, nil)
 
 	case PropertyExpr:
+		if ident, ok := e.Object.(IdentExpr); ok {
+			if binding, exists := c.resolveVariable(ident.Name); exists && binding.VirtualFields != nil {
+				if slot, exists := binding.VirtualFields[e.Name]; exists {
+					c.emit(OP_LOAD_LOCAL, slot)
+					return
+				}
+			}
+		}
+
 		c.compileExpr(e.Object)
 
 		if e.Safe {
@@ -2870,6 +3538,10 @@ func (c *Compiler) compileExpr(expr Expr) {
 		}
 
 		if c.declaredFunctions[e.Name] {
+			if c.tryCompileInlineCall(e.Name, e.Args, e.File, e.Line, e.Column) {
+				return
+			}
+
 			fn := c.functions[e.Name]
 
 			c.checkCompileTimeArguments(e.Name, e.Args, fn.Params, e.Line, e.Column)
@@ -2910,6 +3582,10 @@ func (c *Compiler) compileExpr(expr Expr) {
 
 		if c.currentNamespaceFunctions != nil {
 			if fullName, exists := c.currentNamespaceFunctions[e.Name]; exists {
+				if c.tryCompileInlineCall(fullName, e.Args, e.File, e.Line, e.Column) {
+					return
+				}
+
 				for _, arg := range e.Args {
 					c.compileExpr(arg)
 				}
@@ -3041,6 +3717,10 @@ func (c *Compiler) compileExpr(expr Expr) {
 
 			if c.currentNamespaceFunctions != nil {
 				if fullName, exists := c.currentNamespaceFunctions[ident.Name]; exists {
+					if c.tryCompileInlineCall(fullName, e.Args, ident.File, ident.Line, ident.Column) {
+						return
+					}
+
 					for _, arg := range e.Args {
 						c.compileExpr(arg)
 					}
@@ -3073,6 +3753,10 @@ func (c *Compiler) compileExpr(expr Expr) {
 			}
 
 			if fn, exists := c.functions[ident.Name]; exists {
+				if c.tryCompileInlineCall(ident.Name, e.Args, ident.File, ident.Line, ident.Column) {
+					return
+				}
+
 				c.checkCompileTimeArguments(ident.Name, e.Args, fn.Params, e.Line, e.Column)
 
 				c.usedFunctions[ident.Name] = true
@@ -3153,6 +3837,10 @@ func (c *Compiler) compileExpr(expr Expr) {
 		})
 
 	case MemberCallExpr:
+		if c.tryCompileStdIntrinsic(e) {
+			return
+		}
+
 		if ident, ok := e.Object.(IdentExpr); ok && (ident.Name == "Plugin") {
 			for _, arg := range e.Args {
 				c.compileExpr(arg)
@@ -3302,6 +3990,7 @@ func (c *Compiler) compileMethod(className string, stmt FunctionStmt) {
 		Params:         params,
 		ReturnType:     stmt.ReturnType,
 		Instructions:   functionInstructions,
+		StatementCount: len(stmt.Body),
 		LocalCount:     c.localCount,
 		HasDefaults:    hasDefaults,
 		HasTypeHints:   hasTypeHints,
@@ -3627,13 +4316,21 @@ func (c *Compiler) compareCompileTimeTypes(got string, expected string) bool {
 			}
 		}
 
-		if part == "object" && (strings.HasPrefix(got, "class:") || strings.HasPrefix(got, "interface:") || got == "object") {
+		if part == "object" && (strings.HasPrefix(got, "class:") || strings.HasPrefix(got, "interface:") || got == "object" || c.hasInterfaceHint(got)) {
 			return true
 		}
 
 		if got == "object" {
 			if c.hasInterfaceHint(part) {
 				return true
+			}
+
+			// Handle generic interface: Box:number is compatible with object
+			if strings.Contains(part, ":") {
+				base := strings.Split(part, ":")[0]
+				if c.hasInterfaceHint(base) {
+					return true
+				}
 			}
 		}
 	}
@@ -4075,4 +4772,231 @@ func sortedNativeImports(imports map[string]bool) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+func (c *Compiler) doesVariableEscape(name string, fieldsSet map[string]bool, statements []Stmt) bool {
+	escaped := false
+
+	var scanExpr func(e Expr)
+	var scanStmt func(s Stmt)
+
+	scanExpr = func(e Expr) {
+		if e == nil || escaped {
+			return
+		}
+		switch expr := e.(type) {
+		case IdentExpr:
+			if expr.Name == name {
+				escaped = true
+			}
+		case PropertyExpr:
+			if ident, ok := expr.Object.(IdentExpr); ok && ident.Name == name {
+				// Accessing property does not escape, UNLESS it doesn't exist in the literal fields
+				if !fieldsSet[expr.Name] {
+					escaped = true
+				}
+			} else {
+				scanExpr(expr.Object)
+			}
+		case BinaryExpr:
+			scanExpr(expr.Left)
+			scanExpr(expr.Right)
+		case CallExpr:
+			for _, arg := range expr.Args {
+				scanExpr(arg)
+			}
+		case CallValueExpr:
+			scanExpr(expr.Callee)
+			for _, arg := range expr.Args {
+				scanExpr(arg)
+			}
+		case MemberCallExpr:
+			if ident, ok := expr.Object.(IdentExpr); ok && ident.Name == name {
+				// Calling method on object. For now we consider it escaping
+				// unless we can prove the method doesn't capture 'this'.
+				// To be safe, we say it escapes.
+				escaped = true
+			} else {
+				scanExpr(expr.Object)
+			}
+			for _, arg := range expr.Args {
+				scanExpr(arg)
+			}
+		case ObjectExpr:
+			for _, f := range expr.Fields {
+				scanExpr(f.Value)
+			}
+		case ArrayExpr:
+			for _, item := range expr.Elements {
+				scanExpr(item)
+			}
+		case TernaryExpr:
+			scanExpr(expr.Condition)
+			scanExpr(expr.ThenExpr)
+			scanExpr(expr.ElseExpr)
+		case UnaryExpr:
+			scanExpr(expr.Right)
+		case InterpolatedStringExpr:
+			for _, part := range expr.Parts {
+				if part.IsExpr {
+					scanExpr(part.Expr)
+				}
+			}
+		case IndexExpr:
+			if ident, ok := expr.Object.(IdentExpr); ok && ident.Name == name {
+				// obj[index] is like a property access, but if index is not a string literal,
+				// it's harder to virtualize. For now, let's say it escapes.
+				escaped = true
+			} else {
+				scanExpr(expr.Object)
+			}
+			scanExpr(expr.Index)
+		}
+	}
+
+	scanStmt = func(s Stmt) {
+		if s == nil || escaped {
+			return
+		}
+		switch stmt := s.(type) {
+		case VariableStmt:
+			scanExpr(stmt.Value)
+		case AssignStmt:
+			if stmt.Name == name {
+				escaped = true
+			}
+			scanExpr(stmt.Value)
+		case PropertyAssignStmt:
+			if ident, ok := stmt.Object.(IdentExpr); ok && ident.Name == name {
+				// assignment to property is fine, UNLESS it doesn't exist in the literal fields
+				if !fieldsSet[stmt.Name] {
+					escaped = true
+				}
+			} else {
+				scanExpr(stmt.Object)
+			}
+			scanExpr(stmt.Value)
+		case ExprStmt:
+			scanExpr(stmt.Value)
+		case ReturnStmt:
+			if stmt.HasValue {
+				scanExpr(stmt.Value)
+			}
+		case IfStmt:
+			scanExpr(stmt.Condition)
+			for _, inner := range stmt.ThenBody {
+				scanStmt(inner)
+			}
+			for _, inner := range stmt.ElseBody {
+				scanStmt(inner)
+			}
+		case WhileStmt:
+			scanExpr(stmt.Condition)
+			for _, inner := range stmt.Body {
+				scanStmt(inner)
+			}
+		case ForStmt:
+			scanStmt(stmt.Init)
+			scanExpr(stmt.Condition)
+			scanStmt(stmt.Update)
+			for _, inner := range stmt.Body {
+				scanStmt(inner)
+			}
+		case ForInStmt:
+			if stmt.ItemName == name || stmt.IndexName == name {
+				escaped = true
+			}
+			scanExpr(stmt.Iterable)
+			for _, inner := range stmt.Body {
+				scanStmt(inner)
+			}
+		case TryCatchStmt:
+			for _, inner := range stmt.TryBody {
+				scanStmt(inner)
+			}
+			if stmt.ErrorName == name {
+				escaped = true
+			}
+			for _, inner := range stmt.CatchBody {
+				scanStmt(inner)
+			}
+			for _, inner := range stmt.FinallyBody {
+				scanStmt(inner)
+			}
+		case MatchStmt:
+			scanExpr(stmt.Value)
+			for _, c := range stmt.Cases {
+				scanExpr(c.Value)
+				for _, inner := range c.Body {
+					scanStmt(inner)
+				}
+			}
+			for _, inner := range stmt.Default {
+				scanStmt(inner)
+			}
+		case NamespaceStmt:
+			for _, inner := range stmt.Statements {
+				scanStmt(inner)
+			}
+		case ExportStmt:
+			scanStmt(stmt.Inner)
+		}
+	}
+
+	for _, s := range statements {
+		scanStmt(s)
+	}
+
+	return escaped
+}
+
+func (c *Compiler) performEscapeAnalysis(statements []Stmt) {
+	for _, stmt := range statements {
+		inner, _ := unwrapExport(stmt)
+		if v, ok := inner.(VariableStmt); ok && c.isInsideFunction() {
+			if obj, ok := v.Value.(ObjectExpr); ok {
+				fieldsSet := map[string]bool{}
+				for _, field := range obj.Fields {
+					fieldsSet[field.Name] = true
+				}
+				escaping := c.doesVariableEscape(v.Name, fieldsSet, statements)
+				if !escaping {
+					fields := map[string]int{}
+					for _, field := range obj.Fields {
+						slot := c.localCount
+						c.localCount++
+						fields[field.Name] = slot
+					}
+					key := VarNodeKey{File: v.File, Line: v.Line, Column: v.Column}
+					c.virtualObjects[key] = fields
+				}
+			}
+		}
+
+		// Recurse into blocks
+		switch s := inner.(type) {
+		case IfStmt:
+			c.performEscapeAnalysis(s.ThenBody)
+			c.performEscapeAnalysis(s.ElseBody)
+		case WhileStmt:
+			c.performEscapeAnalysis(s.Body)
+		case ForStmt:
+			c.performEscapeAnalysis(s.Body)
+		case ForInStmt:
+			c.performEscapeAnalysis(s.Body)
+		case TryCatchStmt:
+			c.performEscapeAnalysis(s.TryBody)
+			c.performEscapeAnalysis(s.CatchBody)
+			c.performEscapeAnalysis(s.FinallyBody)
+		case MatchStmt:
+			for _, mc := range s.Cases {
+				c.performEscapeAnalysis(mc.Body)
+			}
+			c.performEscapeAnalysis(s.Default)
+		case NamespaceStmt:
+			c.performEscapeAnalysis(s.Statements)
+		case FunctionStmt:
+			c.performEscapeAnalysis(s.Body)
+		}
+	}
 }

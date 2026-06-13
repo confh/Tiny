@@ -161,25 +161,25 @@ func (vm *VM) callNativePlugin(plugin *NativePluginValue, method string, args []
 
 	syscall.SyscallN(plugin.Free, resultPtr)
 
-	var result any
-
-	err = json.Unmarshal([]byte(resultText), &result)
+	result, err := parseTinyJSONDirect(resultText)
 	if err != nil {
 		vm.fatalError(ErrorRuntime, "plugin returned invalid JSON: %v", err)
 	}
 
-	if obj, ok := result.(map[string]any); ok {
+	if obj, ok := result.Value.(ObjectValue); ok {
 		if errValue, exists := obj["error"]; exists {
-			errObj, ok := errValue.(map[string]any)
+			errObj, ok := errValue.Value.(ObjectValue)
 			if ok {
-				kind, _ := errObj["kind"].(string)
-				message, _ := errObj["message"].(string)
+				kind, ok1 := errObj["kind"].Value.(string)
+				message, ok2 := errObj["message"].Value.(string)
 
-				if kind == "" {
-					kind = "PluginError"
+				if ok1 && ok2 {
+					if kind == "" {
+						kind = "PluginError"
+					}
+
+					vm.fatalError(ErrorKind(kind), "%s", message)
 				}
-
-				vm.fatalError(ErrorKind(kind), "%s", message)
 			}
 		}
 	}

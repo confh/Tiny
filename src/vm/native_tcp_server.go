@@ -17,7 +17,7 @@ func init() {
 	}
 }
 
-func handleConn(vm *VM, tcp *NativeTcpServerValue, conn net.Conn) {
+func handleConn(worker *VM, tcp *NativeTcpServerValue, conn net.Conn) {
 	defer conn.Close()
 
 	defer func() {
@@ -30,7 +30,7 @@ func handleConn(vm *VM, tcp *NativeTcpServerValue, conn net.Conn) {
 		return
 	}
 
-	vm.callFunctionValue(*tcp.ConnectionHandler, []TinyValue{
+	worker.callFunctionValue(*tcp.ConnectionHandler, []TinyValue{
 		NewNative(&NativeTcpConnectionValue{
 			Connection: conn,
 		}),
@@ -72,6 +72,12 @@ func tcpStart(vm *VM, tcp *NativeTcpServerValue, args []TinyValue) {
 
 	tcp.Listener = &listener
 
+	if tcp.Workers == nil {
+		tcp.Workers = NewVMPool(16, 8, func() *VM {
+			return vm.CloneForTask()
+		})
+	}
+
 	acceptLoop := func() {
 		for {
 			conn, err := listener.Accept()
@@ -79,9 +85,12 @@ func tcpStart(vm *VM, tcp *NativeTcpServerValue, args []TinyValue) {
 				continue
 			}
 
-			connVm := vm.CloneForTask()
+			worker := tcp.Workers.Get()
 
-			go handleConn(connVm, tcp, conn)
+			go func() {
+				defer tcp.Workers.Put(worker)
+				handleConn(worker, tcp, conn)
+			}()
 		}
 	}
 

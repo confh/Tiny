@@ -246,6 +246,33 @@ fn increment() {
 
 ***
 
+## Just-In-Time (JIT) Compilation
+
+Tiny includes a multi-function JIT compilation engine that translates frequently executed bytecode into native WebAssembly. While the interpreter is optimized for general-purpose scripting, the JIT provides significant performance gains for numerical computation, loops, and recursive algorithms.
+
+### JIT-Safe Functions
+
+The JIT automatically identifies and compiles eligible functions. To ensure your performance-critical code is JIT-compiled, follow these best practices:
+
+- **Avoid Closures with Captures**: Functions that capture variables from an outer scope are currently executed by the interpreter.
+- **Stay Synchronous**: `async` functions are not eligible for JIT compilation.
+- **Fixed Parameter Lists**: Avoid using variadic parameters (`...args`) or default parameter values in hot functions.
+- **Type Stability**: Provide explicit type hints for parameters and return values. This helps the JIT generate specialized machine code and avoids costly runtime type checks and deoptimizations.
+- **Localize State**: Prefer local variables over global variables inside intensive loops. The JIT can optimize stack-based operations more effectively than global memory access.
+
+```js
+// Highly JIT-optimized: typed, synchronous, no captures, uses loops
+fn computeSum(n: number): number {
+    let total = 0;
+    for let i = 0; i < n; i++ {
+        total += i;
+    }
+    return total;
+}
+```
+
+***
+
 ## Inline Go Extensions (WebAssembly)
 
 For performance-critical code segments, Tiny allows you to write Go logic directly in the source file using the `native fn` keyword. During compilation, the compiler extracts these blocks and compiles them to WebAssembly bytecode via TinyGo, loading them at runtime for near-native execution speed.
@@ -470,9 +497,10 @@ Manage scripts, dependencies, targets, and compilation rules using a project-lev
 
 The `tiny` binary acts as a compiler, package manager, and execution runtime:
 
+- **`tiny help`**: Views the help menu
 - **`tiny run <file>`**: Compiles and runs a `.tiny` or `.tbc` file. Direct execution of `.tiny` files utilizes `.tinycache` tracking to skip compilation if source files have not been modified.
 - **`tiny build <file> -o <out>`**: Compiles a source file into a distribution bytecode file (`.tbc`).
-- **`tiny pack <file> -o <binary>`**: Compiles and bundles the source bytecode alongside the VM runtime interpreter into a single, standalone native executable (\~9MB).
+- **`tiny pack <file> -o <binary>`**: Compiles and bundles the source bytecode alongside the VM runtime interpreter into a single, standalone native executable (~13MB).
 - **`tiny dist <file> -o <dir>`**: Packages the application alongside compiled external library plugins (`.dll`/`.so`).
 - **`tiny init`**: Generates a default `tiny.json` config in the current directory.
 - **`tiny add <owner/repo>`**: Downloads and registers a third-party library from GitHub into the global dependency cache.

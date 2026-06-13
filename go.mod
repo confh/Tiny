@@ -9,6 +9,7 @@ require (
 	github.com/charmbracelet/x/term v0.2.2
 	github.com/ebitengine/purego v0.10.0
 	github.com/goccy/go-json v0.10.6
+	github.com/gogpu/systray v0.1.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/kbinani/screenshot v0.0.0-20250624051815-089614a94018
 	github.com/tetratelabs/wazero v1.12.0
@@ -17,7 +18,6 @@ require (
 
 require (
 	github.com/go-webgpu/goffi v0.5.0 // indirect
-	github.com/gogpu/systray v0.1.0 // indirect
 	github.com/lxn/win v0.0.0-20210218163916-a377121e959e // indirect
 	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect

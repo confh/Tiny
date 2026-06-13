@@ -117,83 +117,83 @@ func stdMathToInt(vm *VM, args []TinyValue) {
 
 func stdMathAbs(vm *VM, args []TinyValue) {
 	expectArgs(vm, "math.abs", args, 1)
-	value := asFloat64(args[0])
+	value := vm.asFloat64(args[0])
 	vm.push(NewNative(math.Abs(value)))
 }
 
 func stdMathPow(vm *VM, args []TinyValue) {
 	expectArgs(vm, "math.pow", args, 2)
-	base := asFloat64(args[0])
-	exp := asFloat64(args[1])
+	base := vm.asFloat64(args[0])
+	exp := vm.asFloat64(args[1])
 	vm.push(NewNative(math.Pow(base, exp)))
 }
 
 func stdMathSqrt(vm *VM, args []TinyValue) {
 	expectArgs(vm, "math.sqrt", args, 1)
-	x := asFloat64(args[0])
+	x := vm.asFloat64(args[0])
 	vm.push(NewNative(math.Sqrt(x)))
 }
 
 func stdMathCeil(vm *VM, args []TinyValue) {
 	expectArgs(vm, "math.ceil", args, 1)
-	x := asFloat64(args[0])
+	x := vm.asFloat64(args[0])
 	vm.push(NewNative(math.Ceil(x)))
 }
 
 func stdMathFloor(vm *VM, args []TinyValue) {
 	expectArgs(vm, "math.floor", args, 1)
-	x := asFloat64(args[0])
+	x := vm.asFloat64(args[0])
 	vm.push(NewNative(math.Floor(x)))
 }
 
 func stdMathRound(vm *VM, args []TinyValue) {
 	expectArgs(vm, "math.round", args, 1)
-	x := asFloat64(args[0])
+	x := vm.asFloat64(args[0])
 	vm.push(NewNative(math.Round(x)))
 }
 
 func stdMathClamp(vm *VM, args []TinyValue) {
 	expectArgs(vm, "math.clamp", args, 3)
-	value := asFloat64(args[0])
-	min := asFloat64(args[1])
-	max := asFloat64(args[2])
+	value := vm.asFloat64(args[0])
+	min := vm.asFloat64(args[1])
+	max := vm.asFloat64(args[2])
 	vm.push(NewNative(Clamp(value, min, max)))
 }
 
 func stdMathSin(vm *VM, args []TinyValue) {
 	expectArgs(vm, "math.sin", args, 1)
-	rad := asFloat64(args[0])
+	rad := vm.asFloat64(args[0])
 	vm.push(NewNative(math.Sin(rad)))
 }
 
 func stdMathCos(vm *VM, args []TinyValue) {
 	expectArgs(vm, "math.cos", args, 1)
-	rad := asFloat64(args[0])
+	rad := vm.asFloat64(args[0])
 	vm.push(NewNative(math.Cos(rad)))
 }
 
 func stdMathTan(vm *VM, args []TinyValue) {
 	expectArgs(vm, "math.tan", args, 1)
-	rad := asFloat64(args[0])
+	rad := vm.asFloat64(args[0])
 	vm.push(NewNative(math.Tan(rad)))
 }
 
 func stdMathRadToDeg(vm *VM, args []TinyValue) {
 	expectArgs(vm, "math.radToDeg", args, 1)
-	rad := asFloat64(args[0])
+	rad := vm.asFloat64(args[0])
 	vm.push(NewNative(RadToDeg(rad)))
 }
 
 func stdMathDegToRad(vm *VM, args []TinyValue) {
 	expectArgs(vm, "math.degToRad", args, 1)
-	deg := asFloat64(args[0])
+	deg := vm.asFloat64(args[0])
 	vm.push(NewNative(DegToRad(deg)))
 }
 
 func stdMathAtan2(vm *VM, args []TinyValue) {
 	expectArgs(vm, "math.atan2", args, 2)
-	y := asFloat64(args[0])
-	x := asFloat64(args[1])
+	y := vm.asFloat64(args[0])
+	x := vm.asFloat64(args[1])
 	vm.push(NewNative(math.Atan2(y, x)))
 }
 
@@ -262,7 +262,7 @@ func stdMathMatTranspose(vm *VM, args []TinyValue) {
 func stdMathMatScale(vm *VM, args []TinyValue) {
 	expectArgs(vm, "math.matScale", args, 2)
 	value := asObject(args[0], vm)
-	scalar := asFloat64(args[1])
+	scalar := vm.asFloat64(args[1])
 	rows, cols, data := getMatrixFields(value, "first", vm)
 	m := mat.NewDense(rows, cols, data)
 	var res mat.Dense

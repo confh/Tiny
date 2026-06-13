@@ -494,7 +494,10 @@ type DecrementStmt struct {
 func (e DecrementStmt) stmtNode() {}
 
 type FloatExpr struct {
-	Value float64
+	Value  float64
+	File   string
+	Line   int
+	Column int
 }
 
 func (e FloatExpr) exprNode() {}

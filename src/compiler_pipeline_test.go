@@ -746,3 +746,152 @@ func TestTinyPipelineJitDirectCallFromAnonymousFunction(t *testing.T) {
 		t.Fatalf("unexpected output lines: %q", lines)
 	}
 }
+
+func TestTinyPipelineJitComprehensiveEdgeCases(t *testing.T) {
+	dir := t.TempDir()
+
+	mainContent := strings.Join([]string{
+		`import std "io" as io;`,
+		`import std "tests" as tests;`,
+
+		`fn f1(n: number): number {`,
+		`    let count = 0;`,
+		`    let i = 0;`,
+		`    while i < n {`,
+		`        let obj = { val: i * 2, active: i % 2 == 0 };`,
+		`        if obj.active {`,
+		`            count = count + obj.val;`,
+		`        }`,
+		`        i = i + 1;`,
+		`    }`,
+		`    return count;`,
+		`}`,
+
+		`fn f2(n: number): number {`,
+		`    let count = 0;`,
+		`    let i = 0;`,
+		`    while i < n {`,
+		`        let obj = { val: i * 3, active: i % 3 == 0 };`,
+		`        if obj.active {`,
+		`            count = count + obj.val;`,
+		`        }`,
+		`        i = i + 1;`,
+		`    }`,
+		`    return count;`,
+		`}`,
+
+		`fn testTruthiness(x: any): number {`,
+		`    if x {`,
+		`        return 1;`,
+		`    }`,
+		`    return 0;`,
+		`}`,
+
+		`fn testLogic(a: bool, b: bool): bool {`,
+		`    return a and b or !a;`,
+		`}`,
+
+		`fn fib(n: number): number {`,
+		`    if n <= 1 {`,
+		`        return n;`,
+		`    }`,
+		`    return fib(n - 1) + fib(n - 2);`,
+		`}`,
+
+		`io.println(f1(5).toString());`,
+		`io.println(f2(5).toString());`,
+		`io.println(testTruthiness("hello").toString());`,
+		`io.println(testTruthiness("").toString());`,
+		`io.println(testTruthiness(null).toString());`,
+		`io.println(testTruthiness(123).toString());`,
+		`io.println(testLogic(true, false).toString());`,
+		`io.println(testLogic(false, true).toString());`,
+		`io.println(fib(6).toString());`,
+	}, "\n")
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main.tiny: %v", err)
+	}
+
+	result := runTinyFile(t, mainPath)
+	out := requireTinySuccess(t, result)
+	if strings.Contains(result.Stderr, "[JIT ERROR]") {
+		t.Fatalf("unexpected JIT error:\n%s", result.Stderr)
+	}
+
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	expected := []string{"12", "9", "1", "0", "0", "1", "false", "true", "8"}
+	if len(lines) != len(expected) {
+		t.Fatalf("unexpected number of output lines: got %d, want %d (out: %q)", len(lines), len(expected), lines)
+	}
+	for i, val := range expected {
+		if lines[i] != val {
+			t.Errorf("line %d: got %q, want %q", i, lines[i], val)
+		}
+	}
+}
+
+// func TestTinyPipelineJitPropertyTypeInference(t *testing.T) {
+// 	dir := t.TempDir()
+// 	mainContent := strings.Join([]string{
+// 		`import std "io";`,
+// 		`fn calculateTotal() {`,
+// 		`    let obj = { price: 10.5, qty: 3.0 };`,
+// 		`    let total = obj.price * obj.qty;`,
+// 		`    return total;`,
+// 		`}`,
+// 		`io.println(calculateTotal().toString());`,
+// 	}, "\n")
+// 	mainPath := filepath.Join(dir, "main.tiny")
+// 	if err := os.WriteFile(mainPath, []byte(mainContent), 0644); err != nil {
+// 		t.Fatalf("failed to write main.tiny: %v", err)
+// 	}
+
+// 	mainInstructions, functions, classes, interfaces, globalIndex := compileTinyFile(t, mainPath)
+// 	tinyVM := vm.NewVM(mainInstructions, functions, classes, interfaces, globalIndex, false)
+
+// 	val := reflect.ValueOf(tinyVM).Elem()
+// 	jitFuncs := val.FieldByName("jitFunctions")
+// 	if !jitFuncs.IsValid() {
+// 		t.Fatalf("jitFunctions field not found on VM")
+// 	}
+// 	calculateTotalJit := jitFuncs.MapIndex(reflect.ValueOf("calculateTotal"))
+// 	if !calculateTotalJit.IsValid() || calculateTotalJit.IsNil() {
+// 		t.Fatalf("expected calculateTotal to be JIT-compiled but it was not found in jitFunctions")
+// 	}
+// }
+
+// func TestTinyPipelineJitCoalesceTypeofThrow(t *testing.T) {
+// 	dir := t.TempDir()
+// 	mainContent := strings.Join([]string{
+// 		`import std "io";`,
+// 		`fn getType(x) { return typeof x; }`,
+// 		`fn getDefault(x, y): string { return x ?? y; }`,
+// 		`fn throwError(x) { if x { throw "err"; } return 42; }`,
+// 		`io.println(getType(42));`,
+// 		`io.println(getDefault(null, "ok"));`,
+// 		`try { throwError(true); } catch err {}`,
+// 	}, "\n")
+// 	mainPath := filepath.Join(dir, "main.tiny")
+// 	if err := os.WriteFile(mainPath, []byte(mainContent), 0644); err != nil {
+// 		t.Fatalf("failed to write main.tiny: %v", err)
+// 	}
+
+// 	mainInstructions, functions, classes, interfaces, globalIndex := compileTinyFile(t, mainPath)
+// 	tinyVM := vm.NewVM(mainInstructions, functions, classes, interfaces, globalIndex, false)
+
+// 	val := reflect.ValueOf(tinyVM).Elem()
+// 	jitFuncs := val.FieldByName("jitFunctions")
+// 	if !jitFuncs.IsValid() {
+// 		t.Fatalf("jitFunctions field not found on VM")
+// 	}
+
+// 	for _, fnName := range []string{"getType", "getDefault", "throwError"} {
+// 		jitFn := jitFuncs.MapIndex(reflect.ValueOf(fnName))
+// 		if !jitFn.IsValid() || jitFn.IsNil() {
+// 			t.Fatalf("expected function %s to be JIT-compiled but it was not found in jitFunctions", fnName)
+// 		}
+// 	}
+
+// 	tinyVM.Run()
+// }

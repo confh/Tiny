@@ -5,12 +5,151 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	. "language.com/src/tinyerrors"
 )
+
+type VMPool struct {
+	idle   chan *VM
+	makeVM func() *VM
+
+	mu     sync.Mutex
+	cond   *sync.Cond
+	active int
+
+	minActive int
+	maxActive int
+	maxIdle   int
+}
+
+func NewVMPool(maxActive int, maxIdle int, makeVM func() *VM) *VMPool {
+	if maxActive < 1 {
+		maxActive = 1
+	}
+	if maxIdle < 1 {
+		maxIdle = 1
+	}
+	if maxIdle > maxActive {
+		maxIdle = maxActive
+	}
+
+	minActive := runtime.GOMAXPROCS(0) * 8
+	if minActive < 16 {
+		minActive = 16
+	}
+	if minActive > maxActive {
+		minActive = maxActive
+	}
+
+	p := &VMPool{
+		idle:      make(chan *VM, maxIdle),
+		makeVM:    makeVM,
+		minActive: minActive,
+		maxActive: maxActive,
+		maxIdle:   maxIdle,
+	}
+
+	p.cond = sync.NewCond(&p.mu)
+	return p
+}
+
+func defaultTaskPoolLimits() (maxActive int, maxIdle int) {
+	cores := runtime.GOMAXPROCS(0)
+
+	// Safe default:
+	// 4-core machine  -> 64 active
+	// 8-core machine  -> 128 active
+	// 16-core machine -> 256 active
+	maxActive = cores * 16
+
+	if maxActive < 32 {
+		maxActive = 32
+	}
+	if maxActive > 256 {
+		maxActive = 256
+	}
+
+	maxIdle = maxActive / 4
+	if maxIdle < 16 {
+		maxIdle = 16
+	}
+
+	return maxActive, maxIdle
+}
+
+func (p *VMPool) currentLimitLocked() int {
+	limit := p.maxActive
+
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+
+	heapMB := mem.Alloc / 1024 / 1024
+	sysMB := mem.Sys / 1024 / 1024
+
+	// If Go memory is getting chunky, reduce task concurrency.
+	// This prevents the Windows VirtualAlloc/terminal-death situation.
+	if heapMB > 768 || sysMB > 1536 {
+		limit = limit / 2
+	}
+	if heapMB > 1200 || sysMB > 2400 {
+		limit = limit / 4
+	}
+
+	if limit < p.minActive {
+		limit = p.minActive
+	}
+	if limit < 1 {
+		limit = 1
+	}
+
+	return limit
+}
+
+func (p *VMPool) Get() *VM {
+	p.mu.Lock()
+
+	for p.active >= p.currentLimitLocked() {
+		p.cond.Wait()
+	}
+
+	p.active++
+
+	p.mu.Unlock()
+
+	select {
+	case vm := <-p.idle:
+		return vm
+	default:
+		return p.makeVM()
+	}
+}
+
+func (p *VMPool) Put(vm *VM) {
+	if vm != nil {
+		vm.ResetForRequest()
+
+		select {
+		case p.idle <- vm:
+			// keep for reuse
+		default:
+			// idle pool full, drop it
+			// Do not call vm.Close() if task VMs share parent runtime/modules.
+		}
+	}
+
+	p.mu.Lock()
+	if p.active > 0 {
+		p.active--
+	}
+	p.mu.Unlock()
+
+	p.cond.Signal()
+}
 
 var serverMethods map[string]NativeModuleFunc[*NativeServerValue]
 
@@ -132,6 +271,12 @@ func serverStart(vm *VM, server *NativeServerValue, args []TinyValue) {
 	server.mux = mux
 	ensureServerRoutes(server)
 
+	if server.Workers == nil {
+		server.Workers = NewVMPool(16, 8, func() *VM {
+			return vm.CloneForTask()
+		})
+	}
+
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if server.closed {
 			return
@@ -174,7 +319,9 @@ func serverStart(vm *VM, server *NativeServerValue, args []TinyValue) {
 
 			reqObj := NewNative(requestObjectFromHTTP(r, string(bodyBytes), params))
 
-			requestVM := vm.CloneForTask()
+			requestVM := server.Workers.Get()
+			defer server.Workers.Put(requestVM)
+
 			result := requestVM.callFunctionValue(h, []TinyValue{reqObj})
 
 			httpResponseObject, ok := result.Value.(NativeHttpResponseValue)

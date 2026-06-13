@@ -73,11 +73,11 @@ func stdHttpServer(vm *VM, args []TinyValue) {
 	if args[0].IsInt {
 		server.Port = args[0].AsInt
 	} else if config, ok := args[0].Value.(ObjectValue); ok {
-		server.Port = objectInt(config, "port", 0)
+		server.Port = objectInt(vm, config, "port", 0)
 		server.Host = objectString(config, "host", "")
-		server.ReadTimeoutMs = objectInt(config, "readTimeoutMs", 0)
-		server.WriteTimeoutMs = objectInt(config, "writeTimeoutMs", 0)
-		server.MaxBodySize = int64(objectInt(config, "maxBodySize", 0))
+		server.ReadTimeoutMs = objectInt(vm, config, "readTimeoutMs", 0)
+		server.WriteTimeoutMs = objectInt(vm, config, "writeTimeoutMs", 0)
+		server.MaxBodySize = int64(objectInt(vm, config, "maxBodySize", 0))
 	} else {
 		vm.runtimeError(ErrorType, "http.server expects port number or options object")
 		return
@@ -173,7 +173,7 @@ func doHTTPRequest(vm *VM, name string, method string, url string, body TinyValu
 	}
 
 	client := &http.Client{}
-	timeoutMs := objectInt(options, "timeoutMs", 0)
+	timeoutMs := objectInt(vm, options, "timeoutMs", 0)
 	if timeoutMs > 0 {
 		client.Timeout = time.Duration(timeoutMs) * time.Millisecond
 	}
@@ -267,7 +267,7 @@ func stdHttpStatusResponse(vm *VM, args []TinyValue) {
 	expectArgs(vm, "http.status", args, 2)
 	vm.push(NewNative(NativeHttpResponseValue{
 		Type:   HttpResponse,
-		Status: asInt(args[0]),
+		Status: vm.asInt(args[0]),
 		Value:  args[1],
 	}))
 }
@@ -280,7 +280,7 @@ func stdHttpResponse(vm *VM, args []TinyValue) {
 	}
 	vm.push(NewNative(NativeHttpResponseValue{
 		Type:    HttpResponse,
-		Status:  asInt(args[0]),
+		Status:  vm.asInt(args[0]),
 		Value:   args[1],
 		Headers: headers,
 	}))
@@ -290,7 +290,7 @@ func stdHttpRedirect(vm *VM, args []TinyValue) {
 	expectArgsRange(vm, "http.redirect", args, 1, 2)
 	status := http.StatusFound
 	if len(args) == 2 {
-		status = asInt(args[1])
+		status = vm.asInt(args[1])
 	}
 	vm.push(NewNative(NativeHttpResponseValue{
 		Type:        HttpRedirect,
@@ -374,9 +374,9 @@ func objectString(object ObjectValue, key string, fallback string) string {
 	return fallback
 }
 
-func objectInt(object ObjectValue, key string, fallback int) int {
+func objectInt(vm *VM, object ObjectValue, key string, fallback int) int {
 	if value, ok := object[key]; ok {
-		return asInt(value)
+		return vm.asInt(value)
 	}
 	return fallback
 }

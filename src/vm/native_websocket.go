@@ -191,8 +191,8 @@ func websocketConnReadJson(vm *VM, conn *NativeWebsocketConnValue, args []TinyVa
 		return
 	}
 
-	var result any
-	if err := json.Unmarshal(data, &result); err != nil {
+	result, err := parseTinyJSONDirect(string(data))
+	if err != nil {
 		vm.runtimeError(ErrorRuntime, "websocket failed to parse JSON: %v", err)
 		return
 	}
@@ -200,7 +200,13 @@ func websocketConnReadJson(vm *VM, conn *NativeWebsocketConnValue, args []TinyVa
 	vm.push(jsonToTinyValue(result))
 }
 
-func (conn *NativeWebsocketConnValue) startReadLoop(vm *VM) {
+func (conn *NativeWebsocketConnValue) startReadLoop(vm *VM, pool *VMPool) {
+	if pool == nil {
+		pool = NewVMPool(4, 2, func() *VM {
+			return vm.CloneForTask()
+		})
+	}
+
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -228,8 +234,9 @@ func (conn *NativeWebsocketConnValue) startReadLoop(vm *VM) {
 						"wasClean": NewNative(websocket.IsCloseError(err, websocket.CloseNormalClosure)),
 					}
 
-					newVM := vm.CloneForTask()
-					newVM.callFunctionValue(*conn.OnClose, []TinyValue{NewNative(event)})
+					worker := pool.Get()
+					worker.callFunctionValue(*conn.OnClose, []TinyValue{NewNative(event)})
+					pool.Put(worker)
 				}
 
 				if conn.server != nil {
@@ -257,8 +264,9 @@ func (conn *NativeWebsocketConnValue) startReadLoop(vm *VM) {
 					"data": resultData,
 				}
 
-				newVM := vm.CloneForTask()
-				newVM.callFunctionValue(*conn.OnMessage, []TinyValue{NewNative(conn), NewNative(msg)})
+				worker := pool.Get()
+				worker.callFunctionValue(*conn.OnMessage, []TinyValue{NewNative(conn), NewNative(msg)})
+				pool.Put(worker)
 			}
 		}
 	}()
@@ -268,7 +276,7 @@ func websocketConnOnMessage(vm *VM, conn *NativeWebsocketConnValue, args []TinyV
 	expectArgs(vm, "websocketConnection.onMessage", args, 1)
 	fn := argFn(vm, "websocketConnection.onMessage", args, 0)
 	conn.OnMessage = &fn
-	conn.startReadLoop(vm)
+	conn.startReadLoop(vm, nil)
 	vm.push(NewNull())
 }
 
@@ -412,7 +420,11 @@ func websocketServerStart(vm *VM, server *NativeWebsocketServerValue, args []Tin
 	if len(args) == 1 {
 		async = argBool(vm, "websocketServer.start", args, 0)
 	}
-
+	if server.Workers == nil {
+		server.Workers = NewVMPool(16, 8, func() *VM {
+			return vm.CloneForTask()
+		})
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc(server.Path, func(w http.ResponseWriter, r *http.Request) {
 		conn, err := server.upgrader.Upgrade(w, r, nil)
@@ -438,8 +450,10 @@ func websocketServerStart(vm *VM, server *NativeWebsocketServerValue, args []Tin
 		server.mu.Unlock()
 
 		if server.OnConnection != nil {
-			newVM := vm.CloneForTask()
-			newVM.callFunctionValue(*server.OnConnection, []TinyValue{NewNative(nativeConn)})
+			worker := server.Workers.Get()
+			defer server.Workers.Put(worker)
+
+			worker.callFunctionValue(*server.OnConnection, []TinyValue{NewNative(nativeConn)})
 		}
 
 		if server.OnMessage != nil {
@@ -449,7 +463,7 @@ func websocketServerStart(vm *VM, server *NativeWebsocketServerValue, args []Tin
 			nativeConn.OnClose = server.OnClose
 		}
 
-		nativeConn.startReadLoop(vm)
+		nativeConn.startReadLoop(vm, server.Workers)
 	})
 
 	addr := server.Host + ":" + strconv.Itoa(server.Port)

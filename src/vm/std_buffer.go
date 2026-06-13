@@ -48,7 +48,7 @@ func bufferFromArray(vm *VM, args []TinyValue) {
 
 	floats := make([]float64, len(array.Elements))
 	for i, val := range array.Elements {
-		floats[i] = asFloat64(val)
+		floats[i] = vm.asFloat64(val)
 	}
 
 	var byteSlice []byte

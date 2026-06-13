@@ -3,18 +3,91 @@ package vm
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"os"
 	"sort"
 	"strconv"
+	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
+	"language.com/src/tinyerrors"
 )
 
 var jitCounter uint64
+var jitZeroBuf = make([]byte, 2*1024*1024)
+
+const jitDeoptSnapshotBase = 2 * 1024 * 1024
+const jitDeoptSnapshotSize = 1 * 1024 * 1024
+
+type JitExceptionThrownError struct{}
+
+func (JitExceptionThrownError) Error() string {
+	return "jit exception thrown"
+}
+
+type jitExceptionThrown struct{}
+
+func (jitExceptionThrown) Error() string {
+	return "jit exception thrown"
+}
+
+// JitUnsafeReplayError means the JIT failed after it had already performed an
+// irreversible side effect, such as print, object/array mutation, or a stdlib call.
+// The VM must not replay the whole function in the interpreter in this case,
+// because replaying would duplicate those side effects.
+type JitUnsafeReplayError struct {
+	FunctionName string
+	Reason       string
+}
+
+func (e JitUnsafeReplayError) Error() string {
+	if e.FunctionName != "" && e.Reason != "" {
+		return "jit failed after side effects in " + e.FunctionName + ": " + e.Reason
+	}
+	if e.FunctionName != "" {
+		return "jit failed after side effects in " + e.FunctionName
+	}
+	if e.Reason != "" {
+		return "jit failed after side effects: " + e.Reason
+	}
+	return "jit failed after side effects"
+}
+
+const jitImportCount = 16
+
+const (
+	jitImportAllocObject = iota
+	jitImportDetermineTag
+	jitImportArrayPush
+	jitImportStringConcat
+	jitImportStringEq
+	jitImportDynamicAdd
+	jitImportDynamicJoin3
+	jitImportDynamicJoin4
+	jitImportLoadStringConstant
+	jitImportIsTruthy
+	jitImportMathPow
+	jitImportPrintValue
+	jitImportTypeofWasm
+	jitImportThrowWasm
+	jitImportLoadGlobal
+	jitImportCallStdlibWasm
+)
+
+const (
+	wasmF64Abs   = 0x99
+	wasmF64Ceil  = 0x9B
+	wasmF64Floor = 0x9C
+	wasmF64Trunc = 0x9D
+	wasmF64Sqrt  = 0x9F
+	wasmF64Min   = 0xA4
+	wasmF64Max   = 0xA5
+)
 
 type WasmBuffer struct {
 	buf []byte
@@ -42,6 +115,21 @@ func (w *WasmBuffer) WriteVarUint(n uint32) {
 	}
 }
 
+func (w *WasmBuffer) WriteVarInt(n int64) {
+	for {
+		b := byte(n & 0x7F)
+		n >>= 7
+		done := (n == 0 && (b&0x40) == 0) || (n == -1 && (b&0x40) != 0)
+		if !done {
+			b |= 0x80
+		}
+		w.buf = append(w.buf, b)
+		if done {
+			break
+		}
+	}
+}
+
 func (w *WasmBuffer) WriteFloat64(f float64) {
 	bits := math.Float64bits(f)
 	var bytes [8]byte
@@ -50,11 +138,53 @@ func (w *WasmBuffer) WriteFloat64(f float64) {
 }
 
 type JitFunction struct {
+	ID         int
+	Name       string
 	fn         api.Function
+	paramTypes []stackType
 	paramCount int
-	isBoolRet  bool
+	retType    stackType
+	returnType string
 	vm         *VM
 	allocPtr   *uint32
+}
+
+type JitFunctionMeta struct {
+	ID         int
+	Name       string
+	ParamTypes []stackType
+	ParamCount int
+	RetType    stackType
+	ReturnType string
+}
+
+func isNullConstant(val any) bool {
+	if val == nil {
+		return true
+	}
+
+	switch v := val.(type) {
+	case NullValue, *NullValue:
+		return true
+
+	case TinyValue:
+		if v.IsInt {
+			return false
+		}
+		return isNullConstant(v.Value)
+
+	case *TinyValue:
+		if v == nil {
+			return true
+		}
+		if v.IsInt {
+			return false
+		}
+		return isNullConstant(v.Value)
+
+	default:
+		return false
+	}
 }
 
 func getFloat64Constant(val any) (float64, bool) {
@@ -113,7 +243,236 @@ func getFloat64Constant(val any) (float64, bool) {
 	return 0, false
 }
 
-func (jf *JitFunction) Call(ctx context.Context, args []TinyValue) (TinyValue, error) {
+func jitStackTypeName(t stackType) string {
+	switch t {
+	case stackTypeNumber:
+		return "number"
+	case stackTypeBool:
+		return "bool"
+	case stackTypeObject:
+		return "object"
+	case stackTypeArray:
+		return "array"
+	case stackTypeString, stackTypeInternedString:
+		return "string"
+	case stackTypeInternedStringArray:
+		return "array"
+	case stackTypeNull:
+		return "null"
+	default:
+		return "unknown"
+	}
+}
+
+func jitValueMatchesType(arg TinyValue, expected stackType) bool {
+	switch expected {
+	case stackTypeUnknown:
+		return true
+
+	case stackTypeNull:
+		if arg.IsInt {
+			return false
+		}
+		switch arg.Value.(type) {
+		case nil, NullValue, *NullValue:
+			return true
+		default:
+			return false
+		}
+
+	case stackTypeNumber:
+		if arg.IsInt {
+			return true
+		}
+		switch arg.Value.(type) {
+		case int, int8, int16, int32, int64,
+			uint, uint8, uint16, uint32, uint64,
+			float32, float64:
+			return true
+		default:
+			return false
+		}
+
+	case stackTypeBool:
+		if arg.IsInt {
+			return false
+		}
+		_, ok := arg.Value.(bool)
+		return ok
+
+	case stackTypeString:
+		if arg.IsInt {
+			return false
+		}
+		_, ok := arg.Value.(string)
+		return ok
+
+	case stackTypeObject:
+		if arg.IsInt {
+			return false
+		}
+		switch arg.Value.(type) {
+		case WasmObjectValue, ObjectValue, *ObjectValue:
+			return true
+		default:
+			return false
+		}
+
+	case stackTypeArray:
+		if arg.IsInt {
+			return false
+		}
+		switch arg.Value.(type) {
+		case WasmArrayValue, ArrayValue, *ArrayValue:
+			return true
+		default:
+			return false
+		}
+	}
+
+	return true
+}
+
+func (jf *JitFunction) expectedParamType(index int) stackType {
+	if index >= 0 && index < len(jf.paramTypes) && jf.paramTypes[index] != stackTypeUnknown {
+		return jf.paramTypes[index]
+	}
+
+	// Important safety guard:
+	// A function with untyped params but an explicit numeric return, like:
+	//   fn addNumbers(a, b): number { return a + b; }
+	// may compile to a numeric-return JIT function while param inference remains unknown.
+	// If strings enter that JIT, their heap pointers get added as f64s.
+	// Force unknown params to be numeric for explicit number-return JIT calls.
+	if jf.returnType == "number" && jf.retType == stackTypeNumber {
+		return stackTypeNumber
+	}
+
+	return stackTypeUnknown
+}
+
+func (jf *JitFunction) resetSideEffectFlag() {
+	if jf == nil || jf.vm == nil || jf.vm.jitModule == nil {
+		return
+	}
+	g := jf.vm.jitModule.ExportedGlobal("__jit_side_effect")
+	if mg, ok := g.(api.MutableGlobal); ok {
+		mg.Set(api.EncodeF64(0.0))
+	}
+}
+
+func (jf *JitFunction) sideEffectFlag() bool {
+	if jf == nil || jf.vm == nil || jf.vm.jitModule == nil {
+		return false
+	}
+	g := jf.vm.jitModule.ExportedGlobal("__jit_side_effect")
+	if g == nil {
+		return false
+	}
+	return api.DecodeF64(g.Get()) != 0.0
+}
+
+func (jf *JitFunction) unsafeReplayError(reason string) error {
+	return JitUnsafeReplayError{
+		FunctionName: jf.Name,
+		Reason:       reason,
+	}
+}
+
+func (jf *JitFunction) readDeoptSnapshot(reason string) (JitDeoptError, bool) {
+	if jf == nil || jf.vm == nil || jf.vm.jitModule == nil {
+		return JitDeoptError{}, false
+	}
+	mod := jf.vm.jitModule
+	getGlobalF64 := func(name string) (float64, bool) {
+		g := mod.ExportedGlobal(name)
+		if g == nil {
+			return 0, false
+		}
+		return api.DecodeF64(g.Get()), true
+	}
+	ipF, okIP := getGlobalF64("__jit_deopt_ip")
+	spF, okSP := getGlobalF64("__jit_deopt_sp")
+	localCountF, okLocalCount := getGlobalF64("__jit_deopt_local_count")
+	fnIDF, okFnID := getGlobalF64("__jit_deopt_function_id")
+	if !okIP || !okSP || !okLocalCount || !okFnID {
+		return JitDeoptError{}, false
+	}
+	fnID := int(fnIDF)
+	if fnID != jf.ID {
+		return JitDeoptError{}, false
+	}
+	localCount := int(localCountF)
+	stackCount := int(spF)
+	if localCount < 0 || localCount > 65536 || stackCount < 0 || stackCount > 65536 {
+		return JitDeoptError{}, false
+	}
+	readCell := func(addr uint32) (TinyValue, bool) {
+		tagBytes, ok := mod.Memory().Read(addr, 8)
+		if !ok {
+			return TinyValue{}, false
+		}
+		valBytes, ok := mod.Memory().Read(addr+8, 8)
+		if !ok {
+			return TinyValue{}, false
+		}
+		tag := math.Float64frombits(binary.LittleEndian.Uint64(tagBytes))
+		val := math.Float64frombits(binary.LittleEndian.Uint64(valBytes))
+		return jf.vm.jitValueToTinyValue(mod, tag, val), true
+	}
+	base := uint32(jitDeoptSnapshotBase)
+	locals := make([]TinyValue, 0, localCount)
+	for i := 0; i < localCount; i++ {
+		v, ok := readCell(base + uint32(i*16))
+		if !ok {
+			return JitDeoptError{}, false
+		}
+		locals = append(locals, v)
+	}
+	stackBaseAddr := base + uint32(localCount*16)
+	stack := make([]TinyValue, 0, stackCount)
+	for i := 0; i < stackCount; i++ {
+		v, ok := readCell(stackBaseAddr + uint32(i*16))
+		if !ok {
+			return JitDeoptError{}, false
+		}
+		stack = append(stack, v)
+	}
+	return JitDeoptError{
+		FunctionName: jf.Name,
+		Reason:       reason,
+		DeoptIP:      int(ipF),
+		Locals:       locals,
+		Stack:        stack,
+		StackTop:     stackCount,
+	}, true
+}
+
+func (jf *JitFunction) validateArgsForJit(args []TinyValue) error {
+	for i, arg := range args {
+		expected := jf.expectedParamType(i)
+		if expected == stackTypeUnknown {
+			continue
+		}
+
+		if !jitValueMatchesType(arg, expected) {
+			return fmt.Errorf("jit arg type mismatch for arg %d: expected %s, got %s", i, jitStackTypeName(expected), TypeName(arg))
+		}
+	}
+
+	return nil
+}
+
+func (jf *JitFunction) Call(ctx context.Context, args []TinyValue) (res TinyValue, err error) {
+	if err = jf.validateArgsForJit(args); err != nil {
+		return TinyValue{}, err
+	}
+
+	if jf.vm != nil && jf.vm.wasmMu != nil {
+		jf.vm.wasmMu.Lock()
+		defer jf.vm.wasmMu.Unlock()
+	}
+
 	wasmArgs := make([]uint64, len(args))
 	for i, arg := range args {
 		var val float64
@@ -124,6 +483,63 @@ func (jf *JitFunction) Call(ctx context.Context, args []TinyValue) (TinyValue, e
 				val = f
 			} else if intVal, ok := arg.Value.(int); ok {
 				val = float64(intVal)
+			} else if strVal, ok := arg.Value.(string); ok {
+				// We must allocate the string on the WASM heap!
+				bytes := []byte(strVal)
+				size := uint32(16 + len(bytes))
+				size = (size + 7) &^ 7 // Align size to 8-byte boundary
+
+				const bitsetRange = 128 * 1024 * 1024
+				const bitsetSize = bitsetRange / 64
+
+				var addr uint32
+				heapTopGlobal := jf.vm.getHeapTopGlobal(jf.vm.jitModule)
+				if heapTopGlobal != nil {
+					addr = uint32(api.DecodeF64(heapTopGlobal.Get()))
+				} else if jf.allocPtr != nil {
+					addr = atomic.LoadUint32(jf.allocPtr)
+				}
+
+				// Mark allocator bitset
+				bitIdx := addr / 8
+				byteIdx := bitIdx / 8
+				bitOffset := bitIdx % 8
+				if byteIdx < bitsetSize {
+					buf, okBuf := jf.vm.jitModule.Memory().Read(byteIdx, 1)
+					if okBuf {
+						buf[0] |= (1 << bitOffset)
+						jf.vm.jitModule.Memory().Write(byteIdx, buf)
+					}
+				}
+
+				newTop := addr + size
+				currentPages := jf.vm.jitModule.Memory().Size() / 65536
+				newPagesNeeded := (newTop + 65535) / 65536
+				if newPagesNeeded > currentPages {
+					jf.vm.jitModule.Memory().Grow(newPagesNeeded - currentPages)
+				}
+				if heapTopGlobal != nil {
+					if mg, ok := heapTopGlobal.(api.MutableGlobal); ok {
+						mg.Set(api.EncodeF64(float64(newTop)))
+					}
+				}
+				if jf.allocPtr != nil {
+					atomic.StoreUint32(jf.allocPtr, newTop)
+				}
+
+				// Write Tag 6.0 and Length
+				tagBuf := make([]byte, 8)
+				binary.LittleEndian.PutUint64(tagBuf, math.Float64bits(6.0))
+				jf.vm.jitModule.Memory().Write(addr, tagBuf)
+
+				lenBuf := make([]byte, 8)
+				binary.LittleEndian.PutUint64(lenBuf, math.Float64bits(float64(len(bytes))))
+				jf.vm.jitModule.Memory().Write(addr+8, lenBuf)
+
+				// Write string bytes
+				jf.vm.jitModule.Memory().Write(addr+16, bytes)
+
+				val = float64(addr)
 			} else if b, ok := arg.Value.(bool); ok {
 				if b {
 					val = 1.0
@@ -138,17 +554,38 @@ func (jf *JitFunction) Call(ctx context.Context, args []TinyValue) (TinyValue, e
 		}
 		wasmArgs[i] = api.EncodeF64(val)
 	}
+	jf.resetSideEffectFlag()
+
 	if len(args) > 0 {
 		if args[0].IsInt && args[0].AsInt == 123456789 {
-			return TinyValue{}, fmt.Errorf("forced jit failure for deopt test")
+			return TinyValue{}, JitDeoptError{
+				FunctionName: jf.Name,
+				Reason:       "forced jit failure for deopt test",
+				DeoptIP:      0,
+				Locals:       append([]TinyValue(nil), args...),
+			}
 		}
 		if f, ok := args[0].Value.(float64); ok && f == 123456789 {
-			return TinyValue{}, fmt.Errorf("forced jit failure for deopt test")
+			return TinyValue{}, JitDeoptError{
+				FunctionName: jf.Name,
+				Reason:       "forced jit failure for deopt test",
+				DeoptIP:      0,
+				Locals:       append([]TinyValue(nil), args...),
+			}
 		}
 	}
-	results, err := jf.fn.Call(ctx, wasmArgs...)
-	if err != nil {
-		return TinyValue{}, err
+	results, errCall := jf.fn.Call(ctx, wasmArgs...)
+	if errCall != nil {
+		if errors.Is(errCall, jitExceptionThrown{}) || strings.Contains(errCall.Error(), "jit exception thrown") {
+			return TinyValue{}, JitExceptionThrownError{}
+		}
+		if jf.sideEffectFlag() {
+			if deopt, ok := jf.readDeoptSnapshot(errCall.Error()); ok {
+				return TinyValue{}, deopt
+			}
+			return TinyValue{}, jf.unsafeReplayError(errCall.Error())
+		}
+		return TinyValue{}, errCall
 	}
 
 	if len(results) == 0 {
@@ -156,23 +593,69 @@ func (jf *JitFunction) Call(ctx context.Context, args []TinyValue) (TinyValue, e
 	}
 
 	retVal := api.DecodeF64(results[0])
-	if jf.isBoolRet {
+	switch jf.retType {
+	case stackTypeNull:
+		return NewNull(), nil
+	case stackTypeBool:
 		return NewNative(bool(retVal != 0.0)), nil
-	}
-	if jf.vm != nil && jf.vm.jitModule != nil && jf.allocPtr != nil {
+	case stackTypeNumber:
+		return ToValue(retVal), nil
+	case stackTypeObject:
+		return NewNative(WasmObjectValue{Address: retVal, VM: jf.vm}), nil
+	case stackTypeArray:
+		return NewNative(WasmArrayValue{Address: retVal, VM: jf.vm}), nil
+	case stackTypeString:
 		addr := uint32(retVal)
-		currentAllocTop := atomic.LoadUint32(jf.allocPtr)
-		if addr >= 8 && addr < currentAllocTop {
-			tag := jf.vm.ReadWasmFloat(addr)
-			if tag == 4.0 { // 4.0 is the Object Tag we write in OP_OBJECT's header!
-				return NewNative(WasmObjectValue{Address: retVal, VM: jf.vm}), nil
-			} else if tag == 5.0 { // 5.0 is the Array Tag!
-				return NewNative(WasmArrayValue{Address: retVal, VM: jf.vm}), nil
+		lenBytes, _ := jf.vm.jitModule.Memory().Read(addr+8, 8)
+		strLen := uint32(math.Float64frombits(binary.LittleEndian.Uint64(lenBytes)))
+		strBytes, _ := jf.vm.jitModule.Memory().Read(addr+16, strLen)
+		return NewNative(string(strBytes)), nil
+	}
+
+	if jf.vm != nil && jf.vm.jitModule != nil {
+		const bitsetRange = 128 * 1024 * 1024
+		const bitsetSize = bitsetRange / 64
+		const heapStart = bitsetSize + jitDeoptSnapshotSize
+
+		addr := uint32(retVal)
+		var currentAllocTop uint32
+		heapTopGlobal := jf.vm.getHeapTopGlobal(jf.vm.jitModule)
+		if heapTopGlobal != nil {
+			currentAllocTop = uint32(api.DecodeF64(heapTopGlobal.Get()))
+		} else if jf.allocPtr != nil {
+			currentAllocTop = atomic.LoadUint32(jf.allocPtr)
+		}
+
+		if addr >= heapStart && addr < currentAllocTop && addr%8 == 0 {
+			bitIdx := addr / 8
+			byteIdx := bitIdx / 8
+			bitOffset := bitIdx % 8
+
+			if byteIdx < bitsetSize {
+				buf, ok := jf.vm.jitModule.Memory().Read(byteIdx, 1)
+				if ok && (buf[0]&(1<<bitOffset)) != 0 {
+					tag := jf.vm.ReadWasmFloat(addr)
+					switch tag {
+					case 4.0: // 4.0 is the Object Tag we write in OP_OBJECT's header!
+						return NewNative(WasmObjectValue{Address: retVal, VM: jf.vm}), nil
+					case 5.0: // 5.0 is the Array Tag!
+						return NewNative(WasmArrayValue{Address: retVal, VM: jf.vm}), nil
+					case 6.0: // String Tag
+						lenBytes, ok := jf.vm.jitModule.Memory().Read(addr+8, 8)
+						if ok {
+							strLen := uint32(math.Float64frombits(binary.LittleEndian.Uint64(lenBytes)))
+							strBytes, ok := jf.vm.jitModule.Memory().Read(addr+16, strLen)
+							if ok {
+								return NewNative(string(strBytes)), nil
+							}
+						}
+					}
+				}
 			}
 		}
 	}
 
-	return NewNative(retVal), nil
+	return ToValue(retVal), nil
 }
 
 type JitBlock struct {
@@ -226,19 +709,555 @@ func findDepth(activeBlocks []JitBlock, target int) (int, bool) {
 	return 0, false
 }
 
+const (
+	jitTagNull      = 0.0
+	jitTagNumber    = 1.0
+	jitTagBool      = 2.0
+	jitTagObject    = 4.0
+	jitTagArray     = 5.0
+	jitTagString    = 6.0
+	jitTagStdModule = 7.0
+)
+
 type stackType uint8
 
 const (
-	stackTypeUnknown stackType = iota // unknown / any
-	stackTypeNumber                   // arithmetic result
-	stackTypeBool                     // comparison / logical result
-	stackTypeObject                   // object pointer
-	stackTypeArray                    // array pointer
+	stackTypeUnknown             stackType = iota // unknown / any
+	stackTypeNull                                 // null
+	stackTypeNumber                               // arithmetic result
+	stackTypeBool                                 // comparison / logical result
+	stackTypeObject                               // object pointer
+	stackTypeArray                                // array pointer
+	stackTypeString                               // string pointer
+	stackTypeInternedString                       // string pointer known to come from a JIT string constant
+	stackTypeInternedStringArray                  // array whose elements are known interned strings
 )
 
-func inferReturnsBool(fn Function) bool {
+func isJitStringType(t stackType) bool {
+	return t == stackTypeString || t == stackTypeInternedString
+}
+
+func stackTypeFromTypeName(name string) (stackType, bool) {
+	switch name {
+	case "number":
+		return stackTypeNumber, true
+	case "bool":
+		return stackTypeBool, true
+	case "string":
+		return stackTypeString, true
+	case "object":
+		return stackTypeObject, true
+	case "array":
+		return stackTypeArray, true
+	case "null":
+		return stackTypeNull, true
+	default:
+		return stackTypeUnknown, false
+	}
+}
+
+func hasTypedReturn(fn Function) (stackType, bool) {
+	if fn.ReturnType.Name == "" || fn.ReturnType.Name == "any" {
+		return stackTypeUnknown, false
+	}
+
+	return stackTypeFromTypeName(fn.ReturnType.Name)
+}
+
+func inferParamTypes(vm *VM, fn Function, currentReturnTypes []stackType, currentParamTypes [][]stackType) []stackType {
+	paramTypes := make([]stackType, len(fn.Params))
+	for i := range paramTypes {
+		paramTypes[i] = stackTypeUnknown
+
+		if i < len(fn.Params) {
+			if t, ok := stackTypeFromTypeName(fn.Params[i].TypeHint.Name); ok {
+				paramTypes[i] = t
+			}
+		}
+	}
+
 	if len(fn.Instructions) == 0 {
-		return false
+		return paramTypes
+	}
+
+	// 1. Scan for specialized optimized numeric instructions on parameter slots
+	for _, instr := range fn.Instructions {
+		switch instr.Op {
+		case OP_CALL_DIRECT_SUB_CONST:
+			info, ok := instr.Value.(CallDirectSubConstInfo)
+			if ok && info.Slot < len(paramTypes) {
+				paramTypes[info.Slot] = stackTypeNumber
+			}
+		case OP_JUMP_LOCAL_GE_CONST:
+			info, ok := instr.Value.(JumpLocalGEConstInfo)
+			if ok && info.Slot < len(paramTypes) {
+				paramTypes[info.Slot] = stackTypeNumber
+			}
+		case OP_JUMP_LOCAL_GT_CONST:
+			info, ok := instr.Value.(JumpLocalGTConstInfo)
+			if ok && info.Slot < len(paramTypes) {
+				paramTypes[info.Slot] = stackTypeNumber
+			}
+		case OP_JUMP_LOCAL_GE_LOCAL:
+			info, ok := instr.Value.(JumpLocalGELocalInfo)
+			if ok {
+				if info.LeftSlot < len(paramTypes) {
+					paramTypes[info.LeftSlot] = stackTypeNumber
+				}
+				if info.RightSlot < len(paramTypes) {
+					paramTypes[info.RightSlot] = stackTypeNumber
+				}
+			}
+		case OP_JUMP_LOCAL_GT_LOCAL:
+			info, ok := instr.Value.(JumpLocalGTLocalInfo)
+			if ok {
+				if info.SlotA < len(paramTypes) {
+					paramTypes[info.SlotA] = stackTypeNumber
+				}
+				if info.SlotB < len(paramTypes) {
+					paramTypes[info.SlotB] = stackTypeNumber
+				}
+			}
+		case OP_JUMP_MOD_LOCAL_CONST_NOT_ZERO:
+			info, ok := instr.Value.(JumpModLocalConstNotZeroInfo)
+			if ok && info.LeftSlot < len(paramTypes) {
+				paramTypes[info.LeftSlot] = stackTypeNumber
+			}
+		case OP_JUMP_MOD_LOCAL_LOCAL_NOT_ZERO:
+			info, ok := instr.Value.(JumpModLocalLocalNotZeroInfo)
+			if ok {
+				if info.LeftSlot < len(paramTypes) {
+					paramTypes[info.LeftSlot] = stackTypeNumber
+				}
+				if info.RightSlot < len(paramTypes) {
+					paramTypes[info.RightSlot] = stackTypeNumber
+				}
+			}
+		case OP_MUL_LOCAL_CONST:
+			info, ok := instr.Value.(LocalConstInfo)
+			if ok && info.Slot < len(paramTypes) {
+				paramTypes[info.Slot] = stackTypeNumber
+			}
+		case OP_LOCAL_CONST_OP, OP_LOCAL_CONST_OP_STORE:
+			info, ok := instr.Value.(LocalConstOpInfo)
+			if ok && info.Slot < len(paramTypes) {
+				paramTypes[info.Slot] = stackTypeNumber
+			}
+		case OP_ARRAY_INDEX_CONST_OP_STORE:
+			info, ok := instr.Value.(ArrayIndexConstOpInfo)
+			if ok {
+				if info.ArraySlot < len(paramTypes) {
+					paramTypes[info.ArraySlot] = stackTypeArray
+				}
+				if info.IndexSlot < len(paramTypes) {
+					paramTypes[info.IndexSlot] = stackTypeNumber
+				}
+			}
+		case OP_ADD_LOCAL_ARRAY_INDEX_STORE:
+			info, ok := instr.Value.(AddLocalArrayIndexStoreInfo)
+			if ok {
+				if info.ArraySlot < len(paramTypes) {
+					paramTypes[info.ArraySlot] = stackTypeArray
+				}
+				if info.IndexSlot < len(paramTypes) {
+					paramTypes[info.IndexSlot] = stackTypeNumber
+				}
+			}
+		case OP_SUB_ASSIGN_LOCAL:
+			info, ok := instr.Value.(AssignLocalInfo)
+			if ok {
+				if info.TargetSlot < len(paramTypes) {
+					paramTypes[info.TargetSlot] = stackTypeNumber
+				}
+				if info.SourceSlot < len(paramTypes) {
+					paramTypes[info.SourceSlot] = stackTypeNumber
+				}
+			}
+		case OP_INC_LOCAL, OP_DEC_LOCAL:
+			info, ok := instr.Value.(IncrementInfo)
+			if ok && info.Slot < len(paramTypes) {
+				paramTypes[info.Slot] = stackTypeNumber
+			}
+		}
+	}
+
+	// Run a basic type propagation pass on the stack
+	spArray := make([]int, len(fn.Instructions))
+	sp := 0
+	for idx, instr := range fn.Instructions {
+		spArray[idx] = sp
+		switch instr.Op {
+		case OP_CONST, OP_LOAD_LOCAL,
+			OP_LOAD_LOCAL_0, OP_LOAD_LOCAL_1, OP_LOAD_LOCAL_2, OP_LOAD_LOCAL_3,
+			OP_MUL_LOCAL_CONST, OP_GET_PROPERTY_LOCAL, OP_LOAD_GLOBAL,
+			OP_LOCAL_CONST_OP:
+			sp++
+		case OP_MATH_POW:
+			sp--
+		case OP_PRINT:
+			info := instr.Value.(PrintInfo)
+			sp = sp - info.ArgCount + 1
+		case OP_STORE_LOCAL, OP_ASSIGN_LOCAL, OP_POP,
+			OP_JUMP_IF_FALSE, OP_JUMP_IF_TRUE, OP_THROW:
+			sp--
+		case OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
+			OP_EQ, OP_NEQ,
+			OP_LT, OP_LTE, OP_GT, OP_GTE,
+			OP_AND, OP_OR, OP_COALESCE_JUMP:
+			sp--
+		case OP_RETURN:
+			sp--
+		case OP_CALL_DIRECT:
+			info, ok := instr.Value.(DirectCallInfo)
+			if ok {
+				sp = sp - info.ArgCount + 1
+			}
+		case OP_CALL_DIRECT_SUB_CONST:
+			sp++
+		case OP_OBJECT:
+			if info, ok := instr.Value.(ObjectInfo); ok {
+				count := len(info.Names)
+				if count > 0 {
+					sp -= count - 1
+				} else {
+					sp++
+				}
+			}
+		case OP_ARRAY:
+			if info, ok := instr.Value.(ArrayInfo); ok {
+				if info.Count > 0 {
+					sp -= info.Count - 1
+				} else {
+					sp++
+				}
+			}
+		case OP_INDEX:
+			sp--
+		case OP_STRING_JOIN:
+			count := getStringJoinCount(instr)
+			if count > 0 {
+				sp -= count - 1
+			} else {
+				sp++
+			}
+		case OP_SET_INDEX:
+			sp -= 3
+		case OP_LEN:
+		case OP_ARRAY_LEN_LOCAL, OP_ARRAY_GET_LOCAL, OP_ARRAY_PUSH_LOCAL, OP_ARRAY_PUSH_LOCAL_MUL_CONST:
+			sp++
+		case OP_SET_PROPERTY:
+			sp -= 2
+		case OP_METHOD_CALL:
+			if info, ok := instr.Value.(MethodCallInfo); ok {
+				sp -= info.ArgCount
+			}
+		}
+	}
+	maxSp := 0
+	for _, s := range spArray {
+		if s > maxSp {
+			maxSp = s
+		}
+	}
+
+	typeStack := make([]stackType, maxSp+16)
+	localTypes := make([]stackType, fn.LocalCount)
+	stackPropertyTypes := make([]map[string]stackType, maxSp+16)
+	localPropertyTypes := make([]map[string]stackType, fn.LocalCount)
+	for i := 0; i < len(fn.Params) && i < len(localTypes); i++ {
+		localTypes[i] = stackType(10 + i) // stackTypeParam0 + i
+	}
+
+	sp = 0
+	for idx, instr := range fn.Instructions {
+		sp = spArray[idx]
+		switch instr.Op {
+		case OP_MATH_FLOOR, OP_MATH_CEIL, OP_MATH_SQRT, OP_MATH_ABS:
+			if sp >= 1 {
+				t := typeStack[sp-1]
+				if t >= 10 {
+					paramIdx := int(t - 10)
+					if paramIdx < len(paramTypes) {
+						paramTypes[paramIdx] = stackTypeNumber
+					}
+				}
+				typeStack[sp-1] = stackTypeNumber
+			}
+
+		case OP_PRINT:
+			info := instr.Value.(PrintInfo)
+			dest := sp - info.ArgCount
+
+			if dest >= 0 && dest < len(typeStack) {
+				typeStack[dest] = stackTypeNull // null result
+			}
+
+		case OP_MATH_POW:
+			if sp >= 2 {
+				t1 := typeStack[sp-1]
+				t2 := typeStack[sp-2]
+
+				if t1 >= 10 {
+					paramIdx := int(t1 - 10)
+					if paramIdx < len(paramTypes) {
+						paramTypes[paramIdx] = stackTypeNumber
+					}
+				}
+
+				if t2 >= 10 {
+					paramIdx := int(t2 - 10)
+					if paramIdx < len(paramTypes) {
+						paramTypes[paramIdx] = stackTypeNumber
+					}
+				}
+
+				typeStack[sp-2] = stackTypeNumber
+			}
+		case OP_CONST:
+			if sp < len(typeStack) {
+				if isNullConstant(instr.Value) {
+					typeStack[sp] = stackTypeNull
+				} else if instr.IsInt {
+					typeStack[sp] = stackTypeNumber
+				} else if _, isStr := instr.Value.(string); isStr {
+					typeStack[sp] = stackTypeString
+				} else if _, isBool := instr.Value.(bool); isBool {
+					typeStack[sp] = stackTypeBool
+				} else {
+					typeStack[sp] = stackTypeNumber
+				}
+			}
+		case OP_LOAD_GLOBAL:
+			if sp < len(typeStack) {
+				typeStack[sp] = stackTypeUnknown
+			}
+		case OP_LOAD_LOCAL_0, OP_LOAD_LOCAL_1, OP_LOAD_LOCAL_2, OP_LOAD_LOCAL_3:
+			slot := 0
+			if instr.Op == OP_LOAD_LOCAL_1 {
+				slot = 1
+			}
+			if instr.Op == OP_LOAD_LOCAL_2 {
+				slot = 2
+			}
+			if instr.Op == OP_LOAD_LOCAL_3 {
+				slot = 3
+			}
+			if sp < len(typeStack) && slot >= 0 && slot < len(localTypes) {
+				typeStack[sp] = localTypes[slot]
+				stackPropertyTypes[sp] = localPropertyTypes[slot]
+			}
+		case OP_LOAD_LOCAL:
+			slot := instr.IntArg
+			if !instr.IsInt {
+				if s, ok := AsIntInternal(instr.Value); ok {
+					slot = s
+				}
+			}
+			if sp < len(typeStack) && slot >= 0 && slot < len(localTypes) {
+				typeStack[sp] = localTypes[slot]
+				stackPropertyTypes[sp] = localPropertyTypes[slot]
+			}
+		case OP_STORE_LOCAL, OP_ASSIGN_LOCAL:
+			slot := instr.IntArg
+			if !instr.IsInt {
+				if s, ok := AsIntInternal(instr.Value); ok {
+					slot = s
+				} else if info, ok := instr.Value.(VariableInfo); ok {
+					slot = info.Slot
+				}
+			}
+			if sp >= 1 && slot >= 0 && slot < len(localTypes) {
+				localTypes[slot] = typeStack[sp-1]
+				localPropertyTypes[slot] = stackPropertyTypes[sp-1]
+			}
+		case OP_SUB, OP_MUL, OP_DIV, OP_MOD, OP_LT, OP_GT, OP_LTE, OP_GTE:
+			if sp >= 2 {
+				t1 := typeStack[sp-1]
+				t2 := typeStack[sp-2]
+				if t1 >= 10 {
+					paramIdx := int(t1 - 10)
+					if paramIdx < len(paramTypes) {
+						paramTypes[paramIdx] = stackTypeNumber
+					}
+				}
+				if t2 >= 10 {
+					paramIdx := int(t2 - 10)
+					if paramIdx < len(paramTypes) {
+						paramTypes[paramIdx] = stackTypeNumber
+					}
+				}
+				typeStack[sp-2] = stackTypeNumber
+			}
+		case OP_ADD:
+			if sp >= 2 {
+				t1 := typeStack[sp-1]
+				t2 := typeStack[sp-2]
+
+				if t1 == stackTypeString || t2 == stackTypeString {
+					typeStack[sp-2] = stackTypeString
+				} else if t1 == stackTypeNumber && t2 == stackTypeNumber {
+					typeStack[sp-2] = stackTypeNumber
+				} else {
+					typeStack[sp-2] = stackTypeUnknown
+				}
+			}
+		case OP_EQ, OP_NEQ:
+			if sp >= 2 {
+				t1 := typeStack[sp-1]
+				t2 := typeStack[sp-2]
+				if t1 >= 10 && t2 < 10 && t2 != stackTypeUnknown {
+					paramIdx := int(t1 - 10)
+					if paramIdx < len(paramTypes) {
+						paramTypes[paramIdx] = t2
+					}
+				}
+				if t2 >= 10 && t1 < 10 && t1 != stackTypeUnknown {
+					paramIdx := int(t2 - 10)
+					if paramIdx < len(paramTypes) {
+						paramTypes[paramIdx] = t1
+					}
+				}
+				typeStack[sp-2] = stackTypeBool
+			}
+		case OP_CALL_DIRECT:
+			info, ok := instr.Value.(DirectCallInfo)
+			if ok {
+				if len(currentParamTypes) > 0 && info.ID >= 0 && info.ID < len(currentParamTypes) {
+					calleeParams := currentParamTypes[info.ID]
+					for a := 0; a < info.ArgCount && a < len(calleeParams); a++ {
+						t := typeStack[sp-info.ArgCount+a]
+						if t >= 10 {
+							paramIdx := int(t - 10)
+							if paramIdx < len(paramTypes) {
+								if calleeParams[a] != stackTypeUnknown {
+									paramTypes[paramIdx] = calleeParams[a]
+								}
+							}
+						}
+					}
+				}
+
+				retT := stackTypeUnknown
+				if vm != nil && info.ID >= 0 && info.ID < len(currentReturnTypes) {
+					retT = currentReturnTypes[info.ID]
+				}
+				dest := sp - info.ArgCount
+				if dest >= 0 && dest < len(typeStack) {
+					typeStack[dest] = retT
+				}
+			}
+		case OP_CALL_DIRECT_SUB_CONST:
+			info, ok := instr.Value.(CallDirectSubConstInfo)
+			if ok {
+				if info.Slot >= 0 && info.Slot < len(paramTypes) {
+					paramTypes[info.Slot] = stackTypeNumber
+				}
+
+				retT := stackTypeUnknown
+				if vm != nil && info.FnID >= 0 && info.FnID < len(currentReturnTypes) {
+					retT = currentReturnTypes[info.FnID]
+				}
+				if sp < len(typeStack) {
+					typeStack[sp] = retT
+				}
+			}
+		case OP_OBJECT:
+			if info, ok := instr.Value.(ObjectInfo); ok {
+				count := len(info.Names)
+				props := make(map[string]stackType)
+				for idx := 0; idx < count; idx++ {
+					propName := info.Names[idx].Name
+					propType := typeStack[sp-count+idx]
+					props[propName] = propType
+				}
+				dest := sp - count
+				if dest >= 0 && dest < len(typeStack) {
+					typeStack[dest] = stackTypeObject
+					stackPropertyTypes[dest] = props
+				}
+			}
+		case OP_GET_PROPERTY, OP_GET_PROPERTY_SAFE:
+			name, ok := instr.Value.(string)
+			if ok && sp >= 1 {
+				propType := stackTypeUnknown
+				objProps := stackPropertyTypes[sp-1]
+				if objProps != nil {
+					if t, ok := objProps[name]; ok {
+						propType = t
+					}
+				}
+				typeStack[sp-1] = propType
+				stackPropertyTypes[sp-1] = nil
+			}
+		case OP_GET_PROPERTY_LOCAL:
+			info, ok := instr.Value.(PropertyLocalInfo)
+			if ok && sp < len(typeStack) {
+				propType := stackTypeUnknown
+				if info.Slot >= 0 && info.Slot < len(localPropertyTypes) && localPropertyTypes[info.Slot] != nil {
+					if t, ok := localPropertyTypes[info.Slot][info.Name]; ok {
+						propType = t
+					}
+				}
+				typeStack[sp] = propType
+				stackPropertyTypes[sp] = nil
+			}
+		case OP_COALESCE_JUMP:
+			if sp >= 2 {
+				t1 := typeStack[sp-1] // right
+				t2 := typeStack[sp-2] // left
+				var coalescedType stackType
+				if t1 == t2 {
+					coalescedType = t1
+				} else if t1 == stackTypeUnknown {
+					coalescedType = t2
+				} else if t2 == stackTypeUnknown {
+					coalescedType = t1
+				} else if t2 >= 10 && t1 < 10 && t1 != stackTypeUnknown {
+					coalescedType = t1
+				} else if t1 >= 10 && t2 < 10 && t2 != stackTypeUnknown {
+					coalescedType = t2
+				} else {
+					coalescedType = stackTypeUnknown
+				}
+				typeStack[sp-2] = coalescedType
+
+				// Property propagation:
+				props1 := stackPropertyTypes[sp-1]
+				props2 := stackPropertyTypes[sp-2]
+				var mergedProps map[string]stackType
+				if props1 != nil && props2 != nil {
+					mergedProps = make(map[string]stackType)
+					for k, v := range props1 {
+						if v2, ok := props2[k]; ok && v == v2 {
+							mergedProps[k] = v
+						}
+					}
+				} else if props1 != nil {
+					mergedProps = props1
+				} else {
+					mergedProps = props2
+				}
+				stackPropertyTypes[sp-2] = mergedProps
+				stackPropertyTypes[sp-1] = nil
+			}
+		case OP_TYPEOF:
+			if sp >= 1 {
+				typeStack[sp-1] = stackTypeString
+				stackPropertyTypes[sp-1] = nil
+			}
+		case OP_THROW:
+			if sp >= 1 {
+				typeStack[sp-1] = stackTypeUnknown
+				stackPropertyTypes[sp-1] = nil
+			}
+		}
+	}
+	return paramTypes
+}
+
+func inferReturnType(vm *VM, fn Function, currentReturnTypes []stackType) stackType {
+	if len(fn.Instructions) == 0 {
+		return stackTypeNull
 	}
 	reachable := make([]bool, len(fn.Instructions))
 	queue := []int{0}
@@ -269,14 +1288,21 @@ func inferReturnsBool(fn Function) bool {
 		switch instr.Op {
 		case OP_CONST, OP_LOAD_LOCAL,
 			OP_LOAD_LOCAL_0, OP_LOAD_LOCAL_1, OP_LOAD_LOCAL_2, OP_LOAD_LOCAL_3,
-			OP_MUL_LOCAL_CONST, OP_GET_PROPERTY_LOCAL:
+			OP_MUL_LOCAL_CONST, OP_GET_PROPERTY_LOCAL, OP_LOAD_GLOBAL,
+			OP_LOCAL_CONST_OP:
 			sp++
+		case OP_MATH_POW:
+			sp--
+		case OP_PRINT:
+			info := instr.Value.(PrintInfo)
+			sp = sp - info.ArgCount + 1
 		case OP_STORE_LOCAL, OP_ASSIGN_LOCAL, OP_POP,
-			OP_JUMP_IF_FALSE, OP_JUMP_IF_TRUE:
+			OP_JUMP_IF_FALSE, OP_JUMP_IF_TRUE, OP_THROW:
 			sp--
 		case OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
-			OP_EQ, OP_NEQ, OP_LT, OP_LTE, OP_GT, OP_GTE,
-			OP_AND, OP_OR:
+			OP_EQ, OP_NEQ,
+			OP_LT, OP_LTE, OP_GT, OP_GTE,
+			OP_AND, OP_OR, OP_COALESCE_JUMP:
 			sp--
 		case OP_RETURN:
 			sp--
@@ -306,6 +1332,13 @@ func inferReturnsBool(fn Function) bool {
 			}
 		case OP_INDEX:
 			sp--
+		case OP_STRING_JOIN:
+			count := getStringJoinCount(instr)
+			if count > 0 {
+				sp -= count - 1
+			} else {
+				sp++
+			}
 		case OP_SET_INDEX:
 			sp -= 3
 		case OP_LEN:
@@ -327,15 +1360,40 @@ func inferReturnsBool(fn Function) bool {
 	}
 
 	typeStack := make([]stackType, maxSp+16)
+	inferredParams := inferParamTypes(vm, fn, currentReturnTypes, nil)
+	localTypes := make([]stackType, fn.LocalCount)
+	stackPropertyTypes := make([]map[string]stackType, maxSp+16)
+	localPropertyTypes := make([]map[string]stackType, fn.LocalCount)
+	for i := 0; i < len(fn.Params) && i < len(localTypes); i++ {
+		localTypes[i] = inferredParams[i]
+	}
 
 	hasReturn := false
-	allBool := true
+	var finalType stackType = stackTypeUnknown
+	firstReturn := true
 
 	sp = 0
 	for idx, instr := range fn.Instructions {
 		sp = spArray[idx]
 
 		switch instr.Op {
+		case OP_MATH_FLOOR, OP_MATH_CEIL, OP_MATH_SQRT, OP_MATH_ABS:
+			if sp >= 1 {
+				typeStack[sp-1] = stackTypeNumber
+			}
+
+		case OP_PRINT:
+			info := instr.Value.(PrintInfo)
+			dest := sp - info.ArgCount
+
+			if dest >= 0 && dest < len(typeStack) {
+				typeStack[dest] = stackTypeNull // null result
+			}
+
+		case OP_MATH_POW:
+			if sp >= 2 {
+				typeStack[sp-2] = stackTypeNumber
+			}
 		case OP_EQ, OP_NEQ, OP_LT, OP_LTE, OP_GT, OP_GTE:
 			if sp >= 2 {
 				typeStack[sp-2] = stackTypeBool
@@ -350,29 +1408,1243 @@ func inferReturnsBool(fn Function) bool {
 			}
 		case OP_CONST:
 			if sp < len(typeStack) {
-				if instr.IsInt {
+				if isNullConstant(instr.Value) {
+					typeStack[sp] = stackTypeNull
+				} else if instr.IsInt {
 					typeStack[sp] = stackTypeNumber
+				} else if _, isStr := instr.Value.(string); isStr {
+					typeStack[sp] = stackTypeString
 				} else if _, isBool := instr.Value.(bool); isBool {
 					typeStack[sp] = stackTypeBool
 				} else {
-					typeStack[sp] = stackTypeNumber // floats, ints, etc.
+					typeStack[sp] = stackTypeNumber
 				}
 			}
 		case OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD:
 			if sp >= 2 {
-				typeStack[sp-2] = stackTypeNumber
+				if instr.Op == OP_ADD && (isJitStringType(typeStack[sp-1]) || isJitStringType(typeStack[sp-2])) {
+					typeStack[sp-2] = stackTypeString
+				} else if typeStack[sp-1] == stackTypeNumber && typeStack[sp-2] == stackTypeNumber {
+					typeStack[sp-2] = stackTypeNumber
+				} else {
+					typeStack[sp-2] = stackTypeUnknown
+				}
 			}
 		case OP_NEGATE:
 			if sp >= 1 {
 				typeStack[sp-1] = stackTypeNumber
 			}
-		case OP_MUL_LOCAL_CONST, OP_CALL_DIRECT_SUB_CONST:
+		case OP_MUL_LOCAL_CONST:
 			if sp < len(typeStack) {
 				typeStack[sp] = stackTypeNumber
 			}
-		case OP_LOAD_LOCAL, OP_LOAD_LOCAL_0, OP_LOAD_LOCAL_1, OP_LOAD_LOCAL_2, OP_LOAD_LOCAL_3:
+		case OP_LOCAL_CONST_OP:
+			if sp < len(typeStack) {
+				typeStack[sp] = stackTypeNumber
+			}
+		case OP_LOCAL_CONST_OP_STORE:
+			if info, ok := instr.Value.(LocalConstOpInfo); ok && info.Slot >= 0 && info.Slot < len(localTypes) {
+				localTypes[info.Slot] = stackTypeNumber
+			}
+		case OP_ADD_LOCAL_GLOBAL_GLOBAL_STORE:
+			if info, ok := instr.Value.(AddLocalGlobalGlobalStoreInfo); ok && info.LocalSlot >= 0 && info.LocalSlot < len(localTypes) {
+				localTypes[info.LocalSlot] = stackTypeNumber
+			}
+		case OP_ADD_LOCAL_ARRAY_INDEX_STORE:
+			if info, ok := instr.Value.(AddLocalArrayIndexStoreInfo); ok && info.LocalSlot >= 0 && info.LocalSlot < len(localTypes) {
+				localTypes[info.LocalSlot] = stackTypeNumber
+			}
+		case OP_ARRAY_INDEX_CONST_OP_STORE, OP_ADD_PROPERTY_LOCAL_CONST, OP_ADD_PROPERTY_LOCAL_PROPERTY, OP_ADD_LOCAL_PROPERTIES_STORE:
+			// no stack effect for type propagation
+		case OP_ADD_LOCAL_LOCAL_STORE:
+			info := instr.Value.(AddLocalLocalStoreInfo)
+			tA := localTypes[info.SlotA]
+			tB := localTypes[info.SlotB]
+			if isJitStringType(tA) || isJitStringType(tB) {
+				localTypes[info.DestSlot] = stackTypeString
+			} else if tA == stackTypeNumber && tB == stackTypeNumber {
+				localTypes[info.DestSlot] = stackTypeNumber
+			} else {
+				localTypes[info.DestSlot] = stackTypeUnknown
+			}
+		case OP_LOAD_GLOBAL:
 			if sp < len(typeStack) {
 				typeStack[sp] = stackTypeUnknown
+			}
+		case OP_LOAD_LOCAL_0, OP_LOAD_LOCAL_1, OP_LOAD_LOCAL_2, OP_LOAD_LOCAL_3:
+			slot := 0
+			if instr.Op == OP_LOAD_LOCAL_1 {
+				slot = 1
+			}
+			if instr.Op == OP_LOAD_LOCAL_2 {
+				slot = 2
+			}
+			if instr.Op == OP_LOAD_LOCAL_3 {
+				slot = 3
+			}
+			if sp < len(typeStack) && slot >= 0 && slot < len(localTypes) {
+				typeStack[sp] = localTypes[slot]
+				stackPropertyTypes[sp] = localPropertyTypes[slot]
+			}
+		case OP_STRING_JOIN:
+			count := getStringJoinCount(instr)
+
+			if count > 0 {
+				dest := sp - count
+				if dest >= 0 && dest < len(typeStack) {
+					typeStack[dest] = stackTypeString
+				}
+			} else {
+				if sp < len(typeStack) {
+					typeStack[sp] = stackTypeString
+				}
+			}
+		case OP_LOAD_LOCAL:
+			slot := instr.IntArg
+			if !instr.IsInt {
+				if s, ok := AsIntInternal(instr.Value); ok {
+					slot = s
+				}
+			}
+			if sp < len(typeStack) && slot >= 0 && slot < len(localTypes) {
+				typeStack[sp] = localTypes[slot]
+				stackPropertyTypes[sp] = localPropertyTypes[slot]
+			}
+		case OP_STORE_LOCAL, OP_ASSIGN_LOCAL:
+			slot := instr.IntArg
+			if !instr.IsInt {
+				if s, ok := AsIntInternal(instr.Value); ok {
+					slot = s
+				} else if info, ok := instr.Value.(VariableInfo); ok {
+					slot = info.Slot
+				}
+			}
+			if sp >= 1 && slot < len(localTypes) {
+				localTypes[slot] = typeStack[sp-1]
+				localPropertyTypes[slot] = stackPropertyTypes[sp-1]
+			}
+		case OP_GET_PROPERTY, OP_GET_PROPERTY_SAFE:
+			name, ok := instr.Value.(string)
+			if ok && sp >= 1 {
+				propType := stackTypeUnknown
+				objProps := stackPropertyTypes[sp-1]
+				if objProps != nil {
+					if t, ok := objProps[name]; ok {
+						propType = t
+					}
+				}
+				typeStack[sp-1] = propType
+				stackPropertyTypes[sp-1] = nil
+			}
+		case OP_GET_PROPERTY_LOCAL:
+			info, ok := instr.Value.(PropertyLocalInfo)
+			if ok && sp < len(typeStack) {
+				propType := stackTypeUnknown
+				if info.Slot >= 0 && info.Slot < len(localPropertyTypes) && localPropertyTypes[info.Slot] != nil {
+					if t, ok := localPropertyTypes[info.Slot][info.Name]; ok {
+						propType = t
+					}
+				}
+				typeStack[sp] = propType
+				stackPropertyTypes[sp] = nil
+			}
+		case OP_COALESCE_JUMP:
+			if sp >= 2 {
+				t1 := typeStack[sp-1] // right
+				t2 := typeStack[sp-2] // left
+				var coalescedType stackType
+				if t1 == t2 {
+					coalescedType = t1
+				} else if t1 == stackTypeUnknown {
+					coalescedType = t2
+				} else if t2 == stackTypeUnknown {
+					coalescedType = t1
+				} else if t2 >= 10 && t1 < 10 && t1 != stackTypeUnknown {
+					coalescedType = t1
+				} else if t1 >= 10 && t2 < 10 && t2 != stackTypeUnknown {
+					coalescedType = t2
+				} else {
+					coalescedType = stackTypeUnknown
+				}
+				typeStack[sp-2] = coalescedType
+
+				// Property propagation:
+				props1 := stackPropertyTypes[sp-1]
+				props2 := stackPropertyTypes[sp-2]
+				var mergedProps map[string]stackType
+				if props1 != nil && props2 != nil {
+					mergedProps = make(map[string]stackType)
+					for k, v := range props1 {
+						if v2, ok := props2[k]; ok && v == v2 {
+							mergedProps[k] = v
+						}
+					}
+				} else if props1 != nil {
+					mergedProps = props1
+				} else {
+					mergedProps = props2
+				}
+				stackPropertyTypes[sp-2] = mergedProps
+				stackPropertyTypes[sp-1] = nil
+			}
+		case OP_TYPEOF:
+			if sp >= 1 {
+				typeStack[sp-1] = stackTypeString
+				stackPropertyTypes[sp-1] = nil
+			}
+		case OP_THROW:
+			if sp >= 1 {
+				typeStack[sp-1] = stackTypeUnknown
+				stackPropertyTypes[sp-1] = nil
+			}
+		case OP_CALL_DIRECT:
+			info, ok := instr.Value.(DirectCallInfo)
+			if ok {
+				retT := stackTypeUnknown
+				if vm != nil && info.ID >= 0 && info.ID < len(currentReturnTypes) {
+					retT = currentReturnTypes[info.ID]
+				}
+				dest := sp - info.ArgCount
+				if dest >= 0 && dest < len(typeStack) {
+					typeStack[dest] = retT
+				}
+			}
+		case OP_CALL_DIRECT_SUB_CONST:
+			info, ok := instr.Value.(CallDirectSubConstInfo)
+			if ok {
+				retT := stackTypeUnknown
+				if vm != nil && info.FnID >= 0 && info.FnID < len(currentReturnTypes) {
+					retT = currentReturnTypes[info.FnID]
+				}
+				if sp < len(typeStack) {
+					typeStack[sp] = retT
+				}
+			}
+		case OP_OBJECT:
+			if info, ok := instr.Value.(ObjectInfo); ok {
+				count := len(info.Names)
+				props := make(map[string]stackType)
+				for idx := 0; idx < count; idx++ {
+					propName := info.Names[idx].Name
+					propType := typeStack[sp-count+idx]
+					props[propName] = propType
+				}
+				dest := sp - count
+				if dest >= 0 && dest < len(typeStack) {
+					typeStack[dest] = stackTypeObject
+					stackPropertyTypes[dest] = props
+				}
+			}
+		case OP_ARRAY:
+			if info, ok := instr.Value.(ArrayInfo); ok {
+				dest := sp - info.Count
+				if dest >= 0 && dest < len(typeStack) {
+					typeStack[dest] = stackTypeArray
+				}
+			}
+		case OP_INDEX, OP_ARRAY_GET_LOCAL:
+			if sp >= 2 {
+				typeStack[sp-2] = stackTypeUnknown
+			}
+			if sp < len(typeStack) {
+				typeStack[sp] = stackTypeUnknown
+			}
+		case OP_SET_INDEX:
+		case OP_ARRAY_LEN_LOCAL, OP_LEN:
+			if sp < len(typeStack) {
+				typeStack[sp] = stackTypeNumber
+			}
+		case OP_ARRAY_PUSH_LOCAL, OP_ARRAY_PUSH_LOCAL_MUL_CONST:
+			if sp < len(typeStack) {
+				typeStack[sp] = stackTypeArray
+			}
+		case OP_METHOD_CALL:
+			if info, ok := instr.Value.(MethodCallInfo); ok {
+				dest := sp - info.ArgCount - 1
+				if dest >= 0 && dest < len(typeStack) {
+					switch info.Method {
+					case "length":
+						typeStack[dest] = stackTypeNumber
+					case "push":
+						typeStack[dest] = stackTypeArray
+					default:
+						typeStack[dest] = stackTypeUnknown
+					}
+				}
+			}
+		case OP_RETURN:
+			if reachable[idx] {
+				hasReturn = true
+				retType := stackTypeUnknown
+				if sp >= 1 {
+					retType = typeStack[sp-1]
+				}
+
+				if firstReturn {
+					finalType = retType
+					firstReturn = false
+				} else if retType != stackTypeUnknown {
+					if finalType == stackTypeUnknown {
+						finalType = retType
+					} else if finalType != retType {
+						finalType = stackTypeUnknown
+					}
+				}
+			}
+		}
+	}
+
+	if !hasReturn {
+		return stackTypeNull
+	}
+
+	return finalType
+}
+
+type jitStackSourceKind uint8
+
+const (
+	jitSourceUnknown jitStackSourceKind = iota
+	jitSourceStdModule
+)
+
+type jitStackSource struct {
+	kind   jitStackSourceKind
+	module string
+}
+
+type allowedMethod struct {
+	method   string
+	argCount int
+}
+
+func isAllowedMethod(method string, argCount int, allowedMethods []allowedMethod) bool {
+	for _, v := range allowedMethods {
+		if v.method == method {
+			if v.argCount == argCount {
+				return true
+			} else {
+				break
+			}
+		}
+	}
+
+	return false
+}
+
+func isJitAllowedStdlibCall(module string, method string, argCount int) bool {
+	switch module {
+	case "time", "os":
+		return true
+
+	case "process":
+		allowedMethods := []allowedMethod{
+			{
+				method:   "args",
+				argCount: 0,
+			},
+			{
+				method:   "exit",
+				argCount: 1,
+			},
+			{
+				method:   "getEnv",
+				argCount: 1,
+			},
+			{
+				method:   "halt",
+				argCount: 0,
+			},
+			{
+				method:   "pid",
+				argCount: 0,
+			},
+		}
+
+		return isAllowedMethod(method, argCount, allowedMethods)
+
+	case "strings":
+		allowedMethods := []allowedMethod{
+			{
+				method:   "isDigit",
+				argCount: 1,
+			},
+			{
+				method:   "random",
+				argCount: 1,
+			},
+		}
+
+		return isAllowedMethod(method, argCount, allowedMethods)
+
+	// io.println/io.print should be lowered to OP_PRINT.
+	// If they still appear as OP_METHOD_CALL, don't JIT them.
+	case "io":
+		return false
+
+	// math should be lowered to OP_MATH_*.
+	// If it still appears as OP_METHOD_CALL, don't JIT it.
+	case "math":
+		return false
+
+	default:
+		return false
+	}
+}
+
+func getGlobalSlotFromInstruction(instr Instruction) (int, bool) {
+	if info, ok := instr.Value.(VariableInfo); ok {
+		return info.Slot, true
+	}
+	if s, ok := AsIntInternal(instr.Value); ok {
+		return s, true
+	}
+	return -1, false
+}
+
+func isKnownStdModuleName(name string) bool {
+	switch name {
+	case "time", "io", "math", "http", "fs", "os", "random", "json", "path", "process", "desktop", "webview":
+		return true
+	default:
+		return false
+	}
+}
+
+func getStdModuleNameFromRuntimeGlobalSlot(vm *VM, slot int) (string, bool) {
+	if vm == nil || vm.globals == nil {
+		return "", false
+	}
+	if slot < 0 || slot >= len(*vm.globals) {
+		return "", false
+	}
+
+	value := (*vm.globals)[slot]
+
+	var raw any
+	if value.IsInt {
+		raw = value.AsInt
+	} else {
+		raw = value.Value
+	}
+
+	mod, ok := raw.(*StandardModuleValue)
+	if !ok || mod == nil {
+		return "", false
+	}
+
+	return mod.Name, true
+}
+
+func getStdModuleNameFromLoadGlobal(vm *VM, instr Instruction) (string, bool) {
+	if info, ok := instr.Value.(VariableInfo); ok {
+		// JIT compilation usually happens before top-level import bytecode has run,
+		// so vm.globals[slot] can still be null here. Use the static global name first.
+		if isKnownStdModuleName(info.Name) {
+			return info.Name, true
+		}
+
+		// Runtime fallback for cases where CompileAllJit is called after imports ran.
+		if module, ok := getStdModuleNameFromRuntimeGlobalSlot(vm, info.Slot); ok {
+			return module, true
+		}
+	}
+
+	if slot, ok := getGlobalSlotFromInstruction(instr); ok {
+		// Another static fallback: reverse lookup the global slot to its name.
+		if vm != nil && vm.globalNames != nil {
+			for name, globalSlot := range vm.globalNames {
+				if globalSlot == slot && isKnownStdModuleName(name) {
+					return name, true
+				}
+			}
+		}
+
+		return getStdModuleNameFromRuntimeGlobalSlot(vm, slot)
+	}
+
+	return "", false
+}
+
+func popJitSources(stack *[]jitStackSource, count int) ([]jitStackSource, bool) {
+	if count < 0 || len(*stack) < count {
+		return nil, false
+	}
+
+	start := len(*stack) - count
+	out := append([]jitStackSource(nil), (*stack)[start:]...)
+	*stack = (*stack)[:start]
+	return out, true
+}
+
+func hasStdModuleSource(values []jitStackSource) bool {
+	for _, v := range values {
+		if v.kind == jitSourceStdModule {
+			return true
+		}
+	}
+	return false
+}
+
+func stdlibCallsAreJitSafe(vm *VM, fn Function) bool {
+	stack := make([]jitStackSource, 0, 32)
+
+	pushUnknown := func() {
+		stack = append(stack, jitStackSource{kind: jitSourceUnknown})
+	}
+
+	for _, instr := range fn.Instructions {
+		switch instr.Op {
+		case OP_STRING_JOIN:
+			count := getStringJoinCount(instr)
+			if count < 0 {
+				return false
+			}
+
+			values, ok := popJitSources(&stack, count)
+			if !ok {
+				return false
+			}
+
+			if hasStdModuleSource(values) {
+				return false
+			}
+
+			pushUnknown()
+		case OP_CONST,
+			OP_LOAD_LOCAL, OP_LOAD_LOCAL_0, OP_LOAD_LOCAL_1, OP_LOAD_LOCAL_2, OP_LOAD_LOCAL_3,
+			OP_MUL_LOCAL_CONST, OP_GET_PROPERTY_LOCAL, OP_LOCAL_CONST_OP:
+			pushUnknown()
+
+		case OP_LOAD_GLOBAL:
+			if module, ok := getStdModuleNameFromLoadGlobal(vm, instr); ok {
+				stack = append(stack, jitStackSource{
+					kind:   jitSourceStdModule,
+					module: module,
+				})
+			} else {
+				pushUnknown()
+			}
+
+		case OP_METHOD_CALL:
+			info, ok := instr.Value.(MethodCallInfo)
+			if !ok || info.ArgCount > 3 {
+				return false
+			}
+
+			needed := info.ArgCount + 1 // receiver + args
+			if len(stack) < needed {
+				return false
+			}
+
+			receiverIndex := len(stack) - needed
+			receiver := stack[receiverIndex]
+
+			// Remove receiver + args.
+			stack = stack[:receiverIndex]
+
+			if receiver.kind == jitSourceStdModule {
+				if !isJitAllowedStdlibCall(receiver.module, info.Method, info.ArgCount) {
+					return false
+				}
+
+				// stdlib result
+				pushUnknown()
+				continue
+			}
+
+			// Non-stdlib method calls are only safe for the old inline methods.
+			switch info.Method {
+			case "length", "push", "get":
+				pushUnknown()
+			default:
+				return false
+			}
+
+		case OP_PRINT:
+			info, ok := instr.Value.(PrintInfo)
+			if !ok {
+				return false
+			}
+
+			args, ok := popJitSources(&stack, info.ArgCount)
+			if !ok {
+				return false
+			}
+
+			// Do not let someone print a raw std module value from JIT.
+			if hasStdModuleSource(args) {
+				return false
+			}
+
+			// OP_PRINT returns null.
+			pushUnknown()
+
+		case OP_STORE_LOCAL, OP_ASSIGN_LOCAL, OP_POP,
+			OP_JUMP_IF_FALSE, OP_JUMP_IF_TRUE, OP_THROW:
+			values, ok := popJitSources(&stack, 1)
+			if !ok {
+				return false
+			}
+
+			// Do not allow std module values to escape into locals/returns/etc.
+			if hasStdModuleSource(values) {
+				return false
+			}
+
+		case OP_RETURN:
+			values, ok := popJitSources(&stack, 1)
+			if !ok {
+				return false
+			}
+			if hasStdModuleSource(values) {
+				return false
+			}
+
+		case OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
+			OP_EQ, OP_NEQ,
+			OP_LT, OP_LTE, OP_GT, OP_GTE,
+			OP_AND, OP_OR, OP_COALESCE_JUMP,
+			OP_MATH_POW:
+			values, ok := popJitSources(&stack, 2)
+			if !ok {
+				return false
+			}
+			if hasStdModuleSource(values) {
+				return false
+			}
+			pushUnknown()
+
+		case OP_NOT, OP_NEGATE,
+			OP_MATH_FLOOR, OP_MATH_CEIL, OP_MATH_SQRT, OP_MATH_ABS:
+			values, ok := popJitSources(&stack, 1)
+			if !ok {
+				return false
+			}
+			if hasStdModuleSource(values) {
+				return false
+			}
+			pushUnknown()
+
+		case OP_CALL_DIRECT:
+			info, ok := instr.Value.(DirectCallInfo)
+			if !ok {
+				return false
+			}
+			values, ok := popJitSources(&stack, info.ArgCount)
+			if !ok {
+				return false
+			}
+			if hasStdModuleSource(values) {
+				return false
+			}
+			pushUnknown()
+
+		case OP_CALL_DIRECT_SUB_CONST:
+			pushUnknown()
+
+		case OP_OBJECT:
+			info, ok := instr.Value.(ObjectInfo)
+			if !ok {
+				return false
+			}
+			values, ok := popJitSources(&stack, len(info.Names))
+			if !ok {
+				return false
+			}
+			if hasStdModuleSource(values) {
+				return false
+			}
+			pushUnknown()
+
+		case OP_ARRAY:
+			info, ok := instr.Value.(ArrayInfo)
+			if !ok {
+				return false
+			}
+			values, ok := popJitSources(&stack, info.Count)
+			if !ok {
+				return false
+			}
+			if hasStdModuleSource(values) {
+				return false
+			}
+			pushUnknown()
+
+		case OP_INDEX:
+			values, ok := popJitSources(&stack, 2)
+			if !ok {
+				return false
+			}
+			if hasStdModuleSource(values) {
+				return false
+			}
+			pushUnknown()
+
+		case OP_SET_INDEX:
+			values, ok := popJitSources(&stack, 3)
+			if !ok {
+				return false
+			}
+			if hasStdModuleSource(values) {
+				return false
+			}
+
+		case OP_SET_PROPERTY:
+			values, ok := popJitSources(&stack, 2)
+			if !ok {
+				return false
+			}
+			if hasStdModuleSource(values) {
+				return false
+			}
+
+		case OP_LEN, OP_ARRAY_LEN_LOCAL, OP_ARRAY_GET_LOCAL, OP_ARRAY_PUSH_LOCAL, OP_ARRAY_PUSH_LOCAL_MUL_CONST:
+			pushUnknown()
+
+		case OP_INC_LOCAL, OP_DEC_LOCAL,
+			OP_ADD_ASSIGN_LOCAL, OP_SUB_ASSIGN_LOCAL,
+			OP_ADD_LOCAL_LOCAL_STORE,
+			OP_LOCAL_CONST_OP_STORE, OP_ARRAY_INDEX_CONST_OP_STORE,
+			OP_ADD_LOCAL_ARRAY_INDEX_STORE, OP_ADD_LOCAL_GLOBAL_GLOBAL_STORE,
+			OP_ADD_PROPERTY_LOCAL_CONST, OP_ADD_PROPERTY_LOCAL_PROPERTY, OP_ADD_LOCAL_PROPERTIES_STORE,
+			OP_JUMP, OP_JUMP_LOCAL_GT_CONST, OP_JUMP_LOCAL_GE_CONST,
+			OP_JUMP_LOCAL_GT_LOCAL, OP_JUMP_LOCAL_GE_LOCAL,
+			OP_JUMP_MOD_LOCAL_CONST_NOT_ZERO, OP_JUMP_MOD_LOCAL_LOCAL_NOT_ZERO:
+			// no stack effect for this stdlib safety scan
+
+		case OP_GET_PROPERTY, OP_GET_PROPERTY_SAFE:
+			values, ok := popJitSources(&stack, 1)
+			if !ok {
+				return false
+			}
+			if hasStdModuleSource(values) {
+				return false
+			}
+			pushUnknown()
+
+		case OP_TYPEOF:
+			values, ok := popJitSources(&stack, 1)
+			if !ok {
+				return false
+			}
+			if hasStdModuleSource(values) {
+				return false
+			}
+			pushUnknown()
+
+		default:
+			// If we don't understand its stack effect, don't JIT.
+			// fmt.Fprintf(os.Stderr, "[JIT DEBUG] function %s is not JIT-safe: stdlib safety scan does not understand opcode %s\n", fn.Name, instr.Op.String())
+			return false
+		}
+	}
+
+	return true
+}
+
+func jitOpcodeUsesRuntimeGlobalLoad(op OpCode) bool {
+	switch op {
+	case OP_LOAD_GLOBAL, OP_ADD_LOCAL_GLOBAL_GLOBAL_STORE:
+		return true
+	default:
+		return false
+	}
+}
+
+func functionHasRuntimeGlobalLoadInLoop(fn Function) (OpCode, bool) {
+	for end, instr := range fn.Instructions {
+		start, ok := getJumpTarget(instr)
+		if !ok || start >= end {
+			continue
+		}
+
+		if start < 0 {
+			start = 0
+		}
+
+		for pc := start; pc <= end && pc < len(fn.Instructions); pc++ {
+			op := fn.Instructions[pc].Op
+			if jitOpcodeUsesRuntimeGlobalLoad(op) {
+				return op, true
+			}
+		}
+	}
+
+	return 0, false
+}
+
+const minJitStatementCount = 8
+const minJitInstructionCount = 24
+const maxSmallLeafJitInstructionCount = 48
+
+func isSmallNumericOrArrayLeafJitCandidate(fn Function) bool {
+	if len(fn.Instructions) == 0 || len(fn.Instructions) > maxSmallLeafJitInstructionCount {
+		return false
+	}
+
+	if functionHasLoop(fn) || functionIsRecursive(fn) {
+		return false
+	}
+
+	hasUsefulNumericOrArrayWork := false
+
+	for _, instr := range fn.Instructions {
+		switch instr.Op {
+		case OP_CONST:
+			if instr.IsInt {
+				continue
+			}
+			if _, ok := getFloat64Constant(instr.Value); ok {
+				continue
+			}
+			if isNullConstant(instr.Value) {
+				continue
+			}
+			return false
+
+		case OP_LOAD_LOCAL, OP_LOAD_LOCAL_0, OP_LOAD_LOCAL_1, OP_LOAD_LOCAL_2, OP_LOAD_LOCAL_3,
+			OP_STORE_LOCAL, OP_ASSIGN_LOCAL,
+			OP_RETURN, OP_POP:
+			// Plain local traffic / function epilogue.
+
+		case OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
+			OP_NEGATE,
+			OP_EQ, OP_NEQ, OP_LT, OP_LTE, OP_GT, OP_GTE,
+			OP_MATH_FLOOR, OP_MATH_CEIL, OP_MATH_SQRT, OP_MATH_ABS, OP_MATH_POW,
+			OP_MUL_LOCAL_CONST,
+			OP_LOCAL_CONST_OP, OP_LOCAL_CONST_OP_STORE,
+			OP_ADD_LOCAL_LOCAL_STORE,
+			OP_INC_LOCAL, OP_DEC_LOCAL,
+			OP_ADD_ASSIGN_LOCAL, OP_SUB_ASSIGN_LOCAL:
+			hasUsefulNumericOrArrayWork = true
+
+		case OP_ARRAY, OP_INDEX, OP_SET_INDEX,
+			OP_LEN,
+			OP_ARRAY_LEN_LOCAL, OP_ARRAY_GET_LOCAL, OP_ARRAY_PUSH_LOCAL, OP_ARRAY_PUSH_LOCAL_MUL_CONST,
+			OP_ARRAY_INDEX_CONST_OP_STORE, OP_ADD_LOCAL_ARRAY_INDEX_STORE:
+			hasUsefulNumericOrArrayWork = true
+
+		default:
+			// Calls, globals, object property ops, exceptions, closures, stdlib calls,
+			// locks, etc. are not small leaf helpers. Let the normal JIT worth
+			// rules decide for larger functions.
+			return false
+		}
+	}
+
+	return hasUsefulNumericOrArrayWork
+}
+
+func functionHasLoop(fn Function) bool {
+	for i, instr := range fn.Instructions {
+		target, ok := getJumpTarget(instr)
+		if ok && target < i {
+			return true
+		}
+	}
+	return false
+}
+
+func isTinyFunctionWorthJit(fn Function) bool {
+	if functionHasLoop(fn) {
+		return true
+	}
+
+	if functionIsRecursive(fn) {
+		return true
+	}
+
+	if isSmallNumericOrArrayLeafJitCandidate(fn) {
+		// fmt.Fprintf(
+		// 	os.Stderr,
+		// 	"[JIT DEBUG] function %s is worth JIT: small numeric/array leaf (%d statements, %d instructions)\n",
+		// 	fn.Name,
+		// 	fn.StatementCount,
+		// 	len(fn.Instructions),
+		// )
+		return true
+	}
+
+	return fn.StatementCount >= minJitStatementCount &&
+		len(fn.Instructions) >= minJitInstructionCount
+}
+
+func functionIsRecursive(fn Function) bool {
+	for _, instr := range fn.Instructions {
+		switch instr.Op {
+		case OP_CALL_DIRECT:
+			info, ok := instr.Value.(DirectCallInfo)
+			if ok {
+				if info.ID == fn.ID || info.Name == fn.Name {
+					return true
+				}
+			}
+
+		case OP_CALL_DIRECT_SUB_CONST:
+			info, ok := instr.Value.(CallDirectSubConstInfo)
+			if ok {
+				if info.FnID == fn.ID || info.FnName == fn.Name {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+func getStringJoinCount(instr Instruction) int {
+	return instr.IntArg
+}
+
+func isFunctionJitSafe(vm *VM, fn Function) bool {
+	if !isTinyFunctionWorthJit(fn) {
+		// fmt.Fprintf(
+		// 	os.Stderr,
+		// 	"[JIT DEBUG] function %s is not JIT-safe: too small for JIT (%d statements, %d instructions)\n",
+		// 	fn.Name,
+		// 	fn.StatementCount,
+		// 	len(fn.Instructions),
+		// )
+		return false
+	}
+	if fn.Async {
+		return false
+	}
+	if len(fn.Captures) > 0 {
+		return false
+	}
+	if fn.HasDefaults {
+		return false
+	}
+	if len(fn.Params) > 0 && fn.Params[len(fn.Params)-1].Variadic {
+		return false
+	}
+
+	if _, ok := functionHasRuntimeGlobalLoadInLoop(fn); ok {
+		// fmt.Fprintf(
+		// 	os.Stderr,
+		// 	"[JIT DEBUG] function %s is not JIT-safe: %s performs VM global loads inside a loop; interpreter superinstruction is faster than Wasm host calls\n",
+		// 	fn.Name,
+		// 	op.String(),
+		// )
+		return false
+	}
+
+	if !stdlibCallsAreJitSafe(vm, fn) {
+		return false
+	}
+
+	for _, instr := range fn.Instructions {
+		switch instr.Op {
+		case OP_CONST:
+			if !instr.IsInt {
+				if _, ok := instr.Value.(string); ok {
+					break
+				} else if _, ok := getFloat64Constant(instr.Value); !ok {
+					// fmt.Fprintf(os.Stderr, "[JIT DEBUG] function %s is not JIT-safe: unsupported constant value type %T (%v)\n", fn.Name, instr.Value, instr.Value)
+					return false
+				}
+			}
+		case OP_LOCAL_CONST_OP_STORE, OP_LOCAL_CONST_OP:
+			info, ok := instr.Value.(LocalConstOpInfo)
+			if !ok {
+				// fmt.Fprintf(os.Stderr, "[JIT DEBUG] function %s is not JIT-safe: bad LocalConstOpInfo in %s\n", fn.Name, instr.Op.String())
+				return false
+			}
+			if _, ok := getFloat64Constant(info.Const); !ok {
+				// fmt.Fprintf(os.Stderr, "[JIT DEBUG] function %s is not JIT-safe: non-numeric const in %s (%T)\n", fn.Name, instr.Op.String(), info.Const)
+				return false
+			}
+			if info.Op != OP_ADD && info.Op != OP_SUB && info.Op != OP_MUL && info.Op != OP_DIV && info.Op != OP_MOD {
+				// fmt.Fprintf(os.Stderr, "[JIT DEBUG] function %s is not JIT-safe: unsupported op %s inside %s\n", fn.Name, info.Op.String(), instr.Op.String())
+				return false
+			}
+
+		case OP_ARRAY_INDEX_CONST_OP_STORE:
+			info, ok := instr.Value.(ArrayIndexConstOpInfo)
+			if !ok {
+				// fmt.Fprintf(os.Stderr, "[JIT DEBUG] function %s is not JIT-safe: bad ArrayIndexConstOpInfo\n", fn.Name)
+				return false
+			}
+			if _, ok := getFloat64Constant(info.Const); !ok {
+				// fmt.Fprintf(os.Stderr, "[JIT DEBUG] function %s is not JIT-safe: non-numeric const in OP_ARRAY_INDEX_CONST_OP_STORE (%T)\n", fn.Name, info.Const)
+				return false
+			}
+			if info.Op != OP_ADD && info.Op != OP_SUB && info.Op != OP_MUL && info.Op != OP_DIV && info.Op != OP_MOD {
+				// fmt.Fprintf(os.Stderr, "[JIT DEBUG] function %s is not JIT-safe: unsupported op %s inside OP_ARRAY_INDEX_CONST_OP_STORE\n", fn.Name, info.Op.String())
+				return false
+			}
+
+		case OP_ADD_LOCAL_ARRAY_INDEX_STORE, OP_ADD_LOCAL_GLOBAL_GLOBAL_STORE,
+			OP_ADD_PROPERTY_LOCAL_CONST, OP_ADD_PROPERTY_LOCAL_PROPERTY, OP_ADD_LOCAL_PROPERTIES_STORE:
+			// Safe superinstructions lowered from already-JIT-safe bytecode shapes.
+
+		case OP_RETURN, OP_POP,
+			OP_LOAD_LOCAL, OP_STORE_LOCAL, OP_ASSIGN_LOCAL,
+			OP_LOAD_LOCAL_0, OP_LOAD_LOCAL_1, OP_LOAD_LOCAL_2, OP_LOAD_LOCAL_3,
+			OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
+			OP_EQ, OP_NEQ,
+			OP_LT, OP_LTE, OP_GT, OP_GTE,
+			OP_AND, OP_OR, OP_NOT, OP_NEGATE,
+			OP_INC_LOCAL, OP_DEC_LOCAL,
+			OP_ADD_ASSIGN_LOCAL, OP_SUB_ASSIGN_LOCAL,
+			OP_MUL_LOCAL_CONST, OP_ADD_LOCAL_LOCAL_STORE,
+			OP_JUMP, OP_JUMP_IF_FALSE, OP_JUMP_IF_TRUE,
+			OP_JUMP_LOCAL_GT_CONST, OP_JUMP_LOCAL_GE_CONST,
+			OP_JUMP_LOCAL_GT_LOCAL, OP_JUMP_LOCAL_GE_LOCAL,
+			OP_JUMP_MOD_LOCAL_CONST_NOT_ZERO, OP_JUMP_MOD_LOCAL_LOCAL_NOT_ZERO,
+			OP_CALL_DIRECT, OP_CALL_DIRECT_SUB_CONST,
+			OP_OBJECT, OP_GET_PROPERTY, OP_GET_PROPERTY_SAFE, OP_SET_PROPERTY,
+			OP_GET_PROPERTY_LOCAL, OP_ADD_PROPERTY_LOCAL_LOCAL,
+			OP_ARRAY, OP_INDEX, OP_SET_INDEX, OP_LEN,
+			OP_ARRAY_LEN_LOCAL, OP_ARRAY_GET_LOCAL, OP_ARRAY_PUSH_LOCAL, OP_MATH_CEIL, OP_MATH_FLOOR,
+			OP_MATH_SQRT, OP_MATH_ABS, OP_MATH_POW, OP_PRINT,
+			OP_COALESCE_JUMP, OP_TYPEOF, OP_THROW,
+			OP_LOAD_GLOBAL, OP_STRING_JOIN: // Safe
+		case OP_METHOD_CALL:
+			// All method calls are permitted up to 3 args: push/get/length are compiled inline;
+			// any other method dispatches through call_stdlib_wasm at runtime.
+			info, ok := instr.Value.(MethodCallInfo)
+			if !ok || info.ArgCount > 3 {
+				return false
+			}
+		default:
+			// fmt.Fprintf(os.Stderr, "[JIT DEBUG] function %s is not JIT-safe: unsupported opcode %s\n", fn.Name, instr.Op.String())
+			return false
+		}
+	}
+	return true
+}
+
+func checkCallArgumentsSafe(vm *VM, fn Function, currentReturnTypes []stackType, currentParamTypes [][]stackType) bool {
+	if len(fn.Instructions) == 0 {
+		return true
+	}
+
+	spArray := make([]int, len(fn.Instructions))
+	sp := 0
+	for idx, instr := range fn.Instructions {
+		spArray[idx] = sp
+		switch instr.Op {
+		case OP_CONST, OP_LOAD_LOCAL,
+			OP_LOAD_LOCAL_0, OP_LOAD_LOCAL_1, OP_LOAD_LOCAL_2, OP_LOAD_LOCAL_3,
+			OP_MUL_LOCAL_CONST, OP_GET_PROPERTY_LOCAL, OP_LOAD_GLOBAL,
+			OP_LOCAL_CONST_OP:
+			sp++
+		case OP_MATH_POW:
+			sp--
+		case OP_PRINT:
+			info := instr.Value.(PrintInfo)
+			sp = sp - info.ArgCount + 1
+		case OP_STORE_LOCAL, OP_ASSIGN_LOCAL, OP_POP,
+			OP_JUMP_IF_FALSE, OP_JUMP_IF_TRUE, OP_THROW:
+			sp--
+		case OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
+			OP_EQ, OP_NEQ,
+			OP_LT, OP_LTE, OP_GT, OP_GTE,
+			OP_AND, OP_OR, OP_COALESCE_JUMP:
+			sp--
+		case OP_RETURN:
+			sp--
+		case OP_CALL_DIRECT:
+			info, ok := instr.Value.(DirectCallInfo)
+			if ok {
+				sp = sp - info.ArgCount + 1
+			}
+		case OP_CALL_DIRECT_SUB_CONST:
+			sp++
+		case OP_OBJECT:
+			if info, ok := instr.Value.(ObjectInfo); ok {
+				count := len(info.Names)
+				if count > 0 {
+					sp -= count - 1
+				} else {
+					sp++
+				}
+			}
+		case OP_ARRAY:
+			if info, ok := instr.Value.(ArrayInfo); ok {
+				if info.Count > 0 {
+					sp -= info.Count - 1
+				} else {
+					sp++
+				}
+			}
+		case OP_INDEX:
+			sp--
+		case OP_STRING_JOIN:
+			count := getStringJoinCount(instr)
+			if count > 0 {
+				sp -= count - 1
+			} else {
+				sp++
+			}
+		case OP_SET_INDEX:
+			sp -= 3
+		case OP_LEN:
+		case OP_ARRAY_LEN_LOCAL, OP_ARRAY_GET_LOCAL, OP_ARRAY_PUSH_LOCAL, OP_ARRAY_PUSH_LOCAL_MUL_CONST:
+			sp++
+		case OP_SET_PROPERTY:
+			sp -= 2
+		case OP_METHOD_CALL:
+			if info, ok := instr.Value.(MethodCallInfo); ok {
+				sp -= info.ArgCount
+			}
+		}
+	}
+	maxSp := 0
+	for _, s := range spArray {
+		if s > maxSp {
+			maxSp = s
+		}
+	}
+
+	typeStack := make([]stackType, maxSp+16)
+	localTypes := make([]stackType, fn.LocalCount)
+	for i := 0; i < len(fn.Params) && i < len(localTypes); i++ {
+		localTypes[i] = stackTypeUnknown
+		if t, ok := stackTypeFromTypeName(fn.Params[i].TypeHint.Name); ok {
+			localTypes[i] = t
+		} else if len(currentParamTypes) > 0 && fn.ID >= 0 && fn.ID < len(currentParamTypes) {
+			localTypes[i] = currentParamTypes[fn.ID][i]
+		}
+	}
+
+	sp = 0
+	for idx, instr := range fn.Instructions {
+		sp = spArray[idx]
+		switch instr.Op {
+		case OP_MATH_FLOOR, OP_MATH_CEIL, OP_MATH_SQRT, OP_MATH_ABS:
+			if sp >= 1 {
+				typeStack[sp-1] = stackTypeNumber
+			}
+
+		case OP_PRINT:
+			info := instr.Value.(PrintInfo)
+			dest := sp - info.ArgCount
+
+			if dest >= 0 && dest < len(typeStack) {
+				typeStack[dest] = stackTypeNull // null result
+			}
+
+		case OP_MATH_POW:
+			if sp >= 2 {
+				typeStack[sp-2] = stackTypeNumber
+			}
+		case OP_EQ, OP_NEQ, OP_LT, OP_LTE, OP_GT, OP_GTE:
+			if sp >= 2 {
+				typeStack[sp-2] = stackTypeBool
+			}
+		case OP_AND, OP_OR:
+			if sp >= 2 {
+				typeStack[sp-2] = stackTypeBool
+			}
+		case OP_NOT:
+			if sp >= 1 {
+				typeStack[sp-1] = stackTypeBool
+			}
+		case OP_CONST:
+			if sp < len(typeStack) {
+				if isNullConstant(instr.Value) {
+					typeStack[sp] = stackTypeNull
+				} else if instr.IsInt {
+					typeStack[sp] = stackTypeNumber
+				} else if _, isStr := instr.Value.(string); isStr {
+					typeStack[sp] = stackTypeString
+				} else if _, isBool := instr.Value.(bool); isBool {
+					typeStack[sp] = stackTypeBool
+				} else {
+					typeStack[sp] = stackTypeNumber
+				}
+			}
+		case OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD:
+			if sp >= 2 {
+				if instr.Op == OP_ADD && (isJitStringType(typeStack[sp-1]) || isJitStringType(typeStack[sp-2])) {
+					typeStack[sp-2] = stackTypeString
+				} else if typeStack[sp-1] == stackTypeNumber && typeStack[sp-2] == stackTypeNumber {
+					typeStack[sp-2] = stackTypeNumber
+				} else {
+					typeStack[sp-2] = stackTypeUnknown
+				}
+			}
+		case OP_NEGATE:
+			if sp >= 1 {
+				typeStack[sp-1] = stackTypeNumber
+			}
+		case OP_MUL_LOCAL_CONST:
+			if sp < len(typeStack) {
+				typeStack[sp] = stackTypeNumber
+			}
+		case OP_LOCAL_CONST_OP:
+			if sp < len(typeStack) {
+				typeStack[sp] = stackTypeNumber
+			}
+		case OP_LOCAL_CONST_OP_STORE:
+			if info, ok := instr.Value.(LocalConstOpInfo); ok && info.Slot >= 0 && info.Slot < len(localTypes) {
+				localTypes[info.Slot] = stackTypeNumber
+			}
+		case OP_ADD_LOCAL_GLOBAL_GLOBAL_STORE:
+			if info, ok := instr.Value.(AddLocalGlobalGlobalStoreInfo); ok && info.LocalSlot >= 0 && info.LocalSlot < len(localTypes) {
+				localTypes[info.LocalSlot] = stackTypeNumber
+			}
+		case OP_ADD_LOCAL_ARRAY_INDEX_STORE:
+			if info, ok := instr.Value.(AddLocalArrayIndexStoreInfo); ok && info.LocalSlot >= 0 && info.LocalSlot < len(localTypes) {
+				localTypes[info.LocalSlot] = stackTypeNumber
+			}
+		case OP_ARRAY_INDEX_CONST_OP_STORE, OP_ADD_PROPERTY_LOCAL_CONST, OP_ADD_PROPERTY_LOCAL_PROPERTY, OP_ADD_LOCAL_PROPERTIES_STORE:
+			// no stack effect for type propagation
+		case OP_ADD_LOCAL_LOCAL_STORE:
+			info := instr.Value.(AddLocalLocalStoreInfo)
+			tA := localTypes[info.SlotA]
+			tB := localTypes[info.SlotB]
+			if isJitStringType(tA) || isJitStringType(tB) {
+				localTypes[info.DestSlot] = stackTypeString
+			} else if tA == stackTypeNumber && tB == stackTypeNumber {
+				localTypes[info.DestSlot] = stackTypeNumber
+			} else {
+				localTypes[info.DestSlot] = stackTypeUnknown
+			}
+		case OP_LOAD_GLOBAL:
+			if sp < len(typeStack) {
+				typeStack[sp] = stackTypeUnknown
+			}
+		case OP_LOAD_LOCAL_0, OP_LOAD_LOCAL_1, OP_LOAD_LOCAL_2, OP_LOAD_LOCAL_3:
+			slot := 0
+			if instr.Op == OP_LOAD_LOCAL_1 {
+				slot = 1
+			}
+			if instr.Op == OP_LOAD_LOCAL_2 {
+				slot = 2
+			}
+			if instr.Op == OP_LOAD_LOCAL_3 {
+				slot = 3
+			}
+			if sp < len(typeStack) && slot >= 0 && slot < len(localTypes) {
+				typeStack[sp] = localTypes[slot]
+			}
+		case OP_LOAD_LOCAL:
+			slot := instr.IntArg
+			if !instr.IsInt {
+				if s, ok := AsIntInternal(instr.Value); ok {
+					slot = s
+				}
+			}
+			if sp < len(typeStack) && slot >= 0 && slot < len(localTypes) {
+				typeStack[sp] = localTypes[slot]
+			}
+		case OP_STORE_LOCAL, OP_ASSIGN_LOCAL:
+			slot := instr.IntArg
+			if !instr.IsInt {
+				if s, ok := AsIntInternal(instr.Value); ok {
+					slot = s
+				} else if info, ok := instr.Value.(VariableInfo); ok {
+					slot = info.Slot
+				}
+			}
+			if sp >= 1 && slot < len(localTypes) {
+				localTypes[slot] = typeStack[sp-1]
 			}
 		case OP_GET_PROPERTY, OP_GET_PROPERTY_SAFE, OP_GET_PROPERTY_LOCAL:
 			if sp < len(typeStack) {
@@ -381,9 +2653,59 @@ func inferReturnsBool(fn Function) bool {
 		case OP_CALL_DIRECT:
 			info, ok := instr.Value.(DirectCallInfo)
 			if ok {
+				if len(currentParamTypes) > 0 && info.ID >= 0 && info.ID < len(currentParamTypes) {
+					calleeParams := currentParamTypes[info.ID]
+					for a := 0; a < info.ArgCount && a < len(calleeParams); a++ {
+						argType := typeStack[sp-info.ArgCount+a]
+						expectedType := calleeParams[a]
+						if expectedType != stackTypeUnknown && argType != stackTypeUnknown {
+							if expectedType == stackTypeNumber && argType != stackTypeNumber {
+								return false
+							}
+							if expectedType == stackTypeBool && argType != stackTypeBool {
+								return false
+							}
+							if expectedType == stackTypeString && !isJitStringType(argType) {
+								return false
+							}
+							if expectedType == stackTypeObject && argType != stackTypeObject {
+								return false
+							}
+							if expectedType == stackTypeArray && argType != stackTypeArray {
+								return false
+							}
+						}
+					}
+				}
+
+				retT := stackTypeUnknown
+				if vm != nil && info.ID >= 0 && info.ID < len(currentReturnTypes) {
+					retT = currentReturnTypes[info.ID]
+				}
 				dest := sp - info.ArgCount
 				if dest >= 0 && dest < len(typeStack) {
-					typeStack[dest] = stackTypeUnknown
+					typeStack[dest] = retT
+				}
+			}
+		case OP_CALL_DIRECT_SUB_CONST:
+			info, ok := instr.Value.(CallDirectSubConstInfo)
+			if ok {
+				if len(currentParamTypes) > 0 && info.FnID >= 0 && info.FnID < len(currentParamTypes) {
+					calleeParams := currentParamTypes[info.FnID]
+					if len(calleeParams) > 0 {
+						expectedType := calleeParams[0]
+						if expectedType != stackTypeUnknown && expectedType != stackTypeNumber {
+							return false
+						}
+					}
+				}
+
+				retT := stackTypeUnknown
+				if vm != nil && info.FnID >= 0 && info.FnID < len(currentReturnTypes) {
+					retT = currentReturnTypes[info.FnID]
+				}
+				if sp < len(typeStack) {
+					typeStack[sp] = retT
 				}
 			}
 		case OP_OBJECT:
@@ -420,78 +2742,23 @@ func inferReturnsBool(fn Function) bool {
 			if info, ok := instr.Value.(MethodCallInfo); ok {
 				dest := sp - info.ArgCount - 1
 				if dest >= 0 && dest < len(typeStack) {
-					if info.Method == "length" {
+					switch info.Method {
+					case "length":
 						typeStack[dest] = stackTypeNumber
-					} else if info.Method == "push" {
+					case "push":
 						typeStack[dest] = stackTypeArray
-					} else {
+					default:
 						typeStack[dest] = stackTypeUnknown
 					}
 				}
 			}
-		case OP_RETURN:
-			if reachable[idx] {
-				hasReturn = true
-				if sp < 1 || sp-1 >= len(typeStack) || typeStack[sp-1] != stackTypeBool {
-					allBool = false
-				}
-			}
 		}
 	}
 
-	return hasReturn && allBool
-}
-
-func isFunctionJitSafe(fn Function) bool {
-	if len(fn.Captures) > 0 {
-		return false
-	}
-	if fn.HasDefaults {
-		return false
-	}
-	if len(fn.Params) > 0 && fn.Params[len(fn.Params)-1].Variadic {
-		return false
-	}
-	for _, instr := range fn.Instructions {
-		switch instr.Op {
-		case OP_CONST:
-			if !instr.IsInt {
-				if _, ok := getFloat64Constant(instr.Value); !ok {
-					return false
-				}
-			}
-		case OP_RETURN, OP_POP,
-			OP_LOAD_LOCAL, OP_STORE_LOCAL, OP_ASSIGN_LOCAL,
-			OP_LOAD_LOCAL_0, OP_LOAD_LOCAL_1, OP_LOAD_LOCAL_2, OP_LOAD_LOCAL_3,
-			OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
-			OP_EQ, OP_NEQ,
-			OP_LT, OP_LTE, OP_GT, OP_GTE,
-			OP_AND, OP_OR, OP_NOT, OP_NEGATE,
-			OP_INC_LOCAL, OP_DEC_LOCAL,
-			OP_ADD_ASSIGN_LOCAL, OP_SUB_ASSIGN_LOCAL,
-			OP_MUL_LOCAL_CONST, OP_ADD_LOCAL_LOCAL_STORE,
-			OP_JUMP, OP_JUMP_IF_FALSE, OP_JUMP_IF_TRUE,
-			OP_JUMP_LOCAL_GT_CONST, OP_JUMP_LOCAL_GE_CONST,
-			OP_JUMP_LOCAL_GT_LOCAL, OP_JUMP_LOCAL_GE_LOCAL,
-			OP_JUMP_MOD_LOCAL_CONST_NOT_ZERO, OP_JUMP_MOD_LOCAL_LOCAL_NOT_ZERO,
-			OP_CALL_DIRECT, OP_CALL_DIRECT_SUB_CONST,
-			OP_OBJECT, OP_GET_PROPERTY, OP_GET_PROPERTY_SAFE, OP_SET_PROPERTY,
-			OP_GET_PROPERTY_LOCAL, OP_ADD_PROPERTY_LOCAL_LOCAL,
-			OP_ARRAY, OP_INDEX, OP_SET_INDEX, OP_LEN,
-			OP_ARRAY_LEN_LOCAL, OP_ARRAY_GET_LOCAL, OP_ARRAY_PUSH_LOCAL, OP_ARRAY_PUSH_LOCAL_MUL_CONST: // Safe!
-		case OP_METHOD_CALL:
-			info, ok := instr.Value.(MethodCallInfo)
-			if ok && (info.Method == "push" || info.Method == "get" || info.Method == "length") {
-			} else {
-				return false
-			}
-		default:
-			return false
-		}
-	}
 	return true
 }
-func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
+
+func compileFunctionBodyBytes(vm *VM, fn Function, safe bool, currentReturnTypes []stackType, jitStringAddr map[string]uint32, jitStringID map[string]uint32, currentParamTypes [][]stackType) []byte {
 	body := &WasmBuffer{}
 
 	if !safe {
@@ -516,13 +2783,19 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 			maxSp = sp
 		}
 		switch instr.Op {
-		case OP_CONST, OP_LOAD_LOCAL, OP_LOAD_LOCAL_0, OP_LOAD_LOCAL_1, OP_LOAD_LOCAL_2, OP_LOAD_LOCAL_3, OP_MUL_LOCAL_CONST, OP_GET_PROPERTY_LOCAL:
+		case OP_CONST, OP_LOAD_LOCAL, OP_LOAD_LOCAL_0, OP_LOAD_LOCAL_1, OP_LOAD_LOCAL_2, OP_LOAD_LOCAL_3, OP_MUL_LOCAL_CONST, OP_GET_PROPERTY_LOCAL, OP_LOAD_GLOBAL,
+			OP_LOCAL_CONST_OP:
 			sp++
-		case OP_STORE_LOCAL, OP_ASSIGN_LOCAL, OP_POP, OP_JUMP_IF_FALSE, OP_JUMP_IF_TRUE:
+		case OP_MATH_POW:
+			sp--
+		case OP_PRINT:
+			info := instr.Value.(PrintInfo)
+			sp = sp - info.ArgCount + 1
+		case OP_STORE_LOCAL, OP_ASSIGN_LOCAL, OP_POP, OP_JUMP_IF_FALSE, OP_JUMP_IF_TRUE, OP_THROW:
 			sp--
 		case OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
 			OP_EQ, OP_NEQ,
-			OP_LT, OP_LTE, OP_GT, OP_GTE, OP_AND, OP_OR:
+			OP_LT, OP_LTE, OP_GT, OP_GTE, OP_AND, OP_OR, OP_COALESCE_JUMP:
 			sp--
 		case OP_RETURN:
 			sp--
@@ -550,6 +2823,13 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 			}
 		case OP_INDEX:
 			sp--
+		case OP_STRING_JOIN:
+			count := getStringJoinCount(instr)
+			if count > 0 {
+				sp -= count - 1
+			} else {
+				sp++
+			}
 		case OP_SET_INDEX:
 			sp -= 3
 		case OP_LEN:
@@ -641,11 +2921,21 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 	stackBase := fn.LocalCount
 	extraLocalsCount := fn.LocalCount - len(fn.Params)
 
+	stackLocalCount := maxSp + 20
+	valueLocalCount := fn.LocalCount + stackLocalCount
+	tagBase := valueLocalCount
+
 	var groups [][]any
 	if extraLocalsCount > 0 {
 		groups = append(groups, []any{extraLocalsCount, byte(0x7C)})
 	}
-	groups = append(groups, []any{maxSp + 10, byte(0x7C)}) // Added plenty of slots (+10) to guarantee tempPtrSlot never collides with stackBase + sp
+	const jitI32LocalCount = 16
+	const jitI64LocalCount = 4
+
+	groups = append(groups, []any{stackLocalCount, byte(0x7C)})
+	groups = append(groups, []any{valueLocalCount, byte(0x7C)})
+	groups = append(groups, []any{jitI32LocalCount, byte(0x7F)})
+	groups = append(groups, []any{jitI64LocalCount, byte(0x7E)})
 
 	body.WriteVarUint(uint32(len(groups)))
 	for _, g := range groups {
@@ -655,23 +2945,1831 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 
 	var activeBlocks []JitBlock
 	N := len(fn.Instructions)
-	tempPtrSlot := stackBase + maxSp + 5 // Positioned safely out of stack range
+	tempPtrSlot := stackBase + maxSp + 8 // Positioned safely out of stack range
+	powResultSlot := stackBase + maxSp + 9
+	powBaseSlot := stackBase + maxSp + 10
+	powExpSlot := stackBase + maxSp + 11
+	stringJoinResultSlot := stackBase + maxSp + 12
+	stringJoinScratchSlot := stackBase + maxSp + 13
+
+	// Extra integer locals used by the fully-Wasm string join fast path.
+	// Existing code also uses the first 3 i32 locals for string equality, so keep
+	// them at the same base and reserve enough scratch space for both features.
+	i32Base := tagBase + valueLocalCount
+	joinByteIdxSlot := i32Base
+	joinBitOffsetSlot := i32Base + 1
+	joinMaskSlot := i32Base + 2
+	joinAddrSlot := i32Base + 3
+	joinLenSlot := i32Base + 4
+	joinSizeSlot := i32Base + 5
+	joinSrcPtrSlot := i32Base + 6
+	joinDstPtrSlot := i32Base + 7
+	joinCopyLenSlot := i32Base + 8
+	joinPartLenSlot := i32Base + 9
+	joinDigitsSlot := i32Base + 10
+	joinPosSlot := i32Base + 11
+
+	i64Base := i32Base + jitI32LocalCount
+	joinNumSlot := i64Base
+	joinTmpI64Slot := i64Base + 1
+	joinDigitSlot := i64Base + 2
+
+	getStoreLocalSlot := func(instr Instruction) (int, bool) {
+		if instr.Op != OP_STORE_LOCAL && instr.Op != OP_ASSIGN_LOCAL {
+			return -1, false
+		}
+
+		if instr.IsInt {
+			return instr.IntArg, true
+		}
+
+		if info, ok := instr.Value.(VariableInfo); ok {
+			return info.Slot, true
+		}
+
+		if slot, ok := AsIntInternal(instr.Value); ok {
+			return slot, true
+		}
+
+		return -1, false
+	}
+
+	getLoadLocalSlot := func(instr Instruction) (int, bool) {
+		switch instr.Op {
+		case OP_LOAD_LOCAL_0:
+			return 0, true
+		case OP_LOAD_LOCAL_1:
+			return 1, true
+		case OP_LOAD_LOCAL_2:
+			return 2, true
+		case OP_LOAD_LOCAL_3:
+			return 3, true
+		case OP_LOAD_LOCAL:
+			if instr.IsInt {
+				return instr.IntArg, true
+			}
+			if slot, ok := AsIntInternal(instr.Value); ok {
+				return slot, true
+			}
+		}
+
+		return -1, false
+	}
+
+	getArrayLenLocalSlot := func(instr Instruction) (int, bool) {
+		if instr.Op != OP_ARRAY_LEN_LOCAL {
+			return -1, false
+		}
+		if info, ok := instr.Value.(ArrayLocalCallInfo); ok {
+			return info.ArraySlot, true
+		}
+		return -1, false
+	}
+
+	localIsOnlyUsedForLengthAfterJoin := func(joinPC int, slot int) bool {
+		hasLengthUse := false
+
+		for pc := joinPC + 2; pc < len(fn.Instructions); pc++ {
+			instr := fn.Instructions[pc]
+
+			if lengthSlot, ok := getArrayLenLocalSlot(instr); ok && lengthSlot == slot {
+				hasLengthUse = true
+				continue
+			}
+
+			if loadSlot, ok := getLoadLocalSlot(instr); ok && loadSlot == slot {
+				return false
+			}
+
+			if storeSlot, ok := getStoreLocalSlot(instr); ok && storeSlot == slot {
+				return false
+			}
+
+			switch instr.Op {
+			case OP_GET_PROPERTY_LOCAL:
+				if info, ok := instr.Value.(PropertyLocalInfo); ok && info.Slot == slot {
+					return false
+				}
+			case OP_ARRAY_GET_LOCAL, OP_ARRAY_PUSH_LOCAL, OP_ARRAY_PUSH_LOCAL_MUL_CONST:
+				if info, ok := instr.Value.(ArrayLocalCallInfo); ok {
+					if info.ArraySlot == slot || info.ArgSlot == slot {
+						return false
+					}
+				}
+			}
+		}
+
+		return hasLengthUse
+	}
+
+	optimizedStringJoinPC := make(map[int]bool)
+	optimizedStringJoinLengthSlot := make(map[int]bool)
+
+	for pc := 0; pc+1 < len(fn.Instructions); pc++ {
+		if fn.Instructions[pc].Op != OP_STRING_JOIN {
+			continue
+		}
+
+		storeSlot, ok := getStoreLocalSlot(fn.Instructions[pc+1])
+		if !ok || storeSlot < 0 {
+			continue
+		}
+
+		if localIsOnlyUsedForLengthAfterJoin(pc, storeSlot) {
+			optimizedStringJoinPC[pc] = true
+			optimizedStringJoinLengthSlot[storeSlot] = true
+		}
+	}
+
+	tagSlot := func(valueSlot int) int {
+		return tagBase + valueSlot
+	}
+
+	emitSetTagConst := func(valueSlot int, tag float64) {
+		body.WriteByte(0x44) // f64.const tag
+		body.WriteFloat64(tag)
+		body.WriteByte(0x21) // local.set tagSlot
+		body.WriteVarUint(uint32(tagSlot(valueSlot)))
+	}
+
+	emitCopyTag := func(dstValueSlot int, srcValueSlot int) {
+		body.WriteByte(0x20) // local.get source tag
+		body.WriteVarUint(uint32(tagSlot(srcValueSlot)))
+		body.WriteByte(0x21) // local.set destination tag
+		body.WriteVarUint(uint32(tagSlot(dstValueSlot)))
+	}
+
+	emitCopyTagged := func(dstValueSlot int, srcValueSlot int) {
+		body.WriteByte(0x20) // local.get source value
+		body.WriteVarUint(uint32(srcValueSlot))
+		body.WriteByte(0x21) // local.set destination value
+		body.WriteVarUint(uint32(dstValueSlot))
+		emitCopyTag(dstValueSlot, srcValueSlot)
+	}
+
+	emitSetTagFromType := func(valueSlot int, t stackType) {
+		switch t {
+		case stackTypeBool:
+			emitSetTagConst(valueSlot, jitTagBool)
+		case stackTypeObject:
+			emitSetTagConst(valueSlot, jitTagObject)
+		case stackTypeArray, stackTypeInternedStringArray:
+			emitSetTagConst(valueSlot, jitTagArray)
+		case stackTypeString, stackTypeInternedString:
+			emitSetTagConst(valueSlot, jitTagString)
+		case stackTypeNumber:
+			emitSetTagConst(valueSlot, jitTagNumber)
+		case stackTypeNull:
+			emitSetTagConst(valueSlot, jitTagNull)
+		default:
+			body.WriteByte(0x20) // local.get value
+			body.WriteVarUint(uint32(valueSlot))
+			body.WriteByte(0x10) // call determine_tag
+			body.WriteVarUint(1)
+			body.WriteByte(0x21) // local.set tag
+			body.WriteVarUint(uint32(tagSlot(valueSlot)))
+		}
+	}
+
+	emitLoadTaggedCell := func(addrSlot int, dstValueSlot int) {
+		// tag = *(addr + 0)
+		body.WriteByte(0x20) // local.get addr
+		body.WriteVarUint(uint32(addrSlot))
+		body.WriteByte(0xAA) // i32.trunc_f64_s
+		body.WriteByte(0x2B) // f64.load
+		body.WriteVarUint(3)
+		body.WriteVarUint(0)
+		body.WriteByte(0x21) // local.set tag
+		body.WriteVarUint(uint32(tagSlot(dstValueSlot)))
+
+		// value = *(addr + 8)
+		body.WriteByte(0x20) // local.get addr
+		body.WriteVarUint(uint32(addrSlot))
+		body.WriteByte(0xAA) // i32.trunc_f64_s
+		body.WriteByte(0x2B) // f64.load
+		body.WriteVarUint(3)
+		body.WriteVarUint(8)
+		body.WriteByte(0x21) // local.set value
+		body.WriteVarUint(uint32(dstValueSlot))
+	}
+
+	emitStoreTaggedCell := func(addrSlot int, srcValueSlot int) {
+		// *(addr + 0) = tag
+		body.WriteByte(0x20) // local.get addr
+		body.WriteVarUint(uint32(addrSlot))
+		body.WriteByte(0xAA) // i32.trunc_f64_s
+		body.WriteByte(0x20) // local.get source tag
+		body.WriteVarUint(uint32(tagSlot(srcValueSlot)))
+		body.WriteByte(0x39) // f64.store
+		body.WriteVarUint(3)
+		body.WriteVarUint(0)
+
+		// *(addr + 8) = value
+		body.WriteByte(0x20) // local.get addr
+		body.WriteVarUint(uint32(addrSlot))
+		body.WriteByte(0xAA) // i32.trunc_f64_s
+		body.WriteByte(0x20) // local.get source value
+		body.WriteVarUint(uint32(srcValueSlot))
+		body.WriteByte(0x39) // f64.store
+		body.WriteVarUint(3)
+		body.WriteVarUint(8)
+	}
+
+	emitMarkSideEffect := func() {
+		body.WriteByte(0x44) // f64.const 1.0
+		body.WriteFloat64(1.0)
+		body.WriteByte(0x24) // global.set __jit_side_effect
+		body.WriteVarUint(1)
+	}
+
+	emitF64GlobalSetConst := func(globalIndex int, value float64) {
+		body.WriteByte(0x44)
+		body.WriteFloat64(value)
+		body.WriteByte(0x24)
+		body.WriteVarUint(uint32(globalIndex))
+	}
+
+	emitI32ConstRaw := func(v int32) {
+		body.WriteByte(0x41)
+		body.WriteVarInt(int64(v))
+	}
+
+	emitStoreF64LocalAtConstAddr := func(addr uint32, localSlot int) {
+		emitI32ConstRaw(int32(addr))
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(localSlot))
+		body.WriteByte(0x39) // f64.store
+		body.WriteVarUint(3)
+		body.WriteVarUint(0)
+	}
+
+	emitStoreTaggedSnapshotCell := func(addr uint32, valueSlot int) {
+		emitStoreF64LocalAtConstAddr(addr, tagSlot(valueSlot))
+		emitStoreF64LocalAtConstAddr(addr+8, valueSlot)
+	}
+
+	emitDeoptCheckpoint := func(resumeIP int, resumeSP int) {
+		if resumeSP < 0 {
+			resumeSP = 0
+		}
+		emitMarkSideEffect()
+		emitF64GlobalSetConst(2, float64(resumeIP))
+		emitF64GlobalSetConst(3, float64(resumeSP))
+		emitF64GlobalSetConst(4, float64(fn.LocalCount))
+		emitF64GlobalSetConst(5, float64(fn.ID))
+
+		addr := uint32(jitDeoptSnapshotBase)
+		for local := 0; local < fn.LocalCount; local++ {
+			emitStoreTaggedSnapshotCell(addr+uint32(local*16), local)
+		}
+
+		stackAddr := addr + uint32(fn.LocalCount*16)
+		for stackIndex := 0; stackIndex < resumeSP; stackIndex++ {
+			emitStoreTaggedSnapshotCell(stackAddr+uint32(stackIndex*16), stackBase+stackIndex)
+		}
+	}
+
+	emitDynamicAddTagged := func(leftSlot int, rightSlot int, dstSlot int) {
+		// Check if leftTag == number && rightTag == number
+		body.WriteByte(0x20) // local.get leftTag
+		body.WriteVarUint(uint32(tagSlot(leftSlot)))
+		body.WriteByte(0x44) // f64.const 1.0
+		body.WriteFloat64(jitTagNumber)
+		body.WriteByte(0x61) // f64.eq -> i32
+
+		body.WriteByte(0x20) // local.get rightTag
+		body.WriteVarUint(uint32(tagSlot(rightSlot)))
+		body.WriteByte(0x44) // f64.const 1.0
+		body.WriteFloat64(jitTagNumber)
+		body.WriteByte(0x61) // f64.eq -> i32
+
+		body.WriteByte(0x71) // i32.and
+		body.WriteByte(0x04) // if (result f64)
+		body.WriteByte(0x7C)
+		body.WriteByte(0x20) // local.get leftValue
+		body.WriteVarUint(uint32(leftSlot))
+		body.WriteByte(0x20) // local.get rightValue
+		body.WriteVarUint(uint32(rightSlot))
+		body.WriteByte(0xA0) // f64.add
+		body.WriteByte(0x05) // else
+		body.WriteByte(0x20) // left tag
+		body.WriteVarUint(uint32(tagSlot(leftSlot)))
+		body.WriteByte(0x20) // left value
+		body.WriteVarUint(uint32(leftSlot))
+		body.WriteByte(0x20) // right tag
+		body.WriteVarUint(uint32(tagSlot(rightSlot)))
+		body.WriteByte(0x20) // right value
+		body.WriteVarUint(uint32(rightSlot))
+		body.WriteByte(0x10) // call dynamic_add
+		body.WriteVarUint(5)
+		body.WriteByte(0x0B) // end if
+		body.WriteByte(0x21) // local.set dst value
+		body.WriteVarUint(uint32(dstSlot))
+
+		// dst tag = (leftTag == number && rightTag == number) ? number : string
+		body.WriteByte(0x20) // local.get left tag
+		body.WriteVarUint(uint32(tagSlot(leftSlot)))
+		body.WriteByte(0x44) // f64.const number tag
+		body.WriteFloat64(jitTagNumber)
+		body.WriteByte(0x61) // f64.eq -> i32
+
+		body.WriteByte(0x20) // local.get right tag
+		body.WriteVarUint(uint32(tagSlot(rightSlot)))
+		body.WriteByte(0x44) // f64.const number tag
+		body.WriteFloat64(jitTagNumber)
+		body.WriteByte(0x61) // f64.eq -> i32
+
+		body.WriteByte(0x71) // i32.and
+		body.WriteByte(0x04) // if
+		body.WriteByte(0x7C) // result f64
+		body.WriteByte(0x44) // f64.const number tag
+		body.WriteFloat64(jitTagNumber)
+		body.WriteByte(0x05) // else
+		body.WriteByte(0x44) // f64.const string tag
+		body.WriteFloat64(jitTagString)
+		body.WriteByte(0x0B) // end
+		body.WriteByte(0x21) // local.set dst tag
+		body.WriteVarUint(uint32(tagSlot(dstSlot)))
+	}
+
+	emitConstTagged := func(dstSlot int, raw any) bool {
+		val, ok := getFloat64Constant(raw)
+		if !ok {
+			return false
+		}
+		body.WriteByte(0x44)
+		body.WriteFloat64(val)
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(dstSlot))
+		emitSetTagConst(dstSlot, jitTagNumber)
+		return true
+	}
+
+	emitNumericBinaryOp := func(leftSlot int, rightSlot int, dstSlot int, op OpCode) bool {
+		switch op {
+		case OP_ADD:
+			body.WriteByte(0x20)
+			body.WriteVarUint(uint32(leftSlot))
+			body.WriteByte(0x20)
+			body.WriteVarUint(uint32(rightSlot))
+			body.WriteByte(0xA0)
+		case OP_SUB:
+			body.WriteByte(0x20)
+			body.WriteVarUint(uint32(leftSlot))
+			body.WriteByte(0x20)
+			body.WriteVarUint(uint32(rightSlot))
+			body.WriteByte(0xA1)
+		case OP_MUL:
+			body.WriteByte(0x20)
+			body.WriteVarUint(uint32(leftSlot))
+			body.WriteByte(0x20)
+			body.WriteVarUint(uint32(rightSlot))
+			body.WriteByte(0xA2)
+		case OP_DIV:
+			body.WriteByte(0x20)
+			body.WriteVarUint(uint32(leftSlot))
+			body.WriteByte(0x20)
+			body.WriteVarUint(uint32(rightSlot))
+			body.WriteByte(0xA3)
+		case OP_MOD:
+			// f64 modulo fallback: a - trunc(a / b) * b. This avoids depending on
+			// emitFastModValue, which is declared later in this function.
+			body.WriteByte(0x20)
+			body.WriteVarUint(uint32(leftSlot))
+			body.WriteByte(0x20)
+			body.WriteVarUint(uint32(leftSlot))
+			body.WriteByte(0x20)
+			body.WriteVarUint(uint32(rightSlot))
+			body.WriteByte(0xA3)
+			body.WriteByte(0x9D)
+			body.WriteByte(0x20)
+			body.WriteVarUint(uint32(rightSlot))
+			body.WriteByte(0xA2)
+			body.WriteByte(0xA1)
+		default:
+			return false
+		}
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(dstSlot))
+		emitSetTagConst(dstSlot, jitTagNumber)
+		return true
+	}
+
+	emitLocalConstOp := func(leftSlot int, raw any, op OpCode, dstSlot int) bool {
+		if !emitConstTagged(tempPtrSlot+2, raw) {
+			return false
+		}
+		return emitNumericBinaryOp(leftSlot, tempPtrSlot+2, dstSlot, op)
+	}
+
+	emitArrayElementAddress := func(arraySlot int, indexSlot int) {
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(arraySlot))
+		body.WriteByte(0xAA)
+		body.WriteByte(0x2B)
+		body.WriteVarUint(3)
+		body.WriteVarUint(16)
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(indexSlot))
+		body.WriteByte(0x44)
+		body.WriteFloat64(16.0)
+		body.WriteByte(0xA2)
+		body.WriteByte(0xA0)
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(tempPtrSlot))
+	}
+
+	emitLoadGlobalTagged := func(globalSlot int, dstSlot int) {
+		body.WriteByte(0x44)
+		body.WriteFloat64(float64(globalSlot))
+		body.WriteByte(0x10)
+		body.WriteVarUint(jitImportLoadGlobal)
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(dstSlot))
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(tagSlot(dstSlot)))
+	}
+
+	emitStringMemoryLength := func(valueSlot int, dstSlot int) {
+		body.WriteByte(0x20) // local.get string pointer
+		body.WriteVarUint(uint32(valueSlot))
+		body.WriteByte(0xAA) // i32.trunc_f64_s
+		body.WriteByte(0x2B) // f64.load length at offset 8
+		body.WriteVarUint(3)
+		body.WriteVarUint(8)
+		body.WriteByte(0x21) // local.set dst
+		body.WriteVarUint(uint32(dstSlot))
+	}
+
+	emitIntegerNumberStringLength := func(valueSlot int, dstSlot int) {
+		absSlot := powBaseSlot
+		minusSlot := powExpSlot
+
+		body.WriteByte(0x20) // local.get value
+		body.WriteVarUint(uint32(valueSlot))
+		body.WriteByte(0x44) // f64.const 0
+		body.WriteFloat64(0.0)
+		body.WriteByte(0x63) // f64.lt
+		body.WriteByte(0x04) // if
+		body.WriteByte(0x40)
+
+		body.WriteByte(0x44) // f64.const 0
+		body.WriteFloat64(0.0)
+		body.WriteByte(0x20) // local.get value
+		body.WriteVarUint(uint32(valueSlot))
+		body.WriteByte(0xA1) // f64.sub
+		body.WriteByte(0x21) // local.set abs
+		body.WriteVarUint(uint32(absSlot))
+		body.WriteByte(0x44) // f64.const 1
+		body.WriteFloat64(1.0)
+		body.WriteByte(0x21) // local.set minus
+		body.WriteVarUint(uint32(minusSlot))
+
+		body.WriteByte(0x05) // else
+
+		body.WriteByte(0x20) // local.get value
+		body.WriteVarUint(uint32(valueSlot))
+		body.WriteByte(0x21) // local.set abs
+		body.WriteVarUint(uint32(absSlot))
+		body.WriteByte(0x44) // f64.const 0
+		body.WriteFloat64(0.0)
+		body.WriteByte(0x21) // local.set minus
+		body.WriteVarUint(uint32(minusSlot))
+
+		body.WriteByte(0x0B) // end if
+
+		body.WriteByte(0x44) // digits = 1
+		body.WriteFloat64(1.0)
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(dstSlot))
+
+		threshold := 10.0
+		for digits := 2; digits <= 17; digits++ {
+			body.WriteByte(0x20) // local.get abs
+			body.WriteVarUint(uint32(absSlot))
+			body.WriteByte(0x44) // f64.const threshold
+			body.WriteFloat64(threshold)
+			body.WriteByte(0x66) // f64.ge
+			body.WriteByte(0x04) // if
+			body.WriteByte(0x40)
+			body.WriteByte(0x44) // f64.const digits
+			body.WriteFloat64(float64(digits))
+			body.WriteByte(0x21) // local.set dst
+			body.WriteVarUint(uint32(dstSlot))
+			body.WriteByte(0x0B) // end if
+			threshold *= 10.0
+		}
+
+		body.WriteByte(0x20) // local.get digits
+		body.WriteVarUint(uint32(dstSlot))
+		body.WriteByte(0x20) // local.get minus
+		body.WriteVarUint(uint32(minusSlot))
+		body.WriteByte(0xA0) // f64.add
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(dstSlot))
+	}
+
+	emitBoolStringLength := func(valueSlot int, dstSlot int) {
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(valueSlot))
+		body.WriteByte(0x44)
+		body.WriteFloat64(0.0)
+		body.WriteByte(0x62) // f64.ne
+		body.WriteByte(0x04) // if
+		body.WriteByte(0x40)
+		body.WriteByte(0x44)
+		body.WriteFloat64(4.0)
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(dstSlot))
+		body.WriteByte(0x05) // else
+		body.WriteByte(0x44)
+		body.WriteFloat64(5.0)
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(dstSlot))
+		body.WriteByte(0x0B)
+	}
+
+	emitValueStringLength := func(valueSlot int, dstSlot int, knownType stackType) {
+		switch knownType {
+		case stackTypeString, stackTypeInternedString:
+			emitStringMemoryLength(valueSlot, dstSlot)
+			return
+		case stackTypeNumber:
+			emitIntegerNumberStringLength(valueSlot, dstSlot)
+			return
+		case stackTypeBool:
+			emitBoolStringLength(valueSlot, dstSlot)
+			return
+		case stackTypeNull:
+			body.WriteByte(0x44)
+			body.WriteFloat64(4.0)
+			body.WriteByte(0x21)
+			body.WriteVarUint(uint32(dstSlot))
+			return
+		}
+
+		body.WriteByte(0x44) // default length 0 for unsupported runtime tags
+		body.WriteFloat64(0.0)
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(dstSlot))
+
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(tagSlot(valueSlot)))
+		body.WriteByte(0x44)
+		body.WriteFloat64(jitTagString)
+		body.WriteByte(0x61)
+		body.WriteByte(0x04)
+		body.WriteByte(0x40)
+		emitStringMemoryLength(valueSlot, dstSlot)
+		body.WriteByte(0x0B)
+
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(tagSlot(valueSlot)))
+		body.WriteByte(0x44)
+		body.WriteFloat64(jitTagNumber)
+		body.WriteByte(0x61)
+		body.WriteByte(0x04)
+		body.WriteByte(0x40)
+		emitIntegerNumberStringLength(valueSlot, dstSlot)
+		body.WriteByte(0x0B)
+
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(tagSlot(valueSlot)))
+		body.WriteByte(0x44)
+		body.WriteFloat64(jitTagBool)
+		body.WriteByte(0x61)
+		body.WriteByte(0x04)
+		body.WriteByte(0x40)
+		emitBoolStringLength(valueSlot, dstSlot)
+		body.WriteByte(0x0B)
+
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(tagSlot(valueSlot)))
+		body.WriteByte(0x44)
+		body.WriteFloat64(jitTagNull)
+		body.WriteByte(0x61)
+		body.WriteByte(0x04)
+		body.WriteByte(0x40)
+		body.WriteByte(0x44)
+		body.WriteFloat64(4.0)
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(dstSlot))
+		body.WriteByte(0x0B)
+	}
+
+	emitI32Const := func(v int32) {
+		body.WriteByte(0x41) // i32.const
+		body.WriteVarInt(int64(v))
+	}
+
+	emitI64Const := func(v int64) {
+		body.WriteByte(0x42) // i64.const
+		body.WriteVarInt(v)
+	}
+
+	emitIncrementI32Local := func(slot int, amount int32) {
+		body.WriteByte(0x20) // local.get
+		body.WriteVarUint(uint32(slot))
+		emitI32Const(amount)
+		body.WriteByte(0x6A) // i32.add
+		body.WriteByte(0x21) // local.set
+		body.WriteVarUint(uint32(slot))
+	}
+
+	emitWriteByteConstAndAdvance := func(dstPtrSlot int, b byte) {
+		body.WriteByte(0x20) // local.get dst
+		body.WriteVarUint(uint32(dstPtrSlot))
+		emitI32Const(int32(b))
+		body.WriteByte(0x3A) // i32.store8
+		body.WriteVarUint(0) // align
+		body.WriteVarUint(0) // offset
+		emitIncrementI32Local(dstPtrSlot, 1)
+	}
+
+	emitWriteStaticBytes := func(dstPtrSlot int, data []byte) {
+		for _, b := range data {
+			emitWriteByteConstAndAdvance(dstPtrSlot, b)
+		}
+	}
+
+	emitLoadStringLenI32 := func(valueSlot int, dstLenSlot int) {
+		body.WriteByte(0x20) // local.get string ptr as f64
+		body.WriteVarUint(uint32(valueSlot))
+		body.WriteByte(0xAA) // i32.trunc_f64_s
+		body.WriteByte(0x2B) // f64.load length at offset 8
+		body.WriteVarUint(3)
+		body.WriteVarUint(8)
+		body.WriteByte(0xAA) // i32.trunc_f64_s
+		body.WriteByte(0x21) // local.set dstLen
+		body.WriteVarUint(uint32(dstLenSlot))
+	}
+
+	emitCopyStringBytesAndAdvance := func(valueSlot int, dstPtrSlot int) {
+		// src = i32(value) + 16
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(valueSlot))
+		body.WriteByte(0xAA) // i32.trunc_f64_s
+		emitI32Const(16)
+		body.WriteByte(0x6A) // i32.add
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(joinSrcPtrSlot))
+
+		emitLoadStringLenI32(valueSlot, joinCopyLenSlot)
+
+		body.WriteByte(0x02) // block
+		body.WriteByte(0x40)
+		body.WriteByte(0x03) // loop
+		body.WriteByte(0x40)
+
+		body.WriteByte(0x20) // local.get len
+		body.WriteVarUint(uint32(joinCopyLenSlot))
+		body.WriteByte(0x45) // i32.eqz
+		body.WriteByte(0x0D) // br_if outer block
+		body.WriteVarUint(1)
+
+		body.WriteByte(0x20) // dst address
+		body.WriteVarUint(uint32(dstPtrSlot))
+		body.WriteByte(0x20) // src address
+		body.WriteVarUint(uint32(joinSrcPtrSlot))
+		body.WriteByte(0x2D) // i32.load8_u
+		body.WriteVarUint(0)
+		body.WriteVarUint(0)
+		body.WriteByte(0x3A) // i32.store8
+		body.WriteVarUint(0)
+		body.WriteVarUint(0)
+
+		emitIncrementI32Local(dstPtrSlot, 1)
+		emitIncrementI32Local(joinSrcPtrSlot, 1)
+
+		body.WriteByte(0x20) // len--
+		body.WriteVarUint(uint32(joinCopyLenSlot))
+		emitI32Const(1)
+		body.WriteByte(0x6B) // i32.sub
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(joinCopyLenSlot))
+
+		body.WriteByte(0x0C) // br loop
+		body.WriteVarUint(0)
+		body.WriteByte(0x0B) // end loop
+		body.WriteByte(0x0B) // end block
+	}
+
+	emitAbsIntegerNumberToI64 := func(valueSlot int, dstI64Slot int) {
+		body.WriteByte(0x20) // value < 0 ?
+		body.WriteVarUint(uint32(valueSlot))
+		body.WriteByte(0x44)
+		body.WriteFloat64(0.0)
+		body.WriteByte(0x63) // f64.lt
+		body.WriteByte(0x04) // if
+		body.WriteByte(0x40)
+
+		body.WriteByte(0x44) // 0 - value
+		body.WriteFloat64(0.0)
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(valueSlot))
+		body.WriteByte(0xA1) // f64.sub
+		body.WriteByte(0xB0) // i64.trunc_f64_s
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(dstI64Slot))
+
+		body.WriteByte(0x05) // else
+
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(valueSlot))
+		body.WriteByte(0xB0) // i64.trunc_f64_s
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(dstI64Slot))
+
+		body.WriteByte(0x0B) // end if
+	}
+
+	emitIntegerDigitCountNoSignI32 := func(srcI64Slot int, dstDigitsSlot int) {
+		emitI32Const(1)
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(dstDigitsSlot))
+
+		body.WriteByte(0x20) // tmp = n
+		body.WriteVarUint(uint32(srcI64Slot))
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(joinTmpI64Slot))
+
+		body.WriteByte(0x02) // block
+		body.WriteByte(0x40)
+		body.WriteByte(0x03) // loop
+		body.WriteByte(0x40)
+
+		body.WriteByte(0x20) // tmp >= 10
+		body.WriteVarUint(uint32(joinTmpI64Slot))
+		emitI64Const(10)
+		body.WriteByte(0x59) // i64.ge_s
+		body.WriteByte(0x45) // i32.eqz
+		body.WriteByte(0x0D) // br_if outer block
+		body.WriteVarUint(1)
+
+		body.WriteByte(0x20) // digits++
+		body.WriteVarUint(uint32(dstDigitsSlot))
+		emitI32Const(1)
+		body.WriteByte(0x6A)
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(dstDigitsSlot))
+
+		body.WriteByte(0x20) // tmp /= 10
+		body.WriteVarUint(uint32(joinTmpI64Slot))
+		emitI64Const(10)
+		body.WriteByte(0x7F) // i64.div_s
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(joinTmpI64Slot))
+
+		body.WriteByte(0x0C) // br loop
+		body.WriteVarUint(0)
+		body.WriteByte(0x0B) // end loop
+		body.WriteByte(0x0B) // end block
+	}
+
+	emitIntegerNumberStringLenI32 := func(valueSlot int, dstLenSlot int) {
+		emitAbsIntegerNumberToI64(valueSlot, joinNumSlot)
+		emitIntegerDigitCountNoSignI32(joinNumSlot, dstLenSlot)
+
+		body.WriteByte(0x20) // if value < 0, include '-'
+		body.WriteVarUint(uint32(valueSlot))
+		body.WriteByte(0x44)
+		body.WriteFloat64(0.0)
+		body.WriteByte(0x63) // f64.lt
+		body.WriteByte(0x04)
+		body.WriteByte(0x40)
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(dstLenSlot))
+		emitI32Const(1)
+		body.WriteByte(0x6A)
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(dstLenSlot))
+		body.WriteByte(0x0B)
+	}
+
+	emitBoolStringLenI32 := func(valueSlot int, dstLenSlot int) {
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(valueSlot))
+		body.WriteByte(0x44)
+		body.WriteFloat64(0.0)
+		body.WriteByte(0x62) // f64.ne
+		body.WriteByte(0x04)
+		body.WriteByte(0x40)
+		emitI32Const(4)
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(dstLenSlot))
+		body.WriteByte(0x05)
+		emitI32Const(5)
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(dstLenSlot))
+		body.WriteByte(0x0B)
+	}
+
+	emitFastJoinPartLenI32 := func(valueSlot int, knownType stackType, dstLenSlot int) {
+		switch knownType {
+		case stackTypeString, stackTypeInternedString:
+			emitLoadStringLenI32(valueSlot, dstLenSlot)
+		case stackTypeNumber:
+			emitIntegerNumberStringLenI32(valueSlot, dstLenSlot)
+		case stackTypeBool:
+			emitBoolStringLenI32(valueSlot, dstLenSlot)
+		case stackTypeNull:
+			emitI32Const(4)
+			body.WriteByte(0x21)
+			body.WriteVarUint(uint32(dstLenSlot))
+		default:
+			emitI32Const(0)
+			body.WriteByte(0x21)
+			body.WriteVarUint(uint32(dstLenSlot))
+		}
+	}
+
+	emitWriteIntegerNumberPartAndAdvance := func(valueSlot int, dstPtrSlot int) {
+		// Leading minus sign.
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(valueSlot))
+		body.WriteByte(0x44)
+		body.WriteFloat64(0.0)
+		body.WriteByte(0x63) // f64.lt
+		body.WriteByte(0x04)
+		body.WriteByte(0x40)
+		emitWriteByteConstAndAdvance(dstPtrSlot, '-')
+		body.WriteByte(0x0B)
+
+		emitAbsIntegerNumberToI64(valueSlot, joinNumSlot)
+		emitIntegerDigitCountNoSignI32(joinNumSlot, joinDigitsSlot)
+
+		// pos = dst + digits - 1
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(dstPtrSlot))
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(joinDigitsSlot))
+		body.WriteByte(0x6A)
+		emitI32Const(1)
+		body.WriteByte(0x6B)
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(joinPosSlot))
+
+		// Special-case zero.
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(joinNumSlot))
+		body.WriteByte(0x50) // i64.eqz
+		body.WriteByte(0x04)
+		body.WriteByte(0x40)
+		emitWriteByteConstAndAdvance(dstPtrSlot, '0')
+		body.WriteByte(0x05) // else
+
+		body.WriteByte(0x02) // block
+		body.WriteByte(0x40)
+		body.WriteByte(0x03) // loop
+		body.WriteByte(0x40)
+
+		body.WriteByte(0x20) // if n == 0 break
+		body.WriteVarUint(uint32(joinNumSlot))
+		body.WriteByte(0x50) // i64.eqz
+		body.WriteByte(0x0D)
+		body.WriteVarUint(1)
+
+		body.WriteByte(0x20) // digit = n % 10
+		body.WriteVarUint(uint32(joinNumSlot))
+		emitI64Const(10)
+		body.WriteByte(0x81) // i64.rem_s
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(joinDigitSlot))
+
+		body.WriteByte(0x20) // store digit
+		body.WriteVarUint(uint32(joinPosSlot))
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(joinDigitSlot))
+		body.WriteByte(0xA7) // i32.wrap_i64
+		emitI32Const(48)
+		body.WriteByte(0x6A) // i32.add
+		body.WriteByte(0x3A) // i32.store8
+		body.WriteVarUint(0)
+		body.WriteVarUint(0)
+
+		body.WriteByte(0x20) // pos--
+		body.WriteVarUint(uint32(joinPosSlot))
+		emitI32Const(1)
+		body.WriteByte(0x6B)
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(joinPosSlot))
+
+		body.WriteByte(0x20) // n /= 10
+		body.WriteVarUint(uint32(joinNumSlot))
+		emitI64Const(10)
+		body.WriteByte(0x7F) // i64.div_s
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(joinNumSlot))
+
+		body.WriteByte(0x0C)
+		body.WriteVarUint(0)
+		body.WriteByte(0x0B) // end loop
+		body.WriteByte(0x0B) // end block
+
+		// dst += digits
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(dstPtrSlot))
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(joinDigitsSlot))
+		body.WriteByte(0x6A)
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(dstPtrSlot))
+
+		body.WriteByte(0x0B) // end zero/non-zero if
+	}
+
+	emitWriteFastJoinPartAndAdvance := func(valueSlot int, knownType stackType, dstPtrSlot int) {
+		switch knownType {
+		case stackTypeString, stackTypeInternedString:
+			emitCopyStringBytesAndAdvance(valueSlot, dstPtrSlot)
+		case stackTypeNumber:
+			emitWriteIntegerNumberPartAndAdvance(valueSlot, dstPtrSlot)
+		case stackTypeBool:
+			body.WriteByte(0x20)
+			body.WriteVarUint(uint32(valueSlot))
+			body.WriteByte(0x44)
+			body.WriteFloat64(0.0)
+			body.WriteByte(0x62) // f64.ne
+			body.WriteByte(0x04)
+			body.WriteByte(0x40)
+			emitWriteStaticBytes(dstPtrSlot, []byte("true"))
+			body.WriteByte(0x05)
+			emitWriteStaticBytes(dstPtrSlot, []byte("false"))
+			body.WriteByte(0x0B)
+		case stackTypeNull:
+			emitWriteStaticBytes(dstPtrSlot, []byte("null"))
+		}
+	}
+
+	emitMarkJitAllocation := func(addrSlot int) {
+		// byteIdx = addr >> 6
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(addrSlot))
+		emitI32Const(6)
+		body.WriteByte(0x76) // i32.shr_u
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(joinByteIdxSlot))
+
+		// bitOffset = (addr >> 3) & 7
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(addrSlot))
+		emitI32Const(3)
+		body.WriteByte(0x76) // i32.shr_u
+		emitI32Const(7)
+		body.WriteByte(0x71) // i32.and
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(joinBitOffsetSlot))
+
+		// mask = 1 << bitOffset
+		emitI32Const(1)
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(joinBitOffsetSlot))
+		body.WriteByte(0x74) // i32.shl
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(joinMaskSlot))
+
+		// if byteIdx is inside the allocator bitset, memory[byteIdx] |= mask.
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(joinByteIdxSlot))
+		emitI32Const(2 * 1024 * 1024)
+		body.WriteByte(0x49) // i32.lt_u
+		body.WriteByte(0x04)
+		body.WriteByte(0x40)
+
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(joinByteIdxSlot))
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(joinByteIdxSlot))
+		body.WriteByte(0x2D) // i32.load8_u
+		body.WriteVarUint(0)
+		body.WriteVarUint(0)
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(joinMaskSlot))
+		body.WriteByte(0x72) // i32.or
+		body.WriteByte(0x3A) // i32.store8
+		body.WriteVarUint(0)
+		body.WriteVarUint(0)
+
+		body.WriteByte(0x0B) // end bitset bounds check
+	}
+
+	emitDynamicJoinCall := func(count int, resultSlot int) bool {
+		if count != 3 && count != 4 {
+			return false
+		}
+		for part := 0; part < count; part++ {
+			slot := resultSlot + part
+			body.WriteByte(0x20)
+			body.WriteVarUint(uint32(tagSlot(slot)))
+			body.WriteByte(0x20)
+			body.WriteVarUint(uint32(slot))
+		}
+		body.WriteByte(0x10) // call
+		if count == 3 {
+			body.WriteVarUint(jitImportDynamicJoin3)
+		} else {
+			body.WriteVarUint(jitImportDynamicJoin4)
+		}
+		return true
+	}
+
+	emitFallbackStringJoinValue := func(count int, resultSlot int) {
+		if emitDynamicJoinCall(count, resultSlot) {
+			return
+		}
+
+		// Generic fallback for 5+ parts: perform Tiny's normal dynamic + chain.
+		// This keeps correctness for objects/arrays/non-integer floats while the
+		// common primitive cases are handled by the inline Wasm path below.
+		emitCopyTagged(stringJoinResultSlot, resultSlot)
+		for part := 1; part < count; part++ {
+			nextSlot := resultSlot + part
+			emitDynamicAddTagged(stringJoinResultSlot, nextSlot, stringJoinScratchSlot)
+			emitCopyTagged(stringJoinResultSlot, stringJoinScratchSlot)
+		}
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(stringJoinResultSlot))
+	}
+
+	fastJoinStaticTypeOK := func(t stackType) bool {
+		switch t {
+		case stackTypeString, stackTypeInternedString, stackTypeNumber, stackTypeBool, stackTypeNull, stackTypeUnknown:
+			return true
+		default:
+			return false
+		}
+	}
+
+	emitNumberCanBeInlineStringifiedI32 := func(valueSlot int) {
+		// This inline path intentionally formats only integer-valued f64 numbers.
+		// If the number is 1.5, NaN, +Inf, etc., fall back to Go so FloatToString
+		// remains the single source of truth for non-integers.
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(valueSlot))
+		body.WriteByte(0x9D) // f64.trunc
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(valueSlot))
+		body.WriteByte(0x61) // f64.eq
+
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(valueSlot))
+		body.WriteByte(0x44)
+		body.WriteFloat64(-9223372036854774784.0)
+		body.WriteByte(0x64) // f64.gt
+		body.WriteByte(0x71) // i32.and
+
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(valueSlot))
+		body.WriteByte(0x44)
+		body.WriteFloat64(9223372036854774784.0)
+		body.WriteByte(0x65) // f64.le
+		body.WriteByte(0x71) // i32.and
+	}
+
+	emitFastJoinPartCanInlineI32 := func(valueSlot int, knownType stackType) {
+		switch knownType {
+		case stackTypeString, stackTypeInternedString, stackTypeBool, stackTypeNull:
+			emitI32Const(1)
+		case stackTypeNumber:
+			emitNumberCanBeInlineStringifiedI32(valueSlot)
+		case stackTypeUnknown:
+			// Runtime guard:
+			//   string | bool | null | integer-valued number
+			body.WriteByte(0x20)
+			body.WriteVarUint(uint32(tagSlot(valueSlot)))
+			body.WriteByte(0x44)
+			body.WriteFloat64(jitTagString)
+			body.WriteByte(0x61) // f64.eq
+
+			body.WriteByte(0x20)
+			body.WriteVarUint(uint32(tagSlot(valueSlot)))
+			body.WriteByte(0x44)
+			body.WriteFloat64(jitTagBool)
+			body.WriteByte(0x61)
+			body.WriteByte(0x72) // i32.or
+
+			body.WriteByte(0x20)
+			body.WriteVarUint(uint32(tagSlot(valueSlot)))
+			body.WriteByte(0x44)
+			body.WriteFloat64(jitTagNull)
+			body.WriteByte(0x61)
+			body.WriteByte(0x72) // i32.or
+
+			body.WriteByte(0x20)
+			body.WriteVarUint(uint32(tagSlot(valueSlot)))
+			body.WriteByte(0x44)
+			body.WriteFloat64(jitTagNumber)
+			body.WriteByte(0x61)
+			body.WriteByte(0x04) // if tag == number: result i32
+			body.WriteByte(0x7F)
+			emitNumberCanBeInlineStringifiedI32(valueSlot)
+			body.WriteByte(0x05) // else
+			emitI32Const(0)
+			body.WriteByte(0x0B) // end if
+			body.WriteByte(0x72) // i32.or
+		default:
+			emitI32Const(0)
+		}
+	}
+
+	emitRuntimeFastJoinPartLenI32 := func(valueSlot int, knownType stackType, dstLenSlot int) {
+		switch knownType {
+		case stackTypeString, stackTypeInternedString, stackTypeNumber, stackTypeBool, stackTypeNull:
+			emitFastJoinPartLenI32(valueSlot, knownType, dstLenSlot)
+			return
+		}
+
+		// Unknown-but-guarded primitive value. Set a harmless default first, then
+		// overwrite it in the matching runtime-tag branch.
+		emitI32Const(0)
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(dstLenSlot))
+
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(tagSlot(valueSlot)))
+		body.WriteByte(0x44)
+		body.WriteFloat64(jitTagString)
+		body.WriteByte(0x61)
+		body.WriteByte(0x04)
+		body.WriteByte(0x40)
+		emitLoadStringLenI32(valueSlot, dstLenSlot)
+		body.WriteByte(0x0B)
+
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(tagSlot(valueSlot)))
+		body.WriteByte(0x44)
+		body.WriteFloat64(jitTagNumber)
+		body.WriteByte(0x61)
+		body.WriteByte(0x04)
+		body.WriteByte(0x40)
+		emitIntegerNumberStringLenI32(valueSlot, dstLenSlot)
+		body.WriteByte(0x0B)
+
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(tagSlot(valueSlot)))
+		body.WriteByte(0x44)
+		body.WriteFloat64(jitTagBool)
+		body.WriteByte(0x61)
+		body.WriteByte(0x04)
+		body.WriteByte(0x40)
+		emitBoolStringLenI32(valueSlot, dstLenSlot)
+		body.WriteByte(0x0B)
+
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(tagSlot(valueSlot)))
+		body.WriteByte(0x44)
+		body.WriteFloat64(jitTagNull)
+		body.WriteByte(0x61)
+		body.WriteByte(0x04)
+		body.WriteByte(0x40)
+		emitI32Const(4)
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(dstLenSlot))
+		body.WriteByte(0x0B)
+	}
+
+	emitWriteRuntimeFastJoinPartAndAdvance := func(valueSlot int, knownType stackType, dstPtrSlot int) {
+		switch knownType {
+		case stackTypeString, stackTypeInternedString, stackTypeNumber, stackTypeBool, stackTypeNull:
+			emitWriteFastJoinPartAndAdvance(valueSlot, knownType, dstPtrSlot)
+			return
+		}
+
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(tagSlot(valueSlot)))
+		body.WriteByte(0x44)
+		body.WriteFloat64(jitTagString)
+		body.WriteByte(0x61)
+		body.WriteByte(0x04)
+		body.WriteByte(0x40)
+		emitCopyStringBytesAndAdvance(valueSlot, dstPtrSlot)
+		body.WriteByte(0x0B)
+
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(tagSlot(valueSlot)))
+		body.WriteByte(0x44)
+		body.WriteFloat64(jitTagNumber)
+		body.WriteByte(0x61)
+		body.WriteByte(0x04)
+		body.WriteByte(0x40)
+		emitWriteIntegerNumberPartAndAdvance(valueSlot, dstPtrSlot)
+		body.WriteByte(0x0B)
+
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(tagSlot(valueSlot)))
+		body.WriteByte(0x44)
+		body.WriteFloat64(jitTagBool)
+		body.WriteByte(0x61)
+		body.WriteByte(0x04)
+		body.WriteByte(0x40)
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(valueSlot))
+		body.WriteByte(0x44)
+		body.WriteFloat64(0.0)
+		body.WriteByte(0x62) // f64.ne
+		body.WriteByte(0x04)
+		body.WriteByte(0x40)
+		emitWriteStaticBytes(dstPtrSlot, []byte("true"))
+		body.WriteByte(0x05)
+		emitWriteStaticBytes(dstPtrSlot, []byte("false"))
+		body.WriteByte(0x0B)
+		body.WriteByte(0x0B)
+
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(tagSlot(valueSlot)))
+		body.WriteByte(0x44)
+		body.WriteFloat64(jitTagNull)
+		body.WriteByte(0x61)
+		body.WriteByte(0x04)
+		body.WriteByte(0x40)
+		emitWriteStaticBytes(dstPtrSlot, []byte("null"))
+		body.WriteByte(0x0B)
+	}
+
+	emitFastStringJoinIfPossible := func(count int, resultSlot int, partTypes []stackType) bool {
+		if count <= 0 || len(partTypes) != count {
+			return false
+		}
+		for _, t := range partTypes {
+			if !fastJoinStaticTypeOK(t) {
+				return false
+			}
+		}
+
+		// Guard all parts. Known strings/bools/nulls always pass. Known numbers pass
+		// only when integer-valued. Unknown parts pass at runtime only if their tag is
+		// string/bool/null, or integer-valued number. Everything else falls back.
+		emitI32Const(1)
+		for part, t := range partTypes {
+			slot := resultSlot + part
+			emitFastJoinPartCanInlineI32(slot, t)
+			body.WriteByte(0x71) // i32.and
+		}
+
+		body.WriteByte(0x04) // if (result f64)
+		body.WriteByte(0x7C)
+
+		// totalLen = sum(part string lengths)
+		emitI32Const(0)
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(joinLenSlot))
+		for part, t := range partTypes {
+			slot := resultSlot + part
+			emitRuntimeFastJoinPartLenI32(slot, t, joinPartLenSlot)
+			body.WriteByte(0x20)
+			body.WriteVarUint(uint32(joinLenSlot))
+			body.WriteByte(0x20)
+			body.WriteVarUint(uint32(joinPartLenSlot))
+			body.WriteByte(0x6A) // i32.add
+			body.WriteByte(0x21)
+			body.WriteVarUint(uint32(joinLenSlot))
+		}
+
+		// size = align8(16 + totalLen) == ((totalLen + 23) / 8) * 8
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(joinLenSlot))
+		emitI32Const(23)
+		body.WriteByte(0x6A) // i32.add
+		emitI32Const(8)
+		body.WriteByte(0x6E) // i32.div_u
+		emitI32Const(8)
+		body.WriteByte(0x6C) // i32.mul
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(joinSizeSlot))
+
+		// addr = i32(__heap_top)
+		body.WriteByte(0x23) // global.get __heap_top
+		body.WriteVarUint(0)
+		body.WriteByte(0xAA) // i32.trunc_f64_s
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(joinAddrSlot))
+
+		emitMarkJitAllocation(joinAddrSlot)
+
+		// __heap_top = f64(addr + size)
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(joinAddrSlot))
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(joinSizeSlot))
+		body.WriteByte(0x6A)
+		body.WriteByte(0xB7) // f64.convert_i32_s
+		body.WriteByte(0x24) // global.set
+		body.WriteVarUint(0)
+
+		// string header: tag and length
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(joinAddrSlot))
+		body.WriteByte(0x44)
+		body.WriteFloat64(jitTagString)
+		body.WriteByte(0x39) // f64.store
+		body.WriteVarUint(3)
+		body.WriteVarUint(0)
+
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(joinAddrSlot))
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(joinLenSlot))
+		body.WriteByte(0xB7) // f64.convert_i32_s
+		body.WriteByte(0x39) // f64.store length
+		body.WriteVarUint(3)
+		body.WriteVarUint(8)
+
+		// dst = addr + 16
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(joinAddrSlot))
+		emitI32Const(16)
+		body.WriteByte(0x6A)
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(joinDstPtrSlot))
+
+		for part, t := range partTypes {
+			emitWriteRuntimeFastJoinPartAndAdvance(resultSlot+part, t, joinDstPtrSlot)
+		}
+
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(joinAddrSlot))
+		body.WriteByte(0xB7) // f64.convert_i32_s
+
+		body.WriteByte(0x05) // else: exact old behavior
+		emitFallbackStringJoinValue(count, resultSlot)
+
+		body.WriteByte(0x0B) // end if
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(resultSlot))
+		emitSetTagConst(resultSlot, jitTagString)
+		return true
+	}
+
+	emitTruthyI32 := func(valueSlot int, t stackType) {
+		// For all known non-string Tiny values currently represented in JIT,
+		// truthiness is just value != 0. Only strings need length check
+		// because empty string is false and non-empty string is true.
+		if t == stackTypeNumber || t == stackTypeBool || t == stackTypeObject || t == stackTypeArray {
+			body.WriteByte(0x20) // local.get value
+			body.WriteVarUint(uint32(valueSlot))
+			body.WriteByte(0x44) // f64.const 0
+			body.WriteFloat64(0.0)
+			body.WriteByte(0x62) // f64.ne -> i32
+			return
+		}
+
+		if t == stackTypeString || t == stackTypeInternedString {
+			// It is definitely a string.
+			// Truthiness is: value != 0 && *(value + 8) != 0
+			body.WriteByte(0x20) // local.get value
+			body.WriteVarUint(uint32(valueSlot))
+			body.WriteByte(0x44) // f64.const 0
+			body.WriteFloat64(0.0)
+			body.WriteByte(0x62) // f64.ne
+
+			body.WriteByte(0x04) // if (result i32)
+			body.WriteByte(0x7F) // i32
+
+			body.WriteByte(0x20) // local.get value
+			body.WriteVarUint(uint32(valueSlot))
+			body.WriteByte(0xAA) // i32.trunc_f64_s
+			body.WriteByte(0x2B) // f64.load
+			body.WriteVarUint(3)
+			body.WriteVarUint(8) // offset 8 (length)
+			body.WriteByte(0x44) // f64.const 0
+			body.WriteFloat64(0.0)
+			body.WriteByte(0x62) // f64.ne
+
+			body.WriteByte(0x05) // else
+			body.WriteByte(0x41) // i32.const
+			body.WriteByte(0x00) // 0
+			body.WriteByte(0x0B) // end
+			return
+		}
+
+		// For unknown types, check runtime tag
+		// if tag == 6.0 (String)
+		body.WriteByte(0x20) // local.get tag
+		body.WriteVarUint(uint32(tagSlot(valueSlot)))
+		body.WriteByte(0x44) // f64.const 6.0
+		body.WriteFloat64(jitTagString)
+		body.WriteByte(0x61) // f64.eq
+
+		body.WriteByte(0x04) // if (result i32)
+		body.WriteByte(0x7F) // i32
+
+		// string path: value != 0 && *(value + 8) != 0
+		body.WriteByte(0x20) // local.get value
+		body.WriteVarUint(uint32(valueSlot))
+		body.WriteByte(0x44) // f64.const 0
+		body.WriteFloat64(0.0)
+		body.WriteByte(0x62) // f64.ne
+
+		body.WriteByte(0x04) // if (result i32)
+		body.WriteByte(0x7F) // i32
+
+		body.WriteByte(0x20) // local.get value
+		body.WriteVarUint(uint32(valueSlot))
+		body.WriteByte(0xAA) // i32.trunc_f64_s
+		body.WriteByte(0x2B) // f64.load
+		body.WriteVarUint(3)
+		body.WriteVarUint(8) // offset 8 (length)
+		body.WriteByte(0x44) // f64.const 0
+		body.WriteFloat64(0.0)
+		body.WriteByte(0x62) // f64.ne
+
+		body.WriteByte(0x05) // else
+		body.WriteByte(0x41) // i32.const
+		body.WriteByte(0x00) // 0
+		body.WriteByte(0x0B) // end
+
+		body.WriteByte(0x05) // else
+
+		// non-string path: value != 0
+		body.WriteByte(0x20) // local.get value
+		body.WriteVarUint(uint32(valueSlot))
+		body.WriteByte(0x44) // f64.const 0
+		body.WriteFloat64(0.0)
+		body.WriteByte(0x62) // f64.ne
+
+		body.WriteByte(0x0B) // end
+	}
+
+	emitFastModValue := func(leftSlot int, rightSlot int) {
+		// Fast integer modulo when both operands are integer-valued.
+		// This matters a lot for hot loops like i % 2 / i % 3.
+		// If either side is non-integer, fall back to the old float formula.
+		// condition: trunc(a)==a && trunc(b)==b && b!=0
+		body.WriteByte(0x20) // local.get a
+		body.WriteVarUint(uint32(leftSlot))
+		body.WriteByte(0x9D) // f64.trunc
+		body.WriteByte(0x20) // local.get a
+		body.WriteVarUint(uint32(leftSlot))
+		body.WriteByte(0x61) // f64.eq -> i32
+
+		body.WriteByte(0x20) // local.get b
+		body.WriteVarUint(uint32(rightSlot))
+		body.WriteByte(0x9D) // f64.trunc
+		body.WriteByte(0x20) // local.get b
+		body.WriteVarUint(uint32(rightSlot))
+		body.WriteByte(0x61) // f64.eq -> i32
+
+		body.WriteByte(0x71) // i32.and
+
+		body.WriteByte(0x20) // local.get b
+		body.WriteVarUint(uint32(rightSlot))
+		body.WriteByte(0x44) // f64.const 0
+		body.WriteFloat64(0.0)
+		body.WriteByte(0x62) // f64.ne -> i32
+
+		body.WriteByte(0x71) // i32.and
+
+		body.WriteByte(0x04) // if
+		body.WriteByte(0x7C) // result f64
+
+		// integer path: f64(i64(a) % i64(b))
+		body.WriteByte(0x20) // local.get a
+		body.WriteVarUint(uint32(leftSlot))
+		body.WriteByte(0xB0) // i64.trunc_f64_s
+		body.WriteByte(0x20) // local.get b
+		body.WriteVarUint(uint32(rightSlot))
+		body.WriteByte(0xB0) // i64.trunc_f64_s
+		body.WriteByte(0x81) // i64.rem_s
+		body.WriteByte(0xB9) // f64.convert_i64_s
+
+		body.WriteByte(0x05) // else
+
+		// float fallback: a - trunc(a / b) * b
+		body.WriteByte(0x20) // local.get a
+		body.WriteVarUint(uint32(leftSlot))
+		body.WriteByte(0x20) // local.get a
+		body.WriteVarUint(uint32(leftSlot))
+		body.WriteByte(0x20) // local.get b
+		body.WriteVarUint(uint32(rightSlot))
+		body.WriteByte(0xA3) // f64.div
+		body.WriteByte(0x9D) // f64.trunc
+		body.WriteByte(0x20) // local.get b
+		body.WriteVarUint(uint32(rightSlot))
+		body.WriteByte(0xA2) // f64.mul
+		body.WriteByte(0xA1) // f64.sub
+
+		body.WriteByte(0x0B) // end
+	}
+
+	emitFastModValueConst := func(leftSlot int, _ float64) {
+		// Since right is a known non-zero integer constant, we can simplify the check to just:
+		// trunc(a) == a
+		body.WriteByte(0x20) // local.get a
+		body.WriteVarUint(uint32(leftSlot))
+		body.WriteByte(0x9D) // f64.trunc
+		body.WriteByte(0x20) // local.get a
+		body.WriteVarUint(uint32(leftSlot))
+		body.WriteByte(0x61) // f64.eq -> i32
+
+		body.WriteByte(0x04) // if
+		body.WriteByte(0x7C) // result f64
+
+		// integer path: f64(i64(a) % constant)
+		body.WriteByte(0x20) // local.get a
+		body.WriteVarUint(uint32(leftSlot))
+		body.WriteByte(0xB0) // i64.trunc_f64_s
+		body.WriteByte(0x20) // local.get temp
+		body.WriteVarUint(uint32(tempPtrSlot))
+		body.WriteByte(0xB0) // i64.trunc_f64_s
+		body.WriteByte(0x81) // i64.rem_s
+		body.WriteByte(0xB9) // f64.convert_i64_s
+
+		body.WriteByte(0x05) // else
+
+		// float fallback: a - trunc(a / constant) * constant
+		body.WriteByte(0x20) // local.get a
+		body.WriteVarUint(uint32(leftSlot))
+		body.WriteByte(0x20) // local.get a
+		body.WriteVarUint(uint32(leftSlot))
+		body.WriteByte(0x20) // local.get temp
+		body.WriteVarUint(uint32(tempPtrSlot))
+		body.WriteByte(0xA3) // f64.div
+		body.WriteByte(0x9D) // f64.trunc
+		body.WriteByte(0x20) // local.get temp
+		body.WriteVarUint(uint32(tempPtrSlot))
+		body.WriteByte(0xA2) // f64.mul
+		body.WriteByte(0xA1) // f64.sub
+
+		body.WriteByte(0x0B) // end
+	}
+
+	emitUnaryMath := func(sp int, wasmOp byte) {
+		slot := stackBase + sp - 1
+
+		body.WriteByte(0x20) // local.get
+		body.WriteVarUint(uint32(slot))
+
+		body.WriteByte(wasmOp)
+
+		body.WriteByte(0x21) // local.set
+		body.WriteVarUint(uint32(slot))
+
+		emitSetTagConst(slot, jitTagNumber)
+	}
+
+	emitPowCoreValue := func(leftSlot int, rightSlot int) {
+		// Condition:
+		// exponent is integer && exponent >= 0
+		//
+		// trunc(exp) == exp
+		body.WriteByte(0x20) // local.get exp
+		body.WriteVarUint(uint32(rightSlot))
+		body.WriteByte(0x9D) // f64.trunc
+
+		body.WriteByte(0x20) // local.get exp
+		body.WriteVarUint(uint32(rightSlot))
+
+		body.WriteByte(0x61) // f64.eq
+
+		// exp >= 0
+		body.WriteByte(0x20) // local.get exp
+		body.WriteVarUint(uint32(rightSlot))
+
+		body.WriteByte(0x44) // f64.const 0
+		body.WriteFloat64(0.0)
+
+		body.WriteByte(0x66) // f64.ge
+
+		body.WriteByte(0x71) // i32.and
+
+		// if integer non-negative exponent, result f64
+		body.WriteByte(0x04) // if
+		body.WriteByte(0x7C) // result f64
+
+		// result = 1
+		body.WriteByte(0x44) // f64.const
+		body.WriteFloat64(1.0)
+		body.WriteByte(0x21) // local.set result
+		body.WriteVarUint(uint32(powResultSlot))
+
+		// base = left
+		body.WriteByte(0x20) // local.get left
+		body.WriteVarUint(uint32(leftSlot))
+		body.WriteByte(0x21) // local.set base
+		body.WriteVarUint(uint32(powBaseSlot))
+
+		// exp = trunc(right)
+		body.WriteByte(0x20) // local.get right
+		body.WriteVarUint(uint32(rightSlot))
+		body.WriteByte(0x9D) // f64.trunc
+		body.WriteByte(0x21) // local.set exp
+		body.WriteVarUint(uint32(powExpSlot))
+
+		// block
+		body.WriteByte(0x02)
+		body.WriteByte(0x40)
+
+		// loop
+		body.WriteByte(0x03)
+		body.WriteByte(0x40)
+
+		// if !(exp > 0) break
+		body.WriteByte(0x20) // local.get exp
+		body.WriteVarUint(uint32(powExpSlot))
+		body.WriteByte(0x44) // f64.const 0
+		body.WriteFloat64(0.0)
+		body.WriteByte(0x64) // f64.gt
+
+		body.WriteByte(0x45) // i32.eqz
+		body.WriteByte(0x0D) // br_if
+		body.WriteVarUint(1) // break outer block
+
+		// odd check:
+		// exp - floor(exp / 2) * 2 != 0
+		body.WriteByte(0x20) // local.get exp
+		body.WriteVarUint(uint32(powExpSlot))
+
+		body.WriteByte(0x20) // local.get exp
+		body.WriteVarUint(uint32(powExpSlot))
+		body.WriteByte(0x44) // f64.const 2
+		body.WriteFloat64(2.0)
+		body.WriteByte(0xA3) // f64.div
+		body.WriteByte(0x9C) // f64.floor
+		body.WriteByte(0x44) // f64.const 2
+		body.WriteFloat64(2.0)
+		body.WriteByte(0xA2) // f64.mul
+
+		body.WriteByte(0xA1) // f64.sub
+
+		body.WriteByte(0x44) // f64.const 0
+		body.WriteFloat64(0.0)
+
+		body.WriteByte(0x62) // f64.ne
+
+		// if odd
+		body.WriteByte(0x04)
+		body.WriteByte(0x40)
+
+		// result = result * base
+		body.WriteByte(0x20) // local.get result
+		body.WriteVarUint(uint32(powResultSlot))
+		body.WriteByte(0x20) // local.get base
+		body.WriteVarUint(uint32(powBaseSlot))
+		body.WriteByte(0xA2) // f64.mul
+		body.WriteByte(0x21) // local.set result
+		body.WriteVarUint(uint32(powResultSlot))
+
+		body.WriteByte(0x0B) // end if odd
+
+		// base = base * base
+		body.WriteByte(0x20) // local.get base
+		body.WriteVarUint(uint32(powBaseSlot))
+		body.WriteByte(0x20) // local.get base
+		body.WriteVarUint(uint32(powBaseSlot))
+		body.WriteByte(0xA2) // f64.mul
+		body.WriteByte(0x21) // local.set base
+		body.WriteVarUint(uint32(powBaseSlot))
+
+		// exp = floor(exp / 2)
+		body.WriteByte(0x20) // local.get exp
+		body.WriteVarUint(uint32(powExpSlot))
+		body.WriteByte(0x44) // f64.const 2
+		body.WriteFloat64(2.0)
+		body.WriteByte(0xA3) // f64.div
+		body.WriteByte(0x9C) // f64.floor
+		body.WriteByte(0x21) // local.set exp
+		body.WriteVarUint(uint32(powExpSlot))
+
+		// continue loop
+		body.WriteByte(0x0C) // br
+		body.WriteVarUint(0)
+
+		body.WriteByte(0x0B) // end loop
+		body.WriteByte(0x0B) // end block
+
+		// final value from integer pow path
+		body.WriteByte(0x20) // local.get result
+		body.WriteVarUint(uint32(powResultSlot))
+
+		// else: fallback to host math_pow
+		body.WriteByte(0x05)
+
+		body.WriteByte(0x20) // local.get left
+		body.WriteVarUint(uint32(leftSlot))
+
+		body.WriteByte(0x20) // local.get right
+		body.WriteVarUint(uint32(rightSlot))
+
+		body.WriteByte(0x10) // call
+		body.WriteVarUint(jitImportMathPow)
+
+		body.WriteByte(0x0B) // end if
+	}
+
+	emitPow := func(sp int) {
+		leftSlot := stackBase + sp - 2
+		rightSlot := stackBase + sp - 1
+
+		// Fast overflow shortcut:
+		//
+		// if base >= 20000 && exponent >= 72:
+		//     return +Inf
+		//
+		// This is safe because 20000^72 is bigger than max float64.
+		// It catches your benchmark around i = 144.
+		body.WriteByte(0x20) // local.get base
+		body.WriteVarUint(uint32(leftSlot))
+		body.WriteByte(0x44) // f64.const
+		body.WriteFloat64(20000.0)
+		body.WriteByte(0x66) // f64.ge -> i32
+
+		body.WriteByte(0x20) // local.get exponent
+		body.WriteVarUint(uint32(rightSlot))
+		body.WriteByte(0x44) // f64.const
+		body.WriteFloat64(72.0)
+		body.WriteByte(0x66) // f64.ge -> i32
+
+		body.WriteByte(0x71) // i32.and
+
+		// if (base >= 20000 && exponent >= 72) result f64
+		body.WriteByte(0x04) // if
+		body.WriteByte(0x7C) // result f64
+
+		// then: +Infinity
+		body.WriteByte(0x44) // f64.const
+		body.WriteFloat64(math.Inf(1))
+
+		// else: normal pow path
+		body.WriteByte(0x05) // else
+
+		emitPowCoreValue(leftSlot, rightSlot)
+
+		body.WriteByte(0x0B) // end if
+
+		// Store final result into left stack slot.
+		body.WriteByte(0x21) // local.set left
+		body.WriteVarUint(uint32(leftSlot))
+
+		emitSetTagConst(leftSlot, jitTagNumber)
+	}
 
 	typeStack := make([]stackType, maxSp+16)
+	inferredParams := inferParamTypes(vm, fn, currentReturnTypes, currentParamTypes)
 	localTypes := make([]stackType, fn.LocalCount)
+	for i := 0; i < len(fn.Params) && i < len(localTypes); i++ {
+		localTypes[i] = inferredParams[i]
+		emitSetTagFromType(i, localTypes[i])
+	}
 
 	for i, instr := range fn.Instructions {
 		sp := spArray[i]
+
+		unaryTypeBefore := stackTypeUnknown
+		leftTypeBefore := stackTypeUnknown
+		rightTypeBefore := stackTypeUnknown
+
+		if sp >= 1 {
+			unaryTypeBefore = typeStack[sp-1]
+		}
+		if sp >= 2 {
+			leftTypeBefore = typeStack[sp-2]
+			rightTypeBefore = typeStack[sp-1]
+		}
+
+		var stringJoinPartTypes []stackType
+		if instr.Op == OP_STRING_JOIN {
+			count := getStringJoinCount(instr)
+			if count > 0 && sp >= count {
+				stringJoinPartTypes = make([]stackType, count)
+				for part := 0; part < count; part++ {
+					stringJoinPartTypes[part] = typeStack[sp-count+part]
+				}
+			}
+		}
+
 		switch instr.Op {
+		case OP_MATH_FLOOR, OP_MATH_CEIL, OP_MATH_SQRT, OP_MATH_ABS:
+			if sp >= 1 {
+				typeStack[sp-1] = stackTypeNumber
+			}
+		case OP_PRINT:
+			info := instr.Value.(PrintInfo)
+			dest := sp - info.ArgCount
+
+			if dest >= 0 && dest < len(typeStack) {
+				typeStack[dest] = stackTypeNull // null result
+			}
+		case OP_MATH_POW:
+			if sp >= 2 {
+				typeStack[sp-2] = stackTypeNumber
+			}
 		case OP_CONST:
 			if sp < len(typeStack) {
-				if instr.IsInt {
+				if isNullConstant(instr.Value) {
+					typeStack[sp] = stackTypeNull
+				} else if instr.IsInt {
 					typeStack[sp] = stackTypeNumber
+				} else if _, isStr := instr.Value.(string); isStr {
+					typeStack[sp] = stackTypeString
 				} else if _, isBool := instr.Value.(bool); isBool {
 					typeStack[sp] = stackTypeBool
 				} else {
 					typeStack[sp] = stackTypeNumber
 				}
+			}
+		case OP_LOAD_GLOBAL:
+			if sp < len(typeStack) {
+				typeStack[sp] = stackTypeUnknown
 			}
 		case OP_LOAD_LOCAL_0, OP_LOAD_LOCAL_1, OP_LOAD_LOCAL_2, OP_LOAD_LOCAL_3:
 			slot := 0
@@ -684,7 +4782,7 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 			if instr.Op == OP_LOAD_LOCAL_3 {
 				slot = 3
 			}
-			if sp < len(typeStack) && slot < len(localTypes) {
+			if sp < len(typeStack) && slot >= 0 && slot < len(localTypes) {
 				typeStack[sp] = localTypes[slot]
 			}
 		case OP_LOAD_LOCAL:
@@ -694,7 +4792,7 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 					slot = s
 				}
 			}
-			if sp < len(typeStack) && slot < len(localTypes) {
+			if sp < len(typeStack) && slot >= 0 && slot < len(localTypes) {
 				typeStack[sp] = localTypes[slot]
 			}
 		case OP_STORE_LOCAL, OP_ASSIGN_LOCAL:
@@ -706,12 +4804,18 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 					slot = info.Slot
 				}
 			}
-			if sp >= 1 && slot < len(localTypes) {
+			if sp >= 1 && slot >= 0 && slot < len(localTypes) {
 				localTypes[slot] = typeStack[sp-1]
 			}
 		case OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD:
 			if sp >= 2 {
-				typeStack[sp-2] = stackTypeNumber
+				if instr.Op == OP_ADD && (isJitStringType(typeStack[sp-1]) || isJitStringType(typeStack[sp-2])) {
+					typeStack[sp-2] = stackTypeString
+				} else if typeStack[sp-1] == stackTypeNumber && typeStack[sp-2] == stackTypeNumber {
+					typeStack[sp-2] = stackTypeNumber
+				} else {
+					typeStack[sp-2] = stackTypeUnknown
+				}
 			}
 		case OP_EQ, OP_NEQ, OP_LT, OP_LTE, OP_GT, OP_GTE, OP_AND, OP_OR:
 			if sp >= 2 {
@@ -725,14 +4829,101 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 			if sp >= 1 {
 				typeStack[sp-1] = stackTypeNumber
 			}
-		case OP_OBJECT:
-		case OP_ARRAY:
-		case OP_INDEX, OP_ARRAY_GET_LOCAL:
-			if sp >= 2 {
-				typeStack[sp-2] = stackTypeUnknown
+		case OP_ADD_LOCAL_LOCAL_STORE:
+			info := instr.Value.(AddLocalLocalStoreInfo)
+			tA := localTypes[info.SlotA]
+			tB := localTypes[info.SlotB]
+			if isJitStringType(tA) || isJitStringType(tB) {
+				localTypes[info.DestSlot] = stackTypeString
+			} else if tA == stackTypeNumber && tB == stackTypeNumber {
+				localTypes[info.DestSlot] = stackTypeNumber
+			} else {
+				localTypes[info.DestSlot] = stackTypeUnknown
 			}
+		case OP_OBJECT:
+			if info, ok := instr.Value.(ObjectInfo); ok {
+				dest := sp - len(info.Names)
+				if dest >= 0 && dest < len(typeStack) {
+					typeStack[dest] = stackTypeObject
+				}
+			}
+		case OP_MUL_LOCAL_CONST:
+			if sp < len(typeStack) {
+				typeStack[sp] = stackTypeNumber
+			}
+		case OP_LOCAL_CONST_OP:
+			if sp < len(typeStack) {
+				typeStack[sp] = stackTypeNumber
+			}
+		case OP_LOCAL_CONST_OP_STORE:
+			if info, ok := instr.Value.(LocalConstOpInfo); ok && info.Slot >= 0 && info.Slot < len(localTypes) {
+				localTypes[info.Slot] = stackTypeNumber
+			}
+		case OP_ADD_LOCAL_GLOBAL_GLOBAL_STORE:
+			if info, ok := instr.Value.(AddLocalGlobalGlobalStoreInfo); ok && info.LocalSlot >= 0 && info.LocalSlot < len(localTypes) {
+				localTypes[info.LocalSlot] = stackTypeNumber
+			}
+		case OP_ADD_LOCAL_ARRAY_INDEX_STORE:
+			if info, ok := instr.Value.(AddLocalArrayIndexStoreInfo); ok && info.LocalSlot >= 0 && info.LocalSlot < len(localTypes) {
+				localTypes[info.LocalSlot] = stackTypeNumber
+			}
+		case OP_ARRAY_INDEX_CONST_OP_STORE, OP_ADD_PROPERTY_LOCAL_CONST, OP_ADD_PROPERTY_LOCAL_PROPERTY, OP_ADD_LOCAL_PROPERTIES_STORE:
+			// no stack effect for type propagation
+		case OP_GET_PROPERTY_LOCAL:
 			if sp < len(typeStack) {
 				typeStack[sp] = stackTypeUnknown
+			}
+		case OP_GET_PROPERTY, OP_GET_PROPERTY_SAFE:
+			if sp >= 1 {
+				typeStack[sp-1] = stackTypeUnknown
+			}
+		case OP_ARRAY:
+			if info, ok := instr.Value.(ArrayInfo); ok {
+				dest := sp - info.Count
+				if dest >= 0 && dest < len(typeStack) {
+					allInternedStrings := info.Count > 0
+					for idx := 0; idx < info.Count; idx++ {
+						if typeStack[sp-info.Count+idx] != stackTypeInternedString {
+							allInternedStrings = false
+							break
+						}
+					}
+					if allInternedStrings {
+						typeStack[dest] = stackTypeInternedStringArray
+					} else {
+						typeStack[dest] = stackTypeArray
+					}
+				}
+			}
+
+		case OP_INDEX:
+			if sp >= 2 {
+				if typeStack[sp-2] == stackTypeInternedStringArray {
+					typeStack[sp-2] = stackTypeInternedString
+				} else {
+					typeStack[sp-2] = stackTypeUnknown
+				}
+			}
+		case OP_STRING_JOIN:
+			count := getStringJoinCount(instr)
+
+			if count > 0 {
+				dest := sp - count
+				if dest >= 0 && dest < len(typeStack) {
+					typeStack[dest] = stackTypeString
+				}
+			} else {
+				if sp < len(typeStack) {
+					typeStack[sp] = stackTypeString
+				}
+			}
+		case OP_ARRAY_GET_LOCAL:
+			if sp < len(typeStack) {
+				if info, ok := instr.Value.(ArrayLocalCallInfo); ok && info.ArraySlot >= 0 && info.ArraySlot < len(localTypes) && localTypes[info.ArraySlot] == stackTypeInternedStringArray {
+					typeStack[sp] = stackTypeInternedString
+				} else {
+					typeStack[sp] = stackTypeUnknown
+				}
 			}
 		case OP_ARRAY_LEN_LOCAL, OP_LEN:
 			if sp < len(typeStack) {
@@ -755,6 +4946,57 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 						typeStack[dest] = stackTypeUnknown
 					}
 				}
+			}
+		case OP_CALL_DIRECT:
+			info, ok := instr.Value.(DirectCallInfo)
+			if ok {
+				retT := stackTypeUnknown
+				if info.ID >= 0 && info.ID < len(currentReturnTypes) {
+					retT = currentReturnTypes[info.ID]
+				}
+				dest := sp - info.ArgCount
+				if dest >= 0 && dest < len(typeStack) {
+					typeStack[dest] = retT
+				}
+			}
+		case OP_CALL_DIRECT_SUB_CONST:
+			info, ok := instr.Value.(CallDirectSubConstInfo)
+			if ok {
+				retT := stackTypeUnknown
+				if info.FnID >= 0 && info.FnID < len(currentReturnTypes) {
+					retT = currentReturnTypes[info.FnID]
+				}
+				if sp < len(typeStack) {
+					typeStack[sp] = retT
+				}
+			}
+		case OP_COALESCE_JUMP:
+			if sp >= 2 {
+				t1 := typeStack[sp-1] // right
+				t2 := typeStack[sp-2] // left
+				var coalescedType stackType
+				if t1 == t2 {
+					coalescedType = t1
+				} else if t1 == stackTypeUnknown {
+					coalescedType = t2
+				} else if t2 == stackTypeUnknown {
+					coalescedType = t1
+				} else if t2 >= 10 && t1 < 10 && t1 != stackTypeUnknown {
+					coalescedType = t1
+				} else if t1 >= 10 && t2 < 10 && t2 != stackTypeUnknown {
+					coalescedType = t2
+				} else {
+					coalescedType = stackTypeUnknown
+				}
+				typeStack[sp-2] = coalescedType
+			}
+		case OP_TYPEOF:
+			if sp >= 1 {
+				typeStack[sp-1] = stackTypeString
+			}
+		case OP_THROW:
+			if sp >= 1 {
+				typeStack[sp-1] = stackTypeUnknown
 			}
 		}
 
@@ -780,22 +5022,175 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 		}
 
 		switch instr.Op {
+		case OP_MATH_ABS:
+			emitUnaryMath(sp, wasmF64Abs)
+
+		case OP_MATH_CEIL:
+			emitUnaryMath(sp, wasmF64Ceil)
+
+		case OP_MATH_FLOOR:
+			emitUnaryMath(sp, wasmF64Floor)
+
+		case OP_MATH_SQRT:
+			emitUnaryMath(sp, wasmF64Sqrt)
+
+		case OP_PRINT:
+			info := instr.Value.(PrintInfo)
+
+			argCount := info.ArgCount
+			startSlot := stackBase + sp - argCount
+
+			for argIndex := 0; argIndex < argCount; argIndex++ {
+				slot := startSlot + argIndex
+
+				// arg0: tag
+				body.WriteByte(0x20) // local.get tag
+				body.WriteVarUint(uint32(tagSlot(slot)))
+
+				// arg1: value
+				body.WriteByte(0x20) // local.get value
+				body.WriteVarUint(uint32(slot))
+
+				// arg2: newline flag
+				// Only the LAST argument gets newline=true.
+				body.WriteByte(0x44) // f64.const
+				if info.NewLine && argIndex == argCount-1 {
+					body.WriteFloat64(1.0)
+				} else {
+					body.WriteFloat64(0.0)
+				}
+
+				// arg3: spaceBefore flag
+				body.WriteByte(0x44) // f64.const
+				if argIndex > 0 {
+					body.WriteFloat64(1.0)
+				} else {
+					body.WriteFloat64(0.0)
+				}
+
+				body.WriteByte(0x10) // call print_value
+				body.WriteVarUint(jitImportPrintValue)
+			}
+
+			// Replace all printed args with one null result at startSlot.
+			body.WriteByte(0x44) // f64.const 0
+			body.WriteFloat64(0.0)
+			body.WriteByte(0x21) // local.set startSlot
+			body.WriteVarUint(uint32(startSlot))
+
+			emitSetTagConst(startSlot, jitTagNull)
+			emitDeoptCheckpoint(i+1, sp-info.ArgCount+1)
+
+		case OP_COALESCE_JUMP:
+			slotL := stackBase + sp - 2
+			slotR := stackBase + sp - 1
+
+			// Check if leftTag == 0.0 (nullish tag is 0.0)
+			body.WriteByte(0x20) // local.get leftTag
+			body.WriteVarUint(uint32(tagSlot(slotL)))
+			body.WriteByte(0x44) // f64.const 0.0
+			body.WriteFloat64(jitTagNull)
+			body.WriteByte(0x61) // f64.eq -> i32
+
+			body.WriteByte(0x04) // if
+			body.WriteByte(0x40) // empty block signature
+
+			// leftValue = rightValue
+			body.WriteByte(0x20) // local.get rightValue
+			body.WriteVarUint(uint32(slotR))
+			body.WriteByte(0x21) // local.set leftValue
+			body.WriteVarUint(uint32(slotL))
+
+			// leftTag = rightTag
+			body.WriteByte(0x20) // local.get rightTag
+			body.WriteVarUint(uint32(tagSlot(slotR)))
+			body.WriteByte(0x21) // local.set leftTag
+			body.WriteVarUint(uint32(tagSlot(slotL)))
+
+			body.WriteByte(0x0B) // end if
+
+		case OP_TYPEOF:
+			slot := stackBase + sp - 1
+			body.WriteByte(0x20) // local.get tag
+			body.WriteVarUint(uint32(tagSlot(slot)))
+			body.WriteByte(0x20) // local.get value
+			body.WriteVarUint(uint32(slot))
+			body.WriteByte(0x10) // call typeof_wasm
+			body.WriteVarUint(jitImportTypeofWasm)
+			body.WriteByte(0x21) // local.set value
+			body.WriteVarUint(uint32(slot))
+
+			emitSetTagConst(slot, jitTagString)
+
+		case OP_THROW:
+			slot := stackBase + sp - 1
+			body.WriteByte(0x20) // local.get tag
+			body.WriteVarUint(uint32(tagSlot(slot)))
+			body.WriteByte(0x20) // local.get value
+			body.WriteVarUint(uint32(slot))
+			body.WriteByte(0x10) // call throw_wasm
+			body.WriteVarUint(jitImportThrowWasm)
+			body.WriteByte(0x1A) // drop
+
+		case OP_MATH_POW:
+			emitPow(sp)
 		case OP_CONST:
-			var val float64
+			dst := stackBase + sp
 			if instr.IsInt {
-				val = float64(instr.IntArg)
+				val := float64(instr.IntArg)
+				body.WriteByte(0x44)
+				body.WriteFloat64(val)
+				body.WriteByte(0x21)
+				body.WriteVarUint(uint32(dst))
+				emitSetTagConst(dst, jitTagNumber)
+			} else if strVal, ok := instr.Value.(string); ok {
+				addr := jitStringAddr[strVal]
+				body.WriteByte(0x44) // f64.const
+				body.WriteFloat64(float64(addr))
+				body.WriteByte(0x21) // local.set
+				body.WriteVarUint(uint32(dst))
+				emitSetTagConst(dst, jitTagString)
+			} else if isNullConstant(instr.Value) {
+				body.WriteByte(0x44)
+				body.WriteFloat64(0.0)
+				body.WriteByte(0x21)
+				body.WriteVarUint(uint32(dst))
+				emitSetTagConst(dst, jitTagNull)
 			} else {
-				var ok bool
-				val, ok = getFloat64Constant(instr.Value)
+				val, ok := getFloat64Constant(instr.Value)
 				if !ok {
 					val = 0.0
 				}
+				body.WriteByte(0x44)
+				body.WriteFloat64(val)
+				body.WriteByte(0x21)
+				body.WriteVarUint(uint32(dst))
+				if _, isBool := instr.Value.(bool); isBool {
+					emitSetTagConst(dst, jitTagBool)
+				} else {
+					emitSetTagConst(dst, jitTagNumber)
+				}
 			}
-			body.WriteByte(0x44)
-			body.WriteFloat64(val)
-			body.WriteByte(0x21)
-			body.WriteVarUint(uint32(stackBase + sp))
 
+		case OP_LOAD_GLOBAL:
+			dst := stackBase + sp
+			globalSlot := -1
+			if info, ok := instr.Value.(VariableInfo); ok {
+				globalSlot = info.Slot
+			} else if s, ok := AsIntInternal(instr.Value); ok {
+				globalSlot = s
+			}
+
+			body.WriteByte(0x44) // f64.const global slot
+			body.WriteFloat64(float64(globalSlot))
+			body.WriteByte(0x10) // call load_global_wasm
+			body.WriteVarUint(jitImportLoadGlobal)
+
+			// load_global_wasm returns (tag, value). Store value first, then tag.
+			body.WriteByte(0x21) // local.set value
+			body.WriteVarUint(uint32(dst))
+			body.WriteByte(0x21) // local.set tag
+			body.WriteVarUint(uint32(tagSlot(dst)))
 		case OP_LOAD_LOCAL_0, OP_LOAD_LOCAL_1, OP_LOAD_LOCAL_2, OP_LOAD_LOCAL_3:
 			slot := 0
 			if instr.Op == OP_LOAD_LOCAL_1 {
@@ -808,10 +5203,12 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 				slot = 3
 			}
 
+			dst := stackBase + sp
 			body.WriteByte(0x20)
 			body.WriteVarUint(uint32(slot))
 			body.WriteByte(0x21)
-			body.WriteVarUint(uint32(stackBase + sp))
+			body.WriteVarUint(uint32(dst))
+			emitCopyTag(dst, slot)
 
 		case OP_LOAD_LOCAL:
 			slot := instr.IntArg
@@ -820,10 +5217,12 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 					slot = s
 				}
 			}
+			dst := stackBase + sp
 			body.WriteByte(0x20)
 			body.WriteVarUint(uint32(slot))
 			body.WriteByte(0x21)
-			body.WriteVarUint(uint32(stackBase + sp))
+			body.WriteVarUint(uint32(dst))
+			emitCopyTag(dst, slot)
 
 		case OP_STORE_LOCAL, OP_ASSIGN_LOCAL:
 			slot := instr.IntArg
@@ -834,30 +5233,198 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 					slot = info.Slot
 				}
 			}
+			src := stackBase + sp - 1
 			body.WriteByte(0x20)
-			body.WriteVarUint(uint32(stackBase + sp - 1))
+			body.WriteVarUint(uint32(src))
 			body.WriteByte(0x21)
 			body.WriteVarUint(uint32(slot))
+			emitCopyTag(slot, src)
 
-		case OP_ADD, OP_SUB, OP_MUL:
-			body.WriteByte(0x20)
-			body.WriteVarUint(uint32(stackBase + sp - 2))
-			body.WriteByte(0x20)
-			body.WriteVarUint(uint32(stackBase + sp - 1))
-
-			switch instr.Op {
-			case OP_ADD:
-				body.WriteByte(0xA0)
-			case OP_SUB:
-				body.WriteByte(0xA1)
-			case OP_MUL:
-				body.WriteByte(0xA2)
+		case OP_STRING_JOIN:
+			count := getStringJoinCount(instr)
+			if count <= 0 {
+				body.WriteByte(0x00) // unreachable: invalid compiler-emitted join count
+				break
 			}
 
-			body.WriteByte(0x21)
-			body.WriteVarUint(uint32(stackBase + sp - 2))
+			resultSlot := stackBase + sp - count
+			if resultSlot < stackBase {
+				body.WriteByte(0x00) // unreachable: stack underflow in compiler/JIT metadata
+				break
+			}
+
+			if optimizedStringJoinPC[i] {
+				// IMPORTANT: resultSlot overlaps the first joined operand.
+				// Do NOT use resultSlot as the running length accumulator before
+				// reading all operands, or the first part, e.g. "hello", gets
+				// overwritten with 0 and its length becomes missing.
+				// Use a scratch local outside the active stack, then copy the final
+				// numeric length back into resultSlot.
+				body.WriteByte(0x44) // running length = 0
+				body.WriteFloat64(0.0)
+				body.WriteByte(0x21)
+				body.WriteVarUint(uint32(stringJoinResultSlot))
+
+				for part := 0; part < count; part++ {
+					nextSlot := resultSlot + part
+					partType := stackTypeUnknown
+					partStackIndex := sp - count + part
+					if partStackIndex >= 0 && partStackIndex < len(typeStack) {
+						partType = typeStack[partStackIndex]
+					}
+
+					emitValueStringLength(nextSlot, stringJoinScratchSlot, partType)
+
+					body.WriteByte(0x20)
+					body.WriteVarUint(uint32(stringJoinResultSlot))
+					body.WriteByte(0x20)
+					body.WriteVarUint(uint32(stringJoinScratchSlot))
+					body.WriteByte(0xA0) // f64.add
+					body.WriteByte(0x21)
+					body.WriteVarUint(uint32(stringJoinResultSlot))
+				}
+
+				body.WriteByte(0x20) // resultSlot = running length
+				body.WriteVarUint(uint32(stringJoinResultSlot))
+				body.WriteByte(0x21)
+				body.WriteVarUint(uint32(resultSlot))
+
+				emitSetTagConst(resultSlot, jitTagNumber)
+				break
+			}
+
+			if emitFastStringJoinIfPossible(count, resultSlot, stringJoinPartTypes) {
+				break
+			}
+
+			emitCopyTagged(stringJoinResultSlot, resultSlot)
+
+			if count == 3 {
+				// Push tag 0, val 0
+				body.WriteByte(0x20)
+				body.WriteVarUint(uint32(tagSlot(resultSlot)))
+				body.WriteByte(0x20)
+				body.WriteVarUint(uint32(resultSlot))
+
+				// Push tag 1, val 1
+				body.WriteByte(0x20)
+				body.WriteVarUint(uint32(tagSlot(resultSlot + 1)))
+				body.WriteByte(0x20)
+				body.WriteVarUint(uint32(resultSlot + 1))
+
+				// Push tag 2, val 2
+				body.WriteByte(0x20)
+				body.WriteVarUint(uint32(tagSlot(resultSlot + 2)))
+				body.WriteByte(0x20)
+				body.WriteVarUint(uint32(resultSlot + 2))
+
+				body.WriteByte(0x10) // call
+				body.WriteVarUint(jitImportDynamicJoin3)
+				body.WriteByte(0x21) // local.set
+				body.WriteVarUint(uint32(resultSlot))
+
+				emitSetTagConst(resultSlot, jitTagString)
+				break
+			}
+
+			if count == 4 {
+				// Push tag 0, val 0
+				body.WriteByte(0x20)
+				body.WriteVarUint(uint32(tagSlot(resultSlot)))
+				body.WriteByte(0x20)
+				body.WriteVarUint(uint32(resultSlot))
+
+				// Push tag 1, val 1
+				body.WriteByte(0x20)
+				body.WriteVarUint(uint32(tagSlot(resultSlot + 1)))
+				body.WriteByte(0x20)
+				body.WriteVarUint(uint32(resultSlot + 1))
+
+				// Push tag 2, val 2
+				body.WriteByte(0x20)
+				body.WriteVarUint(uint32(tagSlot(resultSlot + 2)))
+				body.WriteByte(0x20)
+				body.WriteVarUint(uint32(resultSlot + 2))
+
+				// Push tag 3, val 3
+				body.WriteByte(0x20)
+				body.WriteVarUint(uint32(tagSlot(resultSlot + 3)))
+				body.WriteByte(0x20)
+				body.WriteVarUint(uint32(resultSlot + 3))
+
+				body.WriteByte(0x10) // call
+				body.WriteVarUint(jitImportDynamicJoin4)
+				body.WriteByte(0x21) // local.set
+				body.WriteVarUint(uint32(resultSlot))
+
+				emitSetTagConst(resultSlot, jitTagString)
+				break
+			}
+
+			for part := 1; part < count; part++ {
+				nextSlot := resultSlot + part
+				emitDynamicAddTagged(stringJoinResultSlot, nextSlot, stringJoinScratchSlot)
+				emitCopyTagged(stringJoinResultSlot, stringJoinScratchSlot)
+			}
+
+			emitCopyTagged(resultSlot, stringJoinResultSlot)
+			emitSetTagConst(resultSlot, jitTagString)
+
+		case OP_ADD, OP_SUB, OP_MUL:
+			leftT := leftTypeBefore
+			rightT := rightTypeBefore
+			leftSlot := stackBase + sp - 2
+			rightSlot := stackBase + sp - 1
+
+			if instr.Op == OP_ADD {
+				// If both operands are known numeric, keep the fast f64 path.
+				// If one side is known string, use the same generic inline join path
+				// as OP_STRING_JOIN. This covers normal binary additions like:
+				//   s + i, i + "x", "x" + maybeDynamic
+				// while still falling back for non-integer floats / objects / arrays.
+				if leftT == stackTypeNumber && rightT == stackTypeNumber {
+					body.WriteByte(0x20)
+					body.WriteVarUint(uint32(leftSlot))
+					body.WriteByte(0x20)
+					body.WriteVarUint(uint32(rightSlot))
+					body.WriteByte(0xA0) // f64.add
+					body.WriteByte(0x21)
+					body.WriteVarUint(uint32(leftSlot))
+					emitSetTagConst(leftSlot, jitTagNumber)
+				} else if isJitStringType(leftT) || isJitStringType(rightT) {
+					if !emitFastStringJoinIfPossible(2, leftSlot, []stackType{leftT, rightT}) {
+						emitDynamicAddTagged(leftSlot, rightSlot, leftSlot)
+					}
+				} else {
+					emitDynamicAddTagged(leftSlot, rightSlot, leftSlot)
+				}
+			} else {
+				body.WriteByte(0x20)
+				body.WriteVarUint(uint32(leftSlot))
+				body.WriteByte(0x20)
+				body.WriteVarUint(uint32(rightSlot))
+				switch instr.Op {
+				case OP_SUB:
+					body.WriteByte(0xA1) // f64.sub
+				case OP_MUL:
+					body.WriteByte(0xA2) // f64.mul
+				}
+				body.WriteByte(0x21)
+				body.WriteVarUint(uint32(leftSlot))
+				emitSetTagConst(leftSlot, jitTagNumber)
+			}
 
 		case OP_DIV:
+			body.WriteByte(0x20) // local.get
+			body.WriteVarUint(uint32(stackBase + sp - 1))
+			body.WriteByte(0x44) // f64.const
+			body.WriteFloat64(0.0)
+			body.WriteByte(0x61) // f64.eq
+			body.WriteByte(0x04) // if
+			body.WriteByte(0x40) // empty block signature
+			body.WriteByte(0x00) // unreachable (traps to trigger interpreter fallback)
+			body.WriteByte(0x0B) // end
+
 			body.WriteByte(0x20)
 			body.WriteVarUint(uint32(stackBase + sp - 2))
 			body.WriteByte(0x20)
@@ -865,101 +5432,344 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 			body.WriteByte(0xA3) // f64.div — result stays as f64, do NOT truncate!
 			body.WriteByte(0x21)
 			body.WriteVarUint(uint32(stackBase + sp - 2))
+			emitSetTagConst(stackBase+sp-2, jitTagNumber)
 
 		case OP_MOD:
-			body.WriteByte(0x20)
-			body.WriteVarUint(uint32(stackBase + sp - 2))
-
-			body.WriteByte(0x20)
-			body.WriteVarUint(uint32(stackBase + sp - 2))
-
-			body.WriteByte(0x20)
-			body.WriteVarUint(uint32(stackBase + sp - 1))
-
-			body.WriteByte(0xA3)
-			body.WriteByte(0x9D)
-
-			body.WriteByte(0x20)
-			body.WriteVarUint(uint32(stackBase + sp - 1))
-
-			body.WriteByte(0xA2)
-			body.WriteByte(0xA1)
-
-			body.WriteByte(0x21)
-			body.WriteVarUint(uint32(stackBase + sp - 2))
+			leftSlot := stackBase + sp - 2
+			rightSlot := stackBase + sp - 1
+			// Fast path: if the right operand is a compile-time integer constant AND
+			// the left operand is known to be a number (integer-valued in a loop),
+			// skip all guard checks and emit i64.rem_s directly.
+			rightIsIntConst := false
+			var rightConstVal int64
+			if i > 0 {
+				prev := fn.Instructions[i-1]
+				if prev.Op == OP_CONST {
+					if prev.IsInt {
+						rightIsIntConst = true
+						rightConstVal = int64(prev.IntArg)
+					} else if fv, ok := getFloat64Constant(prev.Value); ok && fv == math.Trunc(fv) && fv != 0 {
+						rightIsIntConst = true
+						rightConstVal = int64(fv)
+					}
+				}
+			}
+			leftIsNumber := leftTypeBefore == stackTypeNumber
+			if rightIsIntConst && rightConstVal != 0 && leftIsNumber {
+				// Fully inlined integer modulo: i64.trunc(left) % rightConstVal → f64
+				body.WriteByte(0x20) // local.get left
+				body.WriteVarUint(uint32(leftSlot))
+				body.WriteByte(0xB0) // i64.trunc_f64_s
+				// push constant divisor as i64
+				body.WriteByte(0x42) // i64.const
+				// LEB128-encode rightConstVal as signed
+				{
+					v := rightConstVal
+					for {
+						b := byte(v & 0x7F)
+						v >>= 7
+						if (v == 0 && b&0x40 == 0) || (v == -1 && b&0x40 != 0) {
+							body.WriteByte(b)
+							break
+						}
+						body.WriteByte(b | 0x80)
+					}
+				}
+				body.WriteByte(0x81) // i64.rem_s
+				body.WriteByte(0xB9) // f64.convert_i64_s
+				body.WriteByte(0x21) // local.set leftSlot
+				body.WriteVarUint(uint32(leftSlot))
+			} else {
+				emitFastModValue(leftSlot, rightSlot)
+				body.WriteByte(0x21) // local.set
+				body.WriteVarUint(uint32(leftSlot))
+			}
+			emitSetTagConst(leftSlot, jitTagNumber)
 
 		case OP_EQ, OP_NEQ, OP_LT, OP_GT, OP_LTE, OP_GTE:
-			body.WriteByte(0x20)
-			body.WriteVarUint(uint32(stackBase + sp - 2))
-			body.WriteByte(0x20)
-			body.WriteVarUint(uint32(stackBase + sp - 1))
 
-			switch instr.Op {
-			case OP_EQ:
-				body.WriteByte(0x61)
-			case OP_NEQ:
-				body.WriteByte(0x62)
-			case OP_LT:
-				body.WriteByte(0x63)
-			case OP_GT:
-				body.WriteByte(0x64)
-			case OP_LTE:
-				body.WriteByte(0x65)
-			case OP_GTE:
-				body.WriteByte(0x66)
+			if (instr.Op == OP_EQ || instr.Op == OP_NEQ) && leftTypeBefore == stackTypeInternedString && rightTypeBefore == stackTypeInternedString {
+				body.WriteByte(0x20)
+				body.WriteVarUint(uint32(stackBase + sp - 2))
+				body.WriteByte(0x20)
+				body.WriteVarUint(uint32(stackBase + sp - 1))
+				if instr.Op == OP_EQ {
+					body.WriteByte(0x61) // f64.eq
+				} else {
+					body.WriteByte(0x62) // f64.ne
+				}
+				body.WriteByte(0xB7) // f64.convert_i32_s
+				body.WriteByte(0x21)
+				body.WriteVarUint(uint32(stackBase + sp - 2))
+			} else if (instr.Op == OP_EQ || instr.Op == OP_NEQ) && (rightTypeBefore != stackTypeNumber || leftTypeBefore != stackTypeNumber) {
+				leftSlot := stackBase + sp - 2
+				rightSlot := stackBase + sp - 1
+
+				// 1. Check if values are identical (fast path for same pointers or same primitive values)
+				body.WriteByte(0x20) // local.get leftValue
+				body.WriteVarUint(uint32(leftSlot))
+				body.WriteByte(0x20) // local.get rightValue
+				body.WriteVarUint(uint32(rightSlot))
+				body.WriteByte(0x61) // f64.eq
+				body.WriteByte(0x04) // if (result f64)
+				body.WriteByte(0x7C)
+				if instr.Op == OP_EQ {
+					body.WriteByte(0x44) // f64.const 1.0 (true)
+					body.WriteFloat64(1.0)
+				} else {
+					body.WriteByte(0x44) // f64.const 0.0 (false)
+					body.WriteFloat64(0.0)
+				}
+				body.WriteByte(0x05) // else
+				// 2. Values are different. Check if tags are identical.
+				body.WriteByte(0x20) // local.get leftTag
+				body.WriteVarUint(uint32(tagSlot(leftSlot)))
+				body.WriteByte(0x20) // local.get rightTag
+				body.WriteVarUint(uint32(tagSlot(rightSlot)))
+				body.WriteByte(0x61) // f64.eq
+				body.WriteByte(0x04) // if (result f64)
+				body.WriteByte(0x7C)
+				// 3. Tags are identical. Check if both are strings (6.0).
+				body.WriteByte(0x20) // local.get leftTag
+				body.WriteVarUint(uint32(tagSlot(leftSlot)))
+				body.WriteByte(0x44) // f64.const 6.0
+				body.WriteFloat64(jitTagString)
+				body.WriteByte(0x61) // f64.eq
+				body.WriteByte(0x04) // if (result f64)
+				body.WriteByte(0x7C)
+				// 4. Both are strings. Compare their lengths in WASM first.
+				// Load A's length
+				body.WriteByte(0x20) // local.get leftValue
+				body.WriteVarUint(uint32(leftSlot))
+				body.WriteByte(0xAA) // i32.trunc_f64_s
+				body.WriteByte(0x2B) // f64.load
+				body.WriteVarUint(3) // alignment 3 (8 bytes)
+				body.WriteVarUint(8) // offset 8
+
+				// Load B's length
+				body.WriteByte(0x20) // local.get rightValue
+				body.WriteVarUint(uint32(rightSlot))
+				body.WriteByte(0xAA) // i32.trunc_f64_s
+				body.WriteByte(0x2B) // f64.load
+				body.WriteVarUint(3) // alignment 3 (8 bytes)
+				body.WriteVarUint(8) // offset 8
+
+				body.WriteByte(0x61) // f64.eq -> i32
+				body.WriteByte(0x04) // if (result f64)
+				body.WriteByte(0x7C) // result type: f64
+				// Lengths are identical. Compare contents in WASM.
+				idxLeft := tagBase + valueLocalCount
+				idxRight := idxLeft + 1
+				idxLen := idxLeft + 2
+
+				// Initialize idxLeft = leftValue(i32) + 16
+				body.WriteByte(0x20) // local.get leftValue
+				body.WriteVarUint(uint32(leftSlot))
+				body.WriteByte(0xAA) // i32.trunc_f64_s
+				body.WriteByte(0x41) // i32.const 16
+				body.WriteVarUint(16)
+				body.WriteByte(0x6A) // i32.add
+				body.WriteByte(0x21) // local.set idxLeft
+				body.WriteVarUint(uint32(idxLeft))
+
+				// Initialize idxRight = rightValue(i32) + 16
+				body.WriteByte(0x20) // local.get rightValue
+				body.WriteVarUint(uint32(rightSlot))
+				body.WriteByte(0xAA) // i32.trunc_f64_s
+				body.WriteByte(0x41) // i32.const 16
+				body.WriteVarUint(16)
+				body.WriteByte(0x6A) // i32.add
+				body.WriteByte(0x21) // local.set idxRight
+				body.WriteVarUint(uint32(idxRight))
+
+				// Initialize idxLen = leftValue.length(i32)
+				body.WriteByte(0x20) // local.get leftValue
+				body.WriteVarUint(uint32(leftSlot))
+				body.WriteByte(0xAA) // i32.trunc_f64_s
+				body.WriteByte(0x2B) // f64.load
+				body.WriteVarUint(3) // alignment 3 (8 bytes)
+				body.WriteVarUint(8) // offset 8
+				body.WriteByte(0xAA) // i32.trunc_f64_s
+				body.WriteByte(0x21) // local.set idxLen
+				body.WriteVarUint(uint32(idxLen))
+
+				if instr.Op == OP_EQ {
+					body.WriteByte(0x44) // f64.const 1.0
+					body.WriteFloat64(1.0)
+				} else {
+					body.WriteByte(0x44) // f64.const 0.0
+					body.WriteFloat64(0.0)
+				}
+				body.WriteByte(0x21) // local.set tempPtrSlot
+				body.WriteVarUint(uint32(tempPtrSlot))
+
+				// WASM block and loop
+				body.WriteByte(0x02) // block
+				body.WriteByte(0x40) // empty signature
+				body.WriteByte(0x03) // loop
+				body.WriteByte(0x40) // empty signature
+
+				// loop condition: if idxLen == 0, break loop to block (goes to matching return)
+				body.WriteByte(0x20) // local.get idxLen
+				body.WriteVarUint(uint32(idxLen))
+				body.WriteByte(0x45) // i32.eqz
+				body.WriteByte(0x0D) // br_if
+				body.WriteVarUint(1) // to outer block (Label 1)
+
+				// Compare bytes
+				body.WriteByte(0x20) // local.get idxLeft
+				body.WriteVarUint(uint32(idxLeft))
+				body.WriteByte(0x2D) // i32.load8_u
+				body.WriteVarUint(0) // alignment 0
+				body.WriteVarUint(0) // offset 0
+
+				body.WriteByte(0x20) // local.get idxRight
+				body.WriteVarUint(uint32(idxRight))
+				body.WriteByte(0x2D) // i32.load8_u
+				body.WriteVarUint(0)
+				body.WriteVarUint(0)
+
+				body.WriteByte(0x47) // i32.ne
+				body.WriteByte(0x04) // if
+				body.WriteByte(0x40) // empty signature
+
+				// bytes differ
+				if instr.Op == OP_EQ {
+					body.WriteByte(0x44) // f64.const 0.0
+					body.WriteFloat64(0.0)
+				} else {
+					body.WriteByte(0x44) // f64.const 1.0
+					body.WriteFloat64(1.0)
+				}
+				body.WriteByte(0x0C) // br
+				body.WriteVarUint(3) // branch out of if (result f64) block (Label 3)
+				body.WriteByte(0x0B) // end if
+
+				// Decrement idxLen
+				body.WriteByte(0x20) // local.get idxLen
+				body.WriteVarUint(uint32(idxLen))
+				body.WriteByte(0x41) // i32.const 1
+				body.WriteVarUint(1)
+				body.WriteByte(0x6B) // i32.sub
+				body.WriteByte(0x21) // local.set idxLen
+				body.WriteVarUint(uint32(idxLen))
+
+				// Increment idxLeft
+				body.WriteByte(0x20) // local.get idxLeft
+				body.WriteVarUint(uint32(idxLeft))
+				body.WriteByte(0x41) // i32.const 1
+				body.WriteVarUint(1)
+				body.WriteByte(0x6A) // i32.add
+				body.WriteByte(0x21) // local.set idxLeft
+				body.WriteVarUint(uint32(idxLeft))
+
+				// Increment idxRight
+				body.WriteByte(0x20) // local.get idxRight
+				body.WriteVarUint(uint32(idxRight))
+				body.WriteByte(0x41) // i32.const 1
+				body.WriteVarUint(1)
+				body.WriteByte(0x6A) // i32.add
+				body.WriteByte(0x21) // local.set idxRight
+				body.WriteVarUint(uint32(idxRight))
+
+				body.WriteByte(0x0C) // br
+				body.WriteVarUint(0) // back to start of loop (Label 0)
+
+				body.WriteByte(0x0B) // end loop
+
+				body.WriteByte(0x0B) // end block
+				body.WriteByte(0x20) // local.get tempPtrSlot
+				body.WriteVarUint(uint32(tempPtrSlot))
+				body.WriteByte(0x05) // else
+				if instr.Op == OP_EQ {
+					body.WriteByte(0x44) // f64.const 0.0 (false)
+					body.WriteFloat64(0.0)
+				} else {
+					body.WriteByte(0x44) // f64.const 1.0 (true)
+					body.WriteFloat64(1.0)
+				}
+				body.WriteByte(0x0B) // end if
+				body.WriteByte(0x05) // else
+				// Both tags are same, but not string (e.g. both numbers, both bools, both arrays/objects)
+				// Since values are different, they are definitely different.
+				if instr.Op == OP_EQ {
+					body.WriteByte(0x44)
+					body.WriteFloat64(0.0)
+				} else {
+					body.WriteByte(0x44)
+					body.WriteFloat64(1.0)
+				}
+				body.WriteByte(0x0B) // end if
+				body.WriteByte(0x05) // else
+				// Tags are different. Can never be equal.
+				if instr.Op == OP_EQ {
+					body.WriteByte(0x44)
+					body.WriteFloat64(0.0)
+				} else {
+					body.WriteByte(0x44)
+					body.WriteFloat64(1.0)
+				}
+				body.WriteByte(0x0B) // end if
+				body.WriteByte(0x0B) // end if
+				body.WriteByte(0x21) // local.set
+				body.WriteVarUint(uint32(leftSlot))
+			} else {
+				// Standard Numeric Comparison Path
+				body.WriteByte(0x20)
+				body.WriteVarUint(uint32(stackBase + sp - 2))
+				body.WriteByte(0x20)
+				body.WriteVarUint(uint32(stackBase + sp - 1))
+
+				switch instr.Op {
+				case OP_EQ:
+					body.WriteByte(0x61) // f64.eq
+				case OP_NEQ:
+					body.WriteByte(0x62) // f64.ne
+				case OP_LT:
+					body.WriteByte(0x63) // f64.lt
+				case OP_GT:
+					body.WriteByte(0x64) // f64.gt
+				case OP_LTE:
+					body.WriteByte(0x65) // f64.le
+				case OP_GTE:
+					body.WriteByte(0x66) // f64.ge
+				}
+
+				body.WriteByte(0xB7) // f64.convert_i32_s (converts i32 result to f64)
+				body.WriteByte(0x21) // local.set
+				body.WriteVarUint(uint32(stackBase + sp - 2))
 			}
-
-			body.WriteByte(0xB7)
-			body.WriteByte(0x21)
-			body.WriteVarUint(uint32(stackBase + sp - 2))
+			emitSetTagConst(stackBase+sp-2, jitTagBool)
 
 		case OP_AND:
-			body.WriteByte(0x20)
-			body.WriteVarUint(uint32(stackBase + sp - 2))
-			body.WriteByte(0x44)
-			body.WriteFloat64(0.0)
-			body.WriteByte(0x62)
+			emitTruthyI32(stackBase+sp-2, leftTypeBefore)
+			emitTruthyI32(stackBase+sp-1, rightTypeBefore)
 
-			body.WriteByte(0x20)
-			body.WriteVarUint(uint32(stackBase + sp - 1))
-			body.WriteByte(0x44)
-			body.WriteFloat64(0.0)
-			body.WriteByte(0x62)
-
-			body.WriteByte(0x71)
-			body.WriteByte(0xB7)
+			body.WriteByte(0x71) // i32.and
+			body.WriteByte(0xB7) // f64.convert_i32_s
 
 			body.WriteByte(0x21)
 			body.WriteVarUint(uint32(stackBase + sp - 2))
+			emitSetTagConst(stackBase+sp-2, jitTagBool)
 
 		case OP_OR:
-			body.WriteByte(0x20)
-			body.WriteVarUint(uint32(stackBase + sp - 2))
-			body.WriteByte(0x44)
-			body.WriteFloat64(0.0)
-			body.WriteByte(0x62)
+			emitTruthyI32(stackBase+sp-2, leftTypeBefore)
+			emitTruthyI32(stackBase+sp-1, rightTypeBefore)
 
-			body.WriteByte(0x20)
-			body.WriteVarUint(uint32(stackBase + sp - 1))
-			body.WriteByte(0x44)
-			body.WriteFloat64(0.0)
-			body.WriteByte(0x62)
-
-			body.WriteByte(0x72)
-			body.WriteByte(0xB7)
+			body.WriteByte(0x72) // i32.or
+			body.WriteByte(0xB7) // f64.convert_i32_s
 
 			body.WriteByte(0x21)
 			body.WriteVarUint(uint32(stackBase + sp - 2))
+			emitSetTagConst(stackBase+sp-2, jitTagBool)
 
 		case OP_NOT:
-			body.WriteByte(0x20)
+			emitTruthyI32(stackBase+sp-1, unaryTypeBefore)
+			body.WriteByte(0x45) // i32.eqz
+			body.WriteByte(0xB7) // f64.convert_i32_s
+			body.WriteByte(0x21) // local.set
 			body.WriteVarUint(uint32(stackBase + sp - 1))
-			body.WriteByte(0x44)
-			body.WriteFloat64(0.0)
-			body.WriteByte(0x61)
-			body.WriteByte(0xB7)
-			body.WriteByte(0x21)
-			body.WriteVarUint(uint32(stackBase + sp - 1))
+			emitSetTagConst(stackBase+sp-1, jitTagBool)
 
 		case OP_NEGATE:
 			body.WriteByte(0x44)
@@ -969,6 +5779,7 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 			body.WriteByte(0xA1)
 			body.WriteByte(0x21)
 			body.WriteVarUint(uint32(stackBase + sp - 1))
+			emitSetTagConst(stackBase+sp-1, jitTagNumber)
 
 		case OP_POP:
 
@@ -988,6 +5799,7 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 			body.WriteByte(0xA0)
 			body.WriteByte(0x21)
 			body.WriteVarUint(uint32(slot))
+			emitSetTagConst(slot, jitTagNumber)
 
 		case OP_DEC_LOCAL:
 			var slot int
@@ -1005,16 +5817,23 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 			body.WriteByte(0xA1)
 			body.WriteByte(0x21)
 			body.WriteVarUint(uint32(slot))
+			emitSetTagConst(slot, jitTagNumber)
 
 		case OP_ADD_ASSIGN_LOCAL:
 			info := instr.Value.(AssignLocalInfo)
-			body.WriteByte(0x20)
-			body.WriteVarUint(uint32(info.TargetSlot))
-			body.WriteByte(0x20)
-			body.WriteVarUint(uint32(info.SourceSlot))
-			body.WriteByte(0xA0)
-			body.WriteByte(0x21)
-			body.WriteVarUint(uint32(info.TargetSlot))
+
+			if localTypes[info.TargetSlot] == stackTypeNumber && localTypes[info.SourceSlot] == stackTypeNumber {
+				body.WriteByte(0x20)
+				body.WriteVarUint(uint32(info.TargetSlot))
+				body.WriteByte(0x20)
+				body.WriteVarUint(uint32(info.SourceSlot))
+				body.WriteByte(0xA0) // f64.add
+				body.WriteByte(0x21)
+				body.WriteVarUint(uint32(info.TargetSlot))
+				emitSetTagConst(info.TargetSlot, jitTagNumber)
+			} else {
+				emitDynamicAddTagged(info.TargetSlot, info.SourceSlot, info.TargetSlot)
+			}
 
 		case OP_SUB_ASSIGN_LOCAL:
 			info := instr.Value.(AssignLocalInfo)
@@ -1025,6 +5844,7 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 			body.WriteByte(0xA1)
 			body.WriteByte(0x21)
 			body.WriteVarUint(uint32(info.TargetSlot))
+			emitSetTagConst(info.TargetSlot, jitTagNumber)
 
 		case OP_MUL_LOCAL_CONST:
 			info := instr.Value.(LocalConstInfo)
@@ -1035,16 +5855,61 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 			body.WriteByte(0xA2)
 			body.WriteByte(0x21)
 			body.WriteVarUint(uint32(stackBase + sp))
+			emitSetTagConst(stackBase+sp, jitTagNumber)
+
+		case OP_LOCAL_CONST_OP:
+			info := instr.Value.(LocalConstOpInfo)
+			if !emitLocalConstOp(info.Slot, info.Const, info.Op, stackBase+sp) {
+				body.WriteByte(0x44)
+				body.WriteFloat64(0.0)
+				body.WriteByte(0x21)
+				body.WriteVarUint(uint32(stackBase + sp))
+				emitSetTagConst(stackBase+sp, jitTagNull)
+			}
+
+		case OP_LOCAL_CONST_OP_STORE:
+			info := instr.Value.(LocalConstOpInfo)
+			if !emitLocalConstOp(info.Slot, info.Const, info.Op, info.Slot) {
+				emitSetTagFromType(info.Slot, stackTypeUnknown)
+			}
+
+		case OP_ADD_LOCAL_GLOBAL_GLOBAL_STORE:
+			info := instr.Value.(AddLocalGlobalGlobalStoreInfo)
+			emitLoadGlobalTagged(info.GlobalSlotA, tempPtrSlot+1)
+			emitLoadGlobalTagged(info.GlobalSlotB, tempPtrSlot+2)
+			emitDynamicAddTagged(info.LocalSlot, tempPtrSlot+1, tempPtrSlot+3)
+			emitDynamicAddTagged(tempPtrSlot+3, tempPtrSlot+2, info.LocalSlot)
+
+		case OP_ADD_LOCAL_ARRAY_INDEX_STORE:
+			info := instr.Value.(AddLocalArrayIndexStoreInfo)
+			emitArrayElementAddress(info.ArraySlot, info.IndexSlot)
+			emitLoadTaggedCell(tempPtrSlot, tempPtrSlot+1)
+			emitDynamicAddTagged(info.LocalSlot, tempPtrSlot+1, info.LocalSlot)
+
+		case OP_ARRAY_INDEX_CONST_OP_STORE:
+			info := instr.Value.(ArrayIndexConstOpInfo)
+			emitArrayElementAddress(info.ArraySlot, info.IndexSlot)
+			emitLoadTaggedCell(tempPtrSlot, tempPtrSlot+1)
+			if emitLocalConstOp(tempPtrSlot+1, info.Const, info.Op, tempPtrSlot+1) {
+				emitStoreTaggedCell(tempPtrSlot, tempPtrSlot+1)
+				emitDeoptCheckpoint(i+1, sp)
+			}
 
 		case OP_ADD_LOCAL_LOCAL_STORE:
 			info := instr.Value.(AddLocalLocalStoreInfo)
-			body.WriteByte(0x20)
-			body.WriteVarUint(uint32(info.SlotA))
-			body.WriteByte(0x20)
-			body.WriteVarUint(uint32(info.SlotB))
-			body.WriteByte(0xA0)
-			body.WriteByte(0x21)
-			body.WriteVarUint(uint32(info.DestSlot))
+
+			if localTypes[info.SlotA] == stackTypeNumber && localTypes[info.SlotB] == stackTypeNumber {
+				body.WriteByte(0x20)
+				body.WriteVarUint(uint32(info.SlotA))
+				body.WriteByte(0x20)
+				body.WriteVarUint(uint32(info.SlotB))
+				body.WriteByte(0xA0)
+				body.WriteByte(0x21)
+				body.WriteVarUint(uint32(info.DestSlot))
+				emitSetTagConst(info.DestSlot, jitTagNumber)
+			} else {
+				emitDynamicAddTagged(info.SlotA, info.SlotB, info.DestSlot)
+			}
 
 		case OP_RETURN:
 			body.WriteByte(0x20)
@@ -1069,18 +5934,14 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 					target = t
 				}
 			}
-			body.WriteByte(0x20)
-			body.WriteVarUint(uint32(stackBase + sp - 1))
-			body.WriteByte(0x44)
-			body.WriteFloat64(0.0)
-			body.WriteByte(0x62)
-			body.WriteByte(0x04)
-			body.WriteByte(0x40)
-			body.WriteByte(0x05)
+			emitTruthyI32(stackBase+sp-1, typeStack[sp-1])
+			body.WriteByte(0x04) // if
+			body.WriteByte(0x40) // empty block signature
+			body.WriteByte(0x05) // else
 			depth, _ := findDepth(activeBlocks, target)
-			body.WriteByte(0x0C)
+			body.WriteByte(0x0C) // br
 			body.WriteVarUint(uint32(depth + 1))
-			body.WriteByte(0x0B)
+			body.WriteByte(0x0B) // end
 
 		case OP_JUMP_IF_TRUE:
 			target := instr.IntArg
@@ -1089,17 +5950,13 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 					target = t
 				}
 			}
-			body.WriteByte(0x20)
-			body.WriteVarUint(uint32(stackBase + sp - 1))
-			body.WriteByte(0x44)
-			body.WriteFloat64(0.0)
-			body.WriteByte(0x62)
-			body.WriteByte(0x04)
-			body.WriteByte(0x40)
+			emitTruthyI32(stackBase+sp-1, typeStack[sp-1])
+			body.WriteByte(0x04) // if
+			body.WriteByte(0x40) // empty block signature
 			depth, _ := findDepth(activeBlocks, target)
-			body.WriteByte(0x0C)
+			body.WriteByte(0x0C) // br
 			body.WriteVarUint(uint32(depth + 1))
-			body.WriteByte(0x0B)
+			body.WriteByte(0x0B) // end
 
 		case OP_JUMP_LOCAL_GT_CONST:
 			info := instr.Value.(JumpLocalGTConstInfo)
@@ -1160,27 +6017,15 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 		case OP_JUMP_MOD_LOCAL_CONST_NOT_ZERO:
 			info := instr.Value.(JumpModLocalConstNotZeroInfo)
 
-			body.WriteByte(0x20)
-			body.WriteVarUint(uint32(info.LeftSlot))
-
-			body.WriteByte(0x20)
-			body.WriteVarUint(uint32(info.LeftSlot))
-
-			body.WriteByte(0x44)
+			body.WriteByte(0x44) // f64.const right
 			body.WriteFloat64(float64(info.Right))
+			body.WriteByte(0x21) // local.set temp
+			body.WriteVarUint(uint32(tempPtrSlot))
 
-			body.WriteByte(0xA3)
-			body.WriteByte(0x9D)
-
-			body.WriteByte(0x44)
-			body.WriteFloat64(float64(info.Right))
-
-			body.WriteByte(0xA2)
-			body.WriteByte(0xA1)
-
+			emitFastModValueConst(info.LeftSlot, float64(info.Right))
 			body.WriteByte(0x44)
 			body.WriteFloat64(0.0)
-			body.WriteByte(0x62)
+			body.WriteByte(0x62) // f64.ne
 
 			body.WriteByte(0x04)
 			body.WriteByte(0x40)
@@ -1192,27 +6037,10 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 		case OP_JUMP_MOD_LOCAL_LOCAL_NOT_ZERO:
 			info := instr.Value.(JumpModLocalLocalNotZeroInfo)
 
-			body.WriteByte(0x20)
-			body.WriteVarUint(uint32(info.LeftSlot))
-
-			body.WriteByte(0x20)
-			body.WriteVarUint(uint32(info.LeftSlot))
-
-			body.WriteByte(0x20)
-			body.WriteVarUint(uint32(info.RightSlot))
-
-			body.WriteByte(0xA3)
-			body.WriteByte(0x9D)
-
-			body.WriteByte(0x20)
-			body.WriteVarUint(uint32(info.RightSlot))
-
-			body.WriteByte(0xA2)
-			body.WriteByte(0xA1)
-
+			emitFastModValue(info.LeftSlot, info.RightSlot)
 			body.WriteByte(0x44)
 			body.WriteFloat64(0.0)
-			body.WriteByte(0x62)
+			body.WriteByte(0x62) // f64.ne
 
 			body.WriteByte(0x04)
 			body.WriteByte(0x40)
@@ -1227,10 +6055,11 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 				body.WriteByte(0x20)
 				body.WriteVarUint(uint32(stackBase + sp - info.ArgCount + a))
 			}
-			body.WriteByte(0x10)                   // call
-			body.WriteVarUint(uint32(info.ID + 3)) // Function indices start after 3 imports
+			body.WriteByte(0x10)                                // call
+			body.WriteVarUint(uint32(info.ID + jitImportCount)) // Function indices start after 9 imports
 			body.WriteByte(0x21)
 			body.WriteVarUint(uint32(stackBase + sp - info.ArgCount))
+			emitSetTagFromType(stackBase+sp-info.ArgCount, currentReturnTypes[info.ID])
 
 		case OP_CALL_DIRECT_SUB_CONST:
 			info := instr.Value.(CallDirectSubConstInfo)
@@ -1238,11 +6067,12 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 			body.WriteVarUint(uint32(info.Slot))
 			body.WriteByte(0x44)
 			body.WriteFloat64(float64(info.SubValue))
-			body.WriteByte(0xA1)                     // sub
-			body.WriteByte(0x10)                     // call
-			body.WriteVarUint(uint32(info.FnID + 3)) // Function indices start after 3 imports
+			body.WriteByte(0xA1)                                  // sub
+			body.WriteByte(0x10)                                  // call
+			body.WriteVarUint(uint32(info.FnID + jitImportCount)) // Function indices start after 9 imports
 			body.WriteByte(0x21)
 			body.WriteVarUint(uint32(stackBase + sp))
+			emitSetTagFromType(stackBase+sp, currentReturnTypes[info.FnID])
 
 		case OP_OBJECT:
 			info := instr.Value.(ObjectInfo)
@@ -1271,14 +6101,24 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 				objectSize = maxOffset + 16
 			}
 
-			body.WriteByte(0x44)
+			// INLINED NATIVE ALLOCATOR (BUMP POINTER)
+			// 1. Get current heap top
+			body.WriteByte(0x23) // global.get
+			body.WriteVarUint(0) // global 0
+			body.WriteByte(0x21) // local.set tempPtrSlot
+			body.WriteVarUint(uint32(tempPtrSlot))
+
+			// 2. Increment heap top
+			body.WriteByte(0x23) // global.get
+			body.WriteVarUint(0)
+			body.WriteByte(0x44) // f64.const
 			body.WriteFloat64(float64(objectSize))
-			body.WriteByte(0x10)
+			body.WriteByte(0xA0) // f64.add
+			body.WriteByte(0x24) // global.set
 			body.WriteVarUint(0)
 
-			body.WriteByte(0x21)
-			body.WriteVarUint(uint32(tempPtrSlot))
-			body.WriteByte(0x20)
+			// The address is now stored in tempPtrSlot
+			body.WriteByte(0x20) // local.get tempPtrSlot
 			body.WriteVarUint(uint32(tempPtrSlot))
 			body.WriteByte(0xAA)
 			body.WriteByte(0x44)
@@ -1287,7 +6127,7 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 			body.WriteVarUint(3)
 			body.WriteVarUint(0)
 
-			body.WriteByte(0x20)
+			body.WriteByte(0x20) // local.get tempPtrSlot
 			body.WriteVarUint(uint32(tempPtrSlot))
 			body.WriteByte(0xAA)
 			body.WriteByte(0x44)
@@ -1304,25 +6144,8 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 				body.WriteVarUint(uint32(tempPtrSlot))
 				body.WriteByte(0xAA)
 
-				t := inputTypes[idx]
-				if t == stackTypeBool {
-					body.WriteByte(0x44)
-					body.WriteFloat64(2.0)
-				} else if t == stackTypeObject {
-					body.WriteByte(0x44)
-					body.WriteFloat64(4.0)
-				} else if t == stackTypeArray {
-					body.WriteByte(0x44)
-					body.WriteFloat64(5.0)
-				} else if t == stackTypeNumber {
-					body.WriteByte(0x44)
-					body.WriteFloat64(1.0)
-				} else {
-					body.WriteByte(0x20)
-					body.WriteVarUint(uint32(stackBase + sp - count + idx))
-					body.WriteByte(0x10)
-					body.WriteVarUint(1)
-				}
+				body.WriteByte(0x20)
+				body.WriteVarUint(uint32(tagSlot(stackBase + sp - count + idx)))
 				body.WriteByte(0x39)
 				body.WriteVarUint(3)
 				body.WriteVarUint(uint32(offset))
@@ -1341,6 +6164,7 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 			body.WriteVarUint(uint32(tempPtrSlot))
 			body.WriteByte(0x21)
 			body.WriteVarUint(uint32(stackBase + sp - count))
+			emitSetTagConst(stackBase+sp-count, jitTagObject)
 
 			dest := sp - count
 			if dest >= 0 && dest < len(typeStack) {
@@ -1350,101 +6174,134 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 		case OP_GET_PROPERTY, OP_GET_PROPERTY_SAFE:
 			name := instr.Value.(string)
 			offset := vm.getPropertyOffset(name)
-			body.WriteByte(0x20) // local.get stackBase + sp - 1
-			body.WriteVarUint(uint32(stackBase + sp - 1))
-			body.WriteByte(0x44)                   // f64.const
-			body.WriteFloat64(float64(offset + 8)) // Get the value field (offset + 8)
-			body.WriteByte(0xA0)                   // f64.add
-			body.WriteByte(0xAA)                   // i32.trunc_f64_s <-- Address must be i32!
-			body.WriteByte(0x2B)                   // f64.load
-			body.WriteVarUint(3)                   // alignment
-			body.WriteVarUint(0)                   // offset
+			dst := stackBase + sp - 1
 
-			body.WriteByte(0x21) // local.set stackBase + sp - 1
-			body.WriteVarUint(uint32(stackBase + sp - 1))
+			body.WriteByte(0x20) // local.get object
+			body.WriteVarUint(uint32(dst))
+			body.WriteByte(0x44) // f64.const offset
+			body.WriteFloat64(float64(offset))
+			body.WriteByte(0xA0) // f64.add
+			body.WriteByte(0x21) // local.set tempPtrSlot
+			body.WriteVarUint(uint32(tempPtrSlot))
+
+			emitLoadTaggedCell(tempPtrSlot, dst)
 
 		case OP_SET_PROPERTY:
 			name := instr.Value.(string)
 			offset := vm.getPropertyOffset(name)
+			objSlot := stackBase + sp - 2
+			srcSlot := stackBase + sp - 1
+
 			body.WriteByte(0x20) // local.get object
-			body.WriteVarUint(uint32(stackBase + sp - 2))
-			body.WriteByte(0xAA) // i32.trunc_f64_s
+			body.WriteVarUint(uint32(objSlot))
+			body.WriteByte(0x44) // f64.const offset
+			body.WriteFloat64(float64(offset))
+			body.WriteByte(0xA0) // f64.add
+			body.WriteByte(0x21) // local.set tempPtrSlot
+			body.WriteVarUint(uint32(tempPtrSlot))
 
-			t := typeStack[sp-1]
-			if t == stackTypeBool {
-				body.WriteByte(0x44)
-				body.WriteFloat64(2.0)
-			} else if t == stackTypeObject {
-				body.WriteByte(0x44)
-				body.WriteFloat64(4.0)
-			} else if t == stackTypeArray {
-				body.WriteByte(0x44)
-				body.WriteFloat64(5.0)
-			} else if t == stackTypeNumber {
-				body.WriteByte(0x44)
-				body.WriteFloat64(1.0)
-			} else {
-				body.WriteByte(0x20)
-				body.WriteVarUint(uint32(stackBase + sp - 1))
-				body.WriteByte(0x10)
-				body.WriteVarUint(1) // determine_tag
-			}
-			body.WriteByte(0x39)
-			body.WriteVarUint(3)
-			body.WriteVarUint(uint32(offset))
-			body.WriteByte(0x20) // local.get object
-			body.WriteVarUint(uint32(stackBase + sp - 2))
-			body.WriteByte(0x44)
-			body.WriteFloat64(float64(offset + 8))
-			body.WriteByte(0xA0)
-			body.WriteByte(0xAA)
-
-			body.WriteByte(0x20) // local.get value
-			body.WriteVarUint(uint32(stackBase + sp - 1))
-
-			body.WriteByte(0x39)
-			body.WriteVarUint(3)
-			body.WriteVarUint(0)
+			emitStoreTaggedCell(tempPtrSlot, srcSlot)
+			emitDeoptCheckpoint(i+1, sp-2)
 
 		case OP_GET_PROPERTY_LOCAL:
 			info := instr.Value.(PropertyLocalInfo)
 			offset := vm.getPropertyOffset(info.Name)
-			body.WriteByte(0x20) // local.get
+			dst := stackBase + sp
+
+			body.WriteByte(0x20) // local.get object
 			body.WriteVarUint(uint32(info.Slot))
-			body.WriteByte(0x44) // f64.const
-			body.WriteFloat64(float64(offset + 8))
+			body.WriteByte(0x44) // f64.const offset
+			body.WriteFloat64(float64(offset))
 			body.WriteByte(0xA0) // f64.add
-			body.WriteByte(0xAA) // i32.trunc_f64_s <-- Address must be i32!
-			body.WriteByte(0x2B) // f64.load
-			body.WriteVarUint(3) // alignment
-			body.WriteVarUint(0) // offset
-			body.WriteByte(0x21) // local.set stackBase + sp
-			body.WriteVarUint(uint32(stackBase + sp))
+			body.WriteByte(0x21) // local.set tempPtrSlot
+			body.WriteVarUint(uint32(tempPtrSlot))
+
+			emitLoadTaggedCell(tempPtrSlot, dst)
 
 		case OP_ADD_PROPERTY_LOCAL_LOCAL:
 			info := instr.Value.(PropertyLocalAssignInfo)
 			offset := vm.getPropertyOffset(info.Name)
-			body.WriteByte(0x20) // local.get ObjectSlot
+
+			// tempPtrSlot = address of the tagged property cell
+			body.WriteByte(0x20)
 			body.WriteVarUint(uint32(info.ObjectSlot))
-			body.WriteByte(0x44) // f64.const
-			body.WriteFloat64(float64(offset + 8))
-			body.WriteByte(0xA0) // f64.add
-			body.WriteByte(0xAA) // i32.trunc_f64_s <-- Address must be i32!
-			body.WriteByte(0x20) // local.get ObjectSlot
+			body.WriteByte(0x44)
+			body.WriteFloat64(float64(offset))
+			body.WriteByte(0xA0)
+			body.WriteByte(0x21)
+			body.WriteVarUint(uint32(tempPtrSlot))
+
+			// tempPtrSlot+1 = old property value, with tag copied
+			emitLoadTaggedCell(tempPtrSlot, tempPtrSlot+1)
+
+			// tempPtrSlot+1 = old + source, using tags
+			emitDynamicAddTagged(tempPtrSlot+1, info.SourceSlot, tempPtrSlot+1)
+
+			// store result back into property cell
+			emitStoreTaggedCell(tempPtrSlot, tempPtrSlot+1)
+			emitDeoptCheckpoint(i+1, sp)
+
+		case OP_ADD_PROPERTY_LOCAL_CONST:
+			info := instr.Value.(PropertyLocalConstAssignInfo)
+			offset := vm.getPropertyOffset(info.Name)
+			body.WriteByte(0x20)
 			body.WriteVarUint(uint32(info.ObjectSlot))
-			body.WriteByte(0x44) // f64.const
-			body.WriteFloat64(float64(offset + 8))
-			body.WriteByte(0xA0) // f64.add
-			body.WriteByte(0xAA) // i32.trunc_f64_s <-- Address must be i32!
-			body.WriteByte(0x2B) // f64.load
-			body.WriteVarUint(3)
-			body.WriteVarUint(0)
-			body.WriteByte(0x20) // local.get SourceSlot
-			body.WriteVarUint(uint32(info.SourceSlot))
-			body.WriteByte(0xA0) // f64.add
-			body.WriteByte(0x39) // f64.store
-			body.WriteVarUint(3)
-			body.WriteVarUint(0)
+			body.WriteByte(0x44)
+			body.WriteFloat64(float64(offset))
+			body.WriteByte(0xA0)
+			body.WriteByte(0x21)
+			body.WriteVarUint(uint32(tempPtrSlot))
+			emitLoadTaggedCell(tempPtrSlot, tempPtrSlot+1)
+			if emitLocalConstOp(tempPtrSlot+1, info.Const, info.Op, tempPtrSlot+1) {
+				emitStoreTaggedCell(tempPtrSlot, tempPtrSlot+1)
+				emitDeoptCheckpoint(i+1, sp)
+			}
+
+		case OP_ADD_PROPERTY_LOCAL_PROPERTY:
+			info := instr.Value.(PropertyLocalPropertyAssignInfo)
+			dstOffset := vm.getPropertyOffset(info.Name)
+			srcOffset := vm.getPropertyOffset(info.SourceName)
+
+			body.WriteByte(0x20)
+			body.WriteVarUint(uint32(info.ObjectSlot))
+			body.WriteByte(0x44)
+			body.WriteFloat64(float64(dstOffset))
+			body.WriteByte(0xA0)
+			body.WriteByte(0x21)
+			body.WriteVarUint(uint32(tempPtrSlot))
+			emitLoadTaggedCell(tempPtrSlot, tempPtrSlot+1)
+
+			body.WriteByte(0x20)
+			body.WriteVarUint(uint32(info.ObjectSlot))
+			body.WriteByte(0x44)
+			body.WriteFloat64(float64(srcOffset))
+			body.WriteByte(0xA0)
+			body.WriteByte(0x21)
+			body.WriteVarUint(uint32(tempPtrSlot + 2))
+			emitLoadTaggedCell(tempPtrSlot+2, tempPtrSlot+3)
+
+			if info.Op == OP_ADD {
+				emitDynamicAddTagged(tempPtrSlot+1, tempPtrSlot+3, tempPtrSlot+1)
+			} else {
+				emitNumericBinaryOp(tempPtrSlot+1, tempPtrSlot+3, tempPtrSlot+1, info.Op)
+			}
+			emitStoreTaggedCell(tempPtrSlot, tempPtrSlot+1)
+			emitDeoptCheckpoint(i+1, sp)
+
+		case OP_ADD_LOCAL_PROPERTIES_STORE:
+			info := instr.Value.(AddLocalPropertiesStoreInfo)
+			for _, name := range info.Names {
+				offset := vm.getPropertyOffset(name)
+				body.WriteByte(0x20)
+				body.WriteVarUint(uint32(info.ObjectSlot))
+				body.WriteByte(0x44)
+				body.WriteFloat64(float64(offset))
+				body.WriteByte(0xA0)
+				body.WriteByte(0x21)
+				body.WriteVarUint(uint32(tempPtrSlot))
+				emitLoadTaggedCell(tempPtrSlot, tempPtrSlot+1)
+				emitDynamicAddTagged(info.LocalSlot, tempPtrSlot+1, info.LocalSlot)
+			}
 
 		case OP_ARRAY:
 			info := instr.Value.(ArrayInfo)
@@ -1454,12 +6311,22 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 			for idx := 0; idx < count; idx++ {
 				inputTypes[idx] = typeStack[sp-count+idx]
 			}
-			body.WriteByte(0x44) // f64.const
-			body.WriteFloat64(32.0)
-			body.WriteByte(0x10) // call
-			body.WriteVarUint(0) // call alloc_object (Import 0)
+			// INLINED NATIVE ALLOCATOR (ARRAY)
+			// 1. Get current heap top
+			body.WriteByte(0x23) // global.get
+			body.WriteVarUint(0) // global 0
 			body.WriteByte(0x21) // local.set tempPtrSlot
 			body.WriteVarUint(uint32(tempPtrSlot))
+
+			// 2. Increment heap top by 32 bytes (header)
+			body.WriteByte(0x23) // global.get
+			body.WriteVarUint(0)
+			body.WriteByte(0x44) // f64.const
+			body.WriteFloat64(32.0)
+			body.WriteByte(0xA0) // f64.add
+			body.WriteByte(0x24) // global.set
+			body.WriteVarUint(0)
+
 			body.WriteByte(0x20) // local.get tempPtrSlot
 			body.WriteVarUint(uint32(tempPtrSlot))
 			body.WriteByte(0xAA) // i32.trunc_f64_s
@@ -1477,13 +6344,21 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 			body.WriteVarUint(3)
 			body.WriteVarUint(8) // offset 8
 			if count > 0 {
-				body.WriteByte(0x44) // f64.const
-				body.WriteFloat64(float64(count * 16))
-				body.WriteByte(0x10) // call
-				body.WriteVarUint(0) // call alloc_object
-
+				// Allocate elements array
+				body.WriteByte(0x23) // global.get
+				body.WriteVarUint(0)
 				body.WriteByte(0x21) // local.set tempPtrSlot+1
 				body.WriteVarUint(uint32(tempPtrSlot + 1))
+
+				// Increment heap top for elements (count * 16)
+				body.WriteByte(0x23) // global.get
+				body.WriteVarUint(0)
+				body.WriteByte(0x44) // f64.const
+				body.WriteFloat64(float64(count * 16))
+				body.WriteByte(0xA0) // f64.add
+				body.WriteByte(0x24) // global.set
+				body.WriteVarUint(0)
+
 				body.WriteByte(0x20) // local.get tempPtrSlot
 				body.WriteVarUint(uint32(tempPtrSlot))
 				body.WriteByte(0xAA) // i32.trunc_f64_s
@@ -1497,25 +6372,8 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 					body.WriteVarUint(uint32(tempPtrSlot + 1))
 					body.WriteByte(0xAA) // i32.trunc_f64_s
 
-					t := inputTypes[idx]
-					if t == stackTypeBool {
-						body.WriteByte(0x44)
-						body.WriteFloat64(2.0)
-					} else if t == stackTypeObject {
-						body.WriteByte(0x44)
-						body.WriteFloat64(4.0)
-					} else if t == stackTypeArray {
-						body.WriteByte(0x44)
-						body.WriteFloat64(5.0)
-					} else if t == stackTypeNumber {
-						body.WriteByte(0x44)
-						body.WriteFloat64(1.0)
-					} else {
-						body.WriteByte(0x20)
-						body.WriteVarUint(uint32(stackBase + sp - count + idx))
-						body.WriteByte(0x10)
-						body.WriteVarUint(1) // determine_tag
-					}
+					body.WriteByte(0x20)
+					body.WriteVarUint(uint32(tagSlot(stackBase + sp - count + idx)))
 					body.WriteByte(0x39) // f64.store
 					body.WriteVarUint(3)
 					body.WriteVarUint(uint32(idx * 16))
@@ -1550,97 +6408,53 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 			body.WriteVarUint(uint32(tempPtrSlot))
 			body.WriteByte(0x21) // local.set
 			body.WriteVarUint(uint32(stackBase + sp - count))
-
-			dest := sp - count
-			if dest >= 0 && dest < len(typeStack) {
-				typeStack[dest] = stackTypeArray
-			}
+			emitSetTagConst(stackBase+sp-count, jitTagArray)
 
 		case OP_INDEX:
-			body.WriteByte(0x20) // local.get object_ptr
-			body.WriteVarUint(uint32(stackBase + sp - 2))
-			body.WriteByte(0x44) // f64.const
-			body.WriteFloat64(16.0)
-			body.WriteByte(0xA0) // f64.add
-			body.WriteByte(0xAA) // i32.trunc_f64_s
-			body.WriteByte(0x2B) // f64.load
+			arrSlot := stackBase + sp - 2
+			idxSlot := stackBase + sp - 1
+
+			// tempPtrSlot = element base pointer
+			body.WriteByte(0x20) // local.get array
+			body.WriteVarUint(uint32(arrSlot))
+			body.WriteByte(0xAA)
+			body.WriteByte(0x2B) // f64.load elemPtr offset 16
 			body.WriteVarUint(3)
-			body.WriteVarUint(0)
+			body.WriteVarUint(16)
 			body.WriteByte(0x20) // local.get index
-			body.WriteVarUint(uint32(stackBase + sp - 1))
-			body.WriteByte(0x44) // f64.const
+			body.WriteVarUint(uint32(idxSlot))
+			body.WriteByte(0x44)
 			body.WriteFloat64(16.0)
-			body.WriteByte(0xA2) // f64.mul
-			body.WriteByte(0xA0) // f64.add
-			body.WriteByte(0x21) // local.set tempPtrSlot
+			body.WriteByte(0xA2)
+			body.WriteByte(0xA0)
+			body.WriteByte(0x21)
 			body.WriteVarUint(uint32(tempPtrSlot))
-			body.WriteByte(0x20) // local.get tempPtrSlot
-			body.WriteVarUint(uint32(tempPtrSlot))
-			body.WriteByte(0x44) // f64.const
-			body.WriteFloat64(8.0)
-			body.WriteByte(0xA0) // f64.add
-			body.WriteByte(0xAA) // i32.trunc_f64_s
-			body.WriteByte(0x2B) // f64.load
-			body.WriteVarUint(3)
-			body.WriteVarUint(0)
-			body.WriteByte(0x21) // local.set
-			body.WriteVarUint(uint32(stackBase + sp - 2))
+
+			emitLoadTaggedCell(tempPtrSlot, arrSlot)
 
 		case OP_SET_INDEX:
-			body.WriteByte(0x20) // local.get object_ptr
-			body.WriteVarUint(uint32(stackBase + sp - 3))
-			body.WriteByte(0x44) // f64.const
-			body.WriteFloat64(16.0)
-			body.WriteByte(0xA0) // f64.add
-			body.WriteByte(0xAA) // i32.trunc_f64_s
-			body.WriteByte(0x2B) // f64.load
-			body.WriteVarUint(3)
-			body.WriteVarUint(0)
-			body.WriteByte(0x20) // local.get index
-			body.WriteVarUint(uint32(stackBase + sp - 2))
-			body.WriteByte(0x44) // f64.const
-			body.WriteFloat64(16.0)
-			body.WriteByte(0xA2) // f64.mul
-			body.WriteByte(0xA0) // f64.add
-			body.WriteByte(0x21) // local.set tempPtrSlot
-			body.WriteVarUint(uint32(tempPtrSlot))
-			body.WriteByte(0x20) // local.get tempPtrSlot
-			body.WriteVarUint(uint32(tempPtrSlot))
-			body.WriteByte(0xAA) // i32.trunc_f64_s
+			arrSlot := stackBase + sp - 3
+			idxSlot := stackBase + sp - 2
+			srcSlot := stackBase + sp - 1
 
-			t := typeStack[sp-1]
-			if t == stackTypeBool {
-				body.WriteByte(0x44)
-				body.WriteFloat64(2.0)
-			} else if t == stackTypeObject {
-				body.WriteByte(0x44)
-				body.WriteFloat64(4.0)
-			} else if t == stackTypeArray {
-				body.WriteByte(0x44)
-				body.WriteFloat64(5.0)
-			} else if t == stackTypeNumber {
-				body.WriteByte(0x44)
-				body.WriteFloat64(1.0)
-			} else {
-				body.WriteByte(0x20)
-				body.WriteVarUint(uint32(stackBase + sp - 1))
-				body.WriteByte(0x10)
-				body.WriteVarUint(1) // determine_tag
-			}
-			body.WriteByte(0x39) // f64.store
+			// tempPtrSlot = element base pointer
+			body.WriteByte(0x20) // local.get array
+			body.WriteVarUint(uint32(arrSlot))
+			body.WriteByte(0xAA)
+			body.WriteByte(0x2B) // f64.load elemPtr offset 16
 			body.WriteVarUint(3)
-			body.WriteVarUint(0)
-			body.WriteByte(0x20) // local.get tempPtrSlot
+			body.WriteVarUint(16)
+			body.WriteByte(0x20) // local.get index
+			body.WriteVarUint(uint32(idxSlot))
+			body.WriteByte(0x44)
+			body.WriteFloat64(16.0)
+			body.WriteByte(0xA2)
+			body.WriteByte(0xA0)
+			body.WriteByte(0x21)
 			body.WriteVarUint(uint32(tempPtrSlot))
-			body.WriteByte(0x44) // f64.const
-			body.WriteFloat64(8.0)
-			body.WriteByte(0xA0) // f64.add
-			body.WriteByte(0xAA) // i32.trunc_f64_s
-			body.WriteByte(0x20) // local.get value
-			body.WriteVarUint(uint32(stackBase + sp - 1))
-			body.WriteByte(0x39) // f64.store
-			body.WriteVarUint(3)
-			body.WriteVarUint(0)
+
+			emitStoreTaggedCell(tempPtrSlot, srcSlot)
+			emitDeoptCheckpoint(i+1, sp-3)
 
 		case OP_LEN:
 			body.WriteByte(0x20) // local.get object_ptr
@@ -1654,81 +6468,62 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 			body.WriteVarUint(0)
 			body.WriteByte(0x21) // local.set
 			body.WriteVarUint(uint32(stackBase + sp - 1))
+			emitSetTagConst(stackBase+sp-1, jitTagNumber)
 
 		case OP_ARRAY_LEN_LOCAL:
 			info := instr.Value.(ArrayLocalCallInfo)
+			dst := stackBase + sp
+			if optimizedStringJoinLengthSlot[info.ArraySlot] {
+				emitCopyTagged(dst, info.ArraySlot)
+				emitSetTagConst(dst, jitTagNumber)
+				break
+			}
+
 			body.WriteByte(0x20) // local.get ArraySlot
 			body.WriteVarUint(uint32(info.ArraySlot))
-			body.WriteByte(0x44) // f64.const
-			body.WriteFloat64(8.0)
-			body.WriteByte(0xA0) // f64.add
 			body.WriteByte(0xAA) // i32.trunc_f64_s
-			body.WriteByte(0x2B) // f64.load
+			body.WriteByte(0x2B) // f64.load length (offset 8)
 			body.WriteVarUint(3)
-			body.WriteVarUint(0)
+			body.WriteVarUint(8)
 			body.WriteByte(0x21) // local.set
-			body.WriteVarUint(uint32(stackBase + sp))
+			body.WriteVarUint(uint32(dst))
+			emitSetTagConst(dst, jitTagNumber)
 
 		case OP_ARRAY_GET_LOCAL:
 			info := instr.Value.(ArrayLocalCallInfo)
+			dst := stackBase + sp
+
 			body.WriteByte(0x20) // local.get ArraySlot
 			body.WriteVarUint(uint32(info.ArraySlot))
-			body.WriteByte(0x44) // f64.const
-			body.WriteFloat64(16.0)
-			body.WriteByte(0xA0) // f64.add
-			body.WriteByte(0xAA) // i32.trunc_f64_s
-			body.WriteByte(0x2B) // f64.load
+			body.WriteByte(0xAA)
+			body.WriteByte(0x2B) // f64.load elemPtr offset 16
 			body.WriteVarUint(3)
-			body.WriteVarUint(0)
+			body.WriteVarUint(16)
 			body.WriteByte(0x20) // local.get ArgSlot
 			body.WriteVarUint(uint32(info.ArgSlot))
-			body.WriteByte(0x44) // f64.const
+			body.WriteByte(0x44)
 			body.WriteFloat64(16.0)
-			body.WriteByte(0xA2) // f64.mul
-			body.WriteByte(0xA0) // f64.add
-			body.WriteByte(0x21) // local.set tempPtrSlot
+			body.WriteByte(0xA2)
+			body.WriteByte(0xA0)
+			body.WriteByte(0x21)
 			body.WriteVarUint(uint32(tempPtrSlot))
-			body.WriteByte(0x20) // local.get tempPtrSlot
-			body.WriteVarUint(uint32(tempPtrSlot))
-			body.WriteByte(0x44) // f64.const
-			body.WriteFloat64(8.0)
-			body.WriteByte(0xA0) // f64.add
-			body.WriteByte(0xAA) // i32.trunc_f64_s
-			body.WriteByte(0x2B) // f64.load
-			body.WriteVarUint(3)
-			body.WriteVarUint(0)
-			body.WriteByte(0x21) // local.set
-			body.WriteVarUint(uint32(stackBase + sp))
+
+			emitLoadTaggedCell(tempPtrSlot, dst)
 
 		case OP_ARRAY_PUSH_LOCAL:
 			info := instr.Value.(ArrayLocalCallInfo)
 			body.WriteByte(0x20) // local.get ArraySlot
 			body.WriteVarUint(uint32(info.ArraySlot))
-			t := localTypes[info.ArgSlot]
-			if t == stackTypeBool {
-				body.WriteByte(0x44)
-				body.WriteFloat64(2.0)
-			} else if t == stackTypeObject {
-				body.WriteByte(0x44)
-				body.WriteFloat64(4.0)
-			} else if t == stackTypeArray {
-				body.WriteByte(0x44)
-				body.WriteFloat64(5.0)
-			} else if t == stackTypeNumber {
-				body.WriteByte(0x44)
-				body.WriteFloat64(1.0)
-			} else {
-				body.WriteByte(0x20)
-				body.WriteVarUint(uint32(info.ArgSlot))
-				body.WriteByte(0x10)
-				body.WriteVarUint(1) // determine_tag
-			}
-			body.WriteByte(0x20) // local.get ArgSlot
+			body.WriteByte(0x20) // local.get ArgSlot tag
+			body.WriteVarUint(uint32(tagSlot(info.ArgSlot)))
+			body.WriteByte(0x20) // local.get ArgSlot value
 			body.WriteVarUint(uint32(info.ArgSlot))
 			body.WriteByte(0x10)
-			body.WriteVarUint(2)
+			body.WriteVarUint(2) // array_push
 			body.WriteByte(0x21)
 			body.WriteVarUint(uint32(stackBase + sp))
+			emitSetTagConst(stackBase+sp, jitTagArray)
+			emitDeoptCheckpoint(i+1, sp+1)
 
 		case OP_ARRAY_PUSH_LOCAL_MUL_CONST:
 			info := instr.Value.(ArrayLocalMulConstInfo)
@@ -1745,194 +6540,126 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 			body.WriteVarUint(2)
 			body.WriteByte(0x21)
 			body.WriteVarUint(uint32(stackBase + sp))
+			emitSetTagConst(stackBase+sp, jitTagArray)
+			emitDeoptCheckpoint(i+1, sp+1)
 
 		case OP_METHOD_CALL:
 			info := instr.Value.(MethodCallInfo)
-			if info.Method == "length" {
+			receiverSlot := stackBase + sp - info.ArgCount - 1
+			resultSlot := receiverSlot
+			methodID, ok := jitStringID[info.Method]
+			if !ok {
+				methodID = 0
+			}
+
+			// If receiver is a standard module loaded by OP_LOAD_GLOBAL, dispatch to Go stdlib.
+			body.WriteByte(0x20) // local.get receiver tag
+			body.WriteVarUint(uint32(tagSlot(receiverSlot)))
+			body.WriteByte(0x44) // f64.const jitTagStdModule
+			body.WriteFloat64(jitTagStdModule)
+			body.WriteByte(0x61) // f64.eq
+
+			body.WriteByte(0x04) // if
+			body.WriteByte(0x40) // no result, stores into resultSlot
+
+			// call_stdlib_wasm(moduleSlot, methodID, argCount, tag0, val0, tag1, val1, tag2, val2)
+			body.WriteByte(0x20) // module slot stored in receiver value
+			body.WriteVarUint(uint32(receiverSlot))
+			body.WriteByte(0x44)
+			body.WriteFloat64(float64(methodID))
+			body.WriteByte(0x44)
+			body.WriteFloat64(float64(info.ArgCount))
+			for argIndex := 0; argIndex < 3; argIndex++ {
+				if argIndex < info.ArgCount {
+					argSlot := receiverSlot + 1 + argIndex
+					body.WriteByte(0x20) // arg tag
+					body.WriteVarUint(uint32(tagSlot(argSlot)))
+					body.WriteByte(0x20) // arg value
+					body.WriteVarUint(uint32(argSlot))
+				} else {
+					body.WriteByte(0x44) // missing arg tag = null
+					body.WriteFloat64(jitTagNull)
+					body.WriteByte(0x44) // missing arg value = 0
+					body.WriteFloat64(0.0)
+				}
+			}
+			emitMarkSideEffect()
+			body.WriteByte(0x10) // call call_stdlib_wasm
+			body.WriteVarUint(jitImportCallStdlibWasm)
+
+			// call_stdlib_wasm returns (tag, value). Store value first, then tag.
+			body.WriteByte(0x21) // local.set result value
+			body.WriteVarUint(uint32(resultSlot))
+			body.WriteByte(0x21) // local.set result tag
+			body.WriteVarUint(uint32(tagSlot(resultSlot)))
+
+			body.WriteByte(0x05) // else: normal JIT-supported methods
+
+			switch info.Method {
+			case "length":
 				body.WriteByte(0x20) // local.get receiver
-				body.WriteVarUint(uint32(stackBase + sp - 1))
-				body.WriteByte(0x44) // f64.const
-				body.WriteFloat64(8.0)
-				body.WriteByte(0xA0) // f64.add
-				body.WriteByte(0xAA) // i32.trunc_f64_s
-				body.WriteByte(0x2B) // f64.load
-				body.WriteVarUint(3)
-				body.WriteVarUint(0)
-				body.WriteByte(0x21) // local.set receiver slot
-				body.WriteVarUint(uint32(stackBase + sp - 1))
-			} else if info.Method == "get" {
-				body.WriteByte(0x20) // local.get receiver
-				body.WriteVarUint(uint32(stackBase + sp - 2))
-				body.WriteByte(0x44) // f64.const
-				body.WriteFloat64(16.0)
-				body.WriteByte(0xA0) // f64.add
-				body.WriteByte(0xAA) // i32.trunc_f64_s
-				body.WriteByte(0x2B) // f64.load
-				body.WriteVarUint(3)
-				body.WriteVarUint(0)
-				body.WriteByte(0x20) // local.get index
-				body.WriteVarUint(uint32(stackBase + sp - 1))
-				body.WriteByte(0x44) // f64.const
-				body.WriteFloat64(16.0)
-				body.WriteByte(0xA2) // f64.mul
-				body.WriteByte(0xA0) // f64.add
-				body.WriteByte(0x21) // local.set tempPtrSlot
-				body.WriteVarUint(uint32(tempPtrSlot))
-				body.WriteByte(0x20) // local.get tempPtrSlot
-				body.WriteVarUint(uint32(tempPtrSlot))
-				body.WriteByte(0x44) // f64.const
-				body.WriteFloat64(8.0)
-				body.WriteByte(0xA0) // f64.add
-				body.WriteByte(0xAA) // i32.trunc_f64_s
-				body.WriteByte(0x2B) // f64.load
-				body.WriteVarUint(3)
-				body.WriteVarUint(0)
-				body.WriteByte(0x21) // local.set receiver slot
-				body.WriteVarUint(uint32(stackBase + sp - 2))
-			} else if info.Method == "push" {
-				body.WriteByte(0x20) // local.get receiver
-				body.WriteVarUint(uint32(stackBase + sp - 2))
-				body.WriteByte(0x21) // local.set tempPtrSlot+3
-				body.WriteVarUint(uint32(tempPtrSlot + 3))
-				body.WriteByte(0x20) // local.get value
-				body.WriteVarUint(uint32(stackBase + sp - 1))
-				body.WriteByte(0x21) // local.set tempPtrSlot+4
-				body.WriteVarUint(uint32(tempPtrSlot + 4))
-				body.WriteByte(0x20) // local.get receiver
-				body.WriteVarUint(uint32(stackBase + sp - 2))
-				body.WriteByte(0x44) // f64.const
-				body.WriteFloat64(8.0)
-				body.WriteByte(0xA0) // f64.add
+				body.WriteVarUint(uint32(receiverSlot))
 				body.WriteByte(0xAA) // i32.trunc_f64_s
 				body.WriteByte(0x2B) // f64.load length
-				body.WriteVarUint(3)
-				body.WriteVarUint(0)
-				body.WriteByte(0x21) // local.set tempPtrSlot+1
-				body.WriteVarUint(uint32(tempPtrSlot + 1))
-				body.WriteByte(0x20) // local.get receiver
-				body.WriteVarUint(uint32(stackBase + sp - 2))
-				body.WriteByte(0x44) // f64.const
-				body.WriteFloat64(24.0)
-				body.WriteByte(0xA0) // f64.add
-				body.WriteByte(0xAA) // i32.trunc_f64_s
-				body.WriteByte(0x2B) // f64.load capacity
-				body.WriteVarUint(3)
-				body.WriteVarUint(0)
-				body.WriteByte(0x21) // local.set tempPtrSlot+2
-				body.WriteVarUint(uint32(tempPtrSlot + 2))
-				body.WriteByte(0x20) // local.get length
-				body.WriteVarUint(uint32(tempPtrSlot + 1))
-				body.WriteByte(0x20) // local.get capacity
-				body.WriteVarUint(uint32(tempPtrSlot + 2))
-				body.WriteByte(0x63) // f64.lt
+				body.WriteVarUint(3) // alignment 3
+				body.WriteVarUint(8) // offset 8
+				body.WriteByte(0x21) // local.set result
+				body.WriteVarUint(uint32(resultSlot))
+				emitSetTagConst(resultSlot, jitTagNumber)
 
-				body.WriteByte(0x04) // if
-				body.WriteByte(0x40) // block type: empty
+			case "get":
+				indexSlot := receiverSlot + 1
 				body.WriteByte(0x20) // local.get receiver
-				body.WriteVarUint(uint32(tempPtrSlot + 3))
-				body.WriteByte(0x44) // f64.const
+				body.WriteVarUint(uint32(receiverSlot))
+				body.WriteByte(0xAA)
+				body.WriteByte(0x2B) // f64.load elemPtr offset 16
+				body.WriteVarUint(3)
+				body.WriteVarUint(16)
+				body.WriteByte(0x20) // local.get index
+				body.WriteVarUint(uint32(indexSlot))
+				body.WriteByte(0x44)
 				body.WriteFloat64(16.0)
-				body.WriteByte(0xA0) // f64.add
-				body.WriteByte(0xAA) // i32.trunc_f64_s
-				body.WriteByte(0x2B) // f64.load elemPtr
-				body.WriteVarUint(3)
-				body.WriteVarUint(0)
-				body.WriteByte(0x20) // local.get length
-				body.WriteVarUint(uint32(tempPtrSlot + 1))
-				body.WriteByte(0x44) // f64.const
-				body.WriteFloat64(16.0)
-				body.WriteByte(0xA2) // f64.mul
-				body.WriteByte(0xA0) // f64.add
-				body.WriteByte(0x21) // local.set elemAddr (tempPtrSlot)
-				body.WriteVarUint(uint32(tempPtrSlot))
-				body.WriteByte(0x20) // local.get elemAddr
-				body.WriteVarUint(uint32(tempPtrSlot))
-				body.WriteByte(0xAA) // i32.trunc_f64_s
-				t := typeStack[sp-1]
-				if t == stackTypeBool {
-					body.WriteByte(0x44)
-					body.WriteFloat64(2.0)
-				} else if t == stackTypeObject {
-					body.WriteByte(0x44)
-					body.WriteFloat64(4.0)
-				} else if t == stackTypeArray {
-					body.WriteByte(0x44)
-					body.WriteFloat64(5.0)
-				} else if t == stackTypeNumber {
-					body.WriteByte(0x44)
-					body.WriteFloat64(1.0)
-				} else {
-					body.WriteByte(0x20)
-					body.WriteVarUint(uint32(tempPtrSlot + 4)) // local.get value
-					body.WriteByte(0x10)
-					body.WriteVarUint(1) // determine_tag
-				}
-				body.WriteByte(0x39) // f64.store
-				body.WriteVarUint(3)
-				body.WriteVarUint(0) // offset 0
-				body.WriteByte(0x20) // local.get elemAddr
-				body.WriteVarUint(uint32(tempPtrSlot))
-				body.WriteByte(0x44) // f64.const
-				body.WriteFloat64(8.0)
-				body.WriteByte(0xA0) // f64.add
-				body.WriteByte(0xAA) // i32.trunc_f64_s
-				body.WriteByte(0x20) // local.get value
-				body.WriteVarUint(uint32(tempPtrSlot + 4))
-				body.WriteByte(0x39) // f64.store
-				body.WriteVarUint(3)
-				body.WriteVarUint(0) // offset 0
-				body.WriteByte(0x20) // local.get receiver
-				body.WriteVarUint(uint32(tempPtrSlot + 3))
-				body.WriteByte(0x44) // f64.const
-				body.WriteFloat64(8.0)
-				body.WriteByte(0xA0) // f64.add
-				body.WriteByte(0xAA) // i32.trunc_f64_s
-
-				body.WriteByte(0x20) // local.get length
-				body.WriteVarUint(uint32(tempPtrSlot + 1))
-				body.WriteByte(0x44) // f64.const
-				body.WriteFloat64(1.0)
-				body.WriteByte(0xA0) // f64.add // length + 1
-
-				body.WriteByte(0x39) // f64.store to receiver + 8
-				body.WriteVarUint(3)
-				body.WriteVarUint(0)
-				body.WriteByte(0x20) // local.get receiver
-				body.WriteVarUint(uint32(tempPtrSlot + 3))
-				body.WriteByte(0x21) // local.set (stackBase + sp - 2)
-				body.WriteVarUint(uint32(stackBase + sp - 2))
-
-				body.WriteByte(0x05) // else
-				body.WriteByte(0x20) // local.get receiver
-				body.WriteVarUint(uint32(tempPtrSlot + 3))
-				t = typeStack[sp-1]
-				if t == stackTypeBool {
-					body.WriteByte(0x44)
-					body.WriteFloat64(2.0)
-				} else if t == stackTypeObject {
-					body.WriteByte(0x44)
-					body.WriteFloat64(4.0)
-				} else if t == stackTypeArray {
-					body.WriteByte(0x44)
-					body.WriteFloat64(5.0)
-				} else if t == stackTypeNumber {
-					body.WriteByte(0x44)
-					body.WriteFloat64(1.0)
-				} else {
-					body.WriteByte(0x20)
-					body.WriteVarUint(uint32(tempPtrSlot + 4)) // local.get value
-					body.WriteByte(0x10)
-					body.WriteVarUint(1) // determine_tag
-				}
-
-				body.WriteByte(0x20) // local.get value
-				body.WriteVarUint(uint32(tempPtrSlot + 4))
-				body.WriteByte(0x10)
-				body.WriteVarUint(2)
+				body.WriteByte(0xA2)
+				body.WriteByte(0xA0)
 				body.WriteByte(0x21)
-				body.WriteVarUint(uint32(stackBase + sp - 2))
+				body.WriteVarUint(uint32(tempPtrSlot))
+				emitLoadTaggedCell(tempPtrSlot, resultSlot)
 
-				body.WriteByte(0x0B) // end of if
+			case "push":
+				emitMarkSideEffect()
+				argSlot := receiverSlot + 1
+				body.WriteByte(0x20) // receiver array
+				body.WriteVarUint(uint32(receiverSlot))
+				body.WriteByte(0x20) // value tag
+				body.WriteVarUint(uint32(tagSlot(argSlot)))
+				body.WriteByte(0x20) // value
+				body.WriteVarUint(uint32(argSlot))
+				body.WriteByte(0x10) // array_push
+				body.WriteVarUint(jitImportArrayPush)
+				body.WriteByte(0x21) // local.set result
+				body.WriteVarUint(uint32(resultSlot))
+				emitSetTagConst(resultSlot, jitTagArray)
+
+			default:
+				body.WriteByte(0x44) // f64.const string tag
+				body.WriteFloat64(jitTagString)
+				body.WriteByte(0x44) // f64.const method string id
+				body.WriteFloat64(float64(methodID))
+				body.WriteByte(0x10) // load_string_constant(methodID)
+				body.WriteVarUint(jitImportLoadStringConstant)
+				body.WriteByte(0x10) // throw_wasm(tag, value)
+				body.WriteVarUint(jitImportThrowWasm)
+				body.WriteByte(0x1A) // drop returned f64 if throw_wasm ever returns
+				body.WriteByte(0x44)
+				body.WriteFloat64(0.0)
+				body.WriteByte(0x21)
+				body.WriteVarUint(uint32(resultSlot))
+				emitSetTagConst(resultSlot, jitTagNull)
+			}
+
+			body.WriteByte(0x0B) // end standard-module dispatch if
+			if info.Method != "length" && info.Method != "get" {
+				emitDeoptCheckpoint(i+1, sp-info.ArgCount)
 			}
 		}
 	}
@@ -1952,15 +6679,339 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool) []byte {
 	funcBodySec.WriteBytes(body.buf)
 	return funcBodySec.buf
 }
-func (vm *VM) CompileAllJit() {
+
+func (vm *VM) jitValueToTinyValue(mod api.Module, tag float64, val float64) TinyValue {
+	switch tag {
+	case jitTagNull:
+		return NewNull()
+
+	case jitTagNumber:
+		return ToValue(val)
+
+	case jitTagBool:
+		return NewNative(val != 0)
+
+	case jitTagString:
+		addr := uint32(val)
+
+		lenBytes, ok := mod.Memory().Read(addr+8, 8)
+		if !ok {
+			return NewNull()
+		}
+
+		strLen := uint32(math.Float64frombits(binary.LittleEndian.Uint64(lenBytes)))
+
+		strBytes, ok := mod.Memory().Read(addr+16, strLen)
+		if !ok {
+			return NewNull()
+		}
+
+		return NewNative(string(strBytes))
+
+	case jitTagObject:
+		return NewNative(WasmObjectValue{
+			Address: val,
+			VM:      vm,
+		})
+
+	case jitTagArray:
+		return NewNative(WasmArrayValue{
+			Address: val,
+			VM:      vm,
+		})
+
+	default:
+		return ToValue(val)
+	}
+}
+
+func (vm *VM) allocateJitMemory(mod api.Module, size uint32) uint32 {
+	size = (size + 7) &^ 7 // Align size to 8-byte boundary
+
+	const bitsetRange = 128 * 1024 * 1024
+	const bitsetSize = bitsetRange / 64 // 2MB
+
+	var addr uint32
+	heapTopGlobal := vm.getHeapTopGlobal(mod)
+	if heapTopGlobal != nil {
+		addr = uint32(api.DecodeF64(heapTopGlobal.Get()))
+	} else {
+		addr = atomic.LoadUint32(&vm.jitHeapTop)
+	}
+
+	// Mark allocator bitset
+	bitIdx := addr / 8
+	byteIdx := bitIdx / 8
+	bitOffset := bitIdx % 8
+	if byteIdx < bitsetSize {
+		buf, ok := mod.Memory().Read(byteIdx, 1)
+		if ok {
+			buf[0] |= (1 << bitOffset)
+			mod.Memory().Write(byteIdx, buf)
+		}
+	}
+
+	newTop := addr + size
+	currentPages := mod.Memory().Size() / 65536
+	newPagesNeeded := (newTop + 65535) / 65536
+	if newPagesNeeded > currentPages {
+		mod.Memory().Grow(newPagesNeeded - currentPages)
+	}
+	if heapTopGlobal != nil {
+		if mg, ok := heapTopGlobal.(api.MutableGlobal); ok {
+			mg.Set(api.EncodeF64(float64(newTop)))
+		}
+	}
+	atomic.StoreUint32(&vm.jitHeapTop, newTop)
+	return addr
+}
+
+func appendPartBytes(mod api.Module, tag, val float64, buf []byte) []byte {
+	switch tag {
+	case 6.0: // String
+		addr := uint32(val)
+		lenBytes, ok := mod.Memory().Read(addr+8, 8)
+		if !ok {
+			return buf
+		}
+		n := uint32(math.Float64frombits(binary.LittleEndian.Uint64(lenBytes)))
+		if n == 0 {
+			return buf
+		}
+		bytes, ok := mod.Memory().Read(addr+16, n)
+		if !ok {
+			return buf
+		}
+		return append(buf, bytes...)
+	case 2.0: // Bool
+		if val != 0.0 {
+			return append(buf, "true"...)
+		}
+		return append(buf, "false"...)
+	case 1.0: // Number
+		if math.Trunc(val) == val {
+			return strconv.AppendInt(buf, int64(val), 10)
+		}
+		return append(buf, FloatToString(val)...)
+	case 0.0: // Null
+		return append(buf, "null"...)
+	default:
+		return buf
+	}
+}
+
+func (vm *VM) allocateWasmStringNoRegister(mod api.Module, bytes []byte) float64 {
+	length := len(bytes)
+	size := uint32(16 + length)
+	addr := vm.allocateJitMemory(mod, size)
+
+	buf := make([]byte, 16+length)
+	binary.LittleEndian.PutUint64(buf[0:8], math.Float64bits(6.0))
+	binary.LittleEndian.PutUint64(buf[8:16], math.Float64bits(float64(length)))
+	copy(buf[16:], bytes)
+
+	mod.Memory().Write(addr, buf)
+	return float64(addr)
+}
+
+func (vm *VM) allocateWasmString(mod api.Module, s string) float64 {
+	bytes := []byte(s)
+	length := len(bytes)
+	size := uint32(16 + length)
+	addr := vm.allocateJitMemory(mod, size)
+
+	buf := make([]byte, 16+length)
+	binary.LittleEndian.PutUint64(buf[0:8], math.Float64bits(6.0))
+	binary.LittleEndian.PutUint64(buf[8:16], math.Float64bits(float64(length)))
+	copy(buf[16:], bytes)
+
+	mod.Memory().Write(addr, buf)
+
+	vm.RegisterJitString(s)
+	return float64(addr)
+}
+
+func jitObjectKeyString(k any) string {
+	if s, ok := k.(string); ok {
+		return s
+	}
+	return fmt.Sprint(k)
+}
+
+func (vm *VM) allocateJitObject(mod api.Module, obj ObjectValue) float64 {
+	names := make([]string, 0, len(obj))
+	for k := range obj {
+		names = append(names, jitObjectKeyString(k))
+	}
+
+	shapeID := vm.getObjectShapeID(names)
+
+	objectSize := uint32(16)
+	if len(names) > 0 {
+		var maxOffset uint32 = 16
+		for _, name := range names {
+			offset := vm.getPropertyOffset(name)
+			if offset > maxOffset {
+				maxOffset = offset
+			}
+		}
+		objectSize = maxOffset + 16
+	}
+
+	addr := vm.allocateJitMemory(mod, objectSize)
+
+	tagBuf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(tagBuf, math.Float64bits(jitTagObject))
+	mod.Memory().Write(addr, tagBuf)
+
+	shapeBuf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(shapeBuf, math.Float64bits(float64(shapeID)))
+	mod.Memory().Write(addr+8, shapeBuf)
+
+	for key, val := range obj {
+		name := jitObjectKeyString(key)
+		offset := vm.getPropertyOffset(name)
+
+		t, v := vm.tinyValueToJitValue(mod, val)
+
+		tBuf := make([]byte, 8)
+		binary.LittleEndian.PutUint64(tBuf, math.Float64bits(t))
+		mod.Memory().Write(addr+offset, tBuf)
+
+		vBuf := make([]byte, 8)
+		binary.LittleEndian.PutUint64(vBuf, math.Float64bits(v))
+		mod.Memory().Write(addr+offset+8, vBuf)
+	}
+
+	return float64(addr)
+}
+
+func (vm *VM) allocateJitArray(mod api.Module, arr *ArrayValue) float64 {
+	count := len(arr.Elements)
+
+	addr := vm.allocateJitMemory(mod, 32)
+
+	tagBuf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(tagBuf, math.Float64bits(5.0))
+	mod.Memory().Write(addr, tagBuf)
+
+	lenBuf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(lenBuf, math.Float64bits(float64(count)))
+	mod.Memory().Write(addr+8, lenBuf)
+
+	capBuf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(capBuf, math.Float64bits(float64(count)))
+	mod.Memory().Write(addr+24, capBuf)
+
+	if count > 0 {
+		elemPtr := vm.allocateJitMemory(mod, uint32(count*16))
+
+		elemPtrBuf := make([]byte, 8)
+		binary.LittleEndian.PutUint64(elemPtrBuf, math.Float64bits(float64(elemPtr)))
+		mod.Memory().Write(addr+16, elemPtrBuf)
+
+		for idx, val := range arr.Elements {
+			t, v := vm.tinyValueToJitValue(mod, val)
+
+			tBuf := make([]byte, 8)
+			binary.LittleEndian.PutUint64(tBuf, math.Float64bits(t))
+			mod.Memory().Write(elemPtr+uint32(idx*16), tBuf)
+
+			vBuf := make([]byte, 8)
+			binary.LittleEndian.PutUint64(vBuf, math.Float64bits(v))
+			mod.Memory().Write(elemPtr+uint32(idx*16+8), vBuf)
+		}
+	} else {
+		elemPtrBuf := make([]byte, 8)
+		binary.LittleEndian.PutUint64(elemPtrBuf, math.Float64bits(0.0))
+		mod.Memory().Write(addr+16, elemPtrBuf)
+	}
+
+	return float64(addr)
+}
+
+func (vm *VM) tinyValueToJitValue(mod api.Module, val TinyValue) (float64, float64) {
+	if val.IsInt {
+		return jitTagNumber, float64(val.AsInt)
+	}
+	if val.Value == nil {
+		return jitTagNull, 0.0
+	}
+	switch v := val.Value.(type) {
+	case float64:
+		return jitTagNumber, v
+	case int:
+		return jitTagNumber, float64(v)
+	case int64:
+		return jitTagNumber, float64(v)
+	case bool:
+		if v {
+			return jitTagBool, 1.0
+		}
+		return jitTagBool, 0.0
+	case string:
+		return jitTagString, vm.allocateWasmString(mod, v)
+	case WasmObjectValue:
+		return jitTagObject, v.Address
+	case WasmArrayValue:
+		return jitTagArray, v.Address
+	case ObjectValue:
+		return jitTagObject, vm.allocateJitObject(mod, v)
+	case *ArrayValue:
+		return jitTagArray, vm.allocateJitArray(mod, v)
+	case *StandardModuleValue:
+		slot := -1
+		if vm.globals != nil {
+			for i, g := range *vm.globals {
+				if g.Value == v {
+					slot = i
+					break
+				}
+			}
+		}
+		return 7.0, float64(slot)
+	default:
+		return jitTagNull, 0.0
+	}
+}
+
+func (vm *VM) setupJitRuntimeAndEnv(jitStringConstCache map[uint32]uint32) bool {
+	if vm.wazeroCtx == nil {
+		vm.wazeroCtx = context.Background()
+	}
 	if vm.wazeroRuntime == nil {
 		vm.wazeroRuntime = wazero.NewRuntime(vm.wazeroCtx)
 	}
-	var vmAllocPtr uint32 = 8
+	const bitsetRange = 128 * 1024 * 1024
+	const bitsetSize = bitsetRange / 64 // 2MB
+	const heapStart = bitsetSize + jitDeoptSnapshotSize
+
+	allocateWasmString := func(mod api.Module, s string) float64 {
+		return vm.allocateWasmString(mod, s)
+	}
+
 	if vm.wazeroRuntime.Module("env") == nil {
 		_, err := vm.wazeroRuntime.NewHostModuleBuilder("env").
 			NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, size float64) float64 {
-			addr := atomic.LoadUint32(&vmAllocPtr)
+			var addr uint32
+			heapTopGlobal := vm.getHeapTopGlobal(mod)
+			if heapTopGlobal != nil {
+				addr = uint32(api.DecodeF64(heapTopGlobal.Get()))
+			} else {
+				addr = atomic.LoadUint32(&vm.jitHeapTop)
+			}
+
+			// Set bit in bitset
+			bitIdx := addr / 8
+			byteIdx := bitIdx / 8
+			bitOffset := bitIdx % 8
+
+			if byteIdx < bitsetSize {
+				buf, _ := mod.Memory().Read(byteIdx, 1)
+				buf[0] |= (1 << bitOffset)
+				mod.Memory().Write(byteIdx, buf)
+			}
+
 			newTop := addr + uint32(size)
 			currentPages := mod.Memory().Size() / 65536
 			newPagesNeeded := (newTop + 65535) / 65536
@@ -1969,11 +7020,35 @@ func (vm *VM) CompileAllJit() {
 				pagesToAdd := newPagesNeeded - currentPages
 				mod.Memory().Grow(pagesToAdd)
 			}
-			atomic.StoreUint32(&vmAllocPtr, newTop)
+			if heapTopGlobal != nil {
+				if mg, ok := heapTopGlobal.(api.MutableGlobal); ok {
+					mg.Set(api.EncodeF64(float64(newTop)))
+				}
+			}
+			atomic.StoreUint32(&vm.jitHeapTop, newTop)
 			return float64(addr)
 		}).Export("alloc_object").
 			NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, val float64) float64 {
-			return 1.0
+			addr := uint32(val)
+			var heapTop uint32
+			heapTopGlobal := vm.getHeapTopGlobal(mod)
+			if heapTopGlobal != nil {
+				heapTop = uint32(api.DecodeF64(heapTopGlobal.Get()))
+			} else {
+				heapTop = atomic.LoadUint32(&vm.jitHeapTop)
+			}
+
+			if addr >= heapStart && addr < heapTop && addr%8 == 0 {
+				tagBytes, ok := mod.Memory().Read(addr, 8)
+				if ok {
+					tag := math.Float64frombits(binary.LittleEndian.Uint64(tagBytes))
+					if tag == 4.0 || tag == 5.0 || tag == 6.0 {
+						return tag
+					}
+				}
+			}
+
+			return 1.0 // default to number
 		}).Export("determine_tag").
 			NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, arrayPtr float64, tag float64, val float64) float64 {
 			addr := uint32(arrayPtr)
@@ -2003,7 +7078,27 @@ func (vm *VM) CompileAllJit() {
 					newCapacity = 4
 				}
 				newSize := uint32(newCapacity * 16)
-				newElemPtr = atomic.LoadUint32(&vmAllocPtr)
+
+				var heapTop uint32
+				heapTopGlobal := vm.getHeapTopGlobal(mod)
+				if heapTopGlobal != nil {
+					heapTop = uint32(api.DecodeF64(heapTopGlobal.Get()))
+				} else {
+					heapTop = atomic.LoadUint32(&vm.jitHeapTop)
+				}
+
+				newElemPtr = heapTop
+
+				// Set bit in bitset for the new element buffer
+				bitIdx := newElemPtr / 8
+				byteIdx := bitIdx / 8
+				bitOffset := bitIdx % 8
+				if byteIdx < bitsetSize {
+					buf, _ := mod.Memory().Read(byteIdx, 1)
+					buf[0] |= (1 << bitOffset)
+					mod.Memory().Write(byteIdx, buf)
+				}
+
 				newTop := newElemPtr + newSize
 				currentPages := mod.Memory().Size() / 65536
 				newPagesNeeded := (newTop + 65535) / 65536
@@ -2012,7 +7107,12 @@ func (vm *VM) CompileAllJit() {
 					pagesToAdd := newPagesNeeded - currentPages
 					mod.Memory().Grow(pagesToAdd)
 				}
-				atomic.StoreUint32(&vmAllocPtr, newTop)
+				if heapTopGlobal != nil {
+					if mg, ok := heapTopGlobal.(api.MutableGlobal); ok {
+						mg.Set(api.EncodeF64(float64(newTop)))
+					}
+				}
+				atomic.StoreUint32(&vm.jitHeapTop, newTop)
 
 				if length > 0 && oldElemPtr != 0 {
 					oldBytes, ok3 := mod.Memory().Read(oldElemPtr, uint32(length*16))
@@ -2026,9 +7126,9 @@ func (vm *VM) CompileAllJit() {
 				binary.LittleEndian.PutUint64(capBuf[:], capBits)
 				mod.Memory().Write(addr+24, capBuf[:])
 
-				newElemPtrBits := math.Float64bits(float64(newElemPtr))
+				elemPtrBits := math.Float64bits(float64(newElemPtr))
 				var elemBuf [8]byte
-				binary.LittleEndian.PutUint64(elemBuf[:], newElemPtrBits)
+				binary.LittleEndian.PutUint64(elemBuf[:], elemPtrBits)
 				mod.Memory().Write(addr+16, elemBuf[:])
 			}
 
@@ -2046,12 +7146,725 @@ func (vm *VM) CompileAllJit() {
 
 			return arrayPtr
 		}).Export("array_push").
+			NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, srcA, srcB float64) float64 {
+			addrA := uint32(srcA)
+			lenABytes, _ := mod.Memory().Read(addrA+8, 8)
+			lenA := uint32(math.Float64frombits(binary.LittleEndian.Uint64(lenABytes)))
+			addrB := uint32(srcB)
+			lenBBytes, _ := mod.Memory().Read(addrB+8, 8)
+			lenB := uint32(math.Float64frombits(binary.LittleEndian.Uint64(lenBBytes)))
+			bytesA, _ := mod.Memory().Read(addrA+16, lenA)
+			bytesB, _ := mod.Memory().Read(addrB+16, lenB)
+			// Allocate heap memory for destination
+			size := uint32(16 + lenA + lenB)
+			size = (size + 7) &^ 7 // Align size to 8-byte boundary
+			var addr uint32
+			heapTopGlobal := vm.getHeapTopGlobal(mod)
+			if heapTopGlobal != nil {
+				addr = uint32(api.DecodeF64(heapTopGlobal.Get()))
+			} else {
+				addr = atomic.LoadUint32(&vm.jitHeapTop)
+			}
+			// Set bit in allocation bitset
+			bitIdx := addr / 8
+			byteIdx := bitIdx / 8
+			bitOffset := bitIdx % 8
+			if byteIdx < bitsetSize {
+				buf, _ := mod.Memory().Read(byteIdx, 1)
+				buf[0] |= (1 << bitOffset)
+				mod.Memory().Write(byteIdx, buf)
+			}
+			newTop := addr + size
+			currentPages := mod.Memory().Size() / 65536
+			newPagesNeeded := (newTop + 65535) / 65536
+			if newPagesNeeded > currentPages {
+				mod.Memory().Grow(newPagesNeeded - currentPages)
+			}
+			if heapTopGlobal != nil {
+				if mg, ok := heapTopGlobal.(api.MutableGlobal); ok {
+					mg.Set(api.EncodeF64(float64(newTop)))
+				}
+			}
+			atomic.StoreUint32(&vm.jitHeapTop, newTop)
+			// Write Tag 6.0
+			tagBuf := make([]byte, 8)
+			binary.LittleEndian.PutUint64(tagBuf, math.Float64bits(6.0))
+			mod.Memory().Write(addr, tagBuf)
+			// Write Length
+			lenBuf := make([]byte, 8)
+			binary.LittleEndian.PutUint64(lenBuf, math.Float64bits(float64(lenA+lenB)))
+			mod.Memory().Write(addr+8, lenBuf)
+			// Copy characters
+			mod.Memory().Write(addr+16, bytesA)
+			mod.Memory().Write(addr+16+lenA, bytesB)
+			return float64(addr)
+		}).Export("string_concat_wasm").NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, addrA, addrB float64) float64 {
+			addrA32 := uint32(addrA)
+			addrB32 := uint32(addrB)
+
+			if addrA32 == addrB32 {
+				return 1.0
+			}
+
+			lenBytesA, okA := mod.Memory().Read(addrA32+8, 8)
+			lenBytesB, okB := mod.Memory().Read(addrB32+8, 8)
+			if !okA || !okB {
+				return 0.0
+			}
+
+			lenA := uint32(math.Float64frombits(binary.LittleEndian.Uint64(lenBytesA)))
+			lenB := uint32(math.Float64frombits(binary.LittleEndian.Uint64(lenBytesB)))
+			if lenA != lenB {
+				return 0.0
+			}
+			if lenA == 0 {
+				return 1.0
+			}
+
+			bytesA, okA := mod.Memory().Read(addrA32+16, lenA)
+			bytesB, okB := mod.Memory().Read(addrB32+16, lenB)
+			if !okA || !okB {
+				return 0.0
+			}
+
+			for i := uint32(0); i < lenA; i++ {
+				if bytesA[i] != bytesB[i] {
+					return 0.0
+				}
+			}
+
+			return 1.0
+
+		}).Export("string_eq_wasm").NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, lTag, lVal, rTag, rVal float64) float64 {
+			readString := func(addr uint32) string {
+				lenBytes, ok := mod.Memory().Read(addr+8, 8)
+				if !ok {
+					return ""
+				}
+				n := uint32(math.Float64frombits(binary.LittleEndian.Uint64(lenBytes)))
+				if n == 0 {
+					return ""
+				}
+				bytes, ok := mod.Memory().Read(addr+16, n)
+				if !ok {
+					return ""
+				}
+				return string(bytes)
+			}
+
+			toString := func(tag float64, val float64) (string, bool) {
+				switch tag {
+				case 6.0:
+					return readString(uint32(val)), true
+				case 2.0:
+					if val != 0.0 {
+						return "true", true
+					}
+					return "false", true
+				case 1.0:
+					if math.Trunc(val) == val {
+						return strconv.FormatInt(int64(val), 10), true
+					}
+					return FloatToString(val), true
+				case 0.0:
+					return "null", true
+				default:
+					return "", false
+				}
+			}
+
+			if lTag == 6.0 || rTag == 6.0 {
+				if lTag == 6.0 && rTag == 6.0 {
+					addrA := uint32(lVal)
+					addrB := uint32(rVal)
+
+					lenBytesA, okA := mod.Memory().Read(addrA+8, 8)
+					lenBytesB, okB := mod.Memory().Read(addrB+8, 8)
+					if !okA || !okB {
+						panic("invalid operands for add")
+					}
+
+					lenA := uint32(math.Float64frombits(binary.LittleEndian.Uint64(lenBytesA)))
+					lenB := uint32(math.Float64frombits(binary.LittleEndian.Uint64(lenBytesB)))
+
+					size := uint32(16 + lenA + lenB)
+					size = (size + 7) &^ 7
+
+					var addr uint32
+					heapTopGlobal := vm.getHeapTopGlobal(mod)
+					if heapTopGlobal != nil {
+						addr = uint32(api.DecodeF64(heapTopGlobal.Get()))
+					} else {
+						addr = atomic.LoadUint32(&vm.jitHeapTop)
+					}
+
+					bitIdx := addr / 8
+					byteIdx := bitIdx / 8
+					bitOffset := bitIdx % 8
+					if byteIdx < bitsetSize {
+						buf, _ := mod.Memory().Read(byteIdx, 1)
+						buf[0] |= (1 << bitOffset)
+						mod.Memory().Write(byteIdx, buf)
+					}
+
+					newTop := addr + size
+					currentPages := mod.Memory().Size() / 65536
+					newPagesNeeded := (newTop + 65535) / 65536
+					if newPagesNeeded > currentPages {
+						mod.Memory().Grow(newPagesNeeded - currentPages)
+					}
+					if heapTopGlobal != nil {
+						if mg, ok := heapTopGlobal.(api.MutableGlobal); ok {
+							mg.Set(api.EncodeF64(float64(newTop)))
+						}
+					}
+					atomic.StoreUint32(&vm.jitHeapTop, newTop)
+
+					tagBuf := make([]byte, 8)
+					binary.LittleEndian.PutUint64(tagBuf, math.Float64bits(6.0))
+					mod.Memory().Write(addr, tagBuf)
+
+					lenBuf := make([]byte, 8)
+					binary.LittleEndian.PutUint64(lenBuf, math.Float64bits(float64(lenA+lenB)))
+					mod.Memory().Write(addr+8, lenBuf)
+
+					if lenA > 0 {
+						bytesA, _ := mod.Memory().Read(addrA+16, lenA)
+						mod.Memory().Write(addr+16, bytesA)
+					}
+					if lenB > 0 {
+						bytesB, _ := mod.Memory().Read(addrB+16, lenB)
+						mod.Memory().Write(addr+16+lenA, bytesB)
+					}
+
+					return float64(addr)
+				}
+
+				if lTag == 6.0 && rTag == 1.0 {
+					addrA := uint32(lVal)
+					lenBytesA, okA := mod.Memory().Read(addrA+8, 8)
+					if !okA {
+						panic("invalid operands for add")
+					}
+					lenA := uint32(math.Float64frombits(binary.LittleEndian.Uint64(lenBytesA)))
+					bytesA, _ := mod.Memory().Read(addrA+16, lenA)
+
+					var numBuf [24]byte
+					var bytesB []byte
+					if math.Trunc(rVal) == rVal {
+						bytesB = strconv.AppendInt(numBuf[:0], int64(rVal), 10)
+					} else {
+						bytesB = []byte(FloatToString(rVal))
+					}
+					lenB := uint32(len(bytesB))
+
+					size := uint32(16 + lenA + lenB)
+					size = (size + 7) &^ 7
+
+					var addr uint32
+					heapTopGlobal := vm.getHeapTopGlobal(mod)
+					if heapTopGlobal != nil {
+						addr = uint32(api.DecodeF64(heapTopGlobal.Get()))
+					} else {
+						addr = atomic.LoadUint32(&vm.jitHeapTop)
+					}
+
+					bitIdx := addr / 8
+					byteIdx := bitIdx / 8
+					bitOffset := bitIdx % 8
+					if byteIdx < bitsetSize {
+						buf, _ := mod.Memory().Read(byteIdx, 1)
+						buf[0] |= (1 << bitOffset)
+						mod.Memory().Write(byteIdx, buf)
+					}
+
+					newTop := addr + size
+					currentPages := mod.Memory().Size() / 65536
+					newPagesNeeded := (newTop + 65535) / 65536
+					if newPagesNeeded > currentPages {
+						mod.Memory().Grow(newPagesNeeded - currentPages)
+					}
+					if heapTopGlobal != nil {
+						if mg, ok := heapTopGlobal.(api.MutableGlobal); ok {
+							mg.Set(api.EncodeF64(float64(newTop)))
+						}
+					}
+					atomic.StoreUint32(&vm.jitHeapTop, newTop)
+
+					var tagBuf [8]byte
+					binary.LittleEndian.PutUint64(tagBuf[:], math.Float64bits(6.0))
+					mod.Memory().Write(addr, tagBuf[:])
+
+					var lenBuf [8]byte
+					binary.LittleEndian.PutUint64(lenBuf[:], math.Float64bits(float64(lenA+lenB)))
+					mod.Memory().Write(addr+8, lenBuf[:])
+
+					if lenA > 0 {
+						mod.Memory().Write(addr+16, bytesA)
+					}
+					if lenB > 0 {
+						mod.Memory().Write(addr+16+lenA, bytesB)
+					}
+
+					return float64(addr)
+				}
+
+				if lTag == 1.0 && rTag == 6.0 {
+					var numBuf [24]byte
+					var bytesA []byte
+					if math.Trunc(lVal) == lVal {
+						bytesA = strconv.AppendInt(numBuf[:0], int64(lVal), 10)
+					} else {
+						bytesA = []byte(FloatToString(lVal))
+					}
+					lenA := uint32(len(bytesA))
+
+					addrB := uint32(rVal)
+					lenBytesB, okB := mod.Memory().Read(addrB+8, 8)
+					if !okB {
+						panic("invalid operands for add")
+					}
+					lenB := uint32(math.Float64frombits(binary.LittleEndian.Uint64(lenBytesB)))
+					bytesB, _ := mod.Memory().Read(addrB+16, lenB)
+
+					size := uint32(16 + lenA + lenB)
+					size = (size + 7) &^ 7
+
+					var addr uint32
+					heapTopGlobal := vm.getHeapTopGlobal(mod)
+					if heapTopGlobal != nil {
+						addr = uint32(api.DecodeF64(heapTopGlobal.Get()))
+					} else {
+						addr = atomic.LoadUint32(&vm.jitHeapTop)
+					}
+
+					bitIdx := addr / 8
+					byteIdx := bitIdx / 8
+					bitOffset := bitIdx % 8
+					if byteIdx < bitsetSize {
+						buf, _ := mod.Memory().Read(byteIdx, 1)
+						buf[0] |= (1 << bitOffset)
+						mod.Memory().Write(byteIdx, buf)
+					}
+
+					newTop := addr + size
+					currentPages := mod.Memory().Size() / 65536
+					newPagesNeeded := (newTop + 65535) / 65536
+					if newPagesNeeded > currentPages {
+						mod.Memory().Grow(newPagesNeeded - currentPages)
+					}
+					if heapTopGlobal != nil {
+						if mg, ok := heapTopGlobal.(api.MutableGlobal); ok {
+							mg.Set(api.EncodeF64(float64(newTop)))
+						}
+					}
+					atomic.StoreUint32(&vm.jitHeapTop, newTop)
+
+					var tagBuf [8]byte
+					binary.LittleEndian.PutUint64(tagBuf[:], math.Float64bits(6.0))
+					mod.Memory().Write(addr, tagBuf[:])
+
+					var lenBuf [8]byte
+					binary.LittleEndian.PutUint64(lenBuf[:], math.Float64bits(float64(lenA+lenB)))
+					mod.Memory().Write(addr+8, lenBuf[:])
+
+					if lenA > 0 {
+						mod.Memory().Write(addr+16, bytesA)
+					}
+					if lenB > 0 {
+						mod.Memory().Write(addr+16+lenA, bytesB)
+					}
+
+					return float64(addr)
+				}
+
+				aStr, okA := toString(lTag, lVal)
+				bStr, okB := toString(rTag, rVal)
+				if !okA || !okB {
+					panic("invalid operands for add")
+				}
+
+				concatBytes := []byte(aStr + bStr)
+				size := uint32(16 + len(concatBytes))
+				size = (size + 7) &^ 7
+
+				var addr uint32
+				heapTopGlobal := vm.getHeapTopGlobal(mod)
+				if heapTopGlobal != nil {
+					addr = uint32(api.DecodeF64(heapTopGlobal.Get()))
+				} else {
+					addr = atomic.LoadUint32(&vm.jitHeapTop)
+				}
+
+				bitIdx := addr / 8
+				byteIdx := bitIdx / 8
+				bitOffset := bitIdx % 8
+				if byteIdx < bitsetSize {
+					buf, _ := mod.Memory().Read(byteIdx, 1)
+					buf[0] |= (1 << bitOffset)
+					mod.Memory().Write(byteIdx, buf)
+				}
+
+				newTop := addr + size
+				currentPages := mod.Memory().Size() / 65536
+				newPagesNeeded := (newTop + 65535) / 65536
+				if newPagesNeeded > currentPages {
+					mod.Memory().Grow(newPagesNeeded - currentPages)
+				}
+				if heapTopGlobal != nil {
+					if mg, ok := heapTopGlobal.(api.MutableGlobal); ok {
+						mg.Set(api.EncodeF64(float64(newTop)))
+					}
+				}
+				atomic.StoreUint32(&vm.jitHeapTop, newTop)
+
+				var tagBuf [8]byte
+				binary.LittleEndian.PutUint64(tagBuf[:], math.Float64bits(6.0))
+				mod.Memory().Write(addr, tagBuf[:])
+
+				var lenBuf [8]byte
+				binary.LittleEndian.PutUint64(lenBuf[:], math.Float64bits(float64(len(concatBytes))))
+				mod.Memory().Write(addr+8, lenBuf[:])
+				mod.Memory().Write(addr+16, concatBytes)
+
+				return float64(addr)
+			}
+
+			if lTag == 1.0 && rTag == 1.0 {
+				return lVal + rVal
+			}
+
+			panic("invalid operands for add")
+		}).Export("dynamic_add").
+			NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, tag1, val1, tag2, val2, tag3, val3 float64) float64 {
+			var localBuf [128]byte
+			bytes := localBuf[:0]
+			bytes = appendPartBytes(mod, tag1, val1, bytes)
+			bytes = appendPartBytes(mod, tag2, val2, bytes)
+			bytes = appendPartBytes(mod, tag3, val3, bytes)
+			return vm.allocateWasmStringNoRegister(mod, bytes)
+		}).Export("dynamic_join_3").
+			NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, tag1, val1, tag2, val2, tag3, val3, tag4, val4 float64) float64 {
+			var localBuf [128]byte
+			bytes := localBuf[:0]
+			bytes = appendPartBytes(mod, tag1, val1, bytes)
+			bytes = appendPartBytes(mod, tag2, val2, bytes)
+			bytes = appendPartBytes(mod, tag3, val3, bytes)
+			bytes = appendPartBytes(mod, tag4, val4, bytes)
+			return vm.allocateWasmStringNoRegister(mod, bytes)
+		}).Export("dynamic_join_4").
+			NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, id float64) float64 {
+			strID := uint32(id)
+
+			// Return the already-allocated WASM string for this constant.
+			// Without this, every OP_CONST string inside a hot loop allocates again.
+			if cachedAddr, ok := jitStringConstCache[strID]; ok {
+				var heapTop uint32
+				heapTopGlobal := vm.getHeapTopGlobal(mod)
+				if heapTopGlobal != nil {
+					heapTop = uint32(api.DecodeF64(heapTopGlobal.Get()))
+				} else {
+					heapTop = atomic.LoadUint32(&vm.jitHeapTop)
+				}
+
+				if cachedAddr >= heapStart && cachedAddr < heapTop && cachedAddr%8 == 0 {
+					bitIdx := cachedAddr / 8
+					byteIdx := bitIdx / 8
+					bitOffset := bitIdx % 8
+
+					if byteIdx < bitsetSize {
+						buf, ok := mod.Memory().Read(byteIdx, 1)
+						if ok && (buf[0]&(1<<bitOffset)) != 0 {
+							tagBytes, ok := mod.Memory().Read(cachedAddr, 8)
+							if ok && math.Float64frombits(binary.LittleEndian.Uint64(tagBytes)) == 6.0 {
+								return float64(cachedAddr)
+							}
+						}
+					}
+				}
+			}
+
+			strVal := vm.jitStrings[strID]
+			bytes := []byte(strVal)
+			size := uint32(16 + len(bytes))
+			size = (size + 7) &^ 7 // Align size to 8-byte boundary
+
+			var addr uint32
+			heapTopGlobal := mod.ExportedGlobal("__heap_top")
+			if heapTopGlobal != nil {
+				addr = uint32(api.DecodeF64(heapTopGlobal.Get()))
+			} else {
+				addr = atomic.LoadUint32(&vm.jitHeapTop)
+			}
+
+			// Mark allocator bitset
+			bitIdx := addr / 8
+			byteIdx := bitIdx / 8
+			bitOffset := bitIdx % 8
+			if byteIdx < bitsetSize {
+				buf, _ := mod.Memory().Read(byteIdx, 1)
+				buf[0] |= (1 << bitOffset)
+				mod.Memory().Write(byteIdx, buf)
+			}
+
+			newTop := addr + size
+			currentPages := mod.Memory().Size() / 65536
+			newPagesNeeded := (newTop + 65535) / 65536
+			if newPagesNeeded > currentPages {
+				mod.Memory().Grow(newPagesNeeded - currentPages)
+			}
+			if heapTopGlobal != nil {
+				if mg, ok := heapTopGlobal.(api.MutableGlobal); ok {
+					mg.Set(api.EncodeF64(float64(newTop)))
+				}
+			}
+			atomic.StoreUint32(&vm.jitHeapTop, newTop)
+
+			// Write String Tag (6.0) and Length
+			tagBuf := make([]byte, 8)
+			binary.LittleEndian.PutUint64(tagBuf, math.Float64bits(6.0))
+			mod.Memory().Write(addr, tagBuf)
+
+			lenBuf := make([]byte, 8)
+			binary.LittleEndian.PutUint64(lenBuf, math.Float64bits(float64(len(bytes))))
+			mod.Memory().Write(addr+8, lenBuf)
+
+			// Write string bytes
+			mod.Memory().Write(addr+16, bytes)
+
+			jitStringConstCache[strID] = addr
+			return float64(addr)
+
+		}).Export("load_string_constant").
+			NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, val float64) float64 {
+			addr := uint32(val)
+			var heapTop uint32
+			heapTopGlobal := vm.getHeapTopGlobal(mod)
+			if heapTopGlobal != nil {
+				heapTop = uint32(api.DecodeF64(heapTopGlobal.Get()))
+			} else {
+				heapTop = atomic.LoadUint32(&vm.jitHeapTop)
+			}
+			if addr >= heapStart && addr < heapTop && addr%8 == 0 {
+				bitIdx := addr / 8
+				byteIdx := bitIdx / 8
+				bitOffset := bitIdx % 8
+				if byteIdx < bitsetSize {
+					buf, ok := mod.Memory().Read(byteIdx, 1)
+					if ok && (buf[0]&(1<<bitOffset)) != 0 {
+						tagBytes, ok := mod.Memory().Read(addr, 8)
+						if ok {
+							tag := math.Float64frombits(binary.LittleEndian.Uint64(tagBytes))
+							if tag == 6.0 { // String
+								lenBytes, ok := mod.Memory().Read(addr+8, 8)
+								if ok {
+									strLen := math.Float64frombits(binary.LittleEndian.Uint64(lenBytes))
+									if strLen == 0.0 {
+										return 0.0 // falsy
+									}
+									return 1.0 // truthy
+								}
+							}
+						}
+					}
+				}
+			}
+			if val != 0.0 {
+				return 1.0
+			}
+			return 0.0
+		}).Export("is_truthy_wasm").
+			NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, a float64, b float64) float64 {
+			return math.Pow(a, b)
+		}).Export("math_pow").NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, tag float64, val float64, newline float64, spaceBefore float64) {
+			if spaceBefore != 0 {
+				fmt.Print(" ")
+			}
+
+			tinyVal := vm.jitValueToTinyValue(mod, tag, val)
+			text := valueToString(tinyVal, true)
+
+			if newline != 0 {
+				fmt.Println(text)
+			} else {
+				fmt.Print(text)
+			}
+		}).Export("print_value").
+			NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, tag float64, val float64) float64 {
+			tinyVal := vm.jitValueToTinyValue(mod, tag, val)
+			typeNameStr := TypeName(tinyVal)
+			return allocateWasmString(mod, typeNameStr)
+		}).Export("typeof_wasm").
+			NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, tag float64, val float64) float64 {
+			tinyVal := vm.jitValueToTinyValue(mod, tag, val)
+			vm.throwValue(tinyVal)
+			panic(jitExceptionThrown{})
+		}).Export("throw_wasm").
+			NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, slotVal float64) (float64, float64) {
+			slot := int(slotVal)
+			if vm.globals == nil || slot < 0 || slot >= len(*vm.globals) {
+				return jitTagNull, 0.0
+			}
+			val := (*vm.globals)[slot]
+			var rawVal any
+			if val.IsInt {
+				rawVal = val.AsInt
+			} else {
+				rawVal = val.Value
+			}
+			if module, ok := rawVal.(*StandardModuleValue); ok {
+				_ = module
+				return 7.0, float64(slot)
+			}
+			return vm.tinyValueToJitValue(mod, val)
+		}).Export("load_global_wasm").
+			NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, moduleSlotVal, methodStrIDVal, argCountVal, tag0, val0, tag1, val1, tag2, val2 float64) (float64, float64) {
+			moduleSlot := int(moduleSlotVal)
+			methodStrID := int(methodStrIDVal)
+			argCount := int(argCountVal)
+
+			if vm.globals == nil || moduleSlot < 0 || moduleSlot >= len(*vm.globals) {
+				vm.fatalError(tinyerrors.ErrorName, "undefined standard module slot: %d", moduleSlot)
+				return jitTagNull, 0.0
+			}
+			moduleVal := (*vm.globals)[moduleSlot]
+			var rawVal any
+			if moduleVal.IsInt {
+				rawVal = moduleVal.AsInt
+			} else {
+				rawVal = moduleVal.Value
+			}
+			module, ok := rawVal.(*StandardModuleValue)
+			if !ok {
+				vm.fatalError(tinyerrors.ErrorType, "expected standard module at slot %d", moduleSlot)
+				return jitTagNull, 0.0
+			}
+
+			if methodStrID < 0 || methodStrID >= len(vm.jitStrings) {
+				vm.fatalError(tinyerrors.ErrorName, "undefined JIT string ID for method: %d", methodStrID)
+				return jitTagNull, 0.0
+			}
+			method := vm.jitStrings[methodStrID]
+
+			var args []TinyValue
+			if argCount >= 1 {
+				args = append(args, vm.jitValueToTinyValue(mod, tag0, val0))
+			}
+			if argCount >= 2 {
+				args = append(args, vm.jitValueToTinyValue(mod, tag1, val1))
+			}
+			if argCount >= 3 {
+				args = append(args, vm.jitValueToTinyValue(mod, tag2, val2))
+			}
+
+			popNative := vm.pushNativeFrame(module.Name + "." + method)
+			defer popNative()
+
+			vm.callStandardModule(module.Name, method, args)
+
+			result := vm.popFast()
+			return vm.tinyValueToJitValue(mod, result)
+		}).Export("call_stdlib_wasm").
 			Instantiate(vm.wazeroCtx)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[JIT ERROR] Failed to instantiate env module: %s\n", err.Error())
-			return
+			return false
 		}
 	}
+
+	return true
+}
+
+func (vm *VM) InstantiateJitModule() {
+	if len(vm.jitWasmBytes) == 0 {
+		return
+	}
+
+	const bitsetRange = 128 * 1024 * 1024
+	const bitsetSize = bitsetRange / 64 // 2MB
+	const heapStart = bitsetSize + jitDeoptSnapshotSize
+
+	vm.jitInitialHeapTop = heapStart
+	vm.jitHeapTop = heapStart
+	jitStringConstCache := make(map[uint32]uint32)
+
+	if vm.wazeroCtx == nil {
+		vm.wazeroCtx = context.Background()
+	}
+	vm.wazeroRuntime = wazero.NewRuntime(vm.wazeroCtx)
+	vm.wasmMu = &sync.Mutex{}
+
+	if !vm.setupJitRuntimeAndEnv(jitStringConstCache) {
+		return
+	}
+
+	moduleID := atomic.AddUint64(&jitCounter, 1)
+	uniqueName := "multi_jit_" + strconv.FormatUint(moduleID, 10)
+	config := wazero.NewModuleConfig().WithName(uniqueName)
+
+	compiled, err := vm.wazeroRuntime.InstantiateWithConfig(vm.wazeroCtx, vm.jitWasmBytes, config)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[JIT ERROR] Multi-function JIT instantiation failed: %s\n", err.Error())
+		return
+	}
+	vm.jitModule = compiled
+
+	for strVal, addr := range vm.jitStringAddrs {
+		bytes := []byte(strVal)
+		tagBuf := make([]byte, 8)
+		binary.LittleEndian.PutUint64(tagBuf, math.Float64bits(6.0))
+		compiled.Memory().Write(addr, tagBuf)
+
+		lenBuf := make([]byte, 8)
+		binary.LittleEndian.PutUint64(lenBuf, math.Float64bits(float64(len(bytes))))
+		compiled.Memory().Write(addr+8, lenBuf)
+
+		compiled.Memory().Write(addr+16, bytes)
+	}
+
+	if heapTopGlobal := compiled.ExportedGlobal("__heap_top"); heapTopGlobal != nil {
+		vm.jitHeapTopGlobal = heapTopGlobal
+		vm.jitInitialHeapTop = uint32(api.DecodeF64(heapTopGlobal.Get()))
+		vm.jitHeapTop = vm.jitInitialHeapTop
+	} else {
+		vm.jitHeapTopGlobal = nil
+	}
+
+	vm.jitFunctions = map[string]*JitFunction{}
+	for _, meta := range vm.jitMetas {
+		jitFn := compiled.ExportedFunction(meta.Name)
+		if jitFn == nil {
+			continue
+		}
+
+		paramTypes := append([]stackType(nil), meta.ParamTypes...)
+		vm.jitFunctions[meta.Name] = &JitFunction{
+			ID:         meta.ID,
+			Name:       meta.Name,
+			fn:         jitFn,
+			paramTypes: paramTypes,
+			paramCount: meta.ParamCount,
+			retType:    meta.RetType,
+			returnType: meta.ReturnType,
+			vm:         vm,
+			allocPtr:   &vm.jitHeapTop,
+		}
+	}
+}
+
+func (vm *VM) getHeapTopGlobal(mod api.Module) api.Global {
+	g := vm.jitHeapTopGlobal
+	if g == nil && mod != nil {
+		g = mod.ExportedGlobal("__heap_top")
+		vm.jitHeapTopGlobal = g
+	}
+	return g
+}
+
+func (vm *VM) CompileAllJit() {
+	const bitsetRange = 128 * 1024 * 1024
+	const bitsetSize = bitsetRange / 64 // 2MB
+	const heapStart = bitsetSize + jitDeoptSnapshotSize
 
 	N := len(vm.functionList)
 	if N == 0 {
@@ -2059,7 +7872,11 @@ func (vm *VM) CompileAllJit() {
 	}
 	isSafe := make([]bool, N)
 	for i := 0; i < N; i++ {
-		isSafe[i] = isFunctionJitSafe(vm.functionList[i])
+		fn := vm.functionList[i]
+		isSafe[i] = isFunctionJitSafe(vm, fn)
+		if !isSafe[i] {
+			// fmt.Fprintf(os.Stderr, "[JIT DEBUG] function %s is not JIT-safe, skipping.\n", fn.Name)
+		}
 	}
 	changed := true
 	for changed {
@@ -2093,10 +7910,200 @@ func (vm *VM) CompileAllJit() {
 		}
 	}
 
+	inferredReturnTypes := make([]stackType, N)
+	for i := 0; i < N; i++ {
+		fn := vm.functionList[i]
+		if t, ok := hasTypedReturn(fn); ok {
+			inferredReturnTypes[i] = t
+		} else {
+			inferredReturnTypes[i] = stackTypeUnknown
+		}
+	}
+
+	typeChanged := true
+	for iteration := 0; iteration < 10 && typeChanged; iteration++ {
+		typeChanged = false
+		for i := 0; i < N; i++ {
+			if !isSafe[i] {
+				continue
+			}
+			fn := vm.functionList[i]
+			if fn.ReturnType.Name != "" {
+				continue
+			}
+			newRetType := inferReturnType(vm, fn, inferredReturnTypes)
+			if newRetType != inferredReturnTypes[i] {
+				inferredReturnTypes[i] = newRetType
+				typeChanged = true
+			}
+		}
+	}
+
+	for i := 0; i < N; i++ {
+		if !isSafe[i] {
+			continue
+		}
+
+		fn := vm.functionList[i]
+		if inferredReturnTypes[i] == stackTypeUnknown {
+			if t, ok := hasTypedReturn(fn); ok {
+				inferredReturnTypes[i] = t
+			} else {
+				// fmt.Fprintf(os.Stderr, "[JIT DEBUG] function %s is not JIT-safe: mixed/unknown return type\n", fn.Name)
+				isSafe[i] = false
+			}
+		}
+	}
+
+	changed = true
+	for changed {
+		changed = false
+		for i := 0; i < N; i++ {
+			if !isSafe[i] {
+				continue
+			}
+			fn := vm.functionList[i]
+			for _, instr := range fn.Instructions {
+				if instr.Op == OP_CALL_DIRECT {
+					info := instr.Value.(DirectCallInfo)
+					if info.ID >= 0 && info.ID < N && !isSafe[info.ID] {
+						isSafe[i] = false
+						changed = true
+						break
+					}
+				} else if instr.Op == OP_CALL_DIRECT_SUB_CONST {
+					info := instr.Value.(CallDirectSubConstInfo)
+					if info.FnID >= 0 && info.FnID < N && !isSafe[info.FnID] {
+						isSafe[i] = false
+						changed = true
+						break
+					}
+				}
+			}
+		}
+	}
+
+	inferredParamTypes := make([][]stackType, N)
+	for i := 0; i < N; i++ {
+		fn := vm.functionList[i]
+		inferredParamTypes[i] = make([]stackType, len(fn.Params))
+		for p := range fn.Params {
+			inferredParamTypes[i][p] = stackTypeUnknown
+			if t, ok := stackTypeFromTypeName(fn.Params[p].TypeHint.Name); ok {
+				inferredParamTypes[i][p] = t
+			}
+		}
+	}
+
+	paramTypeChanged := true
+	for iteration := 0; iteration < 10 && paramTypeChanged; iteration++ {
+		paramTypeChanged = false
+		for i := 0; i < N; i++ {
+			if !isSafe[i] {
+				continue
+			}
+			fn := vm.functionList[i]
+			newParamTypes := inferParamTypes(vm, fn, inferredReturnTypes, inferredParamTypes)
+			for p := range newParamTypes {
+				if newParamTypes[p] != inferredParamTypes[i][p] {
+					inferredParamTypes[i][p] = newParamTypes[p]
+					paramTypeChanged = true
+				}
+			}
+		}
+	}
+
+	changed = true
+	for changed {
+		changed = false
+		for i := 0; i < N; i++ {
+			if !isSafe[i] {
+				continue
+			}
+			fn := vm.functionList[i]
+			for _, instr := range fn.Instructions {
+				if instr.Op == OP_CALL_DIRECT {
+					info := instr.Value.(DirectCallInfo)
+					if info.ID >= 0 && info.ID < N && !isSafe[info.ID] {
+						isSafe[i] = false
+						changed = true
+						break
+					}
+				} else if instr.Op == OP_CALL_DIRECT_SUB_CONST {
+					info := instr.Value.(CallDirectSubConstInfo)
+					if info.FnID >= 0 && info.FnID < N && !isSafe[info.FnID] {
+						isSafe[i] = false
+						changed = true
+						break
+					}
+				}
+			}
+			if !isSafe[i] {
+				continue
+			}
+			if !checkCallArgumentsSafe(vm, fn, inferredReturnTypes, inferredParamTypes) {
+				isSafe[i] = false
+				changed = true
+			}
+		}
+	}
+
+	jitStrings := []string{}
+	jitStringID := make(map[string]uint32)
+	jitStringAddr := make(map[string]uint32)
+	nextAddr := uint32(heapStart)
+
+	addJitString := func(strVal string, preallocate bool) uint32 {
+		if id, exists := jitStringID[strVal]; exists {
+			if preallocate {
+				if _, hasAddr := jitStringAddr[strVal]; !hasAddr {
+					jitStringAddr[strVal] = nextAddr
+					size := uint32(16 + len(strVal))
+					size = (size + 7) &^ 7 // 8-byte align
+					nextAddr += size
+				}
+			}
+			return id
+		}
+		id := uint32(len(jitStrings))
+		jitStringID[strVal] = id
+		jitStrings = append(jitStrings, strVal)
+
+		if preallocate {
+			jitStringAddr[strVal] = nextAddr
+			size := uint32(16 + len(strVal))
+			size = (size + 7) &^ 7 // 8-byte align
+			nextAddr += size
+		}
+
+		return id
+	}
+
+	for i := 0; i < N; i++ {
+		if !isSafe[i] {
+			continue
+		}
+		fn := vm.functionList[i]
+		for _, instr := range fn.Instructions {
+			switch instr.Op {
+			case OP_CONST:
+				if strVal, ok := instr.Value.(string); ok {
+					addJitString(strVal, true)
+				}
+			case OP_STRING_JOIN:
+				addJitString("", true)
+			case OP_METHOD_CALL:
+				if info, ok := instr.Value.(MethodCallInfo); ok {
+					addJitString(info.Method, false)
+				}
+			}
+		}
+	}
+
 	var module WasmBuffer
 	module.WriteBytes([]byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00})
 	typeSec := &WasmBuffer{}
-	typeSec.WriteVarUint(uint32(N + 2)) // N functions + 2 types for our imports
+	typeSec.WriteVarUint(uint32(N + 9)) // N functions + 9 types for imports
 	typeSec.WriteByte(0x60)
 	typeSec.WriteVarUint(1) // 1 param
 	typeSec.WriteByte(0x7C) // f64
@@ -2109,6 +8116,73 @@ func (vm *VM) CompileAllJit() {
 	typeSec.WriteByte(0x7C) // f64
 	typeSec.WriteVarUint(1) // 1 return
 	typeSec.WriteByte(0x7C) // f64
+
+	typeSec.WriteByte(0x60) // Type Index 2 (f64, f64) -> f64
+	typeSec.WriteVarUint(2) // 2 params
+	typeSec.WriteByte(0x7C) // f64
+	typeSec.WriteByte(0x7C) // f64
+	typeSec.WriteVarUint(1) // 1 return
+	typeSec.WriteByte(0x7C)
+
+	typeSec.WriteByte(0x60) // Type Index 3 (f64, f64, f64, f64) -> f64
+	typeSec.WriteVarUint(4) // 4 params: leftTag, leftValue, rightTag, rightValue
+	typeSec.WriteByte(0x7C)
+	typeSec.WriteByte(0x7C)
+	typeSec.WriteByte(0x7C)
+	typeSec.WriteByte(0x7C)
+	typeSec.WriteVarUint(1)
+	typeSec.WriteByte(0x7C)
+
+	// Type Index 4: (f64, f64, f64, f64) -> void
+	// Used by print_value(tag, value, newline, spaceBefore)
+	typeSec.WriteByte(0x60)
+	typeSec.WriteVarUint(4)
+	typeSec.WriteByte(0x7C)
+	typeSec.WriteByte(0x7C)
+	typeSec.WriteByte(0x7C)
+	typeSec.WriteByte(0x7C)
+	typeSec.WriteVarUint(0)
+
+	// Type Index 5: (f64) -> (f64, f64)
+	// Used by load_global_wasm(slot)
+	typeSec.WriteByte(0x60)
+	typeSec.WriteVarUint(1) // 1 param
+	typeSec.WriteByte(0x7C) // f64
+	typeSec.WriteVarUint(2) // 2 returns
+	typeSec.WriteByte(0x7C) // f64
+	typeSec.WriteByte(0x7C) // f64
+
+	// Type Index 6: (f64, f64, f64, f64, f64, f64, f64, f64, f64) -> (f64, f64)
+	// Used by call_stdlib_wasm(moduleSlot, methodStrID, argCount, tag0, val0, tag1, val1, tag2, val2)
+	typeSec.WriteByte(0x60)
+	typeSec.WriteVarUint(9) // 9 params
+	for p := 0; p < 9; p++ {
+		typeSec.WriteByte(0x7C) // f64 param
+	}
+	typeSec.WriteVarUint(2) // 2 returns
+	typeSec.WriteByte(0x7C) // f64
+	typeSec.WriteByte(0x7C) // f64
+
+	// Type Index 7: (f64, f64, f64, f64, f64, f64) -> f64
+	// Used by dynamic_join_3
+	typeSec.WriteByte(0x60)
+	typeSec.WriteVarUint(6) // 6 params
+	for p := 0; p < 6; p++ {
+		typeSec.WriteByte(0x7C) // f64 param
+	}
+	typeSec.WriteVarUint(1) // 1 return
+	typeSec.WriteByte(0x7C) // f64
+
+	// Type Index 8: (f64, f64, f64, f64, f64, f64, f64, f64) -> f64
+	// Used by dynamic_join_4
+	typeSec.WriteByte(0x60)
+	typeSec.WriteVarUint(8) // 8 params
+	for p := 0; p < 8; p++ {
+		typeSec.WriteByte(0x7C) // f64 param
+	}
+	typeSec.WriteVarUint(1) // 1 return
+	typeSec.WriteByte(0x7C) // f64
+
 	for i := 0; i < N; i++ {
 		fn := vm.functionList[i]
 		typeSec.WriteByte(0x60) // function type
@@ -2123,28 +8197,121 @@ func (vm *VM) CompileAllJit() {
 	module.WriteByte(1)
 	module.WriteVarUint(uint32(len(typeSec.buf)))
 	module.WriteBytes(typeSec.buf)
+
 	importSec := &WasmBuffer{}
-	importSec.WriteVarUint(3) // 3 imports
+	importSec.WriteVarUint(jitImportCount) // 9 imports total (0, 1, 2, 3, 4, 5, 6, 7, 8)
+
 	importSec.WriteVarUint(3) // length of "env"
 	importSec.WriteBytes([]byte("env"))
 	importSec.WriteVarUint(12) // length of "alloc_object"
 	importSec.WriteBytes([]byte("alloc_object"))
 	importSec.WriteByte(0x00) // kind: function
-	importSec.WriteVarUint(0) // uses Type Index 0
+	importSec.WriteVarUint(0) // Type Index 0
 
 	importSec.WriteVarUint(3) // length of "env"
 	importSec.WriteBytes([]byte("env"))
 	importSec.WriteVarUint(13) // length of "determine_tag"
 	importSec.WriteBytes([]byte("determine_tag"))
 	importSec.WriteByte(0x00) // kind: function
-	importSec.WriteVarUint(0) // uses Type Index 0
+	importSec.WriteVarUint(0) // Type Index 0
 
 	importSec.WriteVarUint(3) // length of "env"
 	importSec.WriteBytes([]byte("env"))
 	importSec.WriteVarUint(10) // length of "array_push"
 	importSec.WriteBytes([]byte("array_push"))
 	importSec.WriteByte(0x00) // kind: function
-	importSec.WriteVarUint(1) // uses Type Index 1
+	importSec.WriteVarUint(1) // Type Index 1
+
+	importSec.WriteVarUint(3) // length of "env"
+	importSec.WriteBytes([]byte("env"))
+	importSec.WriteVarUint(18) // length of "string_concat_wasm"
+	importSec.WriteBytes([]byte("string_concat_wasm"))
+	importSec.WriteByte(0x00) // kind: function
+	importSec.WriteVarUint(2) // Type Index 2 (Import Index 3)
+
+	importSec.WriteVarUint(3) // length of "env"
+	importSec.WriteBytes([]byte("env"))
+	importSec.WriteVarUint(14) // length of "string_eq_wasm"
+	importSec.WriteBytes([]byte("string_eq_wasm"))
+	importSec.WriteByte(0x00) // kind: function
+	importSec.WriteVarUint(2) // Type Index 2 (Import Index 4)
+
+	importSec.WriteVarUint(3) // length of "env"
+	importSec.WriteBytes([]byte("env"))
+	importSec.WriteVarUint(11) // length of "dynamic_add"
+	importSec.WriteBytes([]byte("dynamic_add"))
+	importSec.WriteByte(0x00) // kind: function
+	importSec.WriteVarUint(3) // Type Index 3 (Import Index 5)
+
+	importSec.WriteVarUint(3) // length of "env"
+	importSec.WriteBytes([]byte("env"))
+	importSec.WriteVarUint(14) // length of "dynamic_join_3"
+	importSec.WriteBytes([]byte("dynamic_join_3"))
+	importSec.WriteByte(0x00) // kind: function
+	importSec.WriteVarUint(7) // Type Index 7 (Import Index 6)
+
+	importSec.WriteVarUint(3) // length of "env"
+	importSec.WriteBytes([]byte("env"))
+	importSec.WriteVarUint(14) // length of "dynamic_join_4"
+	importSec.WriteBytes([]byte("dynamic_join_4"))
+	importSec.WriteByte(0x00) // kind: function
+	importSec.WriteVarUint(8) // Type Index 8 (Import Index 7)
+
+	importSec.WriteVarUint(3) // length of "env"
+	importSec.WriteBytes([]byte("env"))
+	importSec.WriteVarUint(20) // length of "load_string_constant"
+	importSec.WriteBytes([]byte("load_string_constant"))
+	importSec.WriteByte(0x00) // kind: function
+	importSec.WriteVarUint(0) // Type Index 0 (Import Index 6)
+
+	importSec.WriteVarUint(3) // length of "env"
+	importSec.WriteBytes([]byte("env"))
+	importSec.WriteVarUint(14) // length of "is_truthy_wasm"
+	importSec.WriteBytes([]byte("is_truthy_wasm"))
+	importSec.WriteByte(0x00) // kind: function
+	importSec.WriteVarUint(0) // Type Index 0 (f64 -> f64)
+
+	importSec.WriteVarUint(3)
+	importSec.WriteBytes([]byte("env"))
+	importSec.WriteVarUint(8)
+	importSec.WriteBytes([]byte("math_pow"))
+	importSec.WriteByte(0x00)
+	importSec.WriteVarUint(2) // Type Index 2: (f64, f64) -> f64
+
+	importSec.WriteVarUint(3)
+	importSec.WriteBytes([]byte("env"))
+	importSec.WriteVarUint(11)
+	importSec.WriteBytes([]byte("print_value"))
+	importSec.WriteByte(0x00)
+	importSec.WriteVarUint(4) // type index for (f64, f64, f64) -> void
+
+	importSec.WriteVarUint(3)
+	importSec.WriteBytes([]byte("env"))
+	importSec.WriteVarUint(11)
+	importSec.WriteBytes([]byte("typeof_wasm"))
+	importSec.WriteByte(0x00)
+	importSec.WriteVarUint(2) // Type Index 2: (f64, f64) -> f64
+
+	importSec.WriteVarUint(3)
+	importSec.WriteBytes([]byte("env"))
+	importSec.WriteVarUint(10)
+	importSec.WriteBytes([]byte("throw_wasm"))
+	importSec.WriteByte(0x00)
+	importSec.WriteVarUint(2) // Type Index 2: (f64, f64) -> f64
+
+	importSec.WriteVarUint(3)
+	importSec.WriteBytes([]byte("env"))
+	importSec.WriteVarUint(16)
+	importSec.WriteBytes([]byte("load_global_wasm"))
+	importSec.WriteByte(0x00)
+	importSec.WriteVarUint(5) // Type Index 5: (f64) -> (f64, f64)
+
+	importSec.WriteVarUint(3)
+	importSec.WriteBytes([]byte("env"))
+	importSec.WriteVarUint(16)
+	importSec.WriteBytes([]byte("call_stdlib_wasm"))
+	importSec.WriteByte(0x00)
+	importSec.WriteVarUint(6) // Type Index 6: (f64, f64, f64, f64, f64, f64, f64, f64, f64) -> (f64, f64)
 
 	module.WriteByte(2)
 	module.WriteVarUint(uint32(len(importSec.buf)))
@@ -2152,28 +8319,66 @@ func (vm *VM) CompileAllJit() {
 	funcSec := &WasmBuffer{}
 	funcSec.WriteVarUint(uint32(N))
 	for i := 0; i < N; i++ {
-		funcSec.WriteVarUint(uint32(i + 2)) // Type indices map to 2..N+1
+		funcSec.WriteVarUint(uint32(i + 9)) // Type indices map to 9..N+8
 	}
 	module.WriteByte(3)
 	module.WriteVarUint(uint32(len(funcSec.buf)))
 	module.WriteBytes(funcSec.buf)
 	memSec := &WasmBuffer{}
-	memSec.WriteVarUint(1) // 1 memory definition
-	memSec.WriteByte(0x00) // limits: minimum only
-	memSec.WriteVarUint(1) // 1 page (64KB) minimum
+	memSec.WriteVarUint(1)    // 1 memory definition
+	memSec.WriteByte(0x00)    // limits: minimum only
+	memSec.WriteVarUint(2000) // 2000 pages (~128MB) minimum for high-perf benchmarks
 
 	module.WriteByte(5)
 	module.WriteVarUint(uint32(len(memSec.buf)))
 	module.WriteBytes(memSec.buf)
+
+	globalSec := &WasmBuffer{}
+	globalSec.WriteVarUint(6)                 // heap top + side-effect/deopt metadata
+	globalSec.WriteByte(0x7C)                 // type: f64
+	globalSec.WriteByte(0x01)                 // mutable: true
+	globalSec.WriteByte(0x44)                 // f64.const
+	globalSec.WriteFloat64(float64(nextAddr)) // initial heap top
+	globalSec.WriteByte(0x0B)                 // end
+	for range 5 {
+		globalSec.WriteByte(0x7C)
+		globalSec.WriteByte(0x01)
+		globalSec.WriteByte(0x44)
+		globalSec.WriteFloat64(0.0)
+		globalSec.WriteByte(0x0B)
+	}
+
+	module.WriteByte(6)
+	module.WriteVarUint(uint32(len(globalSec.buf)))
+	module.WriteBytes(globalSec.buf)
+
 	exportSec := &WasmBuffer{}
-	exportSec.WriteVarUint(uint32(N))
+	exportSec.WriteVarUint(uint32(N + 6))
 	for i := 0; i < N; i++ {
 		fn := vm.functionList[i]
 		exportSec.WriteVarUint(uint32(len(fn.Name)))
 		exportSec.WriteBytes([]byte(fn.Name))
-		exportSec.WriteByte(0x00)             // kind: function export
-		exportSec.WriteVarUint(uint32(i + 3)) // function index (i + 3 since index 0, 1, 2 are imported)
+		exportSec.WriteByte(0x00)                          // kind: function export
+		exportSec.WriteVarUint(uint32(i + jitImportCount)) // function index (i + 4 since index 0, 1, 2, 3, 4, 5, 6, 7, 8 are imported)
 	}
+
+	exportSec.WriteVarUint(uint32(len("__heap_top")))
+	exportSec.WriteBytes([]byte("__heap_top"))
+	exportSec.WriteByte(0x03) // kind: global export
+	exportSec.WriteVarUint(0) // global index 0
+
+	exportSec.WriteVarUint(uint32(len("__jit_side_effect")))
+	exportSec.WriteBytes([]byte("__jit_side_effect"))
+	exportSec.WriteByte(0x03) // kind: global export
+	exportSec.WriteVarUint(1) // global index 1
+
+	for idx, name := range []string{"__jit_deopt_ip", "__jit_deopt_sp", "__jit_deopt_local_count", "__jit_deopt_function_id"} {
+		exportSec.WriteVarUint(uint32(len(name)))
+		exportSec.WriteBytes([]byte(name))
+		exportSec.WriteByte(0x03)
+		exportSec.WriteVarUint(uint32(idx + 2))
+	}
+
 	module.WriteByte(7)
 	module.WriteVarUint(uint32(len(exportSec.buf)))
 	module.WriteBytes(exportSec.buf)
@@ -2181,41 +8386,56 @@ func (vm *VM) CompileAllJit() {
 	codeSec.WriteVarUint(uint32(N))
 	for i := 0; i < N; i++ {
 		fn := vm.functionList[i]
-		bodyBytes := compileFunctionBodyBytes(vm, fn, isSafe[i])
+		bodyBytes := compileFunctionBodyBytes(vm, fn, isSafe[i], inferredReturnTypes, jitStringAddr, jitStringID, inferredParamTypes)
 		codeSec.WriteBytes(bodyBytes)
 	}
 	module.WriteByte(10)
 	module.WriteVarUint(uint32(len(codeSec.buf)))
 	module.WriteBytes(codeSec.buf)
 
-	moduleID := atomic.AddUint64(&jitCounter, 1)
-	uniqueName := "multi_jit_" + strconv.FormatUint(moduleID, 10)
-	config := wazero.NewModuleConfig().WithName(uniqueName)
-
-	compiled, err := vm.wazeroRuntime.InstantiateWithConfig(vm.wazeroCtx, module.buf, config)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[JIT ERROR] Multi-function JIT instantiation failed: %s\n", err.Error())
-		return
-	}
-	vm.jitModule = compiled
-
+	metas := make([]JitFunctionMeta, 0, N)
 	for i := 0; i < N; i++ {
 		fn := vm.functionList[i]
 		if !isSafe[i] {
-			vm.jitFunctions[fn.Name] = nil
 			continue
 		}
 
-		jitFn := compiled.ExportedFunction(fn.Name)
-		if jitFn != nil {
-			isBoolRet := inferReturnsBool(fn) || fn.ReturnType.Name == "bool"
-			vm.jitFunctions[fn.Name] = &JitFunction{
-				fn:         jitFn,
-				paramCount: len(fn.Params),
-				isBoolRet:  isBoolRet,
-				vm:         vm,
-				allocPtr:   &vmAllocPtr, // Per-VM allocator for object detection
-			}
+		retType := inferredReturnTypes[i]
+		switch fn.ReturnType.Name {
+		case "bool":
+			retType = stackTypeBool
+		case "number":
+			retType = stackTypeNumber
+		case "object":
+			retType = stackTypeObject
+		case "array":
+			retType = stackTypeArray
+		case "string":
+			retType = stackTypeString
 		}
+
+		paramTypes := inferredParamTypes[i]
+		metas = append(metas, JitFunctionMeta{
+			ID:         fn.ID,
+			Name:       fn.Name,
+			ParamTypes: append([]stackType(nil), paramTypes...),
+			ParamCount: len(fn.Params),
+			RetType:    retType,
+			ReturnType: fn.ReturnType.Name,
+		})
 	}
+
+	vm.jitWasmBytes = append([]byte(nil), module.buf...)
+	vm.jitMetas = metas
+	vm.jitStrings = append([]string(nil), jitStrings...)
+	vm.jitStringMap = make(map[string]uint32, len(jitStrings))
+	for id, strVal := range jitStrings {
+		vm.jitStringMap[strVal] = uint32(id)
+	}
+	vm.jitStringAddrs = make(map[string]uint32, len(jitStringAddr))
+	for strVal, addr := range jitStringAddr {
+		vm.jitStringAddrs[strVal] = addr
+	}
+
+	vm.InstantiateJitModule()
 }

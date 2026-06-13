@@ -98,6 +98,7 @@ type NativeServerValue struct {
 	mux            *http.ServeMux
 	httpServer     *http.Server
 	closed         bool
+	Workers        *VMPool
 }
 
 type NativeWebViewValue struct {
@@ -109,6 +110,7 @@ type NativeTcpServerValue struct {
 	Port              int
 	Listener          *net.Listener
 	ConnectionHandler *FunctionValue
+	Workers           *VMPool
 }
 
 type NativeTcpConnectionValue struct {
@@ -131,8 +133,9 @@ type NativeWebsocketServerValue struct {
 	server   *http.Server
 	upgrader websocket.Upgrader
 
-	mu    sync.Mutex
-	conns map[*NativeWebsocketConnValue]bool
+	mu      sync.Mutex
+	conns   map[*NativeWebsocketConnValue]bool
+	Workers *VMPool
 }
 
 type NativeWebsocketConnValue struct {
@@ -147,7 +150,7 @@ type NativeWebsocketConnValue struct {
 	closed bool
 
 	headers ObjectValue
-	server  *NativeWebsocketServerValue // If this came from a server
+	server  *NativeWebsocketServerValue
 }
 
 type NativeHttpResponseValue struct {
@@ -203,23 +206,7 @@ type TinyValue struct {
 	AsInt int
 }
 
-func asInt64(value TinyValue) int64 {
-	if value.IsInt {
-		return int64(value.AsInt)
-	}
-
-	switch v := value.Value.(type) {
-	case float64:
-		return int64(v)
-	case uint64:
-		return int64(v)
-	default:
-		LangError(ErrorType, "expected number, got %s", TypeName(value))
-		return 0
-	}
-}
-
-func asInt(value TinyValue) int {
+func (vm *VM) asInt(value TinyValue) int {
 	if value.IsInt {
 		return value.AsInt
 	}
@@ -243,33 +230,17 @@ func asInt(value TinyValue) int {
 		f64, err := strconv.ParseFloat(n, 64)
 		f := int(f64)
 		if err != nil {
-			LangError(ErrorType, "cannot parse string '%s' as number: %v", n, err)
+			vm.runtimeError(ErrorType, "cannot parse string '%s' as number: %v", n, err)
 			return 0
 		}
 		return f
 	default:
-		LangError(ErrorSyntax, "expected number, got %T", value)
+		vm.runtimeError(ErrorSyntax, "expected number, got %T", value)
 		return -1
 	}
 }
 
-func asFloat32(value TinyValue) float32 {
-	if value.IsInt {
-		return float32(value.AsInt)
-	}
-
-	switch n := value.Value.(type) {
-	case float32:
-		return n
-	case float64:
-		return float32(n)
-	default:
-		LangError(ErrorSyntax, "expected float, got %T", value)
-		return -1
-	}
-}
-
-func asFloat64(value TinyValue) float64 {
+func (vm *VM) asFloat64(value TinyValue) float64 {
 	if value.IsInt {
 		return float64(value.AsInt)
 	}
@@ -287,13 +258,13 @@ func asFloat64(value TinyValue) float64 {
 	case string:
 		f, err := strconv.ParseFloat(v, 64)
 		if err != nil {
-			LangError(ErrorType, "cannot parse string '%s' as number: %v", v, err)
+			vm.runtimeError(ErrorType, "cannot parse string '%s' as number: %v", v, err)
 			return 0
 		}
 		return f
 
 	default:
-		LangError(ErrorType, "expected number, got %s", TypeName(value))
+		vm.runtimeError(ErrorType, "expected number, got %s", TypeName(value))
 		return 0
 	}
 }
@@ -363,33 +334,6 @@ func asFloat(value TinyValue, vm *VM) float64 {
 		return f
 	default:
 		vm.runtimeError(ErrorType, "expected number, got %s", TypeName(value))
-		return 0
-	}
-}
-
-func asUint(value TinyValue) uint64 {
-	if value.IsInt {
-		return uint64(value.AsInt)
-	}
-
-	switch v := value.Value.(type) {
-	case int:
-		return uint64(v)
-	case int64:
-		return uint64(v)
-	case float64:
-		return uint64(v)
-	case uint64:
-		return v
-	case string:
-		f, err := strconv.ParseUint(v, 10, 64)
-		if err != nil {
-			LangError(ErrorType, "cannot parse string '%s' as float: %v", v, err)
-			return 0
-		}
-		return f
-	default:
-		LangError(ErrorType, "expected number, got %s", TypeName(value))
 		return 0
 	}
 }
@@ -630,9 +574,17 @@ func jsonToTinyValue(value any) TinyValue {
 	return ToValue(value)
 }
 
-func valueToString(value TinyValue) string {
+func valueToString(value TinyValue, forPrint ...bool) string {
 	if value.IsInt {
 		return strconv.Itoa(value.AsInt)
+	}
+
+	isForPrint := func() bool {
+		if len(forPrint) > 1 && forPrint[0] {
+			return true
+		}
+
+		return false
 	}
 
 	switch v := value.Value.(type) {
@@ -652,9 +604,15 @@ func valueToString(value TinyValue) string {
 		for i, item := range v.Elements {
 			value, ok := item.Value.(string)
 			if ok {
-				parts[i] = "\"" + value + "\""
+				parts[i] = "'" + value + "'"
+				if isForPrint() {
+					parts[i] = "\033[32m" + parts[i] + "\033[0m"
+				}
 			} else {
 				parts[i] = valueToString(item)
+				if isForPrint() && item.IsInt {
+					parts[i] = "\033[36m" + parts[i] + "\033[0m"
+				}
 			}
 		}
 
@@ -691,10 +649,29 @@ func valueToString(value TinyValue) string {
 		parts := make([]string, 0, len(entries))
 
 		for _, entry := range entries {
-			parts = append(parts, entry.keyText+": "+valueToString(entry.value))
+			val := valueToString(entry.value, false)
+			if entry.value.IsInt {
+				if isForPrint() {
+					val = "\033[36m" + val + "\033[0m"
+				}
+			} else if _, ok := entry.value.Value.(string); ok {
+				val = "'" + val + "'"
+				if isForPrint() {
+					val = "\033[32m" + val + "\033[0m"
+				}
+			}
+			parts = append(parts, entry.keyText+": "+val)
 		}
 
-		return "{" + strings.Join(parts, ", ") + "}"
+		startParen := "{"
+		endParen := "}"
+
+		if len(parts) > 0 {
+			startParen = "{ "
+			endParen = " }"
+		}
+
+		return startParen + strings.Join(parts, ", ") + endParen
 
 	case FunctionValue:
 		return "<function " + v.Name + ">"
@@ -792,6 +769,8 @@ func isTruthy(value TinyValue) bool {
 	switch v := value.Value.(type) {
 	case bool:
 		return v
+	case float64:
+		return v != 0.0
 	case string:
 		return v != ""
 	case NullValue:
@@ -817,9 +796,10 @@ func valuesEqual(a TinyValue, b TinyValue) bool {
 
 	switch left := a.Value.(type) {
 	case float64:
+		if b.IsInt {
+			return left == float64(b.AsInt)
+		}
 		switch right := b.Value.(type) {
-		case int:
-			return left == float64(right)
 		case float64:
 			return left == right
 		default:
@@ -827,14 +807,23 @@ func valuesEqual(a TinyValue, b TinyValue) bool {
 		}
 
 	case string:
+		if b.IsInt {
+			return false
+		}
 		right, ok := b.Value.(string)
 		return ok && left == right
 
 	case bool:
+		if b.IsInt {
+			return false
+		}
 		right, ok := b.Value.(bool)
 		return ok && left == right
 
 	case NullValue:
+		if b.IsInt {
+			return false
+		}
 		_, ok := b.Value.(NullValue)
 		return ok
 

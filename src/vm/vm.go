@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tetratelabs/wazero"
@@ -42,6 +43,14 @@ type DeferHandler struct {
 	FrameDepth int
 }
 
+type globalPairInlineCache struct {
+	Version     uint64
+	GlobalSlotA int
+	GlobalSlotB int
+	ValueA      TinyValue
+	ValueB      TinyValue
+}
+
 type Frame struct {
 	function     Function
 	ip           int
@@ -67,12 +76,25 @@ type VM struct {
 	framePool        []*Frame
 	functionList     []Function
 
+	taskPool *VMPool
+
 	packed bool
 
 	jitFunctions map[string]*JitFunction
 
+	jitHeapTop        uint32
+	jitInitialHeapTop uint32
+
 	objectShapes   [][]string
 	objectShapeIDs map[string]uint32
+
+	jitStrings   []string
+	jitStringMap map[string]uint32
+
+	jitWasmBytes []byte
+	jitMetas     []JitFunctionMeta
+
+	jitStringAddrs map[string]uint32
 
 	propertyOffsets    map[string]uint32
 	nextPropertyOffset uint32
@@ -101,14 +123,17 @@ type VM struct {
 	globals         *[]TinyValue
 	globalNames     map[string]int
 	globalConstants map[string]bool
+	globalVersion   uint64
+	globalPairIC    map[uint64]globalPairInlineCache
 
 	frames []*Frame
 
-	wazeroRuntime wazero.Runtime
-	wazeroCtx     context.Context
-	wasmModule    api.Module
-	jitModule     api.Module
-	wasmMu        *sync.Mutex
+	wazeroRuntime    wazero.Runtime
+	wazeroCtx        context.Context
+	wasmModule       api.Module
+	jitModule        api.Module
+	jitHeapTopGlobal api.Global
+	wasmMu           *sync.Mutex
 }
 
 func intToString(n int) string {
@@ -188,6 +213,7 @@ func NewVM(mainInstructions []Instruction, functions map[string]Function, classe
 		jitFunctions:       map[string]*JitFunction{},
 		globalNames:        map[string]int{},
 		globalConstants:    map[string]bool{},
+		globalPairIC:       map[uint64]globalPairInlineCache{},
 		mu:                 &sync.RWMutex{},
 		cliArgs:            []string{},
 		globalTypes:        map[string]TypeHint{},
@@ -202,11 +228,33 @@ func NewVM(mainInstructions []Instruction, functions map[string]Function, classe
 		nextPropertyOffset: 16,
 		objectShapes:       [][]string{},
 		objectShapeIDs:     map[string]uint32{},
+		jitStrings:         []string{},
+		jitStringMap:       map[string]uint32{},
+		jitStringAddrs:     map[string]uint32{},
 	}
 
 	vm.CompileAllJit()
 
+	maxActive, maxIdle := defaultTaskPoolLimits()
+
+	vm.taskPool = NewVMPool(maxActive, maxIdle, func() *VM {
+		return vm.CloneForTask()
+	})
+
 	return vm
+}
+
+func (vm *VM) RegisterJitString(s string) float64 {
+	if vm.jitStringMap == nil {
+		vm.jitStringMap = make(map[string]uint32)
+	}
+	if id, exists := vm.jitStringMap[s]; exists {
+		return float64(id)
+	}
+	id := uint32(len(vm.jitStrings))
+	vm.jitStrings = append(vm.jitStrings, s)
+	vm.jitStringMap[s] = id
+	return float64(id)
 }
 
 func normalizeFunctionIDs(
@@ -248,22 +296,35 @@ func normalizeFunctionIDs(
 
 func remapDirectCallIDs(instructions []Instruction, ids map[string]int) {
 	for i := range instructions {
-		if instructions[i].Op != OP_CALL_DIRECT {
-			continue
-		}
+		switch instructions[i].Op {
+		case OP_CALL_DIRECT:
+			info, ok := instructions[i].Value.(DirectCallInfo)
+			if !ok {
+				continue
+			}
 
-		info, ok := instructions[i].Value.(DirectCallInfo)
-		if !ok {
-			continue
-		}
+			id, exists := ids[info.Name]
+			if !exists {
+				continue
+			}
 
-		id, exists := ids[info.Name]
-		if !exists {
-			continue
-		}
+			info.ID = id
+			instructions[i].Value = info
 
-		info.ID = id
-		instructions[i].Value = info
+		case OP_CALL_DIRECT_SUB_CONST:
+			info, ok := instructions[i].Value.(CallDirectSubConstInfo)
+			if !ok {
+				continue
+			}
+
+			id, exists := ids[info.FnName]
+			if !exists {
+				continue
+			}
+
+			info.FnID = id
+			instructions[i].Value = info
+		}
 	}
 }
 
@@ -294,29 +355,133 @@ func isJitCompatible(val TinyValue) bool {
 		return true
 	}
 	switch val.Value.(type) {
-	case float64, float32, int, int64, bool, WasmObjectValue, WasmArrayValue:
+	case float64, float32, int, int64, bool, string, WasmObjectValue, WasmArrayValue:
 		return true
 	default:
 		return false
 	}
 }
 
-func (vm *VM) argsMatchJit(args []TinyValue) bool {
-	for _, arg := range args {
+type JitDeoptError struct {
+	FunctionName string
+	Reason       string
+	DeoptIP      int
+	Locals       []TinyValue
+	Constants    []bool
+	LocalTypes   []TypeHint
+	Stack        []TinyValue
+	StackTop     int
+}
+
+func (e JitDeoptError) Error() string {
+	if e.Reason != "" {
+		return "jit deopt: " + e.Reason
+	}
+	return "jit deopt"
+}
+
+func jitDeoptFromError(err error) (JitDeoptError, bool) {
+	if err == nil {
+		return JitDeoptError{}, false
+	}
+
+	switch e := err.(type) {
+	case JitDeoptError:
+		return e, true
+	case *JitDeoptError:
+		if e == nil {
+			return JitDeoptError{}, false
+		}
+		return *e, true
+	default:
+		return JitDeoptError{}, false
+	}
+}
+
+func (vm *VM) resumeJitDeopt(fn Function, args []TinyValue, deopt JitDeoptError) {
+	if deopt.FunctionName != "" && deopt.FunctionName != fn.Name {
+		vm.fatalError(ErrorInternal, "JIT deopt function mismatch: got %s, expected %s", deopt.FunctionName, fn.Name)
+	}
+	if deopt.DeoptIP < 0 || deopt.DeoptIP > len(fn.Instructions) {
+		vm.fatalError(ErrorInternal, "JIT deopt IP out of range for %s: %d", fn.Name, deopt.DeoptIP)
+	}
+
+	frame := vm.getFrame(fn)
+	frame.ip = deopt.DeoptIP
+
+	// Seed params first. This makes snapshots allowed to contain only changed locals.
+	for i, arg := range args {
+		if i >= len(frame.locals) {
+			break
+		}
+		setCellValue(frame.locals[i], arg)
+		frame.constants[i] = false
+		if i < len(fn.Params) {
+			frame.localTypes[i] = fn.Params[i].TypeHint
+		}
+	}
+
+	for i, local := range deopt.Locals {
+		if i >= len(frame.locals) {
+			break
+		}
+		setCellValue(frame.locals[i], local)
+	}
+	for i, constant := range deopt.Constants {
+		if i >= len(frame.constants) {
+			break
+		}
+		frame.constants[i] = constant
+	}
+	for i, typ := range deopt.LocalTypes {
+		if i >= len(frame.localTypes) {
+			break
+		}
+		frame.localTypes[i] = typ
+	}
+
+	stack := deopt.Stack
+	if deopt.StackTop > 0 && deopt.StackTop <= len(stack) {
+		stack = stack[:deopt.StackTop]
+	}
+	for _, value := range stack {
+		vm.push(value)
+	}
+
+	vm.frames = append(vm.frames, frame)
+}
+
+func (vm *VM) argsMatchJit(jitFn *JitFunction, args []TinyValue) bool {
+	if len(args) != jitFn.paramCount {
+		return false
+	}
+	for i, arg := range args {
 		if !isJitCompatible(arg) {
+			return false
+		}
+		expected := jitFn.expectedParamType(i)
+		if expected != stackTypeUnknown && !jitValueMatchesType(arg, expected) {
 			return false
 		}
 	}
 	return true
 }
 
-func (vm *VM) stackArgsMatchJit(argCount int) bool {
+func (vm *VM) stackArgsMatchJit(jitFn *JitFunction, argCount int) bool {
 	if vm.top < argCount {
+		return false
+	}
+	if argCount != jitFn.paramCount {
 		return false
 	}
 	start := vm.top - argCount
 	for i := 0; i < argCount; i++ {
-		if !isJitCompatible(vm.stack[start+i]) {
+		arg := vm.stack[start+i]
+		if !isJitCompatible(arg) {
+			return false
+		}
+		expected := jitFn.expectedParamType(i)
+		if expected != stackTypeUnknown && !jitValueMatchesType(arg, expected) {
 			return false
 		}
 	}
@@ -397,11 +562,51 @@ func (vm *VM) releaseFrame(frame *Frame) {
 	vm.framePool = append(vm.framePool, frame)
 }
 
+func cloneMap[K comparable, V any](m map[K]V) map[K]V {
+	out := make(map[K]V, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneObjectShapes(in [][]string) [][]string {
+	out := make([][]string, len(in))
+	for i := range in {
+		out[i] = append([]string(nil), in[i]...)
+	}
+	return out
+}
+
+func (vm *VM) hasJitMetaFor(name string) bool {
+	for _, meta := range vm.jitMetas {
+		if meta.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (vm *VM) ensureJitReadyFor(name string) {
+	if vm.jitModule != nil {
+		return
+	}
+	if len(vm.jitWasmBytes) == 0 {
+		return
+	}
+	if !vm.hasJitMetaFor(name) {
+		return
+	}
+
+	vm.InstantiateJitModule()
+}
+
 func (vm *VM) CloneForTask() *VM {
-	return &VM{
+	task := &VM{
 		mainInstructions: vm.mainInstructions,
 		functions:        vm.functions,
 		classes:          vm.classes,
+		interfaces:       vm.interfaces,
 		functionList:     vm.functionList,
 
 		stack:       make([]TinyValue, 256),
@@ -412,6 +617,8 @@ func (vm *VM) CloneForTask() *VM {
 		globals:         vm.globals,
 		globalNames:     vm.globalNames,
 		globalConstants: vm.globalConstants,
+		globalVersion:   atomic.LoadUint64(&vm.globalVersion),
+		globalPairIC:    map[uint64]globalPairInlineCache{},
 		globalTypes:     vm.globalTypes,
 
 		packed: vm.packed,
@@ -420,17 +627,34 @@ func (vm *VM) CloneForTask() *VM {
 
 		cliArgs: vm.cliArgs,
 
-		wazeroRuntime:      vm.wazeroRuntime,
-		wazeroCtx:          vm.wazeroCtx,
-		wasmModule:         vm.wasmModule,
-		jitModule:          vm.jitModule,
-		jitFunctions:       vm.jitFunctions,
-		wasmMu:             vm.wasmMu,
-		propertyOffsets:    vm.propertyOffsets,
+		jitWasmBytes: vm.jitWasmBytes,
+		jitMetas:     vm.jitMetas,
+
+		jitStringAddrs: cloneMap(vm.jitStringAddrs),
+		jitStrings:     append([]string(nil), vm.jitStrings...),
+		jitStringMap:   cloneMap(vm.jitStringMap),
+
+		jitFunctions: map[string]*JitFunction{},
+
+		jitHeapTop:        vm.jitHeapTop,
+		jitInitialHeapTop: vm.jitInitialHeapTop,
+
+		propertyOffsets:    cloneMap(vm.propertyOffsets),
 		nextPropertyOffset: vm.nextPropertyOffset,
-		objectShapes:       vm.objectShapes,
-		objectShapeIDs:     vm.objectShapeIDs,
+		objectShapes:       cloneObjectShapes(vm.objectShapes),
+		objectShapeIDs:     cloneMap(vm.objectShapeIDs),
+
+		wazeroRuntime:    vm.wazeroRuntime,
+		wazeroCtx:        vm.wazeroCtx,
+		wasmModule:       vm.wasmModule,
+		jitModule:        nil,
+		jitHeapTopGlobal: nil,
+		wasmMu:           &sync.Mutex{},
 	}
+
+	// task.InstantiateJitModule()
+
+	return task
 }
 
 func cloneValue(value TinyValue) TinyValue {
@@ -539,9 +763,38 @@ func frameLocalValue(frame *Frame, slot int, op string) TinyValue {
 }
 
 func propertyValue(vm *VM, objectValue TinyValue, name string) TinyValue {
+	if obj, ok := objectValue.Value.(WasmObjectValue); ok {
+		offset := vm.getPropertyOffset(name)
+		addr := uint32(obj.Address) + offset
+
+		tag := vm.ReadWasmFloat(addr)
+		val := vm.ReadWasmFloat(addr + 8)
+
+		switch tag {
+		case 1.0:
+			return NewNative(val)
+		case 2.0:
+			return NewNative(val != 0.0)
+		case 4.0:
+			return NewNative(WasmObjectValue{Address: val, VM: vm})
+		case 5.0:
+			return NewNative(WasmArrayValue{Address: val, VM: vm})
+		case 6.0:
+			strVal, ok := vm.readWasmStringMaybe(uint32(val))
+			if ok {
+				return NewNative(strVal)
+			}
+			return NewNull()
+		case 0.0:
+			return NewNull()
+		}
+	}
+
 	if object, ok := objectValue.Value.(ObjectValue); ok {
-		if !vm.canAccessField(object, name) {
-			vm.fatalError(ErrorRuntime, "cannot access private field: %s", name)
+		if _, isClass := object["__class"]; isClass {
+			if !vm.canAccessField(object, name) {
+				vm.fatalError(ErrorRuntime, "cannot access private field: %s", name)
+			}
 		}
 
 		value, exists := object[name]
@@ -592,7 +845,7 @@ func resolveNamespaceValue(vm *VM, value TinyValue) TinyValue {
 	return value
 }
 
-func multiplyByInt(value TinyValue, factor int) TinyValue {
+func (vm *VM) multiplyByInt(value TinyValue, factor int) TinyValue {
 	if value.IsInt {
 		return NewInt(value.AsInt * factor)
 	}
@@ -603,7 +856,7 @@ func multiplyByInt(value TinyValue, factor int) TinyValue {
 	case float32:
 		return NewNative(v * float32(factor))
 	default:
-		LangError(ErrorType, "cannot multiply %s and number", TypeName(value))
+		vm.runtimeError(ErrorType, "cannot multiply %s and number", TypeName(value))
 		return TinyValue{}
 	}
 }
@@ -638,6 +891,84 @@ func (vm *VM) readWasmFloatMaybe(addr uint32) (float64, bool) {
 	return math.Float64frombits(bits), true
 }
 
+func (vm *VM) readWasmStringMaybe(addr uint32) (string, bool) {
+	if vm == nil || vm.jitModule == nil {
+		return "", false
+	}
+	lenF, ok := vm.readWasmFloatMaybe(addr + 8)
+	if !ok {
+		return "", false
+	}
+	length := uint32(lenF)
+	if length == 0 {
+		return "", true
+	}
+	bytes, ok := vm.jitModule.Memory().Read(addr+16, length)
+	if !ok {
+		return "", false
+	}
+	return string(bytes), true
+}
+
+func (vm *VM) writeWasmString(s string) float64 {
+	mod := vm.jitModule
+	if mod == nil {
+		panic("JIT module not initialized")
+	}
+	bytes := []byte(s)
+	size := uint32(16 + len(bytes))
+	size = (size + 7) &^ 7 // Align size to 8-byte boundary
+
+	const bitsetRange = 128 * 1024 * 1024
+	const bitsetSize = bitsetRange / 64
+
+	var addr uint32
+	heapTopGlobal := mod.ExportedGlobal("__heap_top")
+	if heapTopGlobal != nil {
+		addr = uint32(api.DecodeF64(heapTopGlobal.Get()))
+	} else {
+		panic("JIT heap top global not found")
+	}
+
+	// Mark allocator bitset
+	bitIdx := addr / 8
+	byteIdx := bitIdx / 8
+	bitOffset := bitIdx % 8
+	if byteIdx < bitsetSize {
+		buf, okBuf := mod.Memory().Read(byteIdx, 1)
+		if okBuf {
+			buf[0] |= (1 << bitOffset)
+			mod.Memory().Write(byteIdx, buf)
+		}
+	}
+
+	newTop := addr + size
+	currentPages := mod.Memory().Size() / 65536
+	newPagesNeeded := (newTop + 65535) / 65536
+	if newPagesNeeded > currentPages {
+		mod.Memory().Grow(newPagesNeeded - currentPages)
+	}
+	if heapTopGlobal != nil {
+		if mg, ok := heapTopGlobal.(api.MutableGlobal); ok {
+			mg.Set(api.EncodeF64(float64(newTop)))
+		}
+	}
+
+	// Write Tag 6.0 and Length
+	tagBuf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(tagBuf, math.Float64bits(6.0))
+	mod.Memory().Write(addr, tagBuf)
+
+	lenBuf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(lenBuf, math.Float64bits(float64(len(bytes))))
+	mod.Memory().Write(addr+8, lenBuf)
+
+	// Write string bytes
+	mod.Memory().Write(addr+16, bytes)
+
+	return float64(addr)
+}
+
 func (a WasmArrayValue) String() string {
 	if a.VM == nil {
 		return "[]"
@@ -665,19 +996,27 @@ func (a WasmArrayValue) String() string {
 			continue
 		}
 
-		if tag == 1.0 {
+		switch tag {
+		case 1.0:
 			parts = append(parts, fmt.Sprintf("%g", val))
-		} else if tag == 2.0 {
+		case 2.0:
 			if val != 0.0 {
 				parts = append(parts, "true")
 			} else {
 				parts = append(parts, "false")
 			}
-		} else if tag == 4.0 {
+		case 4.0:
 			parts = append(parts, WasmObjectValue{Address: val, VM: a.VM}.String())
-		} else if tag == 5.0 {
+		case 5.0:
 			parts = append(parts, WasmArrayValue{Address: val, VM: a.VM}.String())
-		} else {
+		case 6.0:
+			strVal, ok := a.VM.readWasmStringMaybe(uint32(val))
+			if ok {
+				parts = append(parts, "\""+strVal+"\"")
+			} else {
+				parts = append(parts, "null")
+			}
+		default:
 			parts = append(parts, "null")
 		}
 	}
@@ -722,6 +1061,51 @@ func (vm *VM) WriteWasmFloat(addr uint32, val float64) {
 	}
 }
 
+func (vm *VM) WriteWasmTaggedValue(addr uint32, value TinyValue) {
+	tag := 1.0
+	val := 0.0
+
+	if value.IsInt {
+		val = float64(value.AsInt)
+	} else {
+		switch v := value.Value.(type) {
+		case float64:
+			val = v
+		case float32:
+			val = float64(v)
+		case int:
+			val = float64(v)
+		case int64:
+			val = float64(v)
+		case bool:
+			tag = 2.0
+			if v {
+				val = 1.0
+			}
+		case string:
+			tag = 6.0
+			val = vm.writeWasmString(v)
+		case WasmObjectValue:
+			tag = 4.0
+			val = v.Address
+		case WasmArrayValue:
+			tag = 5.0
+			val = v.Address
+		case NullValue:
+			tag = 0.0
+		case *NullValue:
+			tag = 0.0
+		case nil:
+			tag = 0.0
+		default:
+			vm.fatalError(ErrorType, "cannot store %s in JIT object", TypeName(value))
+		}
+	}
+
+	vm.WriteWasmFloat(addr, tag)
+	vm.WriteWasmFloat(addr+8, val)
+}
+
 func (o WasmObjectValue) String() string {
 	if o.VM == nil {
 		return "{}"
@@ -763,6 +1147,13 @@ func (o WasmObjectValue) String() string {
 			parts = append(parts, fmt.Sprintf("%s: %s", name, WasmObjectValue{Address: val, VM: o.VM}.String()))
 		case 5.0:
 			parts = append(parts, fmt.Sprintf("%s: %s", name, WasmArrayValue{Address: val, VM: o.VM}.String()))
+		case 6.0:
+			strVal, ok := o.VM.readWasmStringMaybe(uint32(val))
+			if ok {
+				parts = append(parts, fmt.Sprintf("%s: %s", name, strVal))
+			} else {
+				parts = append(parts, fmt.Sprintf("%s: null", name))
+			}
 		}
 	}
 
@@ -784,82 +1175,201 @@ func asFloat64T(val TinyValue) (float64, bool) {
 	return 0, false
 }
 
-func addValues(left TinyValue, right TinyValue) TinyValue {
-	lStr, lIsStr := left.Value.(string)
-	if left.IsInt {
-		lIsStr = false
+func fastIndexInt(value TinyValue) (int, bool) {
+	if value.IsInt {
+		return value.AsInt, true
 	}
-	rStr, rIsStr := right.Value.(string)
-	if right.IsInt {
-		rIsStr = false
+	switch v := value.Value.(type) {
+	case int:
+		return v, true
+	case int64:
+		return int(v), true
+	case float64:
+		return int(v), true
+	case float32:
+		return int(v), true
+	default:
+		return 0, false
+	}
+}
+
+func fastNumericValue(value TinyValue) (float64, bool) {
+	if value.IsInt {
+		return float64(value.AsInt), true
+	}
+	switch v := value.Value.(type) {
+	case float64:
+		return v, true
+	case float32:
+		return float64(v), true
+	case int:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case uint64:
+		return float64(v), true
+	default:
+		return 0, false
+	}
+}
+
+func constToTinyValue(value any) TinyValue {
+	if tv, ok := value.(TinyValue); ok {
+		return tv
+	}
+	if value == nil {
+		return NewNull()
+	}
+	return ToValue(value)
+}
+
+func (vm *VM) applyBinaryOp(left TinyValue, right TinyValue, op OpCode) TinyValue {
+	if l, ok := fastNumericValue(left); ok {
+		if r, ok := fastNumericValue(right); ok {
+			switch op {
+			case OP_ADD:
+				return NewNative(l + r)
+			case OP_SUB:
+				return NewNative(l - r)
+			case OP_MUL:
+				return NewNative(l * r)
+			case OP_DIV:
+				if r == 0 {
+					vm.runtimeError(ErrorRuntime, "cannot divide by zero")
+				}
+				return NewNative(l / r)
+			case OP_MOD:
+				if r == 0 {
+					vm.runtimeError(ErrorRuntime, "cannot modulo by zero")
+				}
+				return NewNative(math.Mod(l, r))
+			}
+		}
 	}
 
-	if lIsStr && rIsStr {
-		return NewNative(lStr + rStr)
+	switch op {
+	case OP_ADD:
+		return vm.addValues(left, right)
+	case OP_SUB:
+		return vm.subValues(left, right)
+	case OP_MUL:
+		return vm.mulValues(left, right)
+	case OP_DIV:
+		return vm.divValues(left, right)
+	case OP_MOD:
+		return vm.modValues(left, right)
+	default:
+		vm.fatalError(ErrorInternal, "unsupported binary op in superinstruction: %s", op.String())
+		return TinyValue{}
 	}
-	if lIsStr {
-		if rNum, ok := asFloat64T(right); ok {
-			return NewNative(lStr + FloatToString(rNum))
+}
+
+func (vm *VM) addValues(left TinyValue, right TinyValue) TinyValue {
+	toConcatString := func(v TinyValue) (string, bool) {
+		if v.IsInt {
+			return intToString(v.AsInt), true
 		}
+
+		switch x := v.Value.(type) {
+		case string:
+			return x, true
+		case bool:
+			if x {
+				return "true", true
+			}
+			return "false", true
+		case int:
+			return intToString(x), true
+		case int64:
+			return int64ToString(x), true
+		case uint64:
+			return uintToString(x), true
+		case float32:
+			return FloatToString(float64(x)), true
+		case float64:
+			return FloatToString(x), true
+		}
+
+		return "", false
 	}
-	if rIsStr {
-		if lNum, ok := asFloat64T(left); ok {
-			return NewNative(FloatToString(lNum) + rStr)
+
+	leftIsString := false
+	rightIsString := false
+
+	if !left.IsInt {
+		_, leftIsString = left.Value.(string)
+	}
+
+	if !right.IsInt {
+		_, rightIsString = right.Value.(string)
+	}
+
+	if leftIsString || rightIsString {
+		l, okL := toConcatString(left)
+		r, okR := toConcatString(right)
+
+		if okL && okR {
+			return NewNative(l + r)
 		}
+
+		vm.runtimeError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
+		return TinyValue{}
 	}
 
 	lNum, lOK := asFloat64T(left)
 	rNum, rOK := asFloat64T(right)
+
 	if lOK && rOK {
 		return NewNative(lNum + rNum)
 	}
-	LangError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
+
+	vm.runtimeError(ErrorType, "cannot add %s and %s", TypeName(left), TypeName(right))
 	return TinyValue{}
 }
 
-func subValues(left TinyValue, right TinyValue) TinyValue {
+func (vm *VM) subValues(left TinyValue, right TinyValue) TinyValue {
 	lNum, lOK := asFloat64T(left)
 	rNum, rOK := asFloat64T(right)
 	if lOK && rOK {
 		return NewNative(lNum - rNum)
 	}
-	LangError(ErrorType, "cannot subtract %s and %s", TypeName(left), TypeName(right))
+	vm.runtimeError(ErrorType, "cannot subtract %s and %s", TypeName(left), TypeName(right))
 	return TinyValue{}
 }
 
-func mulValues(left TinyValue, right TinyValue) TinyValue {
+func (vm *VM) mulValues(left TinyValue, right TinyValue) TinyValue {
 	lNum, lOK := asFloat64T(left)
 	rNum, rOK := asFloat64T(right)
 	if lOK && rOK {
 		return NewNative(lNum * rNum)
 	}
-	LangError(ErrorType, "cannot multiply %s and %s", TypeName(left), TypeName(right))
+	vm.runtimeError(ErrorType, "cannot multiply %s and %s", TypeName(left), TypeName(right))
 	return TinyValue{}
 }
 
-func divValues(left TinyValue, right TinyValue) TinyValue {
+func (vm *VM) divValues(left TinyValue, right TinyValue) TinyValue {
 	lNum, lOK := asFloat64T(left)
 	rNum, rOK := asFloat64T(right)
 	if lOK && rOK {
 		if rNum == 0 {
-			LangError(ErrorRuntime, "cannot divide by zero")
+			vm.runtimeError(ErrorRuntime, "cannot divide by zero")
 		}
 		return NewNative(lNum / rNum)
 	}
-	LangError(ErrorType, "cannot divide %s and %s", TypeName(left), TypeName(right))
+	vm.runtimeError(ErrorType, "cannot divide %s and %s", TypeName(left), TypeName(right))
 	return TinyValue{}
 }
 
-func modValues(left TinyValue, right TinyValue) TinyValue {
+func (vm *VM) modValues(left TinyValue, right TinyValue) TinyValue {
 	lNum, lOK := asFloat64T(left)
 	rNum, rOK := asFloat64T(right)
 	if lOK && rOK {
 		if rNum == 0 {
-			LangError(ErrorRuntime, "cannot modulo by zero")
+			vm.runtimeError(ErrorRuntime, "cannot modulo by zero")
 		}
 		return NewNative(math.Mod(lNum, rNum))
 	}
-	LangError(ErrorType, "cannot modulo %s and %s", TypeName(left), TypeName(right))
+	vm.runtimeError(ErrorType, "cannot modulo %s and %s", TypeName(left), TypeName(right))
 	return TinyValue{}
 }
 
@@ -882,6 +1392,13 @@ func (vm *VM) getObjectShapeID(names []string) uint32 {
 	return id
 }
 
+func (vm *VM) getGlobalUnlocked(slot int) TinyValue {
+	if slot < 0 || slot >= len(*vm.globals) {
+		return NewNull()
+	}
+	return (*vm.globals)[slot]
+}
+
 func (vm *VM) setGlobalUnlocked(slot int, value TinyValue) {
 	if slot >= len(*vm.globals) {
 		newSize := slot + 1
@@ -893,16 +1410,18 @@ func (vm *VM) setGlobalUnlocked(slot int, value TinyValue) {
 		*vm.globals = newGlobals
 	}
 	(*vm.globals)[slot] = value
+	atomic.AddUint64(&vm.globalVersion, 1)
 }
 
 func (vm *VM) getGlobal(slot int) TinyValue {
 	vm.mu.RLock()
-	defer vm.mu.RUnlock()
-
 	if slot < 0 || slot >= len(*vm.globals) {
+		vm.mu.RUnlock()
 		return NewNull()
 	}
-	return (*vm.globals)[slot]
+	value := (*vm.globals)[slot]
+	vm.mu.RUnlock()
+	return value
 }
 
 func (vm *VM) setGlobal(slot int, value TinyValue) {
@@ -912,18 +1431,50 @@ func (vm *VM) setGlobal(slot int, value TinyValue) {
 	vm.setGlobalUnlocked(slot, value)
 }
 
-func (vm *VM) setGlobalByName(name string, value TinyValue) {
-	vm.mu.Lock()
-	defer vm.mu.Unlock()
-	if vm.globalNames == nil {
-		return
+func (vm *VM) currentInlineCacheKey() uint64 {
+	if len(vm.frames) > 0 {
+		frame := vm.frames[len(vm.frames)-1]
+		ip := frame.ip - 1
+		if ip < 0 {
+			ip = 0
+		}
+		return uint64(uint32(frame.function.ID))<<32 | uint64(uint32(ip))
 	}
-	slot, exists := vm.globalNames[name]
-	if !exists {
-		return
+	ip := vm.ip - 1
+	if ip < 0 {
+		ip = 0
+	}
+	return uint64(^uint32(0))<<32 | uint64(uint32(ip))
+}
+
+func (vm *VM) getCachedGlobalPair(globalSlotA int, globalSlotB int) (TinyValue, TinyValue) {
+	version := atomic.LoadUint64(&vm.globalVersion)
+	key := vm.currentInlineCacheKey()
+
+	if vm.globalPairIC != nil {
+		if cache, ok := vm.globalPairIC[key]; ok && cache.Version == version && cache.GlobalSlotA == globalSlotA && cache.GlobalSlotB == globalSlotB {
+			return cache.ValueA, cache.ValueB
+		}
 	}
 
-	vm.setGlobalUnlocked(slot, value)
+	vm.mu.RLock()
+	valueA := vm.getGlobalUnlocked(globalSlotA)
+	valueB := vm.getGlobalUnlocked(globalSlotB)
+	version = atomic.LoadUint64(&vm.globalVersion)
+	vm.mu.RUnlock()
+
+	if vm.globalPairIC == nil {
+		vm.globalPairIC = make(map[uint64]globalPairInlineCache, 32)
+	}
+	vm.globalPairIC[key] = globalPairInlineCache{
+		Version:     version,
+		GlobalSlotA: globalSlotA,
+		GlobalSlotB: globalSlotB,
+		ValueA:      valueA,
+		ValueB:      valueB,
+	}
+
+	return valueA, valueB
 }
 
 func (vm *VM) canAccessField(object ObjectValue, field string) bool {
@@ -952,6 +1503,80 @@ func (vm *VM) canAccessMethod(object ObjectValue, method string) bool {
 	return true
 }
 
+func (vm *VM) getObjectLocalPropertyFast(frame *Frame, objectSlot int, name string, op string) TinyValue {
+	objectValue := frameLocalValue(frame, objectSlot, op)
+
+	if object, ok := objectValue.Value.(ObjectValue); ok {
+		if _, isClass := object["__class"]; isClass {
+			if !vm.canAccessField(object, name) {
+				vm.fatalError(ErrorRuntime, "cannot access private field: %s", name)
+			}
+		}
+
+		value, exists := object[name]
+		if !exists {
+			vm.fatalError(ErrorName, "object has no property: %s", name)
+		}
+		return value
+	}
+
+	if object, ok := objectValue.Value.(*ObjectValue); ok && object != nil {
+		if _, isClass := (*object)["__class"]; isClass {
+			if !vm.canAccessField(*object, name) {
+				vm.fatalError(ErrorRuntime, "cannot access private field: %s", name)
+			}
+		}
+
+		value, exists := (*object)[name]
+		if !exists {
+			vm.fatalError(ErrorName, "object has no property: %s", name)
+		}
+		return value
+	}
+
+	return vm.getProperty(objectValue, name, false)
+}
+
+func (vm *VM) setObjectLocalPropertyFast(frame *Frame, objectSlot int, name string, value TinyValue, op string) {
+	objectValue := frameLocalValue(frame, objectSlot, op)
+
+	if obj, ok := objectValue.Value.(WasmObjectValue); ok {
+		offset := vm.getPropertyOffset(name)
+		vm.WriteWasmTaggedValue(uint32(obj.Address)+offset, value)
+		return
+	}
+
+	if object, ok := objectValue.Value.(ObjectValue); ok {
+		if _, isClass := object["__class"]; isClass {
+			constFields, _ := object["__constFields"].Value.(map[string]bool)
+			if _, isConstant := constFields[name]; isConstant {
+				vm.fatalError(ErrorRuntime, "cannot assign to constant field: %s", name)
+			}
+			if !vm.canAccessField(object, name) {
+				vm.fatalError(ErrorRuntime, "cannot assign private field: %s", name)
+			}
+		}
+		object[name] = value
+		return
+	}
+
+	if object, ok := objectValue.Value.(*ObjectValue); ok && object != nil {
+		if _, isClass := (*object)["__class"]; isClass {
+			constFields, _ := (*object)["__constFields"].Value.(map[string]bool)
+			if _, isConstant := constFields[name]; isConstant {
+				vm.fatalError(ErrorRuntime, "cannot assign to constant field: %s", name)
+			}
+			if !vm.canAccessField(*object, name) {
+				vm.fatalError(ErrorRuntime, "cannot assign private field: %s", name)
+			}
+		}
+		(*object)[name] = value
+		return
+	}
+
+	vm.fatalError(ErrorType, "expected object, got %s", TypeName(objectValue))
+}
+
 func (vm *VM) getProperty(objectValue TinyValue, name string, safe bool) TinyValue {
 	if obj, ok := objectValue.Value.(WasmObjectValue); ok {
 		offset := vm.getPropertyOffset(name)
@@ -960,14 +1585,23 @@ func (vm *VM) getProperty(objectValue TinyValue, name string, safe bool) TinyVal
 		tag := vm.ReadWasmFloat(addr)
 		val := vm.ReadWasmFloat(addr + 8)
 
-		if tag == 1.0 {
+		switch tag {
+		case 1.0:
 			return NewNative(val)
-		} else if tag == 2.0 {
+		case 2.0:
 			return NewNative(val != 0.0)
-		} else if tag == 4.0 {
+		case 4.0:
 			return NewNative(WasmObjectValue{Address: val, VM: vm})
-		} else if tag == 5.0 {
+		case 5.0:
 			return NewNative(WasmArrayValue{Address: val, VM: vm})
+		case 6.0:
+			strVal, ok := vm.readWasmStringMaybe(uint32(val))
+			if ok {
+				return NewNative(strVal)
+			}
+			return NewNull()
+		case 0.0:
+			return NewNull()
 		}
 	}
 
@@ -1029,8 +1663,10 @@ func (vm *VM) getProperty(objectValue TinyValue, name string, safe bool) TinyVal
 		vm.typeError("expected object, got %s", TypeName(objectValue))
 	}
 
-	if !vm.canAccessField(object, name) {
-		vm.fatalError(ErrorRuntime, "cannot access private field: %s", name)
+	if _, isClass := object["__class"]; isClass {
+		if !vm.canAccessField(object, name) {
+			vm.fatalError(ErrorRuntime, "cannot access private field: %s", name)
+		}
 	}
 
 	value, exists := object[name]
@@ -1368,18 +2004,28 @@ func (vm *VM) objectIsOrEmbedsClass(object ObjectValue, className string) bool {
 }
 
 func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableName string) {
+	vm.ensureJitReadyFor(fn.Name)
 	jitFn := vm.jitFunctions[fn.Name]
 
-	if jitFn != nil && argCount == jitFn.paramCount && vm.stackArgsMatchJit(argCount) {
+	if jitFn != nil && argCount == jitFn.paramCount && vm.stackArgsMatchJit(jitFn, argCount) {
 		args := vm.popArgs(argCount)
 		res, err := jitFn.Call(vm.wazeroCtx, args)
 		if err == nil {
 			vm.push(res)
 			return
 		}
-		vm.jitFunctions[fn.Name] = nil
+		if _, ok := err.(JitExceptionThrownError); ok {
+			return
+		}
 
-		vm.callFunctionDirect(fn, args)
+		if deopt, ok := jitDeoptFromError(err); ok {
+			vm.resumeJitDeopt(fn, args, deopt)
+			return
+		}
+
+		println("JIT call failed for:", fn.Name, "error:", err.Error())
+
+		vm.callFunctionDirectInterpreted(fn, args)
 		return
 	}
 
@@ -1649,16 +2295,26 @@ func makeErrorObject(value TinyValue) ObjectValue {
 func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []TinyValue) {
 	fn, ok := vm.functions[fnValue.Name]
 	if ok {
+		vm.ensureJitReadyFor(fn.Name)
+
 		jitFn := vm.jitFunctions[fn.Name]
 
-		if jitFn != nil && vm.argsMatchJit(args) {
+		if jitFn != nil && vm.argsMatchJit(jitFn, args) {
 			res, err := jitFn.Call(vm.wazeroCtx, args)
 			if err == nil {
 				vm.push(res)
 				return
 			}
+			if _, ok := err.(JitExceptionThrownError); ok {
+				return
+			}
+			if deopt, ok := jitDeoptFromError(err); ok {
+				vm.resumeJitDeopt(fn, args, deopt)
+				return
+			}
 
-			vm.jitFunctions[fn.Name] = nil
+			// Keep the JIT enabled. Generic failures fall through to interpreter start,
+			// but recoverable mid-function bailouts must use JitDeoptError instead.
 		}
 	}
 
@@ -1796,19 +2452,7 @@ func (vm *VM) runFrameToCompletion(frame *Frame) TinyValue {
 	return vm.pop()
 }
 
-func (vm *VM) callFunctionDirect(fn Function, args []TinyValue) {
-	jitFn := vm.jitFunctions[fn.Name]
-
-	if jitFn != nil && vm.argsMatchJit(args) {
-		res, err := jitFn.Call(vm.wazeroCtx, args)
-		if err == nil {
-			vm.push(res)
-			return
-		}
-
-		vm.jitFunctions[fn.Name] = nil
-	}
-
+func (vm *VM) callFunctionDirectInterpreted(fn Function, args []TinyValue) {
 	args = vm.applyDefaultArgs(fn, args, 0, "function "+fn.Name)
 
 	frame := vm.getFrame(fn)
@@ -1836,6 +2480,32 @@ func (vm *VM) callFunctionDirect(fn Function, args []TinyValue) {
 	}
 
 	vm.frames = append(vm.frames, frame)
+}
+
+func (vm *VM) callFunctionDirect(fn Function, args []TinyValue) {
+	vm.ensureJitReadyFor(fn.Name)
+
+	jitFn := vm.jitFunctions[fn.Name]
+
+	if jitFn != nil && vm.argsMatchJit(jitFn, args) {
+		res, err := jitFn.Call(vm.wazeroCtx, args)
+		if err == nil {
+			vm.push(res)
+			return
+		}
+		if _, ok := err.(JitExceptionThrownError); ok {
+			return
+		}
+		if deopt, ok := jitDeoptFromError(err); ok {
+			vm.resumeJitDeopt(fn, args, deopt)
+			return
+		}
+
+		// Keep the JIT enabled. Generic failures fall through to interpreter start,
+		// but recoverable mid-function bailouts must use JitDeoptError instead.
+	}
+
+	vm.callFunctionDirectInterpreted(fn, args)
 }
 
 func (vm *VM) callFunctionValue(fnValue FunctionValue, args []TinyValue) TinyValue {
@@ -1886,6 +2556,38 @@ func (vm *VM) runDefersAboveDepth(targetDepth int) {
 	}
 }
 
+func (vm *VM) ResetForRequest() {
+	vm.top = 0
+	vm.frames = vm.frames[:0]
+	vm.tryHandlers = vm.tryHandlers[:0]
+	vm.deferHandlers = vm.deferHandlers[:0]
+	vm.nativeFrames = vm.nativeFrames[:0]
+	vm.currentInstr = Instruction{}
+	vm.lastInstruction = Instruction{}
+	vm.lastInstructionIndex = 0
+	vm.lastFunctionName = ""
+
+	if vm.jitModule != nil {
+		if vm.jitHeapTop > vm.jitInitialHeapTop {
+			startByte := vm.jitInitialHeapTop / 64
+			endByte := (vm.jitHeapTop + 63) / 64
+			if endByte > startByte {
+				length := endByte - startByte
+				if length > uint32(len(jitZeroBuf)) {
+					length = uint32(len(jitZeroBuf))
+				}
+				vm.jitModule.Memory().Write(startByte, jitZeroBuf[:length])
+			}
+		}
+		vm.jitHeapTop = vm.jitInitialHeapTop
+		if heapTopGlobal := vm.jitModule.ExportedGlobal("__heap_top"); heapTopGlobal != nil {
+			if mg, ok := heapTopGlobal.(api.MutableGlobal); ok {
+				mg.Set(api.EncodeF64(float64(vm.jitInitialHeapTop)))
+			}
+		}
+	}
+}
+
 func (vm *VM) step() bool {
 	instr := vm.fetchInstruction()
 
@@ -1896,6 +2598,44 @@ func (vm *VM) step() bool {
 	}
 
 	switch instr.Op {
+	case OP_JSON_STRINGIFY:
+		if vm.top < 1 {
+			vm.handleUnderflow()
+			return false
+		}
+
+		value := vm.pop()
+		vm.push(NewNative(stringifyTinyJSONFast(value)))
+
+	case OP_JSON_PARSE:
+		if vm.top < 1 {
+			vm.handleUnderflow()
+			return false
+		}
+
+		value := vm.pop()
+
+		var raw any
+		if value.IsInt {
+			raw = value.AsInt
+		} else {
+			raw = value.Value
+		}
+
+		str, ok := raw.(string)
+		if !ok {
+			vm.fatalError(ErrorType, "json.parse expected string, got %s", TypeName(value))
+		}
+
+		result, err := parseTinyJSONDirect(str)
+		if err != nil {
+			vm.runtimeError(ErrorRuntime, "invalid JSON: %v", err)
+			vm.push(NewNull())
+			return false
+		}
+
+		vm.push(result)
+
 	case OP_LOAD_WASM:
 		wasmBytes := instr.Value.([]byte)
 
@@ -1929,28 +2669,137 @@ func (vm *VM) step() bool {
 		info := instr.Value.(AddLocalLocalStoreInfo)
 		frame := vm.frames[len(vm.frames)-1]
 
-		valA := frame.locals[info.SlotA]
-		valB := frame.locals[info.SlotB]
-
-		if valA.IsInt && valB.IsInt {
-			frame.locals[info.DestSlot].Int = valA.Int + valB.Int
-			frame.locals[info.DestSlot].IsInt = true
-		} else {
-			vm.fatalError(ErrorType, "Optimized addition expects integers")
+		if frame.constants[info.DestSlot] {
+			vm.fatalError(ErrorConst, "cannot assign to constant local")
 		}
+
+		leftCell := frame.locals[info.SlotA]
+		rightCell := frame.locals[info.SlotB]
+		destCell := frame.locals[info.DestSlot]
+		if leftCell == nil || rightCell == nil || destCell == nil {
+			vm.fatalError(ErrorInternal, "nil local cell in OP_ADD_LOCAL_LOCAL_STORE")
+		}
+
+		left := cellValue(leftCell)
+		right := cellValue(rightCell)
+		setCellValue(destCell, vm.applyBinaryOp(left, right, OP_ADD))
+
+	case OP_LOCAL_CONST_OP_STORE:
+		info := instr.Value.(LocalConstOpInfo)
+		frame := vm.frames[len(vm.frames)-1]
+		if info.Slot < 0 || info.Slot >= len(frame.locals) {
+			vm.fatalError(ErrorInternal, "local slot out of range in OP_LOCAL_CONST_OP_STORE")
+		}
+		if frame.constants[info.Slot] {
+			vm.fatalError(ErrorConst, "cannot assign to constant local")
+		}
+		cell := frame.locals[info.Slot]
+		if cell == nil {
+			vm.fatalError(ErrorInternal, "nil local cell in OP_LOCAL_CONST_OP_STORE")
+		}
+		left := cellValue(cell)
+		right := constToTinyValue(info.Const)
+		setCellValue(cell, vm.applyBinaryOp(left, right, info.Op))
+
+	case OP_LOCAL_CONST_OP:
+		info := instr.Value.(LocalConstOpInfo)
+		frame := vm.frames[len(vm.frames)-1]
+		if info.Slot < 0 || info.Slot >= len(frame.locals) {
+			vm.fatalError(ErrorInternal, "local slot out of range in OP_LOCAL_CONST_OP")
+		}
+		cell := frame.locals[info.Slot]
+		if cell == nil {
+			vm.fatalError(ErrorInternal, "nil local cell in OP_LOCAL_CONST_OP")
+		}
+		vm.push(vm.applyBinaryOp(cellValue(cell), constToTinyValue(info.Const), info.Op))
+
+	case OP_ADD_LOCAL_GLOBAL_GLOBAL_STORE:
+		info := instr.Value.(AddLocalGlobalGlobalStoreInfo)
+		frame := vm.frames[len(vm.frames)-1]
+		if info.LocalSlot < 0 || info.LocalSlot >= len(frame.locals) {
+			vm.fatalError(ErrorInternal, "local slot out of range in OP_ADD_LOCAL_GLOBAL_GLOBAL_STORE")
+		}
+		if frame.constants[info.LocalSlot] {
+			vm.fatalError(ErrorConst, "cannot assign to constant local")
+		}
+		cell := frame.locals[info.LocalSlot]
+		if cell == nil {
+			vm.fatalError(ErrorInternal, "nil local cell in OP_ADD_LOCAL_GLOBAL_GLOBAL_STORE")
+		}
+
+		globalA, globalB := vm.getCachedGlobalPair(info.GlobalSlotA, info.GlobalSlotB)
+
+		first := vm.applyBinaryOp(cellValue(cell), globalA, OP_ADD)
+		setCellValue(cell, vm.applyBinaryOp(first, globalB, OP_ADD))
+
 	case OP_JUMP_LOCAL_GT_LOCAL:
 		info := instr.Value.(JumpLocalGTLocalInfo)
 		frame := vm.frames[len(vm.frames)-1]
 
-		valA := frame.locals[info.SlotA]
-		valB := frame.locals[info.SlotB]
+		leftCell := frame.locals[info.SlotA]
+		rightCell := frame.locals[info.SlotB]
 
-		if valA.IsInt && valB.IsInt {
-			if valA.Int > valB.Int {
+		if leftCell == nil || rightCell == nil {
+			vm.fatalError(ErrorInternal, "nil local in OP_JUMP_LOCAL_GT_LOCAL")
+		}
+
+		if leftCell.IsInt && rightCell.IsInt {
+			if leftCell.Int > rightCell.Int {
 				frame.ip = info.Target
 			}
+			break
+		}
+
+		var leftVal any
+		if leftCell.Value.IsInt {
+			leftVal = leftCell.Value.AsInt
 		} else {
-			vm.fatalError(ErrorType, "Loop condition expects integers")
+			leftVal = leftCell.Value.Value
+		}
+
+		var rightVal any
+		if rightCell.Value.IsInt {
+			rightVal = rightCell.Value.AsInt
+		} else {
+			rightVal = rightCell.Value.Value
+		}
+
+		shouldJump := false
+
+		switch l := leftVal.(type) {
+		case int:
+			switch r := rightVal.(type) {
+			case int:
+				shouldJump = l > r
+			case int64:
+				shouldJump = int64(l) > r
+			case float64:
+				shouldJump = float64(l) > r
+			default:
+				vm.fatalError(ErrorType, "cannot compare %s and %s", TypeName(leftCell.Value), TypeName(rightCell.Value))
+			}
+
+		case int64:
+			switch r := rightVal.(type) {
+			case int:
+				shouldJump = l > int64(r)
+			case int64:
+				shouldJump = l > r
+			case float64:
+				shouldJump = float64(l) > r
+			default:
+				vm.fatalError(ErrorType, "cannot compare %s and %s", TypeName(leftCell.Value), TypeName(rightCell.Value))
+			}
+
+		case float64:
+			shouldJump = l > vm.asFloat64(rightCell.Value)
+
+		default:
+			vm.fatalError(ErrorType, "cannot compare %s and %s", TypeName(leftCell.Value), TypeName(rightCell.Value))
+		}
+
+		if shouldJump {
+			frame.ip = info.Target
 		}
 	case OP_CALL_DIRECT_SUB_CONST:
 		info := instr.Value.(CallDirectSubConstInfo)
@@ -1960,11 +2809,18 @@ func (vm *VM) step() bool {
 			vm.fatalError(ErrorInternal, "local slot out of range in OP_CALL_DIRECT_SUB_CONST")
 		}
 		cell := currentFrame.locals[info.Slot]
-		if cell == nil || !cell.IsInt {
-			vm.fatalError(ErrorType, "expected int in local slot for math optimization")
+		if cell == nil {
+			vm.fatalError(ErrorInternal, "local cell is nil in OP_CALL_DIRECT_SUB_CONST")
 		}
 
-		finalArgValue := cell.Int - info.SubValue
+		var val int
+		if cell.IsInt {
+			val = cell.Int
+		} else {
+			val = vm.asInt(cellValue(cell))
+		}
+
+		finalArgValue := val - info.SubValue
 
 		fn, exists := vm.functions[info.FnName]
 		if !exists {
@@ -2093,7 +2949,7 @@ func (vm *VM) step() bool {
 			}
 
 		case float64:
-			shouldJump = l >= asFloat64(rightCell.Value)
+			shouldJump = l >= vm.asFloat64(rightCell.Value)
 
 		default:
 			vm.fatalError(ErrorType, "cannot compare %s and %s", TypeName(leftCell.Value), TypeName(rightCell.Value))
@@ -2136,21 +2992,21 @@ func (vm *VM) step() bool {
 
 		switch l := leftVal.(type) {
 		case int:
-			r := asInt(rightCell.Value)
+			r := vm.asInt(rightCell.Value)
 			if r == 0 {
 				vm.fatalError(ErrorRuntime, "cannot modulo by zero")
 			}
 			shouldJump = l%r != 0
 
 		case int64:
-			r := int64(asInt(rightCell.Value))
+			r := int64(vm.asInt(rightCell.Value))
 			if r == 0 {
 				vm.fatalError(ErrorRuntime, "cannot modulo by zero")
 			}
 			shouldJump = l%r != 0
 
 		case float64:
-			r := asFloat64(rightCell.Value)
+			r := vm.asFloat64(rightCell.Value)
 			if r == 0 {
 				vm.fatalError(ErrorRuntime, "cannot modulo by zero")
 			}
@@ -2212,26 +3068,16 @@ func (vm *VM) step() bool {
 
 	case OP_ADD_ASSIGN_LOCAL:
 		info := instr.Value.(AssignLocalInfo)
-
 		frame := vm.frames[len(vm.frames)-1]
 
-		if info.TargetSlot < 0 || info.TargetSlot >= len(frame.locals) {
-			vm.fatalError(ErrorInternal, "target local slot out of range in OP_ADD_ASSIGN_LOCAL")
-		}
-
-		if info.SourceSlot < 0 || info.SourceSlot >= len(frame.locals) {
-			vm.fatalError(ErrorInternal, "source local slot out of range in OP_ADD_ASSIGN_LOCAL")
+		if frame.constants[info.TargetSlot] {
+			vm.fatalError(ErrorConst, "cannot assign to constant local")
 		}
 
 		targetCell := frame.locals[info.TargetSlot]
 		sourceCell := frame.locals[info.SourceSlot]
-
 		if targetCell == nil || sourceCell == nil {
 			vm.fatalError(ErrorInternal, "nil local cell in OP_ADD_ASSIGN_LOCAL")
-		}
-
-		if frame.constants[info.TargetSlot] {
-			vm.fatalError(ErrorConst, "cannot assign to constant local")
 		}
 
 		if targetCell.IsInt && sourceCell.IsInt {
@@ -2239,84 +3085,17 @@ func (vm *VM) step() bool {
 			break
 		}
 
-		var targetVal any
-		if targetCell.Value.IsInt {
-			targetVal = targetCell.Value.AsInt
-		} else {
-			targetVal = targetCell.Value.Value
+		left := cellValue(targetCell)
+		right := cellValue(sourceCell)
+		if l, ok := fastNumericValue(left); ok {
+			if r, ok := fastNumericValue(right); ok {
+				setCellValue(targetCell, NewNative(l+r))
+				break
+			}
 		}
 
-		var sourceVal any
-		if sourceCell.Value.IsInt {
-			sourceVal = sourceCell.Value.AsInt
-		} else {
-			sourceVal = sourceCell.Value.Value
-		}
-
-		switch target := targetVal.(type) {
-		case int:
-			switch source := sourceVal.(type) {
-			case int:
-				targetCell.Int = target + source
-				targetCell.IsInt = true
-			case int64:
-				setCellValue(targetCell, NewNative(int64(target)+source))
-			case float64:
-				setCellValue(targetCell, NewNative(float64(target)+source))
-			case float32:
-				setCellValue(targetCell, NewNative(float32(target)+source))
-			default:
-				vm.fatalError(ErrorType, "cannot add %s and %s", TypeName(targetCell.Value), TypeName(sourceCell.Value))
-			}
-
-		case int64:
-			switch source := sourceVal.(type) {
-			case int:
-				setCellValue(targetCell, NewNative(target+int64(source)))
-			case int64:
-				setCellValue(targetCell, NewNative(target+source))
-			case float64:
-				setCellValue(targetCell, NewNative(float64(target)+source))
-			case float32:
-				setCellValue(targetCell, NewNative(float32(target)+source))
-			default:
-				vm.fatalError(ErrorType, "cannot add %s and %s", TypeName(targetCell.Value), TypeName(sourceCell.Value))
-			}
-
-		case float64:
-			switch source := sourceVal.(type) {
-			case int:
-				setCellValue(targetCell, NewNative(target+float64(source)))
-			case int64:
-				setCellValue(targetCell, NewNative(target+float64(source)))
-			case float64:
-				setCellValue(targetCell, NewNative(target+source))
-			case float32:
-				setCellValue(targetCell, NewNative(target+float64(source)))
-			default:
-				vm.fatalError(ErrorType, "cannot add %s and %s", TypeName(targetCell.Value), TypeName(sourceCell.Value))
-			}
-
-		case float32:
-			switch source := sourceVal.(type) {
-			case int:
-				setCellValue(targetCell, NewNative(target+float32(source)))
-			case int64:
-				setCellValue(targetCell, NewNative(target+float32(source)))
-			case float64:
-				setCellValue(targetCell, NewNative(float64(target)+source))
-			case float32:
-				setCellValue(targetCell, NewNative(target+source))
-			default:
-				vm.fatalError(ErrorType, "cannot add %s and %s", TypeName(targetCell.Value), TypeName(sourceCell.Value))
-			}
-
-		case string:
-			setCellValue(targetCell, NewNative(target+valueToString(sourceCell.Value)))
-
-		default:
-			vm.fatalError(ErrorType, "cannot add to %s", TypeName(targetCell.Value))
-		}
+		result := vm.addValues(left, right)
+		setCellValue(targetCell, result)
 
 	case OP_SUB_ASSIGN_LOCAL:
 		info := instr.Value.(AssignLocalInfo)
@@ -2696,9 +3475,9 @@ func (vm *VM) step() bool {
 			Done: make(chan TaskResult, 1),
 		}
 
-		taskVM := vm.CloneForTask()
-
 		go func() {
+			taskVM := vm.taskPool.Get()
+			defer vm.taskPool.Put(taskVM)
 			defer func() {
 				if r := recover(); r != nil {
 					task.Done <- TaskResult{
@@ -2795,6 +3574,50 @@ func (vm *VM) step() bool {
 		value := vm.popFast()
 		objectValue := vm.popFast()
 
+		if obj, ok := objectValue.Value.(WasmObjectValue); ok {
+			offset := vm.getPropertyOffset(name)
+			addr := uint32(obj.Address) + offset
+
+			tag := 1.0
+			val := 0.0
+
+			if value.IsInt {
+				tag = 1.0
+				val = float64(value.AsInt)
+			} else {
+				switch v := value.Value.(type) {
+				case float64:
+					tag = 1.0
+					val = v
+				case bool:
+					tag = 2.0
+					if v {
+						val = 1.0
+					} else {
+						val = 0.0
+					}
+				case string:
+					tag = 6.0
+					val = vm.writeWasmString(v)
+				case WasmObjectValue:
+					tag = 4.0
+					val = v.Address
+				case WasmArrayValue:
+					tag = 5.0
+					val = v.Address
+				case NullValue:
+					tag = 0.0
+					val = 0.0
+				default:
+					vm.fatalError(ErrorType, "cannot store %s in JIT object", TypeName(value))
+				}
+			}
+
+			vm.WriteWasmFloat(addr, tag)
+			vm.WriteWasmFloat(addr+8, val)
+			break
+		}
+
 		object, ok := objectValue.Value.(ObjectValue)
 		if !ok {
 			vm.fatalError(ErrorType, "expected object, got %s", TypeName(objectValue))
@@ -2852,6 +3675,11 @@ func (vm *VM) step() bool {
 			vm.fatalError(ErrorInternal, "unexpected type for OP_LOAD_GLOBAL: %T", instr.Value)
 		}
 
+		if slot < 0 {
+			vm.push(NewNull())
+			return false
+		}
+
 		vm.push(vm.getGlobal(slot))
 
 	case OP_SETUP_TRY:
@@ -2875,6 +3703,10 @@ func (vm *VM) step() bool {
 	case OP_STORE_GLOBAL:
 		info := instr.Value.(VariableInfo)
 		value := vm.popFast()
+
+		if info.Slot < 0 {
+			return false
+		}
 
 		if ok, reason := vm.checkTypeHint(value, info.TypeHint); !ok {
 			vm.fatalError(
@@ -2902,9 +3734,19 @@ func (vm *VM) step() bool {
 
 	case OP_LOAD_LOCAL:
 		slot := instr.IntArg
+
+		if slot < 0 {
+			if info, ok := instr.Value.(VariableInfo); ok {
+				vm.mu.RLock()
+				vm.push(vm.getGlobal(info.Slot))
+				vm.mu.RUnlock()
+			}
+			return false
+		}
+
 		frame := vm.frames[len(vm.frames)-1]
 
-		if slot < 0 || slot >= len(frame.locals) {
+		if slot >= len(frame.locals) {
 			vm.fatalError(
 				ErrorInternal,
 				"local slot out of range: function=%s slot=%d locals=%d",
@@ -2978,9 +3820,17 @@ func (vm *VM) step() bool {
 		info := instr.Value.(VariableInfo)
 		value := vm.popFast()
 
+		if info.Slot < 0 {
+			vm.mu.Lock()
+			vm.setGlobalUnlocked(info.Slot, value)
+			vm.globalConstants[info.Name] = info.Constant
+			vm.mu.Unlock()
+			return false
+		}
+
 		frame := vm.currentFrame()
 
-		if info.Slot < 0 || info.Slot >= len(frame.locals) {
+		if info.Slot >= len(frame.locals) {
 			vm.fatalError(ErrorInternal, "local slot out of range: %d", info.Slot)
 		}
 
@@ -2997,8 +3847,12 @@ func (vm *VM) step() bool {
 			}
 		}
 
-		frame.locals[info.Slot] = &Cell{}
-		setCellValue(frame.locals[info.Slot], value)
+		cell := frame.locals[info.Slot]
+		if cell == nil {
+			cell = &Cell{}
+			frame.locals[info.Slot] = cell
+		}
+		setCellValue(cell, value)
 		frame.constants[info.Slot] = info.Constant
 		frame.localTypes[info.Slot] = info.TypeHint
 
@@ -3025,7 +3879,13 @@ func (vm *VM) step() bool {
 			vm.fatalError(ErrorInternal, "unexpected type for OP_ASSIGN_GLOBAL: %T", instr.Value)
 		}
 
+		if slot < 0 {
+			vm.mu.RUnlock()
+			return false
+		}
+
 		if vm.globalConstants[name] {
+			vm.mu.RUnlock()
 			vm.fatalError(ErrorConst, "cannot assign to constant global")
 		}
 
@@ -3060,6 +3920,10 @@ func (vm *VM) step() bool {
 			intAmount = info.IntAmount
 			floatAmount = info.FloatAmount
 			isFloat = info.IsFloat
+
+			if !isFloat && floatAmount == 0 && intAmount != 0 {
+				floatAmount = float64(intAmount)
+			}
 		} else {
 			vm.fatalError(ErrorInternal, "unexpected type for OP_INC_LOCAL: %T", instr.Value)
 		}
@@ -3306,9 +4170,20 @@ func (vm *VM) step() bool {
 		slot := instr.IntArg
 		value := vm.popFast()
 
+		if slot < 0 {
+			// This case should ideally be handled by OP_ASSIGN_GLOBAL,
+			// but we handle it here for robustness if the compiler emits it.
+			if info, ok := instr.Value.(VariableInfo); ok {
+				vm.mu.Lock()
+				vm.setGlobalUnlocked(info.Slot, value)
+				vm.mu.Unlock()
+			}
+			return false
+		}
+
 		frame := vm.frames[len(vm.frames)-1]
 
-		if slot < 0 || slot >= len(frame.locals) {
+		if slot >= len(frame.locals) {
 			vm.fatalError(
 				ErrorInternal,
 				"local slot out of range: function=%s slot=%d locals=%d",
@@ -3348,35 +4223,138 @@ func (vm *VM) step() bool {
 
 		setCellValue(frame.locals[slot], value)
 
+	case OP_PRINT:
+		info := instr.Value.(PrintInfo)
+		if vm.top < info.ArgCount {
+			vm.handleUnderflow()
+			return false
+		}
+
+		start := vm.top - info.ArgCount
+		args := vm.stack[start:vm.top]
+
+		if info.NewLine {
+			for i, arg := range args {
+				if i > 0 {
+					fmt.Print(" ")
+				}
+				fmt.Print(valueToString(arg, true))
+			}
+			fmt.Println()
+		} else {
+			for _, arg := range args {
+				fmt.Print(valueToString(arg, true))
+			}
+		}
+
+		for i := start; i < vm.top; i++ {
+			vm.stack[i] = TinyValue{}
+		}
+		vm.top = start
+		vm.push(NewNull())
+
 	case OP_MUL_LOCAL_CONST:
 		info := instr.Value.(LocalConstInfo)
 		frame := vm.frames[len(vm.frames)-1]
-		vm.push(multiplyByInt(frameLocalValue(frame, info.Slot, "OP_MUL_LOCAL_CONST"), info.Value))
+		vm.push(vm.multiplyByInt(frameLocalValue(frame, info.Slot, "OP_MUL_LOCAL_CONST"), info.Value))
+
+	case OP_MATH_FLOOR:
+		val := vm.popFast()
+		x := vm.asFloat64(val)
+		vm.push(NewNative(math.Floor(x)))
+
+	case OP_MATH_CEIL:
+		val := vm.popFast()
+		x := vm.asFloat64(val)
+		vm.push(NewNative(math.Ceil(x)))
+
+	case OP_MATH_SQRT:
+		val := vm.popFast()
+		x := vm.asFloat64(val)
+		vm.push(NewNative(math.Sqrt(x)))
+
+	case OP_MATH_ABS:
+		val := vm.popFast()
+		x := vm.asFloat64(val)
+		vm.push(NewNative(math.Abs(x)))
+
+	case OP_MATH_POW:
+		arg1 := vm.popFast()
+		arg0 := vm.popFast()
+		base := vm.asFloat64(arg0)
+		exp := vm.asFloat64(arg1)
+		vm.push(NewNative(math.Pow(base, exp)))
 
 	case OP_ADD:
 		right := vm.popFast()
 		left := vm.popFast()
-		vm.push(addValues(left, right))
+		if l, ok := fastNumericValue(left); ok {
+			if r, ok := fastNumericValue(right); ok {
+				vm.push(NewNative(l + r))
+				break
+			}
+		}
+		vm.push(vm.addValues(left, right))
 
 	case OP_SUB:
 		right := vm.popFast()
 		left := vm.popFast()
-		vm.push(subValues(left, right))
+		if l, ok := fastNumericValue(left); ok {
+			if r, ok := fastNumericValue(right); ok {
+				vm.push(NewNative(l - r))
+				break
+			}
+		}
+		vm.push(vm.subValues(left, right))
 
 	case OP_MUL:
 		right := vm.popFast()
 		left := vm.popFast()
-		vm.push(mulValues(left, right))
+		if l, ok := fastNumericValue(left); ok {
+			if r, ok := fastNumericValue(right); ok {
+				vm.push(NewNative(l * r))
+				break
+			}
+		}
+		vm.push(vm.mulValues(left, right))
 
 	case OP_DIV:
 		right := vm.popFast()
 		left := vm.popFast()
-		vm.push(divValues(left, right))
+		if l, ok := fastNumericValue(left); ok {
+			if r, ok := fastNumericValue(right); ok {
+				if r == 0 {
+					vm.runtimeError(ErrorRuntime, "cannot divide by zero")
+					return false
+				}
+				vm.push(NewNative(l / r))
+				break
+			}
+		}
+		vm.push(vm.divValues(left, right))
 
 	case OP_MOD:
 		right := vm.popFast()
 		left := vm.popFast()
-		vm.push(modValues(left, right))
+		if left.IsInt && right.IsInt {
+			if right.AsInt == 0 {
+				vm.runtimeError(ErrorRuntime, "cannot modulo by zero")
+				return false
+			}
+			vm.push(NewNative(float64(left.AsInt % right.AsInt)))
+			break
+		}
+		if l, ok := fastNumericValue(left); ok {
+			if r, ok := fastNumericValue(right); ok {
+				if r == 0 {
+					vm.runtimeError(ErrorRuntime, "cannot modulo by zero")
+					return false
+				}
+				vm.push(NewNative(math.Mod(l, r)))
+				break
+			}
+		}
+		vm.push(vm.modValues(left, right))
 
 	case OP_EQ:
 		right := vm.popFast()
@@ -3525,6 +4503,11 @@ func (vm *VM) step() bool {
 		frame := vm.frames[len(vm.frames)-1]
 		objectValue := frameLocalValue(frame, info.ReceiverSlot, "OP_METHOD_CALL_LOCAL_0")
 
+		if info.Method == "toString" {
+			vm.push(NewNative(valueToString(objectValue)))
+			break
+		}
+
 		if vm.callZeroArgNativeMethod(info.Method, objectValue) {
 			break
 		}
@@ -3540,6 +4523,86 @@ func (vm *VM) step() bool {
 			break
 		}
 		vm.callMethodResolved(info.Method, objectValue, []TinyValue{arg})
+
+	case OP_ADD_LOCAL_ARRAY_INDEX_STORE:
+		info := instr.Value.(AddLocalArrayIndexStoreInfo)
+		frame := vm.frames[len(vm.frames)-1]
+		if info.LocalSlot < 0 || info.LocalSlot >= len(frame.locals) {
+			vm.fatalError(ErrorInternal, "local slot out of range in OP_ADD_LOCAL_ARRAY_INDEX_STORE")
+		}
+		if frame.constants[info.LocalSlot] {
+			vm.fatalError(ErrorConst, "cannot assign to constant local")
+		}
+		targetCell := frame.locals[info.LocalSlot]
+		if targetCell == nil {
+			vm.fatalError(ErrorInternal, "nil target local in OP_ADD_LOCAL_ARRAY_INDEX_STORE")
+		}
+
+		arrayValue := frameLocalValue(frame, info.ArraySlot, "OP_ADD_LOCAL_ARRAY_INDEX_STORE")
+		indexValue := frameLocalValue(frame, info.IndexSlot, "OP_ADD_LOCAL_ARRAY_INDEX_STORE")
+		index, ok := fastIndexInt(indexValue)
+		if !ok {
+			index = vm.asInt(indexValue)
+		}
+
+		var element TinyValue
+		if array, ok := arrayValue.Value.(*ArrayValue); ok {
+			if index < 0 || index >= len(array.Elements) {
+				vm.runtimeError(ErrorRuntime, "array index out of range: %d", index)
+				break
+			}
+			element = array.Elements[index]
+		} else if array, ok := arrayValue.Value.(ArrayValue); ok {
+			if index < 0 || index >= len(array.Elements) {
+				vm.runtimeError(ErrorRuntime, "array index out of range: %d", index)
+				break
+			}
+			element = array.Elements[index]
+		} else {
+			element = vm.getIndexValue(arrayValue, indexValue)
+		}
+
+		setCellValue(targetCell, vm.applyBinaryOp(cellValue(targetCell), element, OP_ADD))
+
+	case OP_ARRAY_INDEX_CONST_OP_STORE:
+		info := instr.Value.(ArrayIndexConstOpInfo)
+		frame := vm.frames[len(vm.frames)-1]
+		arrayValue := frameLocalValue(frame, info.ArraySlot, "OP_ARRAY_INDEX_CONST_OP_STORE")
+		indexValue := frameLocalValue(frame, info.IndexSlot, "OP_ARRAY_INDEX_CONST_OP_STORE")
+		index, ok := fastIndexInt(indexValue)
+		if !ok {
+			index = vm.asInt(indexValue)
+		}
+		amount := constToTinyValue(info.Const)
+
+		if array, ok := arrayValue.Value.(*ArrayValue); ok {
+			if index < 0 || index >= len(array.Elements) {
+				vm.runtimeError(ErrorRuntime, "array index out of range: %d", index)
+				break
+			}
+			array.Elements[index] = vm.applyBinaryOp(array.Elements[index], amount, info.Op)
+			break
+		}
+
+		if array, ok := arrayValue.Value.(ArrayValue); ok {
+			if index < 0 || index >= len(array.Elements) {
+				vm.runtimeError(ErrorRuntime, "array index out of range: %d", index)
+				break
+			}
+			array.Elements[index] = vm.applyBinaryOp(array.Elements[index], amount, info.Op)
+			setCellValue(frame.locals[info.ArraySlot], NewNative(array))
+			break
+		}
+
+		// Fall back to the normal dynamic path for non-Tiny arrays.
+		vm.push(arrayValue)
+		vm.push(indexValue)
+		vm.push(vm.applyBinaryOp(vm.getIndexValue(arrayValue, indexValue), amount, info.Op))
+		// OP_SET_INDEX semantics without recursive dispatch.
+		value := vm.popFast()
+		idx := vm.popFast()
+		obj := vm.popFast()
+		vm.setIndexValue(obj, idx, value)
 
 	case OP_ARRAY_LEN_LOCAL:
 		info := instr.Value.(ArrayLocalCallInfo)
@@ -3594,7 +4657,7 @@ func (vm *VM) step() bool {
 		info := instr.Value.(ArrayLocalMulConstInfo)
 		frame := vm.frames[len(vm.frames)-1]
 		arrayValue := frameLocalValue(frame, info.ArraySlot, "OP_ARRAY_PUSH_LOCAL_MUL_CONST")
-		arg := multiplyByInt(frameLocalValue(frame, info.ArgSlot, "OP_ARRAY_PUSH_LOCAL_MUL_CONST"), info.Factor)
+		arg := vm.multiplyByInt(frameLocalValue(frame, info.ArgSlot, "OP_ARRAY_PUSH_LOCAL_MUL_CONST"), info.Factor)
 
 		if array, ok := arrayValue.Value.(*ArrayValue); ok {
 			array.Elements = append(array.Elements, arg)
@@ -3732,11 +4795,9 @@ func (vm *VM) step() bool {
 
 		switch obj := rawObj.(type) {
 		case *ArrayValue:
-			var index int
-			if indexValue.IsInt {
-				index = indexValue.AsInt
-			} else {
-				index = asInt(indexValue)
+			index, ok := fastIndexInt(indexValue)
+			if !ok {
+				index = vm.asInt(indexValue)
 			}
 
 			if index < 0 || index >= len(obj.Elements) {
@@ -3747,11 +4808,9 @@ func (vm *VM) step() bool {
 			vm.push(obj.Elements[index])
 
 		case WasmArrayValue:
-			var index int
-			if indexValue.IsInt {
-				index = indexValue.AsInt
-			} else {
-				index = asInt(indexValue)
+			index, ok := fastIndexInt(indexValue)
+			if !ok {
+				index = vm.asInt(indexValue)
 			}
 
 			length := int(vm.ReadWasmFloat(uint32(obj.Address) + 8))
@@ -3765,15 +4824,23 @@ func (vm *VM) step() bool {
 			tag := vm.ReadWasmFloat(addr)
 			val := vm.ReadWasmFloat(addr + 8)
 
-			if tag == 1.0 {
+			switch tag {
+			case 1.0:
 				vm.push(NewNative(val))
-			} else if tag == 2.0 {
+			case 2.0:
 				vm.push(NewNative(val != 0.0))
-			} else if tag == 4.0 {
+			case 4.0:
 				vm.push(NewNative(WasmObjectValue{Address: val, VM: vm}))
-			} else if tag == 5.0 {
+			case 5.0:
 				vm.push(NewNative(WasmArrayValue{Address: val, VM: vm}))
-			} else {
+			case 6.0:
+				strVal, ok := vm.readWasmStringMaybe(uint32(val))
+				if ok {
+					vm.push(NewNative(strVal))
+				} else {
+					vm.push(NewNull())
+				}
+			default:
 				vm.push(NewNull())
 			}
 
@@ -3811,11 +4878,9 @@ func (vm *VM) step() bool {
 
 		switch obj := rawObj.(type) {
 		case *ArrayValue:
-			var index int
-			if indexValue.IsInt {
-				index = indexValue.AsInt
-			} else {
-				index = asInt(indexValue)
+			index, ok := fastIndexInt(indexValue)
+			if !ok {
+				index = vm.asInt(indexValue)
 			}
 
 			if index < 0 || index >= len(obj.Elements) {
@@ -3825,11 +4890,9 @@ func (vm *VM) step() bool {
 			obj.Elements[index] = value
 
 		case WasmArrayValue:
-			var index int
-			if indexValue.IsInt {
-				index = indexValue.AsInt
-			} else {
-				index = asInt(indexValue)
+			index, ok := fastIndexInt(indexValue)
+			if !ok {
+				index = vm.asInt(indexValue)
 			}
 
 			length := int(vm.ReadWasmFloat(uint32(obj.Address) + 8))
@@ -3855,6 +4918,9 @@ func (vm *VM) step() bool {
 					if v {
 						val = 1.0
 					}
+				case string:
+					tag = 6.0
+					val = vm.writeWasmString(v)
 				case WasmObjectValue:
 					tag = 4.0
 					val = v.Address
@@ -4002,6 +5068,52 @@ func (vm *VM) step() bool {
 		info := instr.Value.(PropertyLocalAssignInfo)
 		frame := vm.frames[len(vm.frames)-1]
 		objectValue := frameLocalValue(frame, info.ObjectSlot, "OP_ADD_PROPERTY_LOCAL_LOCAL")
+
+		if obj, ok := objectValue.Value.(WasmObjectValue); ok {
+			current := propertyValue(vm, objectValue, info.Name)
+			source := frameLocalValue(frame, info.SourceSlot, "OP_ADD_PROPERTY_LOCAL_LOCAL")
+			newValue := vm.addValues(current, source)
+
+			offset := vm.getPropertyOffset(info.Name)
+			addr := uint32(obj.Address) + offset
+
+			tag := 1.0
+			val := 0.0
+
+			if newValue.IsInt {
+				tag = 1.0
+				val = float64(newValue.AsInt)
+			} else {
+				switch v := newValue.Value.(type) {
+				case float64:
+					tag = 1.0
+					val = v
+				case bool:
+					tag = 2.0
+					if v {
+						val = 1.0
+					} else {
+						val = 0.0
+					}
+				case WasmObjectValue:
+					tag = 4.0
+					val = v.Address
+				case WasmArrayValue:
+					tag = 5.0
+					val = v.Address
+				case NullValue:
+					tag = 0.0
+					val = 0.0
+				default:
+					vm.fatalError(ErrorType, "cannot store %s in JIT object", TypeName(newValue))
+				}
+			}
+
+			vm.WriteWasmFloat(addr, tag)
+			vm.WriteWasmFloat(addr+8, val)
+			break
+		}
+
 		object, ok := objectValue.Value.(ObjectValue)
 		if !ok {
 			vm.fatalError(ErrorType, "expected object, got %s", TypeName(objectValue))
@@ -4018,9 +5130,54 @@ func (vm *VM) step() bool {
 			}
 		}
 
-		current := propertyValue(vm, NewNative(object), info.Name)
+		current, exists := object[info.Name]
+		if !exists {
+			vm.fatalError(ErrorName, "object has no property: %s", info.Name)
+		}
 		source := frameLocalValue(frame, info.SourceSlot, "OP_ADD_PROPERTY_LOCAL_LOCAL")
-		object[info.Name] = addValues(current, source)
+		if l, ok := fastNumericValue(current); ok {
+			if r, ok := fastNumericValue(source); ok {
+				object[info.Name] = NewNative(l + r)
+				break
+			}
+		}
+		object[info.Name] = vm.addValues(current, source)
+
+	case OP_ADD_PROPERTY_LOCAL_CONST:
+		info := instr.Value.(PropertyLocalConstAssignInfo)
+		frame := vm.frames[len(vm.frames)-1]
+		current := vm.getObjectLocalPropertyFast(frame, info.ObjectSlot, info.Name, "OP_ADD_PROPERTY_LOCAL_CONST")
+		newValue := vm.applyBinaryOp(current, constToTinyValue(info.Const), info.Op)
+		vm.setObjectLocalPropertyFast(frame, info.ObjectSlot, info.Name, newValue, "OP_ADD_PROPERTY_LOCAL_CONST")
+
+	case OP_ADD_PROPERTY_LOCAL_PROPERTY:
+		info := instr.Value.(PropertyLocalPropertyAssignInfo)
+		frame := vm.frames[len(vm.frames)-1]
+		current := vm.getObjectLocalPropertyFast(frame, info.ObjectSlot, info.Name, "OP_ADD_PROPERTY_LOCAL_PROPERTY")
+		source := vm.getObjectLocalPropertyFast(frame, info.ObjectSlot, info.SourceName, "OP_ADD_PROPERTY_LOCAL_PROPERTY")
+		newValue := vm.applyBinaryOp(current, source, info.Op)
+		vm.setObjectLocalPropertyFast(frame, info.ObjectSlot, info.Name, newValue, "OP_ADD_PROPERTY_LOCAL_PROPERTY")
+
+	case OP_ADD_LOCAL_PROPERTIES_STORE:
+		info := instr.Value.(AddLocalPropertiesStoreInfo)
+		frame := vm.frames[len(vm.frames)-1]
+		if info.LocalSlot < 0 || info.LocalSlot >= len(frame.locals) {
+			vm.fatalError(ErrorInternal, "local slot out of range in OP_ADD_LOCAL_PROPERTIES_STORE")
+		}
+		if frame.constants[info.LocalSlot] {
+			vm.fatalError(ErrorConst, "cannot assign to constant local")
+		}
+		cell := frame.locals[info.LocalSlot]
+		if cell == nil {
+			vm.fatalError(ErrorInternal, "nil local cell in OP_ADD_LOCAL_PROPERTIES_STORE")
+		}
+
+		result := cellValue(cell)
+		for _, name := range info.Names {
+			value := vm.getObjectLocalPropertyFast(frame, info.ObjectSlot, name, "OP_ADD_LOCAL_PROPERTIES_STORE")
+			result = vm.applyBinaryOp(result, value, OP_ADD)
+		}
+		setCellValue(cell, result)
 
 	case OP_GET_PROPERTY:
 		name := instr.Value.(string)
@@ -4361,111 +5518,6 @@ func (vm *VM) callStdObjectFast3(method string, objectValue TinyValue, arg0 Tiny
 	return true
 }
 
-func (vm *VM) callStdObjectFast(method string, objectValue TinyValue, args ...TinyValue) bool {
-	var rawVal any
-	if objectValue.IsInt {
-		rawVal = objectValue.AsInt
-	} else {
-		rawVal = objectValue.Value
-	}
-
-	module, ok := rawVal.(*StandardModuleValue)
-	if !ok || module.Name != "object" {
-		return false
-	}
-
-	switch method {
-	case "get":
-		if len(args) != 2 {
-			return false
-		}
-
-		var rawArg0 any
-		if args[0].IsInt {
-			rawArg0 = args[0].AsInt
-		} else {
-			rawArg0 = args[0].Value
-		}
-
-		obj, ok := rawArg0.(ObjectValue)
-		if !ok {
-			vm.fatalError(ErrorType, "object.get argument 1 expected object, got %s", TypeName(args[0]))
-			return true
-		}
-
-		var rawArg1 any
-		if args[1].IsInt {
-			rawArg1 = args[1].AsInt
-		} else {
-			rawArg1 = args[1].Value
-		}
-
-		key, ok := rawArg1.(string)
-		if !ok {
-			vm.fatalError(ErrorType, "object.get argument 2 expected string, got %s", TypeName(args[1]))
-			return true
-		}
-		vm.push(obj[key])
-		return true
-
-	case "set":
-		if len(args) != 3 {
-			return false
-		}
-
-		var rawArg0 any
-		if args[0].IsInt {
-			rawArg0 = args[0].AsInt
-		} else {
-			rawArg0 = args[0].Value
-		}
-
-		obj, ok := rawArg0.(ObjectValue)
-		if !ok {
-			vm.fatalError(ErrorType, "object.set argument 1 expected object, got %s", TypeName(args[0]))
-			return true
-		}
-
-		var rawArg1 any
-		if args[1].IsInt {
-			rawArg1 = args[1].AsInt
-		} else {
-			rawArg1 = args[1].Value
-		}
-
-		key, ok := rawArg1.(string)
-		if !ok {
-			vm.runtimeError(ErrorType, "object.set argument 2 expected string, got %s", TypeName(args[1]))
-			return true
-		}
-		obj[key] = args[2]
-		vm.push(NewNull())
-		return true
-
-	case "length":
-		if len(args) != 1 {
-			return false
-		}
-
-		var rawArg0 any
-		if args[0].IsInt {
-			rawArg0 = args[0].AsInt
-		} else {
-			rawArg0 = args[0].Value
-		}
-
-		obj, ok := rawArg0.(ObjectValue)
-		if !ok {
-			vm.fatalError(ErrorType, "object.length argument 1 expected object, got %s", TypeName(args[0]))
-			return true
-		}
-		vm.push(NewInt(len(obj)))
-		return true
-	}
-
-	return false
-}
-
 func (vm *VM) callMethodFast(method string, argCount int) {
 	switch argCount {
 	case 0:
@@ -4614,6 +5666,23 @@ func (vm *VM) callMethodResolved(method string, objectValue TinyValue, args []Ti
 
 	case string:
 		vm.callStringMethod(val, method, args)
+		return
+
+	case WasmArrayValue:
+		vm.callWasmArrayMethod(val, method, args)
+		return
+
+	case WasmObjectValue:
+		valObj := vm.getProperty(NewNative(val), method, false)
+		if isNullish(valObj) {
+			vm.fatalError(ErrorName, "object has no method: %s", method)
+		}
+		fnVal, ok := valObj.Value.(FunctionValue)
+		if !ok {
+			vm.fatalError(ErrorType, "property %s is not a function", method)
+		}
+		result := vm.callFunctionValue(fnVal, args)
+		vm.push(result)
 		return
 	}
 
@@ -4921,31 +5990,6 @@ func (vm *VM) pushNativeFrame(name string) func() {
 	}
 }
 
-func (vm *VM) currentInstructions() []Instruction {
-	if len(vm.frames) == 0 {
-		return vm.mainInstructions
-	}
-
-	return vm.frames[len(vm.frames)-1].instructions
-}
-
-func (vm *VM) currentIP() int {
-	if len(vm.frames) == 0 {
-		return vm.ip
-	}
-
-	return vm.frames[len(vm.frames)-1].ip
-}
-
-func (vm *VM) incrementIP() {
-	if len(vm.frames) == 0 {
-		vm.ip++
-		return
-	}
-
-	vm.frames[len(vm.frames)-1].ip++
-}
-
 func (vm *VM) fetchInstruction() Instruction {
 	if len(vm.frames) == 0 {
 		ip := vm.ip
@@ -5051,6 +6095,10 @@ func (vm *VM) handleUnderflow() {
 }
 
 func (vm *VM) popFast() TinyValue {
+	if vm.top == 0 {
+		vm.handleUnderflow()
+	}
+
 	vm.top--
 	val := vm.stack[vm.top]
 	vm.stack[vm.top] = TinyValue{}
@@ -5318,4 +6366,298 @@ func asIntInternal(v any) (int, bool) {
 	default:
 		return 0, false
 	}
+}
+
+func (vm *VM) getIndexValue(objectValue TinyValue, indexValue TinyValue) TinyValue {
+	var rawObj any
+	if objectValue.IsInt {
+		rawObj = objectValue.AsInt
+	} else {
+		rawObj = objectValue.Value
+	}
+
+	switch obj := rawObj.(type) {
+	case *ArrayValue:
+		index, ok := fastIndexInt(indexValue)
+		if !ok {
+			index = vm.asInt(indexValue)
+		}
+		if index < 0 || index >= len(obj.Elements) {
+			vm.runtimeError(ErrorRuntime, "array index out of range: %d", index)
+			return NewNull()
+		}
+		return obj.Elements[index]
+
+	case ArrayValue:
+		index, ok := fastIndexInt(indexValue)
+		if !ok {
+			index = vm.asInt(indexValue)
+		}
+		if index < 0 || index >= len(obj.Elements) {
+			vm.runtimeError(ErrorRuntime, "array index out of range: %d", index)
+			return NewNull()
+		}
+		return obj.Elements[index]
+
+	case WasmArrayValue:
+		index, ok := fastIndexInt(indexValue)
+		if !ok {
+			index = vm.asInt(indexValue)
+		}
+		length := int(vm.ReadWasmFloat(uint32(obj.Address) + 8))
+		if index < 0 || index >= length {
+			vm.runtimeError(ErrorRuntime, "array index out of range: %d", index)
+			return NewNull()
+		}
+		elemPtr := uint32(vm.ReadWasmFloat(uint32(obj.Address) + 16))
+		addr := elemPtr + uint32(index*16)
+		tag := vm.ReadWasmFloat(addr)
+		val := vm.ReadWasmFloat(addr + 8)
+		switch tag {
+		case 1.0:
+			return NewNative(val)
+		case 2.0:
+			return NewNative(val != 0.0)
+		case 4.0:
+			return NewNative(WasmObjectValue{Address: val, VM: vm})
+		case 5.0:
+			return NewNative(WasmArrayValue{Address: val, VM: vm})
+		case 6.0:
+			if strVal, ok := vm.readWasmStringMaybe(uint32(val)); ok {
+				return NewNative(strVal)
+			}
+			return NewNull()
+		default:
+			return NewNull()
+		}
+
+	case ObjectValue:
+		var key string
+		if indexValue.IsInt {
+			key = intToString(indexValue.AsInt)
+		} else {
+			key = valueToString(indexValue)
+		}
+		value, exists := obj[key]
+		if !exists {
+			obj[key] = NewNull()
+			value = obj[key]
+		}
+		return value
+
+	default:
+		vm.fatalError(ErrorType, "cannot index %s", TypeName(objectValue))
+		return NewNull()
+	}
+}
+
+func (vm *VM) setIndexValue(objectValue TinyValue, indexValue TinyValue, value TinyValue) {
+	var rawObj any
+	if objectValue.IsInt {
+		rawObj = objectValue.AsInt
+	} else {
+		rawObj = objectValue.Value
+	}
+
+	switch obj := rawObj.(type) {
+	case *ArrayValue:
+		index, ok := fastIndexInt(indexValue)
+		if !ok {
+			index = vm.asInt(indexValue)
+		}
+		if index < 0 || index >= len(obj.Elements) {
+			vm.fatalError(ErrorRuntime, "array index out of range: %d", index)
+		}
+		obj.Elements[index] = value
+
+	case WasmArrayValue:
+		index, ok := fastIndexInt(indexValue)
+		if !ok {
+			index = vm.asInt(indexValue)
+		}
+		length := int(vm.ReadWasmFloat(uint32(obj.Address) + 8))
+		if index < 0 || index >= length {
+			vm.fatalError(ErrorRuntime, "array index out of range: %d", index)
+		}
+		elemPtr := uint32(vm.ReadWasmFloat(uint32(obj.Address) + 16))
+		addr := elemPtr + uint32(index*16)
+		var tag float64 = 1.0
+		var val float64
+		if value.IsInt {
+			val = float64(value.AsInt)
+		} else {
+			switch v := value.Value.(type) {
+			case float64:
+				val = v
+			case int:
+				val = float64(v)
+			case bool:
+				tag = 2.0
+				if v {
+					val = 1.0
+				}
+			case string:
+				tag = 6.0
+				val = vm.writeWasmString(v)
+			case WasmObjectValue:
+				tag = 4.0
+				val = v.Address
+			case WasmArrayValue:
+				tag = 5.0
+				val = v.Address
+			case NullValue:
+				tag = 0.0
+			default:
+				vm.fatalError(ErrorType, "cannot store %s in JIT array", TypeName(value))
+			}
+		}
+		vm.WriteWasmFloat(addr, tag)
+		vm.WriteWasmFloat(addr+8, val)
+
+	case ObjectValue:
+		var key string
+		if indexValue.IsInt {
+			key = intToString(indexValue.AsInt)
+		} else {
+			key = valueToString(indexValue)
+		}
+		if className, isClass := obj["__class"]; isClass {
+			vm.runtimeError(ErrorRuntime, "cannot modify class '%s' by index operator.", className.Value)
+			return
+		}
+		obj[key] = value
+
+	default:
+		vm.fatalError(ErrorType, "cannot index assign %s", TypeName(objectValue))
+	}
+}
+
+func (vm *VM) callWasmArrayMethod(arr WasmArrayValue, method string, args []TinyValue) {
+	switch method {
+	case "length":
+		expectArgs(vm, "array.length", args, 0)
+		lengthF := vm.ReadWasmFloat(uint32(arr.Address) + 8)
+		vm.push(NewInt(int(lengthF)))
+		return
+	case "push":
+		expectArgs(vm, "array.push", args, 1)
+		tag := 1.0
+		val := 0.0
+		argVal := args[0]
+		if argVal.IsInt {
+			tag = 1.0
+			val = float64(argVal.AsInt)
+		} else {
+			switch v := argVal.Value.(type) {
+			case float64:
+				tag = 1.0
+				val = v
+			case bool:
+				tag = 2.0
+				if v {
+					val = 1.0
+				}
+			case string:
+				tag = 6.0
+				val = vm.writeWasmString(v)
+			case WasmObjectValue:
+				tag = 4.0
+				val = v.Address
+			case WasmArrayValue:
+				tag = 5.0
+				val = v.Address
+			case NullValue:
+				tag = 0.0
+				val = 0.0
+			default:
+				vm.fatalError(ErrorType, "cannot push %s to JIT array", TypeName(argVal))
+			}
+		}
+		pushFn := vm.jitModule.ExportedFunction("array_push")
+		if pushFn == nil {
+			vm.fatalError(ErrorInternal, "JIT array_push function not found")
+		}
+		pushFn.Call(vm.wazeroCtx, api.EncodeF64(arr.Address), api.EncodeF64(tag), api.EncodeF64(val))
+		vm.push(NewNative(arr))
+		return
+	case "get":
+		expectArgs(vm, "array.get", args, 1)
+		index := argInt(vm, "array.get", args, 0)
+		length := int(vm.ReadWasmFloat(uint32(arr.Address) + 8))
+		if index < 0 || index >= length {
+			vm.runtimeError(ErrorRuntime, "array index out of range: %d", index)
+			return
+		}
+		elemPtr := uint32(vm.ReadWasmFloat(uint32(arr.Address) + 16))
+		addr := elemPtr + uint32(index*16)
+		tag := vm.ReadWasmFloat(addr)
+		vVal := vm.ReadWasmFloat(addr + 8)
+		switch tag {
+		case 1.0:
+			vm.push(NewNative(vVal))
+		case 2.0:
+			vm.push(NewNative(vVal != 0.0))
+		case 4.0:
+			vm.push(NewNative(WasmObjectValue{Address: vVal, VM: vm}))
+		case 5.0:
+			vm.push(NewNative(WasmArrayValue{Address: vVal, VM: vm}))
+		case 6.0:
+			strVal, ok := vm.readWasmStringMaybe(uint32(vVal))
+			if ok {
+				vm.push(NewNative(strVal))
+			} else {
+				vm.push(NewNull())
+			}
+		default:
+			vm.push(NewNull())
+		}
+		return
+	case "set":
+		expectArgs(vm, "array.set", args, 2)
+		index := argInt(vm, "array.set", args, 0)
+		length := int(vm.ReadWasmFloat(uint32(arr.Address) + 8))
+		if index < 0 || index >= length {
+			vm.runtimeError(ErrorRuntime, "array index out of range: %d", index)
+			return
+		}
+		elemPtr := uint32(vm.ReadWasmFloat(uint32(arr.Address) + 16))
+		addr := elemPtr + uint32(index*16)
+		tag := 1.0
+		val := 0.0
+		value := args[1]
+		if value.IsInt {
+			tag = 1.0
+			val = float64(value.AsInt)
+		} else {
+			switch v := value.Value.(type) {
+			case float64:
+				tag = 1.0
+				val = v
+			case bool:
+				tag = 2.0
+				if v {
+					val = 1.0
+				}
+			case string:
+				tag = 6.0
+				val = vm.writeWasmString(v)
+			case WasmObjectValue:
+				tag = 4.0
+				val = v.Address
+			case WasmArrayValue:
+				tag = 5.0
+				val = v.Address
+			case NullValue:
+				tag = 0.0
+				val = 0.0
+			default:
+				vm.fatalError(ErrorType, "cannot set %s in JIT array", TypeName(value))
+			}
+		}
+		vm.WriteWasmFloat(addr, tag)
+		vm.WriteWasmFloat(addr+8, val)
+		vm.push(NewNative(arr))
+		return
+	}
+	vm.fatalError(ErrorName, "unknown array method: %s", method)
 }

@@ -35,16 +35,17 @@ type SerializableParam struct {
 }
 
 type SerializableFunction struct {
-	ID           int                       `json:"id"`
-	Name         string                    `json:"name"`
-	Params       []SerializableParam       `json:"params"`
-	ReturnType   TypeHint                  `json:"returnType"`
-	LocalCount   int                       `json:"localCount"`
-	Captures     []CapturedVar             `json:"captures"`
-	Instructions []SerializableInstruction `json:"instructions"`
-	Async        bool                      `json:"async"`
-	HasDefaults  bool                      `json:"hasDefaults"`
-	HasTypeHints bool                      `json:"hasTypeHints"`
+	ID             int                       `json:"id"`
+	Name           string                    `json:"name"`
+	Params         []SerializableParam       `json:"params"`
+	ReturnType     TypeHint                  `json:"returnType"`
+	LocalCount     int                       `json:"localCount"`
+	Captures       []CapturedVar             `json:"captures"`
+	Instructions   []SerializableInstruction `json:"instructions"`
+	StatementCount int                       `json:"statementCount"`
+	Async          bool                      `json:"async"`
+	HasDefaults    bool                      `json:"hasDefaults"`
+	HasTypeHints   bool                      `json:"hasTypeHints"`
 }
 
 type SerializableInterface struct {
@@ -155,16 +156,17 @@ func SaveBytecode(path string, main []Instruction, functions map[string]Function
 
 	for name, fn := range functions {
 		file.Functions[name] = SerializableFunction{
-			ID:           fn.ID,
-			Name:         fn.Name,
-			Params:       serializeParams(fn.Params),
-			ReturnType:   fn.ReturnType,
-			LocalCount:   fn.LocalCount,
-			Captures:     fn.Captures,
-			Instructions: serializeInstructions(fn.Instructions, cache),
-			HasDefaults:  fn.HasDefaults,
-			HasTypeHints: fn.HasTypeHints,
-			Async:        fn.Async,
+			ID:             fn.ID,
+			Name:           fn.Name,
+			Params:         serializeParams(fn.Params),
+			ReturnType:     fn.ReturnType,
+			LocalCount:     fn.LocalCount,
+			Captures:       fn.Captures,
+			Instructions:   serializeInstructions(fn.Instructions, cache),
+			StatementCount: fn.StatementCount,
+			HasDefaults:    fn.HasDefaults,
+			HasTypeHints:   fn.HasTypeHints,
+			Async:          fn.Async,
 		}
 	}
 
@@ -194,16 +196,17 @@ func SaveBytecodeToBytes(main []Instruction, functions map[string]Function, clas
 
 	for name, fn := range functions {
 		file.Functions[name] = SerializableFunction{
-			ID:           fn.ID,
-			Name:         fn.Name,
-			Params:       serializeParams(fn.Params),
-			ReturnType:   fn.ReturnType,
-			LocalCount:   fn.LocalCount,
-			Captures:     fn.Captures,
-			Instructions: serializeInstructions(fn.Instructions, cache),
-			HasDefaults:  fn.HasDefaults,
-			HasTypeHints: fn.HasTypeHints,
-			Async:        fn.Async,
+			ID:             fn.ID,
+			Name:           fn.Name,
+			Params:         serializeParams(fn.Params),
+			ReturnType:     fn.ReturnType,
+			LocalCount:     fn.LocalCount,
+			Captures:       fn.Captures,
+			Instructions:   serializeInstructions(fn.Instructions, cache),
+			StatementCount: fn.StatementCount,
+			HasDefaults:    fn.HasDefaults,
+			HasTypeHints:   fn.HasTypeHints,
+			Async:          fn.Async,
 		}
 	}
 
@@ -243,16 +246,17 @@ func LoadBytecodeFromBytes(data []byte) ([]Instruction, map[string]Function, map
 
 	for name, fn := range file.Functions {
 		functions[name] = Function{
-			ID:           fn.ID,
-			Name:         fn.Name,
-			Params:       deserializeParams(fn.Params),
-			ReturnType:   fn.ReturnType,
-			LocalCount:   fn.LocalCount,
-			Captures:     fn.Captures,
-			Instructions: deserializeInstructions(fn.Instructions),
-			HasDefaults:  fn.HasDefaults,
-			HasTypeHints: fn.HasTypeHints,
-			Async:        fn.Async,
+			ID:             fn.ID,
+			Name:           fn.Name,
+			Params:         deserializeParams(fn.Params),
+			ReturnType:     fn.ReturnType,
+			LocalCount:     fn.LocalCount,
+			Captures:       fn.Captures,
+			Instructions:   deserializeInstructions(fn.Instructions),
+			StatementCount: fn.StatementCount,
+			HasDefaults:    fn.HasDefaults,
+			HasTypeHints:   fn.HasTypeHints,
+			Async:          fn.Async,
 		}
 	}
 
@@ -439,6 +443,21 @@ func EncodeValue(value any) EncodedValue {
 
 	case VariableInfo:
 		return EncodedValue{Type: "variable", Data: v}
+
+	case PrintInfo:
+		return EncodedValue{Type: "print", Data: v}
+
+	case LocalConstOpInfo:
+		return EncodedValue{Type: "localConstOp", Data: v}
+
+	case ArrayIndexConstOpInfo:
+		return EncodedValue{Type: "arrayIndexConstOp", Data: v}
+
+	case AddLocalGlobalGlobalStoreInfo:
+		return EncodedValue{Type: "addLocalGlobalGlobalStore", Data: v}
+
+	case AddLocalArrayIndexStoreInfo:
+		return EncodedValue{Type: "addLocalArrayIndexStore", Data: v}
 
 	case NativeCallInfo:
 		return EncodedValue{Type: "nativeCallInfo", Data: v}
@@ -658,6 +677,26 @@ func DecodeValue(value EncodedValue) any {
 		decodeInto(value.Data, &result)
 		return result
 
+	case "localConstOp":
+		var result LocalConstOpInfo
+		decodeInto(value.Data, &result)
+		return result
+
+	case "arrayIndexConstOp":
+		var result ArrayIndexConstOpInfo
+		decodeInto(value.Data, &result)
+		return result
+
+	case "addLocalGlobalGlobalStore":
+		var result AddLocalGlobalGlobalStoreInfo
+		decodeInto(value.Data, &result)
+		return result
+
+	case "addLocalArrayIndexStore":
+		var result AddLocalArrayIndexStoreInfo
+		decodeInto(value.Data, &result)
+		return result
+
 	case "incLocal":
 		var result IncrementInfo
 		decodeInto(value.Data, &result)
@@ -705,6 +744,11 @@ func DecodeValue(value EncodedValue) any {
 
 	case "variable":
 		var result VariableInfo
+		decodeInto(value.Data, &result)
+		return result
+
+	case "print":
+		var result PrintInfo
 		decodeInto(value.Data, &result)
 		return result
 

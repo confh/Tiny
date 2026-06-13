@@ -124,6 +124,28 @@ const (
 
 	OP_LOAD_WASM
 	OP_NATIVE_CALL
+
+	OP_MATH_FLOOR
+	OP_MATH_CEIL
+	OP_MATH_SQRT
+	OP_MATH_ABS
+	OP_MATH_POW
+
+	OP_PRINT
+
+	OP_JSON_STRINGIFY
+	OP_JSON_PARSE
+
+	// Interpreter superinstructions. These are emitted by OptimizeBytecode only,
+	// so adding them at the end keeps existing opcode ordinals stable.
+	OP_LOCAL_CONST_OP_STORE
+	OP_LOCAL_CONST_OP
+	OP_ARRAY_INDEX_CONST_OP_STORE
+	OP_ADD_LOCAL_ARRAY_INDEX_STORE
+	OP_ADD_LOCAL_GLOBAL_GLOBAL_STORE
+	OP_ADD_PROPERTY_LOCAL_CONST
+	OP_ADD_PROPERTY_LOCAL_PROPERTY
+	OP_ADD_LOCAL_PROPERTIES_STORE
 )
 
 type Instruction struct {
@@ -143,6 +165,7 @@ type Function struct {
 	Params         []Param       `json:"params"`
 	ReturnType     TypeHint      `json:"returnType"`
 	Instructions   []Instruction `json:"instructions"`
+	StatementCount int           `json:"statementCount"`
 	LocalCount     int           `json:"localCount"`
 	Captures       []CapturedVar
 	Async          bool `json:"async"`
@@ -165,6 +188,11 @@ type DirectCallInfo struct {
 	ID       int    `json:"id"`
 	Name     string `json:"name"`
 	ArgCount int    `json:"argCount"`
+}
+
+type PrintInfo struct {
+	ArgCount int
+	NewLine  bool
 }
 
 type JumpLocalGELocalInfo struct {
@@ -258,6 +286,51 @@ type PropertyLocalAssignInfo struct {
 type LocalConstInfo struct {
 	Slot  int
 	Value int
+}
+
+type LocalConstOpInfo struct {
+	Slot  int
+	Const any
+	Op    OpCode
+}
+
+type ArrayIndexConstOpInfo struct {
+	ArraySlot int
+	IndexSlot int
+	Const     any
+	Op        OpCode
+}
+
+type AddLocalGlobalGlobalStoreInfo struct {
+	LocalSlot   int
+	GlobalSlotA int
+	GlobalSlotB int
+}
+
+type AddLocalArrayIndexStoreInfo struct {
+	LocalSlot int
+	ArraySlot int
+	IndexSlot int
+}
+
+type PropertyLocalConstAssignInfo struct {
+	ObjectSlot int
+	Name       string
+	Const      any
+	Op         OpCode
+}
+
+type PropertyLocalPropertyAssignInfo struct {
+	ObjectSlot int
+	Name       string
+	SourceName string
+	Op         OpCode
+}
+
+type AddLocalPropertiesStoreInfo struct {
+	LocalSlot  int
+	ObjectSlot int
+	Names      []string
 }
 
 type IncrementInfo struct {

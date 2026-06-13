@@ -71,6 +71,7 @@
         <a href="#libraries">Libraries</a>
         <a href="#errors">Errors & Defer</a>
         <a href="#concurrency">Concurrency</a>
+        <a href="#jit">JIT Compilation</a>
         <a href="#embedding">Embedding Assets</a>
         <a href="#native-functions">Native Functions</a>
         <a href="#stdlib">Standard Library</a>
@@ -738,10 +739,44 @@ io.println(await task)</code></pre>
         </div>
       </section>
 
+      <section class="doc-section" id="jit"
+        data-search="jit compilation performance wasm deoptimization numerical crunching best practices">
+        <div class="section-heading">
+          <p class="eyebrow">13</p>
+          <h2>JIT Compilation</h2>
+          <p>Tiny features a multi-function JIT compilation engine that optimizes hot code paths by translating bytecode to native WebAssembly. This delivers substantial performance improvements for numerical workloads and tight loops.</p>
+        </div>
+
+        <div class="split">
+          <div>
+            <h3>JIT-Safe Functions</h3>
+            <p>The compiler automatically selects functions for JIT compilation. To maximize compatibility and performance:</p>
+            <ul class="plain-list">
+              <li><strong>Avoid closures with captures</strong>: JIT does not support functions that access variables from outer scopes.</li>
+              <li><strong>Synchronous only</strong>: `async` functions are always executed by the interpreter.</li>
+              <li><strong>Fixed parameters</strong>: Avoid variadic parameters or default values in performance-critical functions.</li>
+              <li><strong>Type stability</strong>: Use explicit type hints (e.g., `: number`) to prevent runtime deoptimization.</li>
+              <li><strong>Prefer locals</strong>: Accessing local variables is significantly faster in JIT code than accessing globals.</li>
+            </ul>
+          </div>
+          <div>
+            <h3>Optimization example</h3>
+            <pre><code>// Optimal JIT candidate
+fn calculate(n: number): number {
+    let result = 0
+    for let i = 0; i < n; i++ {
+        result += i * 2
+    }
+    return result
+}</code></pre>
+          </div>
+        </div>
+      </section>
+
       <section class="doc-section" id="embedding"
         data-search="embedding embedstr embedbin embeddir assets binary string webview config">
         <div class="section-heading">
-          <p class="eyebrow">13</p>
+          <p class="eyebrow">14</p>
           <h2>Embedding Assets</h2>
           <p>Embed data at compile time so scripts and packaged executables can carry configuration, binary files, or
             whole UI folders.</p>
@@ -774,7 +809,7 @@ const html = assets["index.html"]</code></pre>
       <section class="doc-section media-section" id="native-functions"
         data-search="native functions native fn go tinygo wasm performance sha256 fibonacci">
         <div class="section-heading">
-          <p class="eyebrow">14</p>
+          <p class="eyebrow">15</p>
           <h2>Native Go Functions</h2>
           <p>`native fn` lets you write performance-sensitive logic in Go inside Tiny source. Native blocks are compiled
             through TinyGo to WebAssembly and cached.</p>
@@ -803,7 +838,7 @@ const html = assets["index.html"]</code></pre>
       <section class="doc-section" id="stdlib"
         data-search="standard library std io json fs http array math process regex runtime sync time ui desktop net object path buffer tests app error strings">
         <div class="section-heading">
-          <p class="eyebrow">15</p>
+          <p class="eyebrow">16</p>
           <h2>Standard Library</h2>
           <p>The standard library is broad enough for scripts, servers, automation, tests, desktop tools, and GUI
             shells.</p>
@@ -886,7 +921,7 @@ const html = assets["index.html"]</code></pre>
       <section class="doc-section" id="examples"
         data-search="examples basics control flow functions modules classes errors files json cli server defer embed native webview">
         <div class="section-heading">
-          <p class="eyebrow">16</p>
+          <p class="eyebrow">17</p>
           <h2>Examples</h2>
           <p>The repository includes focused examples that double as a learning path.</p>
         </div>
@@ -939,7 +974,7 @@ const html = assets["index.html"]</code></pre>
       <section class="doc-section" id="plugin-development"
         data-search="plugin developers native plugins dll so shared library TinyPluginCall TinyPluginFree json payload wrapper tiny interface import plugin Plugin.load handles">
         <div class="section-heading">
-          <p class="eyebrow">17</p>
+          <p class="eyebrow">18</p>
           <h2>Plugin Development</h2>
           <p>Native plugins let Tiny call external shared libraries while keeping Tiny programs pleasant to use. A good
             plugin has two layers: a native `.dll` or `.so` that speaks Tiny's JSON call protocol, and a `.tiny` wrapper
@@ -1120,7 +1155,7 @@ export fn hash(text: string, method: string): HashResult {
       <section class="doc-section" id="runtime-model"
         data-search="runtime model compiler pipeline source parser compiler bytecode tbc vm standard library plugins native functions">
         <div class="section-heading">
-          <p class="eyebrow">18</p>
+          <p class="eyebrow">19</p>
           <h2>Runtime Model</h2>
           <p>Tiny separates the developer-facing language from the runtime that executes it. Source files compile into a
             compact bytecode format, then the VM runs that bytecode with access to standard modules, plugins, and native
@@ -1181,7 +1216,7 @@ export fn hash(text: string, method: string): HashResult {
       <section class="doc-section" id="gotchas"
         data-search="gotchas caveats defer cache plugins json boundary native fn tiny version dist wrapper">
         <div class="section-heading">
-          <p class="eyebrow">19</p>
+          <p class="eyebrow">20</p>
           <h2>Gotchas</h2>
           <p>These are the small details worth knowing before building larger Tiny projects.</p>
         </div>
@@ -1200,7 +1235,7 @@ export fn hash(text: string, method: string): HashResult {
           <article>
             <h3>Plugins are JSON-boundary APIs</h3>
             <p>Keep plugin arguments and results JSON-compatible. Use string handles for native resources rather than
-              exposing raw pointers to Tiny.</p>
+              encoding/decoding raw pointers to Tiny.</p>
           </article>
           <article>
             <h3>Ship plugin wrappers</h3>
@@ -1223,7 +1258,7 @@ export fn hash(text: string, method: string): HashResult {
       <section class="doc-section" id="deploy"
         data-search="deploy package dist pack bytecode tbc executable github pages distribution obfuscation">
         <div class="section-heading">
-          <p class="eyebrow">20</p>
+          <p class="eyebrow">21</p>
           <h2>Packaging & Deploy</h2>
           <p>Tiny can ship scripts as bytecode or bundle them into standalone native executables with the runtime.</p>
         </div>
@@ -1254,7 +1289,7 @@ export fn hash(text: string, method: string): HashResult {
       <section class="doc-section" id="lsp"
         data-search="lsp editor vscode autocomplete diagnostics formatter language server type narrowing jump definition">
         <div class="section-heading">
-          <p class="eyebrow">21</p>
+          <p class="eyebrow">22</p>
           <h2>Editor Support</h2>
           <p>The project includes a Tiny language server with diagnostics, formatting, autocomplete, type analysis, and
             jump-to-definition support. The LSP also ships stubs for the standard library so editors can understand

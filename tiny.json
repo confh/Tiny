@@ -1,6 +1,6 @@
 {
   "name": "tiny",
-  "version": "0.1.9",
+  "version": "0.2.4",
   "entry": "examples/01-basics/src/main.tiny",
   "outDir": "",
   "target": "",
@@ -8,13 +8,7 @@
     "std": "tiny src/scripts/new_std_module.tiny",
     "test": "tiny test/src/main.tiny"
   },
-  "dependencies": {
-    "Tiny": {
-      "source": "github:confh/Tiny",
-      "version": "v0.1.7",
-      "path": ""
-    }
-  },
+  "dependencies": {},
   "plugins": null,
   "compilerOptions": {
     "stackTraces": false,
