@@ -57,6 +57,126 @@ func CheckTypeHintWithGlobals(value TinyValue, hint TypeHint, interfaces map[str
 	return false, lastReason
 }
 
+func tinyValueAsInterfaceObject(value TinyValue) (ObjectValue, bool) {
+	if value.IsInt {
+		return nil, false
+	}
+
+	switch obj := value.Value.(type) {
+	case ObjectValue:
+		return obj, true
+	case *ObjectValue:
+		if obj == nil {
+			return nil, false
+		}
+		return *obj, true
+	case WasmObjectValue:
+		if obj.VM == nil {
+			return nil, false
+		}
+		return obj.VM.wasmObjectToObjectValue(obj)
+	case *WasmObjectValue:
+		if obj == nil || obj.VM == nil {
+			return nil, false
+		}
+		return obj.VM.wasmObjectToObjectValue(*obj)
+	default:
+		return nil, false
+	}
+}
+
+func wasmObjectHasShapeField(vm *VM, obj WasmObjectValue, fieldName string) bool {
+	if vm == nil || vm.jitModule == nil {
+		return false
+	}
+
+	base := uint32(obj.Address)
+	shapeIDF, ok := vm.readWasmFloatMaybe(base + 8)
+	if !ok {
+		return false
+	}
+
+	shapeID := int(shapeIDF)
+	if shapeID < 0 || shapeID >= len(vm.objectShapes) {
+		return false
+	}
+
+	for _, name := range vm.objectShapes[shapeID] {
+		if name == fieldName {
+			return true
+		}
+	}
+
+	return false
+}
+
+func wasmObjectInterfaceField(obj WasmObjectValue, fieldName string) (TinyValue, bool) {
+	vm := obj.VM
+	if vm == nil || vm.jitModule == nil {
+		return TinyValue{}, false
+	}
+
+	base := uint32(obj.Address)
+	if tag, ok := vm.readWasmFloatMaybe(base); !ok || tag != 4.0 {
+		return TinyValue{}, false
+	}
+
+	offset, hasOffset := vm.propertyOffsets[fieldName]
+	if !hasOffset {
+		return TinyValue{}, false
+	}
+
+	tag, okTag := vm.readWasmFloatMaybe(base + offset)
+	val, okVal := vm.readWasmFloatMaybe(base + offset + 8)
+	if !okTag || !okVal {
+		return TinyValue{}, false
+	}
+
+	if wasmObjectHasShapeField(vm, obj, fieldName) {
+		return vm.wasmTaggedValueToTinyValue(tag, val, 1), true
+	}
+
+	// Some older JIT object-shape metadata can be incomplete even though the
+	// property was physically written at its global property offset. Interface
+	// checks must not report a present JIT field as missing just because the shape
+	// list is stale or incomplete. If the slot contains a non-null tagged value,
+	// treat it as present.
+	if tag != 0.0 || val != 0.0 {
+		return vm.wasmTaggedValueToTinyValue(tag, val, 1), true
+	}
+
+	return TinyValue{}, false
+}
+
+func tinyValueInterfaceField(value TinyValue, fieldName string) (TinyValue, bool, bool) {
+	if value.IsInt {
+		return TinyValue{}, false, false
+	}
+
+	switch obj := value.Value.(type) {
+	case ObjectValue:
+		val, ok := obj[fieldName]
+		return val, ok, true
+	case *ObjectValue:
+		if obj == nil {
+			return TinyValue{}, false, false
+		}
+		val, ok := (*obj)[fieldName]
+		return val, ok, true
+	case WasmObjectValue:
+		val, ok := wasmObjectInterfaceField(obj, fieldName)
+		return val, ok, obj.VM != nil
+	case *WasmObjectValue:
+		if obj == nil {
+			return TinyValue{}, false, false
+		}
+		val, ok := wasmObjectInterfaceField(*obj, fieldName)
+		return val, ok, obj.VM != nil
+	default:
+		return TinyValue{}, false, false
+	}
+}
+
 func checkSingleTypeHintWithGlobals(value TinyValue, hint string, interfaces map[string]Interface, globals []TinyValue, globalNames map[string]int) (bool, string) {
 	if hint == "array" {
 		hint = "array:any"
@@ -69,11 +189,53 @@ func checkSingleTypeHintWithGlobals(value TinyValue, hint string, interfaces map
 			arrObj = v.Elements
 		case *ArrayValue:
 			arrObj = v.Elements
+		case WasmArrayValue:
+			if v.VM != nil {
+				lengthF, ok := v.VM.readWasmFloatMaybe(uint32(v.Address) + 8)
+				if ok {
+					elemPtrF, ok := v.VM.readWasmFloatMaybe(uint32(v.Address) + 16)
+					if ok {
+						length := int(lengthF)
+						elemPtr := uint32(elemPtrF)
+						arrObj = make([]TinyValue, length)
+						for i := 0; i < length; i++ {
+							addr := elemPtr + uint32(i*16)
+							tag := v.VM.ReadWasmFloat(addr)
+							val := v.VM.ReadWasmFloat(addr + 8)
+
+							var element TinyValue
+							switch tag {
+							case 1.0:
+								element = NewNative(val)
+							case 2.0:
+								element = NewNative(val != 0.0)
+							case 4.0:
+								element = NewNative(WasmObjectValue{Address: val, VM: v.VM})
+							case 5.0:
+								element = NewNative(WasmArrayValue{Address: val, VM: v.VM})
+							case 6.0:
+								strVal, ok := v.VM.readWasmStringMaybe(uint32(val))
+								if ok {
+									element = NewNative(strVal)
+								} else {
+									element = NewNull()
+								}
+							default:
+								element = NewNull()
+							}
+							arrObj[i] = element
+						}
+					}
+				}
+			}
 		default:
 			return false, ": expected array"
 		}
 
 		elementType := strings.TrimPrefix(hint, "array:")
+		if elementType == "any" {
+			return true, ""
+		}
 		elementHint := TypeHint{Name: elementType, Types: []string{elementType}}
 		for idx, elem := range arrObj {
 			if ok, subReason := CheckTypeHintWithGlobals(elem, elementHint, interfaces, globals, globalNames); !ok {
@@ -116,7 +278,7 @@ func checkSingleTypeHintWithGlobals(value TinyValue, hint string, interfaces map
 
 	case "array":
 		switch value.Value.(type) {
-		case ArrayValue, *ArrayValue:
+		case ArrayValue, *ArrayValue, WasmArrayValue:
 			return true, ""
 		default:
 			return false, ""
@@ -124,7 +286,7 @@ func checkSingleTypeHintWithGlobals(value TinyValue, hint string, interfaces map
 
 	case "object":
 		switch value.Value.(type) {
-		case ObjectValue:
+		case ObjectValue, *ObjectValue, WasmObjectValue, *WasmObjectValue:
 			return true, ""
 		default:
 			return false, ""
@@ -146,19 +308,24 @@ func checkSingleTypeHintWithGlobals(value TinyValue, hint string, interfaces map
 
 	default:
 		if iface, exists := resolveInterfaceHintWithGlobals(hint, interfaces, globals, globalNames); exists {
-			obj, ok := value.Value.(ObjectValue)
-			if !ok {
-				return false, ": expected object to match interface '" + hint + "'"
+			_, objectLike := tinyValueAsInterfaceObject(value)
+			if !objectLike {
+				if _, _, ok := tinyValueInterfaceField(value, ""); !ok {
+					return false, ": expected object to match interface '" + hint + "'"
+				}
 			}
 
 			for fieldName, expectedHint := range iface.Fields {
-				required := false
-				if slices.Contains(expectedHint.Types, "null") {
-					required = true
-				}
+				optional := slices.Contains(expectedHint.AllTypes(), "null")
 
-				val, hasField := obj[fieldName]
-				if !required && !hasField {
+				val, hasField, okObject := tinyValueInterfaceField(value, fieldName)
+				if !okObject {
+					return false, ": expected object to match interface '" + hint + "'"
+				}
+				if !hasField {
+					if optional {
+						continue
+					}
 					return false, fmt.Sprintf(" (missing field '%s')", fieldName)
 				}
 
@@ -170,7 +337,7 @@ func checkSingleTypeHintWithGlobals(value TinyValue, hint string, interfaces map
 			return true, ""
 		}
 
-		if obj, ok := value.Value.(ObjectValue); ok {
+		if obj, ok := tinyValueAsInterfaceObject(value); ok {
 			classValue, exists := obj["__class"]
 			if exists {
 				className, ok := classValue.Value.(string)
@@ -239,10 +406,6 @@ func substituteTypeHintName(typeName string, subst map[string]string) string {
 		return strings.Join(parts, ":")
 	}
 	return typeName
-}
-
-func resolveInterfaceHint(hint string, interfaces map[string]Interface) (Interface, bool) {
-	return resolveInterfaceHintWithGlobals(hint, interfaces, nil, nil)
 }
 
 func resolveInterfaceHintWithGlobals(hint string, interfaces map[string]Interface, globals []TinyValue, globalNames map[string]int) (Interface, bool) {

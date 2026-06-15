@@ -1,0 +1,100 @@
+// Result returned by schema.safeParse().
+export interface SafeParseResult:T {
+    // True when parsing and validation succeeded.
+    success: bool,
+    // The validated output value when success is true.
+    data: T,
+    // Validation error information when success is false.
+    error: any
+}
+
+// Represents a chainable validation schema.
+export class Schema:T {
+    // Marks the value as required.
+    fn required(): Schema:T {}
+    // Marks the value as optional.
+    fn optional(): Schema:T {}
+    // Allows null values during parsing.
+    fn nullable(): Schema:T {}
+    // Supplies a default value when the input is null or missing.
+    fn default(value: any): Schema:T {}
+    // Overrides the validation error message.
+    fn message(message: string): Schema:T {}
+    // Parses and validates a value, throwing on failure.
+    fn parse(value: any): T {}
+    // Parses and validates a value, returning a structured result.
+    fn safeParse(value: any): SafeParseResult:T {}
+    // Returns true when the value satisfies the schema.
+    fn check(value: any): bool {}
+
+    // Sets the minimum string length, array length, or numeric value.
+    fn min(value: number): Schema:T {}
+    // Sets the maximum string length, array length, or numeric value.
+    fn max(value: number): Schema:T {}
+    // Requires an exact string or array length.
+    fn length(value: number): Schema:T {}
+    // Requires the string or array to contain at least one item.
+    fn nonempty(): Schema:T {}
+
+    // Requires a valid email string.
+    fn email(): Schema:T {}
+    // Requires a valid URL string.
+    fn url(): Schema:T {}
+    // Requires a string to match the given regex pattern.
+    fn regex(pattern: string): Schema:T {}
+    // Trims surrounding whitespace from a string before validation.
+    fn trim(): Schema:T {}
+
+    // Requires a number to be an integer.
+    fn int(): Schema:T {}
+    // Requires a number to be greater than zero.
+    fn positive(): Schema:T {}
+
+    // Sets the schema used for array items.
+    fn items:Item(schema: Schema:Item): Schema:array:Item {}
+
+    // Replaces the object shape with the provided field schemas.
+    fn shape(fields: object): Schema:object {}
+    // Rejects object keys that are not declared in the shape.
+    fn strict(): Schema:T {}
+    // Marks every field in the current object shape as optional.
+    fn partial(): Schema:T {}
+
+    // Adds a custom validation predicate.
+    fn refine(predicate: function): Schema:T {}
+    // Transforms the validated output value.
+    fn transform:Out(mapper: function): Schema:Out {}
+}
+
+// Creates a string validation schema.
+export fn string(): Schema:string {}
+
+// Creates a number validation schema.
+export fn number(): Schema:number {}
+
+// Creates a boolean validation schema.
+export fn bool(): Schema:bool {}
+
+// Creates an array validation schema, optionally with an item schema.
+export fn array:Item(items?: Schema:Item): Schema:array:Item {}
+
+// Creates an object validation schema, optionally with a field shape.
+export fn object(shape?: object): Schema:object {}
+
+// Creates a schema that accepts one of the provided literal values.
+export fn enum:T(values: array:T): Schema:T {}
+
+// Creates a schema that accepts any one of the provided schemas.
+export fn union:T(schemas: array:Schema:T): Schema:T {}
+
+// Creates a schema that accepts any value.
+export fn any(): Schema:any {}
+
+// Validates the request body property using the provided schema.
+export fn body:T(schema: Schema:T): Schema:T {}
+
+// Validates the request query property using the provided schema.
+export fn query:T(schema: Schema:T): Schema:T {}
+
+// Validates the request params property using the provided schema.
+export fn params:T(schema: Schema:T): Schema:T {}

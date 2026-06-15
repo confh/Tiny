@@ -480,6 +480,40 @@ func TestLSPCodeActionAddsInferredTypeHint(t *testing.T) {
 	t.Fatalf("expected Add inferred type hint action, got %#v", actions)
 }
 
+func TestLSPOrganizeImportsActionRemovesDuplicatesAndUnused(t *testing.T) {
+	text := strings.Join([]string{
+		`import std "tests";`,
+		`import std "io";`,
+		`import std "io";`,
+		``,
+		`fn run() {`,
+		`    io.println("ok")`,
+		`}`,
+	}, "\n")
+
+	edit, ok := organizeImportsEdit("file:///imports.tiny", text)
+	if !ok {
+		t.Fatalf("expected organize imports edit")
+	}
+	if edit.NewText != "import std \"io\";\n" {
+		t.Fatalf("unexpected organize imports text: %q", edit.NewText)
+	}
+	if edit.Range.Start.Line != 0 || edit.Range.End.Line != 3 {
+		t.Fatalf("unexpected organize imports range: %#v", edit.Range)
+	}
+
+	actions := getCodeActions("file:///imports.tiny", text, CodeActionParams{
+		TextDocument: TextDocumentIdentifier{URI: "file:///imports.tiny"},
+		Range:        LSPRange{Start: Position{Line: 0, Character: 0}, End: Position{Line: 0, Character: 0}},
+	})
+	for _, action := range actions {
+		if action.Title == "Organize imports" && action.Kind == "source.organizeImports" {
+			return
+		}
+	}
+	t.Fatalf("expected Organize imports source action, got %#v", actions)
+}
+
 func TestLSPThisCompletionIncludesMethodsDeclaredAfterCursor(t *testing.T) {
 	text := strings.Join([]string{
 		"class TaskManager {",
@@ -1487,6 +1521,66 @@ func TestLSPRenameIgnoresShadowedCallbackVariableAfterCallback(t *testing.T) {
 		line := textEdit.Range.Start.Line
 		if line != 0 && line != 4 && line != 10 {
 			t.Fatalf("outer rename returned unexpected edit range %#v in %#v", textEdit.Range, edit)
+		}
+	}
+}
+
+func TestLSPRenameIgnoresObjectKeysStringsAndComments(t *testing.T) {
+	text := strings.Join([]string{
+		`const status = "ok";`,
+		`const payload = {`,
+		`    status: status,`,
+		`    note: "status",`,
+		`}`,
+		`// status`,
+		`io.println(status);`,
+	}, "\n")
+
+	edit := getRenameEdit("file:///rename_filters.tiny", text, Position{
+		Line:      0,
+		Character: len("const status") - 1,
+	}, "state")
+
+	edits := edit.Changes["file:///rename_filters.tiny"]
+	if len(edits) != 3 {
+		t.Fatalf("expected declaration and two value references to be renamed, got %#v", edit)
+	}
+	for _, textEdit := range edits {
+		if textEdit.Range.Start.Line == 2 && textEdit.Range.Start.Character == len(`    `) {
+			t.Fatalf("object literal key was renamed: %#v", edit)
+		}
+		if textEdit.Range.Start.Line == 3 || textEdit.Range.Start.Line == 5 {
+			t.Fatalf("string/comment occurrence was renamed: %#v", edit)
+		}
+	}
+}
+
+func TestLSPRenameKeepsUnrelatedClassMethodsSeparate(t *testing.T) {
+	text := strings.Join([]string{
+		`class A {`,
+		`    fn run() {}`,
+		`}`,
+		`class B {`,
+		`    fn run() {}`,
+		`}`,
+		`let a = A()`,
+		`let b = B()`,
+		`a.run()`,
+		`b.run()`,
+	}, "\n")
+
+	edit := getRenameEdit("file:///rename_methods.tiny", text, Position{
+		Line:      8,
+		Character: strings.Index(`a.run()`, "run") + 1,
+	}, "start")
+
+	edits := edit.Changes["file:///rename_methods.tiny"]
+	if len(edits) != 2 {
+		t.Fatalf("expected only A.run declaration and call to be renamed, got %#v", edit)
+	}
+	for _, textEdit := range edits {
+		if textEdit.Range.Start.Line != 1 && textEdit.Range.Start.Line != 8 {
+			t.Fatalf("unrelated method occurrence was renamed: %#v", edit)
 		}
 	}
 }
@@ -2896,6 +2990,108 @@ func TestLSPTypedArrayExtensions(t *testing.T) {
 	}
 }
 
+func TestLSPSemanticDiagnosticKeepsCallSiteRange(t *testing.T) {
+	text := strings.Join([]string{
+		`fn fib(n: number): number {`,
+		`    if n <= 1 {`,
+		`        return n`,
+		`    }`,
+		`    return fib(n - 1) + fib(n - 2)`,
+		`}`,
+		`fn run() {`,
+		`    fib(20, 1)`,
+		`}`,
+	}, "\n")
+
+	diagnostics := semanticDiagnostics("file:///test_call_range.tiny", text)
+	for _, diagnostic := range diagnostics {
+		message, _ := diagnostic["message"].(string)
+		if !strings.Contains(message, "wrong argument count for fib: expected 1, got 2") {
+			continue
+		}
+
+		rangeValue, _ := diagnostic["range"].(map[string]any)
+		start, _ := rangeValue["start"].(map[string]any)
+		end, _ := rangeValue["end"].(map[string]any)
+		if intFromAny(start["line"]) != 7 ||
+			intFromAny(start["character"]) != 4 ||
+			intFromAny(end["line"]) != 7 ||
+			intFromAny(end["character"]) != 7 {
+			t.Fatalf("expected call-site range for bad fib call, got %#v", diagnostic)
+		}
+		return
+	}
+
+	t.Fatalf("expected wrong argument count diagnostic, got %#v", diagnostics)
+}
+
+func TestLSPSemanticDiagnosticHighlightsBadArgument(t *testing.T) {
+	text := strings.Join([]string{
+		`fn takes(name: string) {}`,
+		`fn run() {`,
+		`    takes(42)`,
+		`}`,
+	}, "\n")
+
+	diagnostics := semanticDiagnostics("file:///test_bad_arg_range.tiny", text)
+	for _, diagnostic := range diagnostics {
+		message, _ := diagnostic["message"].(string)
+		if !strings.Contains(message, "cannot pass type 'number' to parameter 'name'") {
+			continue
+		}
+		rangeValue, _ := diagnostic["range"].(map[string]any)
+		start, _ := rangeValue["start"].(map[string]any)
+		end, _ := rangeValue["end"].(map[string]any)
+		if intFromAny(start["line"]) != 2 ||
+			intFromAny(start["character"]) != len(`    takes(`) ||
+			intFromAny(end["character"]) != len(`    takes(42`) {
+			t.Fatalf("expected bad argument range, got %#v", diagnostic)
+		}
+		return
+	}
+	t.Fatalf("expected bad argument diagnostic, got %#v", diagnostics)
+}
+
+func TestLSPSemanticDiagnosticHighlightsReturnedExpression(t *testing.T) {
+	text := strings.Join([]string{
+		`fn value(): string {`,
+		`    return 42`,
+		`}`,
+	}, "\n")
+
+	diagnostics := semanticDiagnostics("file:///test_return_range.tiny", text)
+	for _, diagnostic := range diagnostics {
+		message, _ := diagnostic["message"].(string)
+		if !strings.Contains(message, "cannot return type 'number'") {
+			continue
+		}
+		rangeValue, _ := diagnostic["range"].(map[string]any)
+		start, _ := rangeValue["start"].(map[string]any)
+		end, _ := rangeValue["end"].(map[string]any)
+		if intFromAny(start["line"]) != 1 ||
+			intFromAny(start["character"]) != len(`    return `) ||
+			intFromAny(end["character"]) != len(`    return 42`) {
+			t.Fatalf("expected returned expression range, got %#v", diagnostic)
+		}
+		return
+	}
+	t.Fatalf("expected return type diagnostic, got %#v", diagnostics)
+}
+
+func TestLSPSemanticDiagnosticsRecoverAfterParseError(t *testing.T) {
+	text := strings.Join([]string{
+		`let =`,
+		`fn ok() {`,
+		`    missing`,
+		`}`,
+	}, "\n")
+
+	diagnostics := semanticDiagnostics("file:///test_recovery.tiny", text)
+	if !diagnosticsContain(diagnostics, "undefined variable: missing") {
+		t.Fatalf("expected recovered semantic diagnostic after parse error, got %#v", diagnostics)
+	}
+}
+
 func TestLSPUnionInterfaceObjectLiteralCompletions(t *testing.T) {
 	// 1. Test union with a primitive and an interface: server(opt: number | ServerOptions)
 	text1 := strings.Join([]string{
@@ -3800,5 +3996,142 @@ func TestLSPGenericsAutoInferenceAndAutocomplete(t *testing.T) {
 			continue
 		}
 		t.Fatalf("unexpected warning/diagnostic: %q", msg)
+	}
+}
+
+func TestLSPValidateSchemaGenericArgumentInference(t *testing.T) {
+	text := strings.Join([]string{
+		`import std "validate";`,
+		`const tags = validate.array(validate.string().required()).default([]);`,
+	}, "\n")
+
+	diagnostics := semanticDiagnostics("file:///validate_generics_array.tiny", text)
+	for _, d := range diagnostics {
+		msg, _ := d["message"].(string)
+		if strings.Contains(msg, "unused ") {
+			continue
+		}
+		if strings.Contains(msg, "cannot pass type") || strings.Contains(msg, "cannot assign") {
+			t.Fatalf("unexpected validate.array generic diagnostic: %s", msg)
+		}
+	}
+}
+
+func TestLSPValidateBodyAcceptsGenericSchema(t *testing.T) {
+	text := strings.Join([]string{
+		`import std "validate";`,
+		`const createPostSchema = validate.body(`,
+		`    validate.object({`,
+		`        title: validate.string().trim().nonempty().min(3).required(),`,
+		`        content: validate.string().trim().min(10).required(),`,
+		`        tags: validate.array(validate.string().required()).default([]),`,
+		`        published: validate.bool().default(false)`,
+		`    })`,
+		`);`,
+		`const req = {`,
+		`    body: {`,
+		`        title: "Hello Tiny",`,
+		`        content: "This is my first post.",`,
+		`        tags: ["tiny", "lang"]`,
+		`    },`,
+		`    query: {},`,
+		`    params: {}`,
+		`};`,
+		`const parsed = createPostSchema.safeParse(req);`,
+	}, "\n")
+
+	diagnostics := semanticDiagnostics("file:///validate_generics_body.tiny", text)
+	for _, d := range diagnostics {
+		msg, _ := d["message"].(string)
+		if strings.Contains(msg, "unused ") {
+			continue
+		}
+		if strings.Contains(msg, "cannot pass type") || strings.Contains(msg, "cannot assign") {
+			t.Fatalf("unexpected validate.body generic diagnostic: %s", msg)
+		}
+	}
+}
+
+func TestLSPValidateSchemaChainCompletionAndHover(t *testing.T) {
+	text := strings.Join([]string{
+		`import std "validate";`,
+		`validate.string().`,
+		`validate.string().trim().`,
+	}, "\n")
+
+	completions1 := getCompletions("file:///validate_chain.tiny", text, Position{
+		Line:      1,
+		Character: len(`validate.string().`),
+	})
+	if !completionLabelsContain(completions1, "trim") {
+		t.Fatalf("expected validate.string() completions to include trim, got %#v", completionLabels(completions1))
+	}
+	if !completionLabelsContain(completions1, "nonempty") {
+		t.Fatalf("expected validate.string() completions to include nonempty, got %#v", completionLabels(completions1))
+	}
+
+	completions2 := getCompletions("file:///validate_chain.tiny", text, Position{
+		Line:      2,
+		Character: len(`validate.string().trim().`),
+	})
+	if !completionLabelsContain(completions2, "default") {
+		t.Fatalf("expected validate.string().trim() completions to include default, got %#v", completionLabels(completions2))
+	}
+	if !completionLabelsContain(completions2, "safeParse") {
+		t.Fatalf("expected validate.string().trim() completions to include safeParse, got %#v", completionLabels(completions2))
+	}
+
+	line1 := strings.Split(text, "\n")[2]
+	hoverPos := Position{
+		Line:      2,
+		Character: strings.Index(line1, "trim") + 1,
+	}
+	hover := getHover("file:///validate_chain.tiny", text, hoverPos)
+	hoverResult, ok := hover.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover result for trim, got %#v", hover)
+	}
+	if !strings.Contains(hoverResult.Contents.Value, "trim") {
+		t.Fatalf("expected hover for trim to mention trim, got %q", hoverResult.Contents.Value)
+	}
+}
+
+func TestLSPValidateSchemaVariableInference(t *testing.T) {
+	text := strings.Join([]string{
+		`import std "validate"`,
+		`const createPostSchema = validate.body(`,
+		`    validate.object({`,
+		`        title: validate.string().trim().nonempty().min(3).required(),`,
+		`        content: validate.string().trim().min(10).required(),`,
+		`        tags: validate.array(validate.string().required()).default([]),`,
+		`        published: validate.bool().default(false)`,
+		`    })`,
+		`)`,
+		`const parsed = createPostSchema.safeParse({ body: {}, query: {}, params: {} })`,
+		`const post = parsed.data`,
+	}, "\n")
+
+	hoverSchema := getHover("file:///validate_inference.tiny", text, Position{
+		Line:      1,
+		Character: strings.Index(strings.Split(text, "\n")[1], "createPostSchema") + 2,
+	})
+	hoverSchemaResult, ok := hoverSchema.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover result for createPostSchema, got %#v", hoverSchema)
+	}
+	if !strings.Contains(hoverSchemaResult.Contents.Value, "class:Schema:object") {
+		t.Fatalf("expected createPostSchema hover to preserve Schema generic type, got %q", hoverSchemaResult.Contents.Value)
+	}
+
+	hoverPost := getHover("file:///validate_inference.tiny", text, Position{
+		Line:      10,
+		Character: strings.Index(strings.Split(text, "\n")[10], "post") + 1,
+	})
+	hoverPostResult, ok := hoverPost.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover result for post, got %#v", hoverPost)
+	}
+	if strings.Contains(hoverPostResult.Contents.Value, "`T`") {
+		t.Fatalf("expected post hover to not leak raw type parameter T, got %q", hoverPostResult.Contents.Value)
 	}
 }

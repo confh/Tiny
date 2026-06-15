@@ -1,3 +1,5 @@
+// lsp.go
+
 package main
 
 import (
@@ -513,7 +515,7 @@ func extractCalleeBefore(text string, open int) string {
 	end := i + 1
 	for i >= 0 {
 		ch := text[i]
-		if isIdentChar(ch) || ch == '.' || ch == '?' {
+		if isIdentChar(ch) || ch == '.' || ch == '?' || ch == ':' {
 			i--
 			continue
 		}
@@ -1151,6 +1153,10 @@ func getReferences(uri string, text string, pos Position, includeDeclaration boo
 			}
 
 			matchPos := Position{Line: rng.Line, Character: rng.Start}
+			line := getLine(docText, matchPos.Line)
+			if isPositionInStringOrComment(line, matchPos.Character) || isObjectLiteralKeyReferencePosition(docText, matchPos, name) {
+				continue
+			}
 			matchScope := scopeAtPosition(docURI, docText, matchPos)
 
 			resolvedSym, ok := symbolAtPositionForReferences(docText, matchPos, matchScope)
@@ -1179,6 +1185,10 @@ func getReferences(uri string, text string, pos Position, includeDeclaration boo
 }
 
 func symbolAtPositionForReferences(text string, pos Position, scope *Scope) (SymbolInfo, bool) {
+	word := wordAtPosition(text, pos)
+	if word == "" || isObjectLiteralKeyReferencePosition(text, pos, word) {
+		return SymbolInfo{}, false
+	}
 	if receiver, member, ok := memberExprAtPosition(text, pos); ok {
 		receiverSym, receiverType, exists := resolveReceiverPath(scope, text, pos, receiver)
 		if !exists {
@@ -1201,7 +1211,39 @@ func symbolAtPositionForReferences(text string, pos Position, scope *Scope) (Sym
 			}
 		}
 	}
-	return scope.Resolve(wordAtPosition(text, pos))
+	if className := classNameAtPosition(text, pos); className != "" {
+		if classSym, ok := resolveClassSymbol(scope, className); ok {
+			line := pos.Line + 1
+			if methodSym, ok := classSym.Methods[word]; ok && methodSym.Line == line {
+				return methodSym, true
+			}
+			if fieldSym, ok := classSym.Fields[word]; ok && fieldSym.Line == line {
+				return fieldSym, true
+			}
+		}
+	}
+	return scope.Resolve(word)
+}
+
+func isObjectLiteralKeyReferencePosition(text string, pos Position, name string) bool {
+	line := getLine(text, pos.Line)
+	if pos.Character < 0 || pos.Character+len(name) > len(line) {
+		return false
+	}
+	before := strings.TrimSpace(line[:pos.Character])
+	after := strings.TrimSpace(line[pos.Character+len(name):])
+	if !strings.HasPrefix(after, ":") {
+		return false
+	}
+	if strings.HasPrefix(before, "let ") ||
+		strings.HasPrefix(before, "const ") ||
+		strings.HasPrefix(before, "field ") ||
+		strings.HasPrefix(before, "fn ") ||
+		strings.HasPrefix(before, "import ") ||
+		strings.Contains(before, "(") {
+		return false
+	}
+	return before == "" || strings.HasSuffix(before, "{") || strings.HasSuffix(before, ",")
 }
 
 func sameReferencedSymbol(left SymbolInfo, right SymbolInfo) bool {
@@ -1490,6 +1532,9 @@ func getCodeActions(uri string, text string, params CodeActionParams) []CodeActi
 	if action, ok := removeImportAction(uri, line, lineIndex); ok {
 		actions = append(actions, action)
 	}
+	if action, ok := organizeImportsAction(uri, text); ok {
+		actions = append(actions, action)
+	}
 	if action, ok := createMissingFunctionAction(uri, text, params.Range.Start, params.Context.Diagnostics); ok {
 		actions = append(actions, action)
 	}
@@ -1542,6 +1587,156 @@ func removeImportAction(uri string, line string, lineIndex int) (CodeAction, boo
 			NewText: "",
 		}}}},
 	}, true
+}
+
+type lspImportLine struct {
+	Line  int
+	Text  string
+	Kind  string
+	Path  string
+	Alias string
+	Key   string
+}
+
+func organizeImportsAction(uri string, text string) (CodeAction, bool) {
+	edit, ok := organizeImportsEdit(uri, text)
+	if !ok {
+		return CodeAction{}, false
+	}
+	return CodeAction{
+		Title: "Organize imports",
+		Kind:  "source.organizeImports",
+		Edit:  WorkspaceEdit{Changes: map[string][]TextEdit{uri: {edit}}},
+	}, true
+}
+
+func organizeImportsEdit(uri string, text string) (TextEdit, bool) {
+	lines := strings.Split(text, "\n")
+	imports := topImportBlock(lines)
+	if len(imports) == 0 {
+		return TextEdit{}, false
+	}
+
+	usedAliases := usedImportAliases(text, imports)
+	seen := map[string]bool{}
+	kept := []string{}
+	for _, imp := range imports {
+		if seen[imp.Key] {
+			continue
+		}
+		seen[imp.Key] = true
+		if !usedAliases[imp.Alias] {
+			continue
+		}
+		kept = append(kept, strings.TrimSpace(imp.Text))
+	}
+	sort.Strings(kept)
+
+	firstLine := imports[0].Line
+	lastLine := imports[len(imports)-1].Line
+	newText := ""
+	if len(kept) > 0 {
+		newText = strings.Join(kept, "\n") + "\n"
+	}
+
+	oldText := strings.Join(lines[firstLine:lastLine+1], "\n")
+	if len(kept) > 0 {
+		oldText += "\n"
+	}
+	if oldText == newText {
+		return TextEdit{}, false
+	}
+
+	return TextEdit{
+		Range: LSPRange{
+			Start: Position{Line: firstLine, Character: 0},
+			End:   Position{Line: lastLine + 1, Character: 0},
+		},
+		NewText: newText,
+	}, true
+}
+
+func topImportBlock(lines []string) []lspImportLine {
+	imports := []lspImportLine{}
+	inBlock := false
+	for i, raw := range lines {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			if inBlock {
+				continue
+			}
+			continue
+		}
+		if !strings.HasPrefix(trimmed, "import ") {
+			if inBlock {
+				break
+			}
+			continue
+		}
+		imp, ok := parseLSPImportLine(raw, i)
+		if !ok {
+			if inBlock {
+				break
+			}
+			continue
+		}
+		inBlock = true
+		imports = append(imports, imp)
+	}
+	return imports
+}
+
+func parseLSPImportLine(line string, lineIndex int) (lspImportLine, bool) {
+	re := regexp.MustCompile(`^\s*import\s+(?:(std|plugin|library|lib)\s+)?"([^"]+)"(?:\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?\s*;?\s*$`)
+	match := re.FindStringSubmatch(line)
+	if match == nil {
+		return lspImportLine{}, false
+	}
+
+	kind := match[1]
+	if kind == "" {
+		kind = "file"
+	}
+	path := match[2]
+	alias := match[3]
+	if alias == "" {
+		switch kind {
+		case "std":
+			alias = path
+		case "library", "lib":
+			alias = defaultLibraryAlias(path)
+		default:
+			alias = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+		}
+	}
+
+	key := kind + ":" + filepath.ToSlash(path) + ":" + alias
+	return lspImportLine{
+		Line:  lineIndex,
+		Text:  line,
+		Kind:  kind,
+		Path:  path,
+		Alias: alias,
+		Key:   key,
+	}, true
+}
+
+func usedImportAliases(text string, imports []lspImportLine) map[string]bool {
+	importLines := map[int]bool{}
+	for _, imp := range imports {
+		importLines[imp.Line] = true
+	}
+
+	used := map[string]bool{}
+	for _, imp := range imports {
+		for _, r := range identifierRangesInText(text, imp.Alias) {
+			if !importLines[r.Line] {
+				used[imp.Alias] = true
+				break
+			}
+		}
+	}
+	return used
 }
 
 func createMissingFunctionAction(uri string, text string, pos Position, diagnostics []map[string]any) (CodeAction, bool) {
@@ -2294,12 +2489,14 @@ func handleLSPMessage(msg LSPMessage) {
 					"definitionProvider":         true,
 					"referencesProvider":         true,
 					"renameProvider":             true,
-					"codeActionProvider":         true,
-					"inlayHintProvider":          true,
-					"documentSymbolProvider":     true,
-					"hoverProvider":              true,
-					"implementationProvider":     true,
-					"callHierarchyProvider":      true,
+					"codeActionProvider": map[string]any{
+						"codeActionKinds": []string{"quickfix", "source.organizeImports"},
+					},
+					"inlayHintProvider":      true,
+					"documentSymbolProvider": true,
+					"hoverProvider":          true,
+					"implementationProvider": true,
+					"callHierarchyProvider":  true,
 				},
 			},
 		})
@@ -2790,7 +2987,7 @@ func publishDiagnosticsWithMode(uri string, text string, includeSlowChecks bool)
 		})
 	}
 
-	if includeSlowChecks && len(parseDiagnostics) == 0 {
+	if includeSlowChecks {
 		diagnostics = append(diagnostics, semanticDiagnostics(uri, text)...)
 	}
 	if includeSlowChecks {
@@ -3711,19 +3908,69 @@ func importAliasForPath(path string) string {
 }
 
 func dedupeCompletionItems(items []CompletionItem) []CompletionItem {
-	seen := map[string]bool{}
+	seen := map[string]int{}
 	result := []CompletionItem{}
 
 	for _, item := range items {
-		if seen[item.Label] {
+		if existingIndex, ok := seen[item.Label]; ok {
+			result[existingIndex] = mergeCompletionItems(result[existingIndex], item)
 			continue
 		}
 
-		seen[item.Label] = true
+		seen[item.Label] = len(result)
 		result = append(result, item)
 	}
 
 	return result
+}
+
+func mergeCompletionItems(base CompletionItem, incoming CompletionItem) CompletionItem {
+	if base.Kind == 0 {
+		base.Kind = incoming.Kind
+	}
+	if base.Detail == "" {
+		base.Detail = incoming.Detail
+	}
+	if base.InsertText == "" {
+		base.InsertText = incoming.InsertText
+	}
+	if base.InsertTextFormat == 0 {
+		base.InsertTextFormat = incoming.InsertTextFormat
+	}
+	if base.SortText == "" {
+		base.SortText = incoming.SortText
+	}
+	if base.TextEdit == nil {
+		base.TextEdit = incoming.TextEdit
+	}
+
+	base.AdditionalTextEdits = mergeTextEdits(base.AdditionalTextEdits, incoming.AdditionalTextEdits)
+	return base
+}
+
+func mergeTextEdits(base []TextEdit, incoming []TextEdit) []TextEdit {
+	if len(incoming) == 0 {
+		return base
+	}
+
+	for _, edit := range incoming {
+		alreadyExists := false
+		for _, existing := range base {
+			if existing.Range.Start.Line == edit.Range.Start.Line &&
+				existing.Range.Start.Character == edit.Range.Start.Character &&
+				existing.Range.End.Line == edit.Range.End.Line &&
+				existing.Range.End.Character == edit.Range.End.Character &&
+				existing.NewText == edit.NewText {
+				alreadyExists = true
+				break
+			}
+		}
+		if !alreadyExists {
+			base = append(base, edit)
+		}
+	}
+
+	return base
 }
 
 func rankedCompletionItems(items []CompletionItem) []CompletionItem {
@@ -4080,6 +4327,17 @@ func applyIndexAccessType(typ string, count int) string {
 }
 
 func resolveReceiverPath(scope *Scope, text string, pos Position, receiver string) (SymbolInfo, string, bool) {
+	if strings.Contains(receiver, "(") || strings.Contains(receiver, "[") {
+		typ := normalizeLSPType(scope, inferExprTypeFromText(scope, receiver))
+		if typ != "" && typ != "unknown" {
+			return SymbolInfo{
+				Name: receiver,
+				Kind: SymbolVariable,
+				Type: typ,
+			}, typ, true
+		}
+	}
+
 	parts := splitReceiverPath(receiver)
 	if len(parts) == 0 {
 		return SymbolInfo{}, "", false
@@ -4315,6 +4573,36 @@ func findLastDotIndex(before string) (int, bool) {
 	return -1, false
 }
 
+func nullableReceiverTextEdit(text string, pos Position) (TextEdit, bool) {
+	line := getLine(text, pos.Line)
+	before := ""
+	if pos.Character <= len(line) {
+		before = line[:pos.Character]
+	} else {
+		before = line
+	}
+
+	dotIndex, ok := findLastDotIndex(before)
+	if !ok {
+		return TextEdit{}, false
+	}
+
+	return TextEdit{
+		Range: LSPRange{
+			Start: Position{Line: pos.Line, Character: dotIndex},
+			End:   Position{Line: pos.Line, Character: dotIndex + 1},
+		},
+		NewText: "?.",
+	}, true
+}
+
+func addAdditionalTextEditToCompletions(items []CompletionItem, edit TextEdit) []CompletionItem {
+	for i := range items {
+		items[i].AdditionalTextEdits = mergeTextEdits(items[i].AdditionalTextEdits, []TextEdit{edit})
+	}
+	return items
+}
+
 func completionItemsForReceiver(scope *Scope, text string, pos Position, receiver string, hasParens bool) []CompletionItem {
 	sym, typ, ok := resolveReceiverPath(scope, text, pos, receiver)
 	if !ok {
@@ -4373,26 +4661,14 @@ func completionItemsForReceiver(scope *Scope, text string, pos Position, receive
 		items = getNativeTypeCompletions(typ, hasParens)
 	}
 
-	// Post-process to add ?. if accessing a nullable type
+	items = dedupeCompletionItems(items)
+
+	// Post-process after every completion source has run. This includes global
+	// methods like toString, so nullable receivers turn every completion into a
+	// safe-access completion consistently.
 	if isNullableLSPType(typ) {
-		line := getLine(text, pos.Line)
-		before := ""
-		if pos.Character <= len(line) {
-			before = line[:pos.Character]
-		} else {
-			before = line
-		}
-		if dotIndex, shouldReplaceDot := findLastDotIndex(before); shouldReplaceDot {
-			edit := TextEdit{
-				Range: LSPRange{
-					Start: Position{Line: pos.Line, Character: dotIndex},
-					End:   Position{Line: pos.Line, Character: dotIndex + 1},
-				},
-				NewText: "?.",
-			}
-			for i := range items {
-				items[i].AdditionalTextEdits = append(items[i].AdditionalTextEdits, edit)
-			}
+		if edit, ok := nullableReceiverTextEdit(text, pos); ok {
+			items = addAdditionalTextEditToCompletions(items, edit)
 		}
 	}
 
@@ -4694,7 +4970,7 @@ func receiverBeforeDot(text string) string {
 			continue
 		}
 
-		if isIdentChar(ch) || ch == '.' || ch == '?' {
+		if isIdentChar(ch) || ch == '.' || ch == '?' || ch == ':' {
 			i--
 			continue
 		}

@@ -183,13 +183,18 @@ func runSourceCommand(args []string) {
 	cliArgs := []string{}
 
 	disableCache := false
+	disableJIT := false
 	filteredArgs := []string{}
+
+	if os.Getenv("TINY_DISABLE_CACHE") == "1" {
+		disableCache = true
+	}
+	if os.Getenv("TINY_DISABLE_JIT") == "1" {
+		disableJIT = true
+	}
+
 	for _, arg := range args {
-		if arg == "--disable-cache" {
-			disableCache = true
-		} else {
-			filteredArgs = append(filteredArgs, arg)
-		}
+		filteredArgs = append(filteredArgs, arg)
 	}
 
 	if len(filteredArgs) >= 1 {
@@ -202,6 +207,8 @@ func runSourceCommand(args []string) {
 		if !ok {
 			LangError(ErrorRuntime, "usage: tiny run <file.tiny> or create tiny.json with tiny init")
 		}
+
+		disableCache = !config.CompilerOptions.BytecodeCache
 
 		entryFile = config.Entry
 	} else {
@@ -217,22 +224,22 @@ func runSourceCommand(args []string) {
 
 	hash, err := hashTinyProject(entryFile, sourceText)
 	if err != nil {
-		compileAndRun(entryFile, cliArgs)
+		compileAndRun(entryFile, cliArgs, disableJIT)
 		return
 	}
 
 	cachePath, err := tinyCachePath(entryFile, hash)
 	if !disableCache && err == nil && fileExists(cachePath) {
-		runBytecodeFile(cachePath)
+		runBytecodeFile(cachePath, disableJIT)
 		return
 	}
 
 	if !disableCache {
 		deleteTinyCacheContent(entryFile)
 		saveBytecodeFile(entryFile, cachePath, true)
-		runBytecodeFile(cachePath)
+		runBytecodeFile(cachePath, disableJIT)
 	} else {
-		compileAndRun(entryFile, cliArgs)
+		compileAndRun(entryFile, cliArgs, disableJIT)
 	}
 }
 
@@ -261,8 +268,8 @@ func deleteTinyCacheContent(entryFile string) {
 	}
 }
 
-func runBytecodeFile(path string) {
-	mainBytecode, functions, classes, interfaces, globalIndex := LoadBytecode(path)
+func runBytecodeFile(path string, disableJit bool) {
+	mainBytecode, functions, classes, interfaces, _ := LoadBytecode(path)
 
 	mainBytecode = OptimizeBytecode(mainBytecode)
 
@@ -271,7 +278,14 @@ func runBytecodeFile(path string) {
 		functions[name] = fn
 	}
 
-	vm := NewVM(mainBytecode, functions, classes, interfaces, globalIndex, false)
+	vm := NewVM(VMInfo{
+		MainInstructions: mainBytecode,
+		Functions:        functions,
+		Classes:          classes,
+		Interfaces:       interfaces,
+		Packed:           false,
+		JITDisabled:      disableJit,
+	})
 	SetPluginSearchPaths(configuredPluginSearchPaths(normalizeTarget("")))
 	vm.SetCLIArgs(getScriptArgs())
 	vm.Run()
@@ -293,11 +307,11 @@ func saveBytecodeFile(entryFile string, outFile string, cache bool) {
 	SaveBytecode(outFile, mainBytecode, functions, classes, interfaces, globalIndex, cache)
 }
 
-func compileAndRun(entryFile string, cliArgs []string) {
+func compileAndRun(entryFile string, cliArgs []string, disableJit bool) {
 	program := LoadProgram(entryFile)
 
 	compiler := NewCompiler()
-	mainBytecode, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
+	mainBytecode, functions, classes, interfaces, _ := compiler.CompileProgram(program)
 
 	mainBytecode = OptimizeBytecode(mainBytecode)
 
@@ -306,7 +320,14 @@ func compileAndRun(entryFile string, cliArgs []string) {
 		functions[name] = fn
 	}
 
-	vm := NewVM(mainBytecode, functions, classes, interfaces, globalIndex, false)
+	vm := NewVM(VMInfo{
+		MainInstructions: mainBytecode,
+		Functions:        functions,
+		Classes:          classes,
+		Interfaces:       interfaces,
+		Packed:           false,
+		JITDisabled:      disableJit,
+	})
 	SetPluginSearchPaths(configuredPluginSearchPaths(normalizeTarget("")))
 	vm.SetCLIArgs(cliArgs)
 	vm.Run()
@@ -337,5 +358,5 @@ func runBytecodeCommand(args []string) {
 		LangError(ErrorRuntime, "usage: tiny run <file.tbc>")
 	}
 
-	runBytecodeFile(args[0])
+	runBytecodeFile(args[0], false)
 }

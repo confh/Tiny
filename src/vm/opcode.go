@@ -146,6 +146,9 @@ const (
 	OP_ADD_PROPERTY_LOCAL_CONST
 	OP_ADD_PROPERTY_LOCAL_PROPERTY
 	OP_ADD_LOCAL_PROPERTIES_STORE
+	OP_JUMP_PROPERTY_LOCAL_FALSE
+	OP_JUMP_PROPERTY_LOCAL_TRUE
+	OP_ARRAY_INDEX_LOCAL_STORE
 )
 
 type Instruction struct {
@@ -331,6 +334,19 @@ type AddLocalPropertiesStoreInfo struct {
 	LocalSlot  int
 	ObjectSlot int
 	Names      []string
+}
+
+type JumpPropertyLocalInfo struct {
+	Slot   int
+	Name   string
+	Target int
+}
+
+type ArrayIndexLocalStoreInfo struct {
+	ArraySlot int
+	IndexSlot int
+	DestSlot  int
+	Store     VariableInfo
 }
 
 type IncrementInfo struct {

@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	webview "github.com/abemedia/go-webview"
+	json "github.com/goccy/go-json"
 	"github.com/gorilla/websocket"
 
 	_ "github.com/abemedia/go-webview/embedded"
@@ -40,6 +41,17 @@ type ArrayValue struct {
 }
 
 type ObjectValue map[any]TinyValue
+
+func (ov ObjectValue) MarshalJSON() ([]byte, error) {
+	cleanMap := make(map[string]TinyValue)
+
+	for key, val := range ov {
+		stringKey := fmt.Sprintf("%v", key)
+		cleanMap[stringKey] = val
+	}
+
+	return json.Marshal(cleanMap)
+}
 
 type NativeTaskValue struct {
 	Done chan TaskResult
@@ -99,6 +111,53 @@ type NativeServerValue struct {
 	httpServer     *http.Server
 	closed         bool
 	Workers        *VMPool
+}
+
+type ValidateType = byte
+
+const (
+	String ValidateType = iota
+	Number
+	Bool
+	ObjectSchema
+	ArraySchema
+	EnumSchema
+	UnionSchema
+	AnySchema
+)
+
+type NativeValidateType struct {
+	Name         string
+	Type         ValidateType
+	Required     bool
+	Nullable     bool
+	HasDefault   bool
+	Default      TinyValue
+	Message      string
+	MinLen       *int
+	MaxLen       *int
+	ExactLen     *int
+	MinNum       *float64
+	MaxNum       *float64
+	NonEmpty     bool
+	Email        bool
+	Url          bool
+	Regex        string
+	Trim         bool
+	IntOnly      bool
+	Positive     bool
+	ItemSchema   *NativeValidateType
+	Fields       []*NativeValidateType
+	Strict       bool
+	EnumValues   []TinyValue
+	UnionSchemas []*NativeValidateType
+	RefineFn     *FunctionValue
+	TransformFn  *FunctionValue
+	WebSource    string
+}
+
+type NativeValidateTop struct {
+	Schema *NativeValidateType
 }
 
 type NativeWebViewValue struct {
@@ -369,6 +428,8 @@ func TypeNameStandard(value TinyValue) string {
 		return "bool"
 	case ArrayValue:
 		return "array"
+	case *ArrayValue:
+		return "array"
 	case NullValue, NullExpr:
 		return "null"
 	case ObjectValue:
@@ -386,6 +447,10 @@ func TypeNameStandard(value TinyValue) string {
 		return "<function " + v.Name + ">"
 	case NativeServerValue:
 		return "server"
+	case *NativeValidateTop:
+		return "schema"
+	case *NativeValidateType:
+		return "schema type"
 	case *NativeServerValue:
 		return "server"
 	case *NativeTcpServerValue:
@@ -431,7 +496,7 @@ func TypeNameStandard(value TinyValue) string {
 	case *NamespaceMemberRef:
 		return "namespace member ref"
 	default:
-		return fmt.Sprintf("%T", value)
+		return fmt.Sprintf("%T", value.Value)
 	}
 }
 
@@ -464,6 +529,30 @@ func valueToJSONCompatible(value TinyValue) any {
 
 		return result
 
+	case *ObjectValue:
+		if v == nil {
+			return nil
+		}
+		return valueToJSONCompatible(NewNative(*v))
+
+	case WasmObjectValue:
+		if v.VM == nil {
+			return nil
+		}
+		if obj, ok := v.VM.wasmObjectToObjectValue(v); ok {
+			return valueToJSONCompatible(NewNative(obj))
+		}
+		return nil
+
+	case *WasmObjectValue:
+		if v == nil || v.VM == nil {
+			return nil
+		}
+		if obj, ok := v.VM.wasmObjectToObjectValue(*v); ok {
+			return valueToJSONCompatible(NewNative(obj))
+		}
+		return nil
+
 	case ArrayValue:
 		result := make([]any, len(v.Elements))
 
@@ -474,6 +563,9 @@ func valueToJSONCompatible(value TinyValue) any {
 		return result
 
 	case *ArrayValue:
+		if v == nil {
+			return nil
+		}
 		result := make([]any, len(v.Elements))
 
 		for i, item := range v.Elements {
@@ -481,6 +573,24 @@ func valueToJSONCompatible(value TinyValue) any {
 		}
 
 		return result
+
+	case WasmArrayValue:
+		if v.VM == nil {
+			return nil
+		}
+		if arr, ok := v.VM.wasmArrayToArrayValue(v); ok {
+			return valueToJSONCompatible(NewNative(arr))
+		}
+		return nil
+
+	case *WasmArrayValue:
+		if v == nil || v.VM == nil {
+			return nil
+		}
+		if arr, ok := v.VM.wasmArrayToArrayValue(*v); ok {
+			return valueToJSONCompatible(NewNative(arr))
+		}
+		return nil
 
 	case BufferValue:
 		return v.Bytes
@@ -574,13 +684,144 @@ func jsonToTinyValue(value any) TinyValue {
 	return ToValue(value)
 }
 
+const prettyIndent = "    " // 4 spaces
+
+func prettyIndentText(level int) string {
+	if level <= 0 {
+		return ""
+	}
+	return strings.Repeat(prettyIndent, level)
+}
+
+func formatPrettyObject(v ObjectValue, indent int, forPrint bool) string {
+	type objectEntry struct {
+		keyText string
+		value   TinyValue
+	}
+
+	className, isClass := v["__class"]
+
+	hiddenClassFields := map[string]bool{
+		"__class":          true,
+		"__constFields":    true,
+		"__privateFields":  true,
+		"__privateMethods": true,
+	}
+
+	entries := make([]objectEntry, 0, len(v))
+
+	for key, item := range v {
+		keyText := valueToString(ToValue(key), false)
+
+		if isClass && hiddenClassFields[keyText] {
+			continue
+		}
+
+		entries = append(entries, objectEntry{
+			keyText: keyText,
+			value:   item,
+		})
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].keyText < entries[j].keyText
+	})
+
+	if len(entries) == 0 {
+		if isClass {
+			name, _ := className.Value.(string)
+			if name == "" {
+				name = "<unknown>"
+			}
+			return "class " + name + " {}"
+		}
+
+		return "{}"
+	}
+
+	currentIndent := prettyIndentText(indent)
+	fieldIndent := prettyIndentText(indent + 1)
+
+	parts := make([]string, 0, len(entries))
+
+	for _, entry := range entries {
+		val := formatPrettyObjectFieldValue(entry.value, indent+1, forPrint)
+		parts = append(parts, fieldIndent+entry.keyText+": "+val)
+	}
+
+	body := strings.Join(parts, ",\n")
+
+	if isClass {
+		name, _ := className.Value.(string)
+		if name == "" {
+			name = "<unknown>"
+		}
+
+		return "class " + name + " {\n" + body + "\n" + currentIndent + "}"
+	}
+
+	return "{\n" + body + "\n" + currentIndent + "}"
+}
+
+func formatPrettyObjectFieldValue(value TinyValue, indent int, forPrint bool) string {
+	if !value.IsInt {
+		switch v := value.Value.(type) {
+		case ObjectValue:
+			return formatPrettyObject(v, indent, forPrint)
+
+		case *ObjectValue:
+			if v == nil {
+				return "null"
+			}
+			return formatPrettyObject(*v, indent, forPrint)
+		}
+	}
+
+	val := valueToString(value, false)
+
+	if value.IsInt {
+		if forPrint {
+			val = "\033[36m" + val + "\033[0m"
+		}
+		return val
+	}
+
+	if _, ok := value.Value.(string); ok {
+		val = "'" + val + "'"
+		if forPrint {
+			val = "\033[32m" + val + "\033[0m"
+		}
+		return val
+	}
+
+	return indentPrettyMultiline(val, indent)
+}
+
+func indentPrettyMultiline(s string, indent int) string {
+	if !strings.Contains(s, "\n") {
+		return s
+	}
+
+	prefix := prettyIndentText(indent)
+
+	lines := strings.Split(s, "\n")
+	for i := 1; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) == "" {
+			continue
+		}
+		lines[i] = prefix + lines[i]
+	}
+
+	return strings.Join(lines, "\n")
+}
+
 func valueToString(value TinyValue, forPrint ...bool) string {
 	if value.IsInt {
 		return strconv.Itoa(value.AsInt)
 	}
 
 	isForPrint := func() bool {
-		if len(forPrint) > 1 && forPrint[0] {
+		if len(forPrint) > 0 && forPrint[0] {
 			return true
 		}
 
@@ -618,6 +859,15 @@ func valueToString(value TinyValue, forPrint ...bool) string {
 
 		return "[" + strings.Join(parts, ", ") + "]"
 
+	case WasmArrayValue:
+		return v.String()
+
+	case *WasmArrayValue:
+		if v == nil {
+			return "null"
+		}
+		return v.String()
+
 	case ErrorValue:
 		return v.Kind + ": " + v.Message
 
@@ -627,51 +877,27 @@ func valueToString(value TinyValue, forPrint ...bool) string {
 		return "null"
 	case nil:
 		return "nil"
+
+	case Class:
+		return "<class " + v.Name + ">"
+
 	case ObjectValue:
-		type objectEntry struct {
-			keyText string
-			value   TinyValue
+		return formatPrettyObject(v, 0, isForPrint())
+
+	case *ObjectValue:
+		if v == nil {
+			return "null"
 		}
+		return formatPrettyObject(*v, 0, isForPrint())
 
-		entries := make([]objectEntry, 0, len(v))
+	case WasmObjectValue:
+		return v.String()
 
-		for key, item := range v {
-			entries = append(entries, objectEntry{
-				keyText: valueToString(ToValue(key)),
-				value:   item,
-			})
+	case *WasmObjectValue:
+		if v == nil {
+			return "null"
 		}
-
-		sort.Slice(entries, func(i, j int) bool {
-			return entries[i].keyText < entries[j].keyText
-		})
-
-		parts := make([]string, 0, len(entries))
-
-		for _, entry := range entries {
-			val := valueToString(entry.value, false)
-			if entry.value.IsInt {
-				if isForPrint() {
-					val = "\033[36m" + val + "\033[0m"
-				}
-			} else if _, ok := entry.value.Value.(string); ok {
-				val = "'" + val + "'"
-				if isForPrint() {
-					val = "\033[32m" + val + "\033[0m"
-				}
-			}
-			parts = append(parts, entry.keyText+": "+val)
-		}
-
-		startParen := "{"
-		endParen := "}"
-
-		if len(parts) > 0 {
-			startParen = "{ "
-			endParen = " }"
-		}
-
-		return startParen + strings.Join(parts, ", ") + endParen
+		return v.String()
 
 	case FunctionValue:
 		return "<function " + v.Name + ">"
@@ -681,6 +907,8 @@ func valueToString(value TinyValue, forPrint ...bool) string {
 		return "<server :" + strconv.Itoa(v.Port) + ">"
 	case *NativeTcpServerValue:
 		return "<tcp server :" + strconv.Itoa(v.Port) + ">"
+	case *NativeWebViewValue:
+		return "<webview>"
 	case *NativeTcpConnectionValue:
 		return "<tcp connection :" + v.Connection.RemoteAddr().String() + ">"
 	case *NativePluginValue:
@@ -712,7 +940,7 @@ func valueToString(value TinyValue, forPrint ...bool) string {
 	case *NativeProcessValue:
 		return "<process>"
 	default:
-		return fmt.Sprintf("%v", v)
+		return strings.NewReplacer("*vm.", "", "vm.", "").Replace(fmt.Sprintf("%T", v))
 	}
 }
 
@@ -726,7 +954,7 @@ func asString(value TinyValue, vm *VM) string {
 }
 
 func asObject(value TinyValue, vm *VM) ObjectValue {
-	objectValue, ok := value.Value.(ObjectValue)
+	objectValue, ok := vm.valueAsObjectForRead(value)
 	if !ok {
 		vm.runtimeError(ErrorSyntax, "expected object, got %s", TypeName(value))
 	}
@@ -744,7 +972,7 @@ func asBuffer(value TinyValue, vm *VM) *BufferValue {
 }
 
 func asArray(value TinyValue, vm *VM) *ArrayValue {
-	arrayValue, ok := value.Value.(*ArrayValue)
+	arrayValue, ok := vm.valueAsArrayForRead(value)
 	if !ok {
 		vm.runtimeError(ErrorSyntax, "expected array, got %s", TypeName(value))
 	}

@@ -64,7 +64,22 @@ func stdArrayFrom(vm *VM, args []TinyValue) {
 		copy(dst, v.Elements)
 		vm.push(NewNative(&ArrayValue{Elements: dst}))
 
+	case ArrayValue:
+		dst := make([]TinyValue, len(v.Elements))
+		copy(dst, v.Elements)
+		vm.push(NewNative(&ArrayValue{Elements: dst}))
+
+	case WasmArrayValue:
+		arr, ok := vm.valueAsArrayForRead(args[0])
+		if !ok {
+			vm.runtimeError(ErrorType, "type %s cannot be turned into an array", TypeName(args[0]))
+			return
+		}
+		dst := make([]TinyValue, len(arr.Elements))
+		copy(dst, arr.Elements)
+		vm.push(NewNative(&ArrayValue{Elements: dst}))
+
 	default:
-		vm.runtimeError(ErrorType, "type %s cannot be turned into an array", TypeName(ToValue(v)))
+		vm.runtimeError(ErrorType, "type %s cannot be turned into an array", TypeName(args[0]))
 	}
 }

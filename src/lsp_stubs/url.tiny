@@ -1,0 +1,25 @@
+// Encodes a string so it is safe to use as a URL query value.
+//
+// Spaces are encoded using query-style escaping.
+//
+// Example:
+//
+// ```tiny
+// import std "url"
+//
+// let encoded = url.encode("hello world & x=1")
+// // "hello+world+%26+x%3D1"
+// ```
+export fn encode(str: string): string {}
+
+// Decodes a URL query-encoded string back into normal text.
+//
+// Example:
+//
+// ```tiny
+// import std "url"
+//
+// let decoded = url.decode("hello+world+%26+x%3D1")
+// // "hello world & x=1"
+// ```
+export fn decode(str: string): string {}

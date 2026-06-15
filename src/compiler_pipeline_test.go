@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -59,7 +60,7 @@ func runTinyBytecode(
 	functions map[string]vm.Function,
 	classes map[string]vm.Class,
 	interfaces map[string]vm.Interface,
-	globalIndex map[string]int,
+	_ map[string]int,
 	args ...string,
 ) tinyRunResult {
 	t.Helper()
@@ -88,7 +89,13 @@ func runTinyBytecode(
 			panicValue = recover()
 		}()
 
-		tinyVM := vm.NewVM(mainInstructions, functions, classes, interfaces, globalIndex, false)
+		tinyVM := vm.NewVM(vm.VMInfo{
+			MainInstructions: mainInstructions,
+			Functions:        functions,
+			Classes:          classes,
+			Interfaces:       interfaces,
+			Packed:           false,
+		})
 		tinyVM.SetCLIArgs(args)
 		tinyVM.Run()
 	}()
@@ -706,6 +713,527 @@ func TestTinyPipelineArrayLoopJit(t *testing.T) {
 	}
 }
 
+func TestTinyPipelineJitOutlinesUnsafeNumericWhileLoop(t *testing.T) {
+	dir := t.TempDir()
+
+	mainContent := strings.Join([]string{
+		`import std "io" as io;`,
+		`fn wrapper(n: number): number {`,
+		`    io.println("before");`,
+		`    let total = 0;`,
+		`    let i = 0;`,
+		`    while i < n {`,
+		`        i = i + 1;`,
+		`        if i == 2 {`,
+		`            continue;`,
+		`        }`,
+		`        if i > 5 {`,
+		`            break;`,
+		`        }`,
+		`        total = total + i;`,
+		`    }`,
+		`    io.println("after");`,
+		`    return total;`,
+		`}`,
+		`io.println(wrapper(10).toString());`,
+	}, "\n")
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main.tiny: %v", err)
+	}
+
+	mainInstructions, functions, classes, interfaces, globalIndex := compileTinyFile(t, mainPath)
+	helperName := ""
+	for name := range functions {
+		if strings.HasPrefix(name, "__jit_region_wrapper_") {
+			helperName = name
+			break
+		}
+	}
+	if helperName == "" {
+		t.Fatalf("expected wrapper loop to be outlined into a JIT helper")
+	}
+
+	tinyVM := vm.NewVM(vm.VMInfo{
+		MainInstructions: mainInstructions,
+		Functions:        functions,
+		Classes:          classes,
+		Interfaces:       interfaces,
+		Packed:           false,
+	})
+	val := reflect.ValueOf(tinyVM).Elem()
+	jitFuncs := val.FieldByName("jitFunctions")
+	if !jitFuncs.IsValid() {
+		t.Fatalf("jitFunctions field not found on VM")
+	}
+	jitFn := jitFuncs.MapIndex(reflect.ValueOf(helperName))
+	if !jitFn.IsValid() || jitFn.IsNil() {
+		t.Fatalf("expected outlined helper %s to be JIT-compiled", helperName)
+	}
+
+	out := requireTinySuccess(t, runTinyBytecode(t, mainInstructions, functions, classes, interfaces, globalIndex))
+	const want = "before\nafter\n13\n"
+	if out != want {
+		t.Fatalf("unexpected output: want %q, got %q", want, out)
+	}
+}
+
+func TestTinyPipelineJitOutliningRejectsUnsafeLoops(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{
+			name: "return crosses loop boundary",
+			content: strings.Join([]string{
+				`fn wrapper(n: number): number {`,
+				`    let total = 0;`,
+				`    let i = 0;`,
+				`    while i < n {`,
+				`        if i > 3 {`,
+				`            return total;`,
+				`        }`,
+				`        total = total + i;`,
+				`        i = i + 1;`,
+				`    }`,
+				`    return total;`,
+				`}`,
+			}, "\n"),
+		},
+		{
+			name: "stdlib call inside loop",
+			content: strings.Join([]string{
+				`import std "io" as io;`,
+				`fn wrapper(n: number): number {`,
+				`    let total = 0;`,
+				`    let i = 0;`,
+				`    while i < n {`,
+				`        io.println(i);`,
+				`        total = total + i;`,
+				`        i = i + 1;`,
+				`    }`,
+				`    return total;`,
+				`}`,
+			}, "\n"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			mainPath := filepath.Join(dir, "main.tiny")
+			if err := os.WriteFile(mainPath, []byte(tt.content), 0644); err != nil {
+				t.Fatalf("failed to write main.tiny: %v", err)
+			}
+
+			_, functions, _, _, _ := compileTinyFile(t, mainPath)
+			for name := range functions {
+				if strings.HasPrefix(name, "__jit_region_wrapper_") {
+					t.Fatalf("expected loop to remain interpreted, but generated helper %s", name)
+				}
+			}
+		})
+	}
+}
+
+func TestTinyPipelineJitOutlinesNestedNumericForLoopWithStdlibPoisonPill(t *testing.T) {
+	dir := t.TempDir()
+
+	mainContent := strings.Join([]string{
+		`import std "http";`,
+		`fn mandelbrot(px: number, py: number, maxIter: number): number {`,
+		`    let cr = py - 0.5`,
+		`    let ci = px`,
+		`    let zr = 0.0`,
+		`    let zi = 0.0`,
+		`    let i = 0`,
+		`    let maxI = maxIter`,
+		`    while i < maxI {`,
+		`        let zr2 = zr * zr`,
+		`        let zi2 = zi * zi`,
+		`        if zr2 + zi2 > 4.0 {`,
+		`            return i`,
+		`        }`,
+		`        let temp = zr * zi * 2.0`,
+		`        zr = zr2 - zi2 + cr`,
+		`        zi = temp + ci`,
+		`        i = i + 1`,
+		`    }`,
+		`    return maxI`,
+		`}`,
+		`fn run_mandelbrot(size: number, maxIter: number): number {`,
+		`    http.server(3000)`,
+		`    let count = 0`,
+		`    let size_f = (size)`,
+		`    for let y = 0; y < size; y = y + 1 {`,
+		`        let py = ((y) / size_f) * 2.5 - 1.25`,
+		`        for let x = 0; x < size; x = x + 1 {`,
+		`            let px = ((x) / size_f) * 3.0 - 2.0`,
+		`            count = count + mandelbrot(px, py, maxIter)`,
+		`        }`,
+		`    }`,
+		`    return count`,
+		`}`,
+	}, "\n")
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main.tiny: %v", err)
+	}
+
+	_, functions, _, _, _ := compileTinyFile(t, mainPath)
+	helperName := ""
+	for name := range functions {
+		if strings.HasPrefix(name, "__jit_region_run_mandelbrot_") {
+			helperName = name
+			break
+		}
+	}
+	if helperName == "" {
+		t.Fatalf("expected nested numeric for loop to be outlined into a JIT helper")
+	}
+
+	tinyVM := vm.NewVM(vm.VMInfo{
+		MainInstructions: nil,
+		Functions:        functions,
+		Classes:          nil,
+		Interfaces:       nil,
+		Packed:           false,
+	})
+	val := reflect.ValueOf(tinyVM).Elem()
+	jitFuncs := val.FieldByName("jitFunctions")
+	if !jitFuncs.IsValid() {
+		t.Fatalf("jitFunctions field not found on VM")
+	}
+	jitFn := jitFuncs.MapIndex(reflect.ValueOf(helperName))
+	if !jitFn.IsValid() || jitFn.IsNil() {
+		t.Fatalf("expected outlined helper %s to be JIT-compiled", helperName)
+	}
+}
+
+func TestTinyPipelineJitOutlinesNumericLoopWithMathIntrinsics(t *testing.T) {
+	dir := t.TempDir()
+
+	mainContent := strings.Join([]string{
+		`import std "http";`,
+		`import std "math";`,
+		`fn hot_math(n: number): number {`,
+		`    http.server(3000)`,
+		`    let total = 0.0`,
+		`    for let i = 1; i < n; i = i + 1 {`,
+		`        let root = math.sqrt(i)`,
+		`        total = total + math.abs(root - math.floor(root))`,
+		`        total = total + math.pow(2, 3)`,
+		`    }`,
+		`    return total`,
+		`}`,
+	}, "\n")
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main.tiny: %v", err)
+	}
+
+	_, functions, _, _, _ := compileTinyFile(t, mainPath)
+	helperName := ""
+	for name := range functions {
+		if strings.HasPrefix(name, "__jit_region_hot_math_") {
+			helperName = name
+			break
+		}
+	}
+	if helperName == "" {
+		t.Fatalf("expected math-heavy numeric loop to be outlined into a JIT helper")
+	}
+
+	tinyVM := vm.NewVM(vm.VMInfo{
+		MainInstructions: nil,
+		Functions:        functions,
+		Classes:          nil,
+		Interfaces:       nil,
+		Packed:           false,
+	})
+	val := reflect.ValueOf(tinyVM).Elem()
+	jitFuncs := val.FieldByName("jitFunctions")
+	if !jitFuncs.IsValid() {
+		t.Fatalf("jitFunctions field not found on VM")
+	}
+	jitFn := jitFuncs.MapIndex(reflect.ValueOf(helperName))
+	if !jitFn.IsValid() || jitFn.IsNil() {
+		t.Fatalf("expected outlined helper %s to be JIT-compiled", helperName)
+	}
+}
+
+func TestTinyPipelineJitOutlinesObjectArrayAndStringRegions(t *testing.T) {
+	tests := []struct {
+		name   string
+		prefix string
+		body   []string
+	}{
+		{
+			name:   "object field mutation",
+			prefix: "__jit_region_object_hot_",
+			body: []string{
+				`fn object_hot(n: number): number {`,
+				`    http.server(3000)`,
+				`    let state = { total: 0, flag: false, label: "hot" }`,
+				`    for let i = 0; i < n; i = i + 1 {`,
+				`        state.total = state.total + i`,
+				`        state.flag = state.total > 10`,
+				`        state.label = state.label + "!"`,
+				`    }`,
+				`    return state.total`,
+				`}`,
+			},
+		},
+		{
+			name:   "array index and length",
+			prefix: "__jit_region_array_hot_",
+			body: []string{
+				`fn array_hot(n: number): number {`,
+				`    http.server(3000)`,
+				`    let items = [0, 1]`,
+				`    for let i = 0; i < n; i = i + 1 {`,
+				`        items[0] = items[0] + i`,
+				`        items.push(i)`,
+				`        let size = items.length()`,
+				`    }`,
+				`    return items[0]`,
+				`}`,
+			},
+		},
+		{
+			name:   "string concat and length",
+			prefix: "__jit_region_string_hot_",
+			body: []string{
+				`fn string_hot(n: number): number {`,
+				`    http.server(3000)`,
+				`    let s = ""`,
+				`    for let i = 0; i < n; i = i + 1 {`,
+				`        s = s + "x"`,
+				`        let size = s.length()`,
+				`    }`,
+				`    return s.length()`,
+				`}`,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			mainContent := strings.Join(append([]string{`import std "http";`}, tt.body...), "\n")
+			mainPath := filepath.Join(dir, "main.tiny")
+			if err := os.WriteFile(mainPath, []byte(mainContent), 0644); err != nil {
+				t.Fatalf("failed to write main.tiny: %v", err)
+			}
+
+			_, functions, _, _, _ := compileTinyFile(t, mainPath)
+			helperName := ""
+			for name := range functions {
+				if strings.HasPrefix(name, tt.prefix) {
+					helperName = name
+					break
+				}
+			}
+			if helperName == "" {
+				t.Fatalf("expected region to be outlined into a JIT helper")
+			}
+
+			tinyVM := vm.NewVM(vm.VMInfo{
+				MainInstructions: nil,
+				Functions:        functions,
+				Classes:          nil,
+				Interfaces:       nil,
+				Packed:           false,
+			})
+			val := reflect.ValueOf(tinyVM).Elem()
+			jitFuncs := val.FieldByName("jitFunctions")
+			if !jitFuncs.IsValid() {
+				t.Fatalf("jitFunctions field not found on VM")
+			}
+			jitFn := jitFuncs.MapIndex(reflect.ValueOf(helperName))
+			if !jitFn.IsValid() || jitFn.IsNil() {
+				t.Fatalf("expected outlined helper %s to be JIT-compiled", helperName)
+			}
+		})
+	}
+}
+
+func TestTinyPipelineStringBuildBenchmarkRegression(t *testing.T) {
+	dir := t.TempDir()
+
+	mainContent := strings.Join([]string{
+		`import std "io";`,
+		`fn string_build(n: number): number {`,
+		`    let s = ""`,
+		`    let checksum = 0`,
+		`    for let i = 0; i < n; i++ {`,
+		`        if i % 4 == 0 {`,
+		`            s = s + "a"`,
+		`        } else if i % 4 == 1 {`,
+		`            s = s + "bb"`,
+		`        } else if i % 4 == 2 {`,
+		`            s = s + "ccc"`,
+		`        } else {`,
+		`            s = s + "d"`,
+		`        }`,
+		`        if i % 50 == 0 {`,
+		`            checksum = checksum + s.length()`,
+		`        }`,
+		`    }`,
+		`    return checksum + s.length()`,
+		`}`,
+		`io.println(string_build(12000).toString())`,
+	}, "\n")
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main.tiny: %v", err)
+	}
+
+	result := runTinyFile(t, mainPath)
+	out := requireTinySuccess(t, result)
+	if strings.Contains(result.Stderr, "[JIT ERROR]") {
+		t.Fatalf("unexpected JIT error:\n%s", result.Stderr)
+	}
+	if strings.TrimSpace(out) != "2530920" {
+		t.Fatalf("unexpected string_build result: got %q want %q", strings.TrimSpace(out), "2530920")
+	}
+}
+
+func TestTinyPipelineJitMemoInvalidatesOnStdObjectMutation(t *testing.T) {
+	dir := t.TempDir()
+
+	mainContent := strings.Join([]string{
+		`import std "io" as io;`,
+		`import std "object" as object;`,
+		`fn sum_field(obj): number {`,
+		`    let total = 0;`,
+		`    for let i = 0; i < 1000; i++ {`,
+		`        total = total + obj.value;`,
+		`    }`,
+		`    return total;`,
+		`}`,
+		`let obj = { value: 1 };`,
+		`io.println(sum_field(obj).toString());`,
+		`object.set(obj, "value", 2);`,
+		`io.println(sum_field(obj).toString());`,
+		`object.delete(obj, "value");`,
+		`object.set(obj, "value", 3);`,
+		`io.println(sum_field(obj).toString());`,
+		`object.clear(obj);`,
+		`object.set(obj, "value", 4);`,
+		`io.println(sum_field(obj).toString());`,
+	}, "\n")
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main.tiny: %v", err)
+	}
+
+	result := runTinyFile(t, mainPath)
+	out := requireTinySuccess(t, result)
+	if strings.Contains(result.Stderr, "[JIT ERROR]") {
+		t.Fatalf("unexpected JIT error:\n%s", result.Stderr)
+	}
+
+	const want = "1000\n2000\n3000\n4000\n"
+	if out != want {
+		t.Fatalf("unexpected output: want %q, got %q", want, out)
+	}
+}
+
+func TestTinyPipelineJitOutliningRejectsDynamicStringMethods(t *testing.T) {
+	dir := t.TempDir()
+
+	mainContent := strings.Join([]string{
+		`import std "http";`,
+		`fn string_hot(n: number): number {`,
+		`    http.server(3000)`,
+		`    let s = "prefix"`,
+		`    let total = 0`,
+		`    for let i = 0; i < n; i = i + 1 {`,
+		`        if s.includes("x") {`,
+		`            total = total + 1`,
+		`        }`,
+		`        s = s + "x"`,
+		`    }`,
+		`    return total`,
+		`}`,
+	}, "\n")
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main.tiny: %v", err)
+	}
+
+	_, functions, _, _, _ := compileTinyFile(t, mainPath)
+	for name := range functions {
+		if strings.HasPrefix(name, "__jit_region_string_hot_") {
+			t.Fatalf("expected dynamic string method loop to remain interpreted, but generated helper %s", name)
+		}
+	}
+}
+
+func TestTinyPipelineJitOutlinesMultipleEscapingSetupValues(t *testing.T) {
+	dir := t.TempDir()
+
+	mainContent := strings.Join([]string{
+		`import std "http";`,
+		`fn mutate_stress(n: number): number {`,
+		`    http.server(3000)`,
+		`    let arr = [1, 2, 3, 4, 5, 6, 7, 8]`,
+		`    let obj = { count: 0, flips: 0, checksum: 1 }`,
+		`    let s = "tiny-language-jit-outline-test"`,
+		`    let slen = s.length()`,
+		`    let total = 0`,
+		`    for let i = 0; i < n; i = i + 1 {`,
+		`        let idx = i % 8`,
+		`        let old = arr[idx]`,
+		`        arr[idx] = old + idx + slen`,
+		`        obj.count = obj.count + arr[idx]`,
+		`        if arr[idx] % 5 == 0 {`,
+		`            obj.flips = obj.flips + 1`,
+		`            arr[idx] = arr[idx] - slen`,
+		`        } else {`,
+		`            obj.checksum = obj.checksum + (arr[idx] % 97)`,
+		`        }`,
+		`        total = total + arr[idx] + obj.flips`,
+		`    }`,
+		`    return total + obj.count + obj.flips + obj.checksum + arr[0] + arr[7]`,
+		`}`,
+	}, "\n")
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main.tiny: %v", err)
+	}
+
+	_, functions, _, _, _ := compileTinyFile(t, mainPath)
+	helperName := ""
+	for name := range functions {
+		if strings.HasPrefix(name, "__jit_region_mutate_stress_") {
+			helperName = name
+			break
+		}
+	}
+	if helperName == "" {
+		t.Fatalf("expected multiple-live-out loop to be outlined into a JIT helper")
+	}
+
+	tinyVM := vm.NewVM(vm.VMInfo{
+		MainInstructions: nil,
+		Functions:        functions,
+		Classes:          nil,
+		Interfaces:       nil,
+		Packed:           false,
+	})
+	val := reflect.ValueOf(tinyVM).Elem()
+	jitFuncs := val.FieldByName("jitFunctions")
+	if !jitFuncs.IsValid() {
+		t.Fatalf("jitFunctions field not found on VM")
+	}
+	jitFn := jitFuncs.MapIndex(reflect.ValueOf(helperName))
+	if !jitFn.IsValid() || jitFn.IsNil() {
+		t.Fatalf("expected outlined helper %s to be JIT-compiled", helperName)
+	}
+}
+
 func TestTinyPipelineJitDirectCallFromAnonymousFunction(t *testing.T) {
 	dir := t.TempDir()
 
@@ -813,7 +1341,36 @@ func TestTinyPipelineJitComprehensiveEdgeCases(t *testing.T) {
 		t.Fatalf("failed to write main.tiny: %v", err)
 	}
 
-	result := runTinyFile(t, mainPath)
+	mainInstructions, functions, classes, interfaces, globalIndex := compileTinyFile(t, mainPath)
+	tinyVM := vm.NewVM(vm.VMInfo{
+		MainInstructions: mainInstructions,
+		Functions:        functions,
+		Classes:          classes,
+		Interfaces:       interfaces,
+		Packed:           false,
+	})
+	val := reflect.ValueOf(tinyVM).Elem()
+	jitFuncs := val.FieldByName("jitFunctions")
+	if !jitFuncs.IsValid() {
+		t.Fatalf("jitFunctions field not found on VM")
+	}
+	compiledName := ""
+	for _, name := range jitFuncs.MapKeys() {
+		key := name.String()
+		if strings.HasPrefix(key, "__jit_region_f1_") {
+			compiledName = key
+			break
+		}
+	}
+	if compiledName == "" {
+		t.Fatalf("expected f1 loop to be outlined into a JIT helper")
+	}
+	jitFn := jitFuncs.MapIndex(reflect.ValueOf(compiledName))
+	if !jitFn.IsValid() || jitFn.IsNil() {
+		t.Fatalf("expected outlined helper %s to be JIT-compiled", compiledName)
+	}
+
+	result := runTinyBytecode(t, mainInstructions, functions, classes, interfaces, globalIndex)
 	out := requireTinySuccess(t, result)
 	if strings.Contains(result.Stderr, "[JIT ERROR]") {
 		t.Fatalf("unexpected JIT error:\n%s", result.Stderr)
@@ -828,6 +1385,89 @@ func TestTinyPipelineJitComprehensiveEdgeCases(t *testing.T) {
 		if lines[i] != val {
 			t.Errorf("line %d: got %q, want %q", i, lines[i], val)
 		}
+	}
+}
+
+func TestTinyPipelineJitForInObjectAggregation(t *testing.T) {
+	dir := t.TempDir()
+
+	mainContent := strings.Join([]string{
+		`import std "io" as io;`,
+		`import std "array" as array;`,
+		``,
+		`fn generate_logs() {`,
+		`    let logs = [];`,
+		`    for let i = 0; i < 1000; i++ {`,
+		`        let status = 200;`,
+		`        if i % 5 == 0 {`,
+		`            status = 500;`,
+		`        }`,
+		`        let time_ms = (i % 10) * 15 + 10;`,
+		`        let bytes_sent = (i % 3) * 500 + 100;`,
+		`        let success = true;`,
+		`        if status == 500 {`,
+		`            success = false;`,
+		`        }`,
+		``,
+		`        logs.push({`,
+		`            status: status,`,
+		`            time: time_ms,`,
+		`            bytes: bytes_sent,`,
+		`            success: success`,
+		`        });`,
+		`    }`,
+		`    return logs;`,
+		`}`,
+		``,
+		`fn aggregate(logs: array) {`,
+		`    let total_time = 0;`,
+		`    let total_bytes = 0;`,
+		`    let success_count = 0;`,
+		`    let fail_count = 0;`,
+		``,
+		`    for log in logs {`,
+		`        if log.success {`,
+		`            success_count = success_count + 1;`,
+		`            total_time = total_time + log.time;`,
+		`            total_bytes = total_bytes + log.bytes;`,
+		`        } else {`,
+		`            fail_count = fail_count + 1;`,
+		`        }`,
+		`    }`,
+		``,
+		`    return {`,
+		`        success_count: success_count,`,
+		`        fail_count: fail_count,`,
+		`        avg_time: total_time / success_count,`,
+		`        total_bytes: total_bytes`,
+		`    };`,
+		`}`,
+		``,
+		`let logs_data = generate_logs();`,
+		`let final_result = {};`,
+		`for let i = 0; i < 5000; i++ {`,
+		`    final_result = aggregate(logs_data);`,
+		`}`,
+		`io.println(final_result.success_count.toString());`,
+		`io.println(final_result.fail_count.toString());`,
+		`io.println(final_result.avg_time.toString());`,
+		`io.println(final_result.total_bytes.toString());`,
+	}, "\n")
+
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main.tiny: %v", err)
+	}
+
+	result := runTinyFile(t, mainPath)
+	out := requireTinySuccess(t, result)
+	if strings.Contains(result.Stderr, "[JIT ERROR]") {
+		t.Fatalf("unexpected JIT error:\n%s", result.Stderr)
+	}
+
+	const want = "800\n200\n85\n479500\n"
+	if out != want {
+		t.Fatalf("unexpected output: want %q, got %q", want, out)
 	}
 }
 
@@ -893,5 +1533,46 @@ func TestTinyPipelineJitComprehensiveEdgeCases(t *testing.T) {
 // 		}
 // 	}
 
-// 	tinyVM.Run()
 // }
+
+func TestJitDefaultParameters(t *testing.T) {
+	content := `
+	fn interpNumeric(n: number, dummy = 0): number {
+		let total = 0
+		let i = 0
+		while i < n {
+			total = total + i
+			i = i + 1
+		}
+		return total
+	}
+	`
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "test.tiny")
+	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+
+	program := LoadProgram(filePath)
+	compiler := NewCompiler()
+	mainBytecode, functions, classes, interfaces, _ := compiler.CompileProgram(program)
+
+	tinyVM := vm.NewVM(vm.VMInfo{
+		MainInstructions: mainBytecode,
+		Functions:        functions,
+		Classes:          classes,
+		Interfaces:       interfaces,
+		Packed:           false,
+	})
+
+	val := reflect.ValueOf(tinyVM).Elem()
+	jitFuncs := val.FieldByName("jitFunctions")
+	if !jitFuncs.IsValid() {
+		t.Fatalf("jitFunctions field not found on VM")
+	}
+
+	jitFn := jitFuncs.MapIndex(reflect.ValueOf("interpNumeric"))
+	if !jitFn.IsValid() || jitFn.IsNil() {
+		t.Fatalf("expected interpNumeric to be JIT-compiled but it was not")
+	}
+}

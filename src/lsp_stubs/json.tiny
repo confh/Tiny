@@ -1,3 +1,8 @@
+interface SafeParseResult {
+    success: bool,
+    data?: object
+}
+
 // Serializes the given object or array into a JSON string.
 export fn stringify(value: object | array): string {}
 
@@ -6,6 +11,9 @@ export fn pretty(value: object | array): string {}
 
 // Parses the specified JSON string and returns the resulting object.
 export fn parse(stringified: string): object {}
+
+// Safely parses the specified JSON string and returns the resulting object.
+export fn safeParse(stringified: string): SafeParseResult {}
 
 // Reads a JSON file and parses its contents as an object.
 export fn readFile(fileName: string): object {}

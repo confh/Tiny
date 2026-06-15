@@ -119,13 +119,13 @@ export fn delete(url: string, options?: RequestOptions): HttpResponse {}
 export fn downloadFile(filePath: string, url: string): any {}
 
 // Helper function to return a JSON response object.
-export fn json(data: any): any {}
+export fn json(data: object): any {}
 
 // Helper function to return a plain text response object.
-export fn text(data: any): any {}
+export fn text(data: string): any {}
 
 // Helper function to return an HTML response object.
-export fn html(data: any): any {}
+export fn html(data: string): any {}
 
 // Creates a response with a status code and body.
 export fn status(code: number, body: any): any {}

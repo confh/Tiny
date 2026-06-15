@@ -52,12 +52,14 @@ func websocketConnect(vm *VM, args []TinyValue) {
 	expectArgsRange(vm, "websocket.connect", args, 1, 2)
 
 	url := argString(vm, "websocket.connect", args, 0)
-	options := optionalObjectArg(args, 1)
+	options := optionalObjectArg(vm, args, 1)
 
 	header := http.Header{}
-	if h, ok := options["headers"].Value.(ObjectValue); ok {
-		for k, v := range h {
-			header.Set(valueToString(ToValue(k)), valueToString(v))
+	if hVal, exists := options["headers"]; exists {
+		if h, ok := vm.valueAsObjectForRead(hVal); ok {
+			for k, v := range h {
+				header.Set(valueToString(ToValue(k)), valueToString(v))
+			}
 		}
 	}
 
@@ -95,7 +97,7 @@ func websocketServer(vm *VM, args []TinyValue) {
 	if args[0].IsInt {
 		server.Port = args[0].AsInt
 		server.Path = "/"
-	} else if config, ok := args[0].Value.(ObjectValue); ok {
+	} else if config, ok := vm.valueAsObjectForRead(args[0]); ok {
 		server.Port = objectInt(vm, config, "port", 0)
 		server.Host = objectString(config, "host", "")
 		server.Path = objectString(config, "path", "/")

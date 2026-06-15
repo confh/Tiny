@@ -192,3 +192,45 @@ class Service {
 		t.Fatalf("unexpected methods: %#v", classStmt.Methods)
 	}
 }
+
+func TestParserAllowsKeywordFunctionNames(t *testing.T) {
+	program := parseSourceForTest(t, `
+export fn enum(values: array:string): array:string {
+    return values;
+}
+`)
+
+	exportStmt, ok := program.Statements[0].(ExportStmt)
+	if !ok {
+		t.Fatalf("expected export statement, got %T", program.Statements[0])
+	}
+
+	fn, ok := exportStmt.Inner.(FunctionStmt)
+	if !ok {
+		t.Fatalf("expected exported function statement, got %T", exportStmt.Inner)
+	}
+
+	if fn.Name != "enum" {
+		t.Fatalf("expected function name enum, got %q", fn.Name)
+	}
+}
+
+func TestParserAllowsKeywordMemberCalls(t *testing.T) {
+	program := parseSourceForTest(t, `
+validate.enum(["a", "b"]);
+`)
+
+	stmt, ok := program.Statements[0].(ExprStmt)
+	if !ok {
+		t.Fatalf("expected expression statement, got %T", program.Statements[0])
+	}
+
+	call, ok := stmt.Value.(MemberCallExpr)
+	if !ok {
+		t.Fatalf("expected member call expression, got %T", stmt.Value)
+	}
+
+	if call.Method != "enum" {
+		t.Fatalf("expected member call to enum, got %q", call.Method)
+	}
+}

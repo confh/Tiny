@@ -1,6 +1,8 @@
 package vm
 
 import (
+	"sort"
+
 	. "language.com/src/tinyerrors"
 )
 
@@ -21,6 +23,9 @@ func init() {
 		"enteries": objectEnteries,
 		"length":   objectLength,
 		"clear":    objectClear,
+		"forEach":  objectForEach,
+		"pick":     objectPick,
+		"omit":     objectOmit,
 	}
 	registerStdModule(stdObjectMetadata)
 }
@@ -37,10 +42,14 @@ func (vm *VM) callStdObject(method string, args []TinyValue) {
 func objectGet(vm *VM, args []TinyValue) {
 	expectArgs(vm, "object.get", args, 2)
 
-	obj := argObject(vm, "object.get", args, 0)
+	obj, ok := vm.valueAsObjectForWrite(args[0])
+	if !ok {
+		vm.runtimeError(ErrorType, "object.get argument 1 expected object, got %s", TypeName(args[0]))
+		return
+	}
 	key := argString(vm, "object.get", args, 1)
 
-	val, ok := obj[key]
+	val, ok := obj.get(key)
 	if ok {
 		vm.push(val)
 	} else {
@@ -51,11 +60,13 @@ func objectGet(vm *VM, args []TinyValue) {
 func objectSet(vm *VM, args []TinyValue) {
 	expectArgs(vm, "object.set", args, 3)
 
-	obj := argObject(vm, "object.set", args, 0)
+	obj, ok := vm.valueAsObjectForWrite(args[0])
+	if !ok {
+		vm.runtimeError(ErrorType, "object.set argument 1 expected object, got %s", TypeName(args[0]))
+		return
+	}
 	key := argString(vm, "object.set", args, 1)
-	value := args[2]
-
-	obj[key] = value
+	obj.set(key, args[2])
 
 	vm.push(NewNull())
 }
@@ -63,24 +74,27 @@ func objectSet(vm *VM, args []TinyValue) {
 func objectHas(vm *VM, args []TinyValue) {
 	expectArgs(vm, "object.has", args, 2)
 
-	obj := argObject(vm, "object.has", args, 0)
+	obj, ok := vm.valueAsObjectForWrite(args[0])
+	if !ok {
+		vm.runtimeError(ErrorType, "object.has argument 1 expected object, got %s", TypeName(args[0]))
+		return
+	}
 	key := argString(vm, "object.has", args, 1)
 
-	_, found := obj[key]
-	vm.push(NewNative(found))
+	vm.push(NewNative(obj.has(key)))
 }
 
 func objectDelete(vm *VM, args []TinyValue) {
 	expectArgs(vm, "object.delete", args, 2)
 
-	obj := argObject(vm, "object.delete", args, 0)
+	obj, ok := vm.valueAsObjectForWrite(args[0])
+	if !ok {
+		vm.runtimeError(ErrorType, "object.delete argument 1 expected object, got %s", TypeName(args[0]))
+		return
+	}
 	key := argString(vm, "object.delete", args, 1)
 
-	_, found := obj[key]
-	if found {
-		delete(obj, key)
-	}
-	vm.push(NewNative(found))
+	vm.push(NewNative(obj.delete(key)))
 }
 
 func objectKeys(vm *VM, args []TinyValue) {
@@ -89,8 +103,21 @@ func objectKeys(vm *VM, args []TinyValue) {
 	obj := argObject(vm, "object.keys", args, 0)
 
 	keys := make([]TinyValue, 0, len(obj))
+	strKeys := make([]string, 0, len(obj))
+	otherKeys := make([]any, 0)
 	for k := range obj {
+		if s, ok := k.(string); ok {
+			strKeys = append(strKeys, s)
+		} else {
+			otherKeys = append(otherKeys, k)
+		}
+	}
+	sort.Strings(strKeys)
+	for _, k := range strKeys {
 		keys = append(keys, NewNative(k))
+	}
+	for _, k := range otherKeys {
+		keys = append(keys, ToValue(k))
 	}
 	vm.push(NewNative(&ArrayValue{Elements: keys}))
 }
@@ -101,8 +128,15 @@ func objectValues(vm *VM, args []TinyValue) {
 	obj := argObject(vm, "object.values", args, 0)
 
 	values := make([]TinyValue, 0, len(obj))
-	for _, v := range obj {
-		values = append(values, v)
+	keys := make([]string, 0, len(obj))
+	for k := range obj {
+		if s, ok := k.(string); ok {
+			keys = append(keys, s)
+		}
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		values = append(values, obj[k])
 	}
 	vm.push(NewNative(&ArrayValue{Elements: values}))
 }
@@ -113,8 +147,15 @@ func objectEnteries(vm *VM, args []TinyValue) {
 	obj := argObject(vm, "object.enteries", args, 0)
 
 	entries := make([]TinyValue, 0, len(obj))
-	for k, v := range obj {
-		entry := NewNative(&ArrayValue{Elements: []TinyValue{NewNative(k), v}})
+	keys := make([]string, 0, len(obj))
+	for k := range obj {
+		if s, ok := k.(string); ok {
+			keys = append(keys, s)
+		}
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		entry := NewNative(&ArrayValue{Elements: []TinyValue{NewNative(k), obj[k]}})
 		entries = append(entries, entry)
 	}
 	vm.push(NewNative(&ArrayValue{Elements: entries}))
@@ -130,9 +171,66 @@ func objectLength(vm *VM, args []TinyValue) {
 func objectClear(vm *VM, args []TinyValue) {
 	expectArgs(vm, "object.clear", args, 1)
 
-	obj := argObject(vm, "object.clear", args, 0)
-	for k := range obj {
-		delete(obj, k)
+	obj, ok := vm.valueAsObjectForWrite(args[0])
+	if !ok {
+		vm.runtimeError(ErrorType, "object.clear argument 1 expected object, got %s", TypeName(args[0]))
+		return
 	}
+	obj.clear()
 	vm.push(NewNull())
+}
+
+func objectForEach(vm *VM, args []TinyValue) {
+	expectArgs(vm, "object.forEach", args, 2)
+
+	obj := argObject(vm, "object.forEach", args, 0)
+	fn := argFn(vm, "object.forEach", args, 1)
+
+	keys := make([]string, 0, len(obj))
+	for k := range obj {
+		if s, ok := k.(string); ok {
+			keys = append(keys, s)
+		}
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		vm.callFunctionValue(fn, []TinyValue{NewNative(k), obj[k]})
+	}
+
+	vm.push(NewNull())
+}
+
+func objectPick(vm *VM, args []TinyValue) {
+	expectArgs(vm, "object.pick", args, 2)
+
+	obj := argObject(vm, "object.pick", args, 0)
+	arr := argArray(vm, "object.pick", args, 1)
+
+	values := ObjectValue{}
+
+	for _, v := range arr.Elements {
+		key := valueToString(v)
+		if val, ok := obj[key]; ok {
+			values[key] = val
+		}
+	}
+
+	vm.push(NewNative(values))
+}
+
+func objectOmit(vm *VM, args []TinyValue) {
+	expectArgs(vm, "object.omit", args, 2)
+
+	obj, ok := vm.valueAsObjectForWrite(args[0])
+	if !ok {
+		vm.runtimeError(ErrorType, "object.omit argument 1 expected object, got %s", TypeName(args[0]))
+		return
+	}
+	arr := argArray(vm, "object.omit", args, 1)
+
+	for _, v := range arr.Elements {
+		obj.delete(valueToString(v))
+	}
+
+	vm.push(NewNative(obj.materialize()))
 }

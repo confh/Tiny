@@ -459,6 +459,21 @@ func EncodeValue(value any) EncodedValue {
 	case AddLocalArrayIndexStoreInfo:
 		return EncodedValue{Type: "addLocalArrayIndexStore", Data: v}
 
+	case PropertyLocalConstAssignInfo:
+		return EncodedValue{Type: "propertyLocalConstAssign", Data: v}
+
+	case PropertyLocalPropertyAssignInfo:
+		return EncodedValue{Type: "propertyLocalPropertyAssign", Data: v}
+
+	case AddLocalPropertiesStoreInfo:
+		return EncodedValue{Type: "addLocalPropertiesStore", Data: v}
+
+	case JumpPropertyLocalInfo:
+		return EncodedValue{Type: "jumpPropertyLocal", Data: v}
+
+	case ArrayIndexLocalStoreInfo:
+		return EncodedValue{Type: "arrayIndexLocalStore", Data: v}
+
 	case NativeCallInfo:
 		return EncodedValue{Type: "nativeCallInfo", Data: v}
 
@@ -682,8 +697,33 @@ func DecodeValue(value EncodedValue) any {
 		decodeInto(value.Data, &result)
 		return result
 
+	case "propertyLocalConstAssign":
+		var result PropertyLocalConstAssignInfo
+		decodeInto(value.Data, &result)
+		return result
+
+	case "propertyLocalPropertyAssign":
+		var result PropertyLocalPropertyAssignInfo
+		decodeInto(value.Data, &result)
+		return result
+
+	case "addLocalPropertiesStore":
+		var result AddLocalPropertiesStoreInfo
+		decodeInto(value.Data, &result)
+		return result
+
+	case "jumpPropertyLocal":
+		var result JumpPropertyLocalInfo
+		decodeInto(value.Data, &result)
+		return result
+
 	case "arrayIndexConstOp":
 		var result ArrayIndexConstOpInfo
+		decodeInto(value.Data, &result)
+		return result
+
+	case "arrayIndexLocalStore":
+		var result ArrayIndexLocalStoreInfo
 		decodeInto(value.Data, &result)
 		return result
 

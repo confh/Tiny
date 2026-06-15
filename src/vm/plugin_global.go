@@ -25,4 +25,6 @@ var AvailablePlugins = []string{
 	"ui",
 	"websocket",
 	"tray",
+	"validate",
+	"url",
 }

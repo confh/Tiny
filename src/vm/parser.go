@@ -47,8 +47,23 @@ func containsDot(s string) bool {
 	return false
 }
 
-func parseInterpolatedString(input string) Expr {
+func advanceSourcePosition(text string, line int, column int) (int, int) {
+	for _, ch := range text {
+		if ch == '\n' {
+			line++
+			column = 1
+		} else {
+			column++
+		}
+	}
+
+	return line, column
+}
+
+func parseInterpolatedString(input string, file string, line int, column int) Expr {
 	var parts []InterpolatedStringPart
+	currentLine := line
+	currentColumn := column
 
 	for len(input) > 0 {
 		start := findInterpolationStart(input)
@@ -74,9 +89,12 @@ func parseInterpolatedString(input string) Expr {
 		}
 
 		exprSource := input[start+2 : end]
+		exprLine, exprColumn := advanceSourcePosition(input[:start+2], currentLine, currentColumn)
 
-		lexer := NewLexer(exprSource, "")
+		lexer := NewLexer(exprSource, file)
 		lexer.EnableASI = false
+		lexer.line = exprLine
+		lexer.column = exprColumn
 		parser := NewParser(lexer)
 		expr := parser.parseExpression()
 
@@ -95,6 +113,7 @@ func parseInterpolatedString(input string) Expr {
 			IsExpr: true,
 		})
 
+		currentLine, currentColumn = advanceSourcePosition(input[:end+1], currentLine, currentColumn)
 		input = input[end+1:]
 	}
 
@@ -310,6 +329,74 @@ func (p *Parser) parseOptionalTypeHint() TypeHint {
 func (p *Parser) isValidType(token TokenType) bool {
 	return token == TOKEN_IDENT ||
 		token == TOKEN_NULL
+}
+
+func isIdentifierLikeToken(tokenType TokenType) bool {
+	switch tokenType {
+	case TOKEN_IDENT,
+		TOKEN_TRUE,
+		TOKEN_FALSE,
+		TOKEN_THIS,
+		TOKEN_NULL,
+		TOKEN_IMPORT,
+		TOKEN_EXPORT,
+		TOKEN_LET,
+		TOKEN_CONST,
+		TOKEN_FIELD,
+		TOKEN_NATIVE,
+		TOKEN_FN,
+		TOKEN_RETURN,
+		TOKEN_THROW,
+		TOKEN_CLASS,
+		TOKEN_PRIVATE,
+		TOKEN_PUBLIC,
+		TOKEN_INTERFACE,
+		TOKEN_ENUM,
+		TOKEN_IOTA,
+		TOKEN_DEFER,
+		TOKEN_IF,
+		TOKEN_ELSE,
+		TOKEN_WHILE,
+		TOKEN_FOR,
+		TOKEN_IN,
+		TOKEN_TRY,
+		TOKEN_CATCH,
+		TOKEN_FINALLY,
+		TOKEN_BREAK,
+		TOKEN_CONTINUE,
+		TOKEN_MATCH,
+		TOKEN_AND,
+		TOKEN_OR,
+		TOKEN_TYPEOF,
+		TOKEN_INSTANCEOF,
+		TOKEN_SPAWN,
+		TOKEN_ASYNC,
+		TOKEN_AWAIT,
+		TOKEN_EMBED,
+		TOKEN_EMBED_STR,
+		TOKEN_EMBED_BIN,
+		TOKEN_EMBED_DIR:
+		return true
+	default:
+		return false
+	}
+}
+
+func (p *Parser) parseIdentifierLikeName(context string) string {
+	if !isIdentifierLikeToken(p.current.Type) {
+		LangErrorAt(
+			ErrorSyntax,
+			p.current.File,
+			p.current.Line,
+			p.current.Column,
+			"expected %s",
+			context,
+		)
+	}
+
+	name := p.current.Literal
+	p.advance()
+	return name
 }
 
 func (p *Parser) parsePossibleAssignmentStatement() Stmt {
@@ -1738,6 +1825,7 @@ func (p *Parser) parseFieldStatement() Stmt {
 }
 
 func (p *Parser) parseLetStatement() Stmt {
+	file := p.current.File
 	line := p.current.Line
 	column := p.current.Column
 	p.expect(TOKEN_LET)
@@ -1770,7 +1858,7 @@ func (p *Parser) parseLetStatement() Stmt {
 		TypeHint: typeHint,
 		Line:     line,
 		Column:   column,
-		File:     p.current.File,
+		File:     file,
 	}
 }
 
@@ -1923,6 +2011,7 @@ func (p *Parser) parseDefaultParamObjectValue() TinyValue {
 }
 
 func (p *Parser) parseConstStatement() Stmt {
+	file := p.current.File
 	line := p.current.Line
 	column := p.current.Column
 	p.expect(TOKEN_CONST)
@@ -1955,7 +2044,7 @@ func (p *Parser) parseConstStatement() Stmt {
 		TypeHint: typeHint,
 		Line:     line,
 		Column:   column,
-		File:     p.current.File,
+		File:     file,
 	}
 }
 
@@ -1967,12 +2056,7 @@ func (p *Parser) parseNativeFunctionStatement() Stmt {
 	p.expect(TOKEN_NATIVE)
 	p.expect(TOKEN_FN)
 
-	if p.current.Type != TOKEN_IDENT {
-		LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "expected native function name")
-	}
-
-	name := p.current.Literal
-	p.advance()
+	name := p.parseIdentifierLikeName("native function name")
 
 	p.expect(TOKEN_LPAREN)
 	params := p.parseParameterList(true)
@@ -2041,16 +2125,12 @@ func (p *Parser) parseNativeFunctionStatement() Stmt {
 }
 
 func (p *Parser) parseFunctionStatement(async bool) Stmt {
+	file := p.current.File
 	line := p.current.Line
 	column := p.current.Column
 	p.expect(TOKEN_FN)
 
-	if p.current.Type != TOKEN_IDENT {
-		LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "expected function name")
-	}
-
-	name := p.current.Literal
-	p.advance()
+	name := p.parseIdentifierLikeName("function name")
 
 	typeParams := []string{}
 	for p.current.Type == TOKEN_COLON {
@@ -2073,7 +2153,7 @@ func (p *Parser) parseFunctionStatement(async bool) Stmt {
 		Async:          async,
 		Line:           line,
 		Column:         column,
-		File:           p.current.File,
+		File:           file,
 	}
 }
 
@@ -2544,6 +2624,13 @@ func (p *Parser) parsePostfix() Expr {
 	for {
 		switch p.current.Type {
 		case TOKEN_LPAREN:
+			file, line, column := exprSourcePosition(expr)
+			if line <= 0 || column <= 0 {
+				file = p.current.File
+				line = p.current.Line
+				column = p.current.Column
+			}
+
 			p.advance()
 
 			args := p.parseArgumentList()
@@ -2553,9 +2640,9 @@ func (p *Parser) parsePostfix() Expr {
 			expr = CallValueExpr{
 				Callee: expr,
 				Args:   args,
-				File:   p.current.File,
-				Line:   p.current.Line,
-				Column: p.current.Column,
+				File:   file,
+				Line:   line,
+				Column: column,
 			}
 
 		case TOKEN_QUESTION_QUESTION:
@@ -2579,7 +2666,7 @@ func (p *Parser) parsePostfix() Expr {
 			safe := p.current.Type == TOKEN_QUESTION_DOT
 			p.advance()
 
-			if p.current.Type != TOKEN_IDENT {
+			if !isIdentifierLikeToken(p.current.Type) {
 				LangErrorAt(
 					ErrorSyntax,
 					p.current.File,
@@ -2660,6 +2747,46 @@ func (p *Parser) parsePostfix() Expr {
 			return expr
 		}
 	}
+}
+
+func exprSourcePosition(expr Expr) (string, int, int) {
+	switch e := expr.(type) {
+	case NumberExpr:
+		return e.File, e.Line, e.Column
+	case FloatExpr:
+		return e.File, e.Line, e.Column
+	case IdentExpr:
+		return e.File, e.Line, e.Column
+	case CallExpr:
+		return e.File, e.Line, e.Column
+	case InstantiatedExpr:
+		if file, line, column := exprSourcePosition(e.Object); line > 0 && column > 0 {
+			return file, line, column
+		}
+		return e.File, e.Line, e.Column
+	case CallValueExpr:
+		if file, line, column := exprSourcePosition(e.Callee); line > 0 && column > 0 {
+			return file, line, column
+		}
+		return e.File, e.Line, e.Column
+	case MemberCallExpr:
+		return e.File, e.Line, e.Column
+	case PropertyExpr:
+		return e.File, e.Line, e.Column
+	case ObjectInExpr:
+		return e.File, e.Line, e.Column
+	case NullishCoalescingExpr:
+		return e.File, e.Line, e.Column
+	case AwaitExpr:
+		return e.File, e.Line, e.Column
+	case DeferExpr:
+		return e.File, e.Line, e.Column
+	case ThisExpr:
+		return e.File, e.Line, e.Column
+	case FunctionExpr:
+		return e.File, e.Line, e.Column
+	}
+	return "", 0, 0
 }
 
 func (p *Parser) isGenericColon() bool {
@@ -2829,7 +2956,7 @@ func (p *Parser) parseObjectLiteral() Expr {
 
 			continue
 		}
-		if p.current.Type != TOKEN_IDENT && p.current.Type != TOKEN_STRING {
+		if !isIdentifierLikeToken(p.current.Type) && p.current.Type != TOKEN_STRING {
 			LangErrorAt(
 				ErrorSyntax,
 				p.current.File,
@@ -2908,7 +3035,6 @@ func (p *Parser) parseFunctionSignatureAndBody() ([]Param, TypeHint, []Stmt) {
 
 	if p.current.Type == TOKEN_COLON {
 		returnType = p.parseTypeHint(false)
-		// p.advance()
 	}
 
 	body := p.parseBlock()
@@ -2920,6 +3046,9 @@ func (p *Parser) parsePrimary() Expr {
 	switch p.current.Type {
 	case TOKEN_NUMBER:
 		literal := p.current.Literal
+		file := p.current.File
+		line := p.current.Line
+		column := p.current.Column
 
 		if containsDot(literal) {
 			value, err := strconv.ParseFloat(literal, 64)
@@ -2935,7 +3064,7 @@ func (p *Parser) parsePrimary() Expr {
 
 			p.advance()
 
-			return FloatExpr{Value: value, File: p.current.File, Line: p.current.Line, Column: p.current.Column}
+			return FloatExpr{Value: value, File: file, Line: line, Column: column}
 		}
 
 		value, err := strconv.Atoi(literal)
@@ -2951,7 +3080,7 @@ func (p *Parser) parsePrimary() Expr {
 
 		p.advance()
 
-		return NumberExpr{Value: value, File: p.current.File, Line: p.current.Line, Column: p.current.Column}
+		return NumberExpr{Value: value, File: file, Line: line, Column: column}
 
 	case TOKEN_FN:
 		return p.parseFunctionExpr()
@@ -2960,14 +3089,18 @@ func (p *Parser) parsePrimary() Expr {
 		return p.parseArrayLiteral()
 
 	case TOKEN_IDENT:
+		file := p.current.File
+		line := p.current.Line
+		column := p.current.Column
 		name := p.current.Literal
 		p.advance()
 
 		return IdentExpr{
 			Name:   name,
-			File:   p.current.File,
-			Line:   p.current.Line,
-			Column: p.current.Column}
+			File:   file,
+			Line:   line,
+			Column: column,
+		}
 
 	case TOKEN_LPAREN:
 		p.advance()
@@ -2985,10 +3118,13 @@ func (p *Parser) parsePrimary() Expr {
 		return StringExpr{Value: value}
 
 	case TOKEN_BACKTICK_STRING:
+		file := p.current.File
+		line := p.current.Line
+		column := p.current.Column + 1
 		value := p.current.Literal
 		p.advance()
 
-		return parseInterpolatedString(value)
+		return parseInterpolatedString(value, file, line, column)
 
 	case TOKEN_LBRACE:
 		return p.parseObjectLiteral()
@@ -3002,11 +3138,14 @@ func (p *Parser) parsePrimary() Expr {
 		return BoolExpr{Value: false}
 
 	case TOKEN_THIS:
+		file := p.current.File
+		line := p.current.Line
+		column := p.current.Column
 		p.advance()
 		return ThisExpr{
-			File:   p.current.File,
-			Line:   p.current.Line,
-			Column: p.current.Column,
+			File:   file,
+			Line:   line,
+			Column: column,
 		}
 
 	case TOKEN_NULL:
@@ -3183,7 +3322,20 @@ func (p *Parser) parseAsyncStmt() Stmt {
 }
 
 func (p *Parser) parseFunctionExpr() Expr {
+	file := p.current.File
+	line := p.current.Line
+	column := p.current.Column
 	p.expect(TOKEN_FN)
+
+	if p.current.Type == TOKEN_IDENT {
+		LangErrorAt(
+			ErrorSyntax,
+			p.current.File,
+			p.current.Line,
+			p.current.Column,
+			"anonymous functions must not have a name",
+		)
+	}
 
 	params, returnType, body := p.parseFunctionSignatureAndBody()
 
@@ -3191,13 +3343,16 @@ func (p *Parser) parseFunctionExpr() Expr {
 		Params:     params,
 		ReturnType: returnType,
 		Body:       body,
-		File:       p.current.File,
-		Line:       p.current.Line,
-		Column:     p.current.Column,
+		File:       file,
+		Line:       line,
+		Column:     column,
 	}
 }
 
 func (p *Parser) parseClassStatement() Stmt {
+	file := p.current.File
+	line := p.current.Line
+	column := p.current.Column
 	p.expect(TOKEN_CLASS)
 
 	if p.current.Type != TOKEN_IDENT {
@@ -3324,9 +3479,9 @@ func (p *Parser) parseClassStatement() Stmt {
 		Methods:        methods,
 		Embeds:         embeds,
 		Fields:         fields,
-		File:           p.current.File,
-		Line:           p.current.Line,
-		Column:         p.current.Column,
+		File:           file,
+		Line:           line,
+		Column:         column,
 	}
 }
 

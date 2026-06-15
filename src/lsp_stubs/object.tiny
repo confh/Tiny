@@ -24,3 +24,12 @@ export fn length(object: object): number {}
 
 // Removes all properties from the specified object.
 export fn clear(object: object): null {}
+
+// Calls a function for each entry and value in the object.
+export fn forEach(object: object, callback: function): null {}
+
+// Returns a new object containing only the specified keys from the object.
+export fn pick(object: object, keys: array): null {}
+
+// Returns a new object excluding the specified keys from the object.
+export fn omit(object: object, keys: array): null {}

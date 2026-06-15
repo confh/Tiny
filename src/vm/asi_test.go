@@ -88,7 +88,7 @@ func TestASI(t *testing.T) {
 func TestASILexer(t *testing.T) {
 	input := "x = 1\ny = 2"
 	lexer := NewLexer(input, "test.tiny")
-	
+
 	tokens := []TokenType{}
 	for {
 		tok := lexer.NextToken()

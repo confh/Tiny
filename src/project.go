@@ -34,8 +34,9 @@ type TinyProjectPluginConfig struct {
 }
 
 type TinyCompilerOptions struct {
-	StackTraces bool `json:"stackTraces"`
-	Strict      bool `json:"strict"`
+	BytecodeCache bool `json:"bytecodeCache"`
+	StackTraces   bool `json:"stackTraces,omitempty"`
+	Strict        bool `json:"strict,omitempty"`
 }
 
 func defaultTinyConfig(projectName string) TinyProjectConfig {
@@ -55,8 +56,7 @@ func defaultTinyConfig(projectName string) TinyProjectConfig {
 		Ignore:       []string{},
 		Plugins:      []TinyProjectPluginConfig{},
 		CompilerOptions: TinyCompilerOptions{
-			StackTraces: true,
-			Strict:      false,
+			BytecodeCache: false,
 		},
 	}
 }

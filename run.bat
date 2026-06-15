@@ -1,4 +1,5 @@
 @echo off
 setlocal
-go run ./src %* --disable-cache
+set TINY_DISABLE_CACHE=1
+go run ./src %*
 endlocal

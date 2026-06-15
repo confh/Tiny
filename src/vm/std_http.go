@@ -2,6 +2,7 @@ package vm
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"os"
@@ -72,7 +73,7 @@ func stdHttpServer(vm *VM, args []TinyValue) {
 
 	if args[0].IsInt {
 		server.Port = args[0].AsInt
-	} else if config, ok := args[0].Value.(ObjectValue); ok {
+	} else if config, ok := vm.valueAsObjectForRead(args[0]); ok {
 		server.Port = objectInt(vm, config, "port", 0)
 		server.Host = objectString(config, "host", "")
 		server.ReadTimeoutMs = objectInt(vm, config, "readTimeoutMs", 0)
@@ -95,35 +96,35 @@ func stdHttpServer(vm *VM, args []TinyValue) {
 func stdHttpGet(vm *VM, args []TinyValue) {
 	expectArgsRange(vm, "http.get", args, 1, 2)
 	url := argString(vm, "http.get", args, 0)
-	options := optionalObjectArg(args, 1)
+	options := optionalObjectArg(vm, args, 1)
 	vm.push(doHTTPRequest(vm, "http.get", http.MethodGet, url, NewNull(), options))
 }
 
 func stdHttpPost(vm *VM, args []TinyValue) {
 	expectArgsRange(vm, "http.post", args, 2, 3)
 	url := argString(vm, "http.post", args, 0)
-	options := optionalObjectArg(args, 2)
+	options := optionalObjectArg(vm, args, 2)
 	vm.push(doHTTPRequest(vm, "http.post", http.MethodPost, url, args[1], options))
 }
 
 func stdHttpPut(vm *VM, args []TinyValue) {
 	expectArgsRange(vm, "http.put", args, 2, 3)
 	url := argString(vm, "http.put", args, 0)
-	options := optionalObjectArg(args, 2)
+	options := optionalObjectArg(vm, args, 2)
 	vm.push(doHTTPRequest(vm, "http.put", http.MethodPut, url, args[1], options))
 }
 
 func stdHttpPatch(vm *VM, args []TinyValue) {
 	expectArgsRange(vm, "http.patch", args, 2, 3)
 	url := argString(vm, "http.patch", args, 0)
-	options := optionalObjectArg(args, 2)
+	options := optionalObjectArg(vm, args, 2)
 	vm.push(doHTTPRequest(vm, "http.patch", http.MethodPatch, url, args[1], options))
 }
 
 func stdHttpDelete(vm *VM, args []TinyValue) {
 	expectArgsRange(vm, "http.delete", args, 1, 2)
 	url := argString(vm, "http.delete", args, 0)
-	options := optionalObjectArg(args, 1)
+	options := optionalObjectArg(vm, args, 1)
 	vm.push(doHTTPRequest(vm, "http.delete", http.MethodDelete, url, NewNull(), options))
 }
 
@@ -146,36 +147,111 @@ func stdHttpRequest(vm *VM, args []TinyValue) {
 	vm.push(doHTTPRequest(vm, "http.request", method, url, body, config))
 }
 
+func requestBodyBytes(vm *VM, body TinyValue) ([]byte, string, error) {
+	if isNullish(body) {
+		return nil, "", nil
+	}
+
+	if body.IsInt {
+		return []byte(valueToString(body)), "text/plain; charset=utf-8", nil
+	}
+
+	switch v := body.Value.(type) {
+	case string:
+		return []byte(v), "text/plain; charset=utf-8", nil
+
+	case []byte:
+		return v, "application/octet-stream", nil
+
+	case *BufferValue:
+		return v.Bytes, "application/octet-stream", nil
+
+	case WasmObjectValue:
+		obj, _ := vm.valueAsObjectForRead(body)
+		cleaned := cleanValueForJSON(NewNative(obj))
+
+		jsonData, err := json.Marshal(cleaned)
+		if err != nil {
+			return nil, "", err
+		}
+
+		return jsonData, "application/json", nil
+
+	case ObjectValue, ArrayValue, *ArrayValue:
+		cleaned := cleanValueForJSON(body)
+
+		jsonData, err := json.Marshal(cleaned)
+		if err != nil {
+			return nil, "", err
+		}
+
+		return jsonData, "application/json", nil
+
+	default:
+		return []byte(valueToString(body)), "text/plain; charset=utf-8", nil
+	}
+}
+
 func doHTTPRequest(vm *VM, name string, method string, url string, body TinyValue, options ObjectValue) TinyValue {
-	reader, contentType, err := requestBodyReader(body)
+	bodyBytes, contentType, err := requestBodyBytes(vm, body)
 	if err != nil {
 		vm.runtimeError(ErrorType, "%s body error: %s", name, err.Error())
 		return NewNull()
 	}
 
-	req, err := http.NewRequest(method, url, reader)
+	timeoutMs := objectInt(vm, options, "timeoutMs", 30000)
+	if timeoutMs <= 0 {
+		timeoutMs = 30000
+	}
+
+	timeout := time.Duration(timeoutMs) * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	var reader io.Reader
+	if bodyBytes != nil {
+		reader = bytes.NewReader(bodyBytes)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, url, reader)
 	if err != nil {
 		vm.runtimeError(ErrorRuntime, "%s request creation failed: %s", name, err.Error())
 		return NewNull()
 	}
 
+	if bodyBytes != nil {
+		req.ContentLength = int64(len(bodyBytes))
+	}
+
 	headers := ObjectValue{}
 	if h, hasHeaders := options["headers"]; hasHeaders {
-		if val, ok := h.Value.(ObjectValue); ok {
+		if val, ok := vm.valueAsObjectForRead(h); ok {
 			headers = val
 		}
 	}
+
 	for key, value := range headers {
 		req.Header.Set(valueToString(ToValue(key)), valueToString(value))
 	}
+
 	if contentType != "" && req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", contentType)
 	}
 
-	client := &http.Client{}
-	timeoutMs := objectInt(vm, options, "timeoutMs", 0)
-	if timeoutMs > 0 {
-		client.Timeout = time.Duration(timeoutMs) * time.Millisecond
+	transport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		ForceAttemptHTTP2:     false,
+		DisableKeepAlives:     true,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: timeout,
+		ExpectContinueTimeout: 1 * time.Second,
+		IdleConnTimeout:       30 * time.Second,
+	}
+
+	client := &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
 	}
 
 	resp, err := client.Do(req)
@@ -185,7 +261,7 @@ func doHTTPRequest(vm *VM, name string, method string, url string, body TinyValu
 	}
 	defer resp.Body.Close()
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	respBodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		vm.runtimeError(ErrorRuntime, "%s read response failed: %s", name, err.Error())
 		return NewNull()
@@ -203,40 +279,12 @@ func doHTTPRequest(vm *VM, name string, method string, url string, body TinyValu
 	}
 
 	if objectBool(options, "bytes", false) {
-		result["body"] = NewNative(bodyBytes)
+		result["body"] = NewNative(respBodyBytes)
 	} else {
-		result["body"] = NewNative(string(bodyBytes))
+		result["body"] = NewNative(string(respBodyBytes))
 	}
 
 	return NewNative(result)
-}
-
-func requestBodyReader(body TinyValue) (io.Reader, string, error) {
-	if isNullish(body) {
-		return nil, "", nil
-	}
-
-	if body.IsInt {
-		return strings.NewReader(valueToString(body)), "text/plain; charset=utf-8", nil
-	}
-
-	switch v := body.Value.(type) {
-	case string:
-		return strings.NewReader(v), "text/plain; charset=utf-8", nil
-	case []byte:
-		return bytes.NewReader(v), "application/octet-stream", nil
-	case *BufferValue:
-		return bytes.NewReader(v.Bytes), "application/octet-stream", nil
-	case ObjectValue, ArrayValue, *ArrayValue:
-		cleaned := cleanValueForJSON(body)
-		jsonData, err := json.Marshal(cleaned)
-		if err != nil {
-			return nil, "", err
-		}
-		return bytes.NewReader(jsonData), "application/json", nil
-	default:
-		return strings.NewReader(valueToString(body)), "text/plain; charset=utf-8", nil
-	}
 }
 
 func stdHttpJsonResponse(vm *VM, args []TinyValue) {
@@ -357,11 +405,11 @@ func stdHttpDownloadFile(vm *VM, args []TinyValue) {
 	vm.push(NewNative(true))
 }
 
-func optionalObjectArg(args []TinyValue, index int) ObjectValue {
+func optionalObjectArg(vm *VM, args []TinyValue, index int) ObjectValue {
 	if len(args) <= index || isNullish(args[index]) {
 		return ObjectValue{}
 	}
-	if object, ok := args[index].Value.(ObjectValue); ok {
+	if object, ok := vm.valueAsObjectForRead(args[index]); ok {
 		return object
 	}
 	return ObjectValue{}

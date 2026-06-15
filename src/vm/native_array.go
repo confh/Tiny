@@ -53,6 +53,14 @@ var arrayNativeMetadata = NativeTypeInfo{
 			Returns:     "bool",
 			Description: "Returns true if the array contains the value.",
 		},
+		"find": {
+			Name: "find",
+			Args: []StdArg{
+				{Name: "callback", Type: "function"},
+			},
+			Returns:     "any",
+			Description: "Returns the first array element for which the callback returns true, or null if none match.",
+		},
 		"join": {
 			Name: "join",
 			Args: []StdArg{
@@ -79,7 +87,7 @@ var arrayNativeMetadata = NativeTypeInfo{
 			Args: []StdArg{
 				{Name: "fn", Type: "function"},
 			},
-			Returns:     "bool",
+			Returns:     "null",
 			Description: "Calls a function for each element in the array.",
 		},
 		"filter": {
@@ -120,6 +128,7 @@ func init() {
 		"get":      arrayGet,
 		"set":      arraySet,
 		"contains": arrayContains,
+		"find":     arrayFind,
 		"join":     arrayJoin,
 		"reverse":  arrayReverse,
 		"map":      arrayMap,
@@ -186,13 +195,40 @@ func arraySet(vm *VM, array *ArrayValue, args []TinyValue) {
 
 func arrayContains(vm *VM, array *ArrayValue, args []TinyValue) {
 	expectArgs(vm, "array.contains", args, 1)
+
 	element := args[0]
 	vm.push(NewNative(slices.Contains(array.Elements, element)))
 }
 
+func arrayFind(vm *VM, array *ArrayValue, args []TinyValue) {
+	expectArgs(vm, "array.find", args, 1)
+
+	fn := argFn(vm, "array.find", args, 0)
+
+	found := false
+	var value TinyValue
+
+	for i, v := range array.Elements {
+		val := vm.callFunctionValue(fn, []TinyValue{NewInt(i), v})
+		if isTruthy(val) {
+			found = true
+			value = v
+			break
+		}
+	}
+
+	if found {
+		vm.push(value)
+	} else {
+		vm.push(NewNull())
+	}
+}
+
 func arrayJoin(vm *VM, array *ArrayValue, args []TinyValue) {
 	expectArgs(vm, "array.join", args, 1)
+
 	separator := argString(vm, "array.join", args, 0)
+
 	var sb strings.Builder
 	for i, value := range array.Elements {
 		sb.WriteString(valueToString(value))
@@ -204,13 +240,15 @@ func arrayJoin(vm *VM, array *ArrayValue, args []TinyValue) {
 }
 
 func arrayReverse(vm *VM, array *ArrayValue, args []TinyValue) {
-	expectArgs(vm, "array.reverse", args, 0)
+	dontExpectArgs(vm, "array.reverse", args)
+
 	slices.Reverse(array.Elements)
 	vm.push(NewNative(array))
 }
 
 func arrayMap(vm *VM, array *ArrayValue, args []TinyValue) {
 	expectArgs(vm, "array.map", args, 1)
+
 	fn := argFn(vm, "array.map", args, 0)
 	mappedArray := &ArrayValue{
 		Elements: make([]TinyValue, 0, len(array.Elements)),
@@ -235,7 +273,7 @@ func arrayForEach(vm *VM, array *ArrayValue, args []TinyValue) {
 	for i, v := range array.Elements {
 		vm.callFunctionValue(fn, []TinyValue{NewInt(i), v})
 	}
-	vm.push(NewNative(true))
+	vm.push(NewNull())
 }
 
 func arrayFilter(vm *VM, array *ArrayValue, args []TinyValue) {

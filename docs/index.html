@@ -740,11 +740,11 @@ io.println(await task)</code></pre>
       </section>
 
       <section class="doc-section" id="jit"
-        data-search="jit compilation performance wasm deoptimization numerical crunching best practices">
+        data-search="jit compilation performance wasm region outlining packed arrays memoization deoptimization numerical crunching best practices">
         <div class="section-heading">
           <p class="eyebrow">13</p>
           <h2>JIT Compilation</h2>
-          <p>Tiny features a multi-function JIT compilation engine that optimizes hot code paths by translating bytecode to native WebAssembly. This delivers substantial performance improvements for numerical workloads and tight loops.</p>
+          <p>Tiny features a multi-tiered JIT compilation engine that optimizes hot code paths by translating bytecode to native WebAssembly. This delivers substantial performance improvements for numerical workloads and tight loops.</p>
         </div>
 
         <div class="split">
@@ -836,7 +836,7 @@ const html = assets["index.html"]</code></pre>
       </section>
 
       <section class="doc-section" id="stdlib"
-        data-search="standard library std io json fs http array math process regex runtime sync time ui desktop net object path buffer tests app error strings">
+        data-search="standard library std validate url io json fs http array math process regex runtime sync time ui desktop net object path buffer tests app error strings">
         <div class="section-heading">
           <p class="eyebrow">16</p>
           <h2>Standard Library</h2>
@@ -845,6 +845,14 @@ const html = assets["index.html"]</code></pre>
         </div>
 
         <div class="module-table" role="table" aria-label="Tiny standard library modules">
+          <div role="row">
+            <strong role="cell">`url`</strong>
+            <span role="cell">URL Encoding & Decoding</span>
+          </div>
+          <div role="row">
+            <strong role="cell">`validate`</strong>
+            <span role="cell">Chainable schema validation for objects, arrays, and primitives with transformation support.</span>
+          </div>
           <div role="row">
             <strong role="cell">`io`</strong>
             <span role="cell">Console IO: `print`, `println`, `input`, `readLine`, `readKey`, `clear`.</span>

@@ -49,9 +49,6 @@ func GetNativeTypeInfo(name string) (NativeTypeInfo, bool) {
 	if strings.HasPrefix(name, "array:") {
 		name = "array"
 	}
-	if strings.HasPrefix(name, "array:") {
-		name = "array"
-	}
 	info, ok := nativeTypeMetadata[name]
 	return info, ok
 }
@@ -71,6 +68,8 @@ func GetNativeMethodInfo(typeName string, method string) (StdMethodInfo, bool) {
 		elementType := strings.TrimPrefix(strings.Replace(origTypeName, "array:empty", "array:any", 1), "array:")
 		if methodInfo.Returns == "any" && (method == "get" || method == "pop") {
 			methodInfo.Returns = elementType
+		} else if methodInfo.Returns == "any" && (method == "find") {
+			methodInfo.Returns = elementType + " | null"
 		} else if methodInfo.Returns == "array" && (method == "push" || method == "set" || method == "reverse" || method == "filter") {
 			methodInfo.Returns = "array:" + elementType
 		}

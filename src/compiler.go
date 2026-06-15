@@ -117,6 +117,8 @@ type Compiler struct {
 
 	inlineCandidates map[string]FunctionStmt
 	inlineDepth      int
+
+	jitRegionCount int
 }
 
 func unwrapExport(stmt Stmt) (Stmt, bool) {
@@ -438,6 +440,9 @@ func (c *Compiler) predeclareNamespaceFunctions(prefix string, ns NamespaceStmt)
 				fn.Name = fullName
 				c.inlineCandidates[fullName] = fn
 			}
+			if c.functionLooksJitCandidate(fn) {
+				c.usedFunctions[fullName] = true
+			}
 		} else if nestedNs, ok := nsStmt.(NamespaceStmt); ok {
 			c.predeclareNamespaceFunctions(prefix+"."+ns.Name, nestedNs)
 		}
@@ -453,6 +458,9 @@ func (c *Compiler) predeclareFunctions(statements []Stmt) {
 			if c.inlineCandidates != nil {
 				c.inlineCandidates[s.Name] = s
 			}
+			if c.functionLooksJitCandidate(s) {
+				c.usedFunctions[s.Name] = true
+			}
 
 		case NativeFnStmt:
 			c.declaredFunctions[s.Name] = true
@@ -467,6 +475,9 @@ func (c *Compiler) predeclareFunctions(statements []Stmt) {
 					if c.inlineCandidates != nil {
 						fn.Name = fullName
 						c.inlineCandidates[fullName] = fn
+					}
+					if c.functionLooksJitCandidate(fn) {
+						c.usedFunctions[fullName] = true
 					}
 				} else if nestedNs, ok := nsStmt.(NamespaceStmt); ok {
 					c.predeclareNamespaceFunctions(s.Name, nestedNs)
@@ -559,12 +570,16 @@ func (c *Compiler) compileFunctionLiteral(stmt FunctionStmt) {
 	oldInMethod := c.inMethod
 	oldOuterBindings := c.outerBindings
 	oldCurrentCaptures := c.currentCaptures
+	oldFile := c.currentFile
+	oldLine := c.currentLine
+	oldColumn := c.currentColumn
 
 	functionInstructions := []Instruction{}
 
 	c.currentInstructions = &functionInstructions
 	c.scopes = []map[string]Binding{}
 	c.localCount = 0
+	c.setLocation(stmt.File, stmt.Line, stmt.Column)
 
 	c.beginScope()
 
@@ -584,7 +599,7 @@ func (c *Compiler) compileFunctionLiteral(stmt FunctionStmt) {
 	oldFunctionName := c.currentFunctionName
 
 	c.currentReturnType = stmt.ReturnType
-	c.currentFunctionName = stmt.Name
+	c.currentFunctionName = compiledName
 
 	defer func() {
 		c.currentReturnType = oldReturnType
@@ -627,6 +642,7 @@ func (c *Compiler) compileFunctionLiteral(stmt FunctionStmt) {
 	c.inMethod = oldInMethod
 	c.outerBindings = oldOuterBindings
 	c.currentCaptures = oldCurrentCaptures
+	c.setLocation(oldFile, oldLine, oldColumn)
 
 	c.usedFunctions[compiledName] = true
 
@@ -764,6 +780,22 @@ func (c *Compiler) compileScopedBlock(body []Stmt) {
 
 func (c *Compiler) CompileProgram(program Program) ([]Instruction, map[string]Function, map[string]Class, map[string]Interface, map[string]int) {
 	c.virtualObjects = map[VarNodeKey]map[string]int{}
+	c.predeclareStdImportsForJitRegions(program.Statements)
+
+	// Predeclare user functions before JIT-region outlining. The outliner needs
+	// function signatures / inlineCandidates to infer call return types in top-level
+	// loops such as:
+	//
+	//   for ... { final_result = aggregate(logs_data) }
+	//
+	// Without this, top-level calls are typed as unknown/number and the outer loop
+	// never gets outlined into a JIT helper. Helper functions created by the
+	// outliner register themselves below.
+	c.predeclareFunctions(program.Statements)
+	program.Statements = c.outlineJitRegionsInStatements(program.Statements)
+	// Register helpers introduced by the outliner too. This keeps function IDs,
+	// inlineCandidates, and usedFunctions coherent after main/function region
+	// outlining adds __jit_region_* functions to the program.
 	c.predeclareFunctions(program.Statements)
 
 	c.performEscapeAnalysis(program.Statements)
@@ -776,8 +808,12 @@ func (c *Compiler) CompileProgram(program Program) ([]Instruction, map[string]Fu
 
 	c.emit(OP_HALT, nil)
 
-	// remove unused functions
+	// remove unused functions. Compiler-generated JIT-region helpers are kept
+	// even if an older path forgot to mark them used.
 	for v := range c.functions {
+		if strings.HasPrefix(v, "__jit_region_") {
+			continue
+		}
 		if _, ok := c.usedFunctions[v]; !ok {
 			delete(c.functions, v)
 		}
@@ -786,6 +822,37 @@ func (c *Compiler) CompileProgram(program Program) ([]Instruction, map[string]Fu
 	c.eraseFunctionGenericsForVM()
 
 	return c.mainInstructions, c.functions, c.classes, c.interfaces, c.globalIndexes
+}
+
+func (c *Compiler) predeclareStdImportsForJitRegions(stmts []Stmt) {
+	if c.stdImportModules == nil {
+		c.stdImportModules = map[string]string{}
+	}
+	for _, stmt := range stmts {
+		switch s := stmt.(type) {
+		case ImportStmt:
+			if !s.Std {
+				continue
+			}
+			name := s.Alias
+			if name == "" {
+				name = s.Path
+			}
+			c.stdImportModules[name] = s.Path
+		case NamespaceStmt:
+			for _, nested := range s.Statements {
+				imp, ok := nested.(ImportStmt)
+				if !ok || !imp.Std {
+					continue
+				}
+				name := imp.Alias
+				if name == "" {
+					name = imp.Path
+				}
+				c.stdImportModules[s.Name+"."+name] = imp.Path
+			}
+		}
+	}
 }
 
 func (c *Compiler) resolveStdImportModuleName(expr Expr) (string, bool) {
@@ -934,6 +1001,9 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 	namespaceStdImports := map[string]string{}
 	namespacePluginImports := map[string]string{}
 	hasExplicitExports := false
+	qualify := func(name string) string {
+		return stmt.Name + "." + name
+	}
 
 	for _, raw := range stmt.Statements {
 		if _, ok := raw.(ExportStmt); ok {
@@ -988,7 +1058,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 			alias = imp.Path
 		}
 
-		fullName := stmt.Name + "." + alias
+		fullName := qualify(alias)
 
 		namespaceVariables[alias] = fullName
 
@@ -1017,7 +1087,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 			continue
 		}
 
-		fullName := stmt.Name + "." + name
+		fullName := qualify(name)
 
 		namespaceFunctions[name] = fullName
 
@@ -1054,7 +1124,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 			continue
 		}
 
-		fullName := stmt.Name + "." + name
+		fullName := qualify(name)
 
 		namespaceVariables[name] = fullName
 
@@ -1072,7 +1142,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 			continue
 		}
 
-		fullName := stmt.Name + "." + classStmt.Name
+		fullName := qualify(classStmt.Name)
 
 		namespaceClasses[classStmt.Name] = fullName
 
@@ -1090,7 +1160,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 			continue
 		}
 
-		fullName := stmt.Name + "." + enumStmt.Name
+		fullName := qualify(enumStmt.Name)
 
 		namespaceEnums[enumStmt.Name] = fullName
 
@@ -1110,7 +1180,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 			continue
 		}
 
-		fullName := stmt.Name + "." + interfaceStmt.Name
+		fullName := qualify(interfaceStmt.Name)
 
 		namespaceInterfaces[interfaceStmt.Name] = fullName
 
@@ -1134,7 +1204,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 			alias = imp.Path
 		}
 
-		fullName := stmt.Name + "." + alias
+		fullName := qualify(alias)
 
 		resolvedPath := imp.Path
 
@@ -1193,7 +1263,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 			continue
 		}
 
-		fullName := stmt.Name + "." + enumStmt.Name
+		fullName := qualify(enumStmt.Name)
 
 		obj := ObjectValue{}
 
@@ -1222,7 +1292,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		inner, _ := unwrapExport(raw)
 
 		if v, ok := inner.(VariableStmt); ok {
-			fullName := stmt.Name + "." + v.Name
+			fullName := qualify(v.Name)
 
 			c.compileExpr(v.Value)
 
@@ -1237,7 +1307,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 			c.globalConstants[fullName] = v.Constant
 
 		} else if embedStmt, ok := inner.(EmbedStmt); ok {
-			fullName := stmt.Name + "." + embedStmt.Name
+			fullName := qualify(embedStmt.Name)
 
 			namespacedEmbed := EmbedStmt{
 				Kind:         embedStmt.Kind,
@@ -1264,12 +1334,10 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 			continue
 		}
 
-		fullName := stmt.Name + "." + interfaceStmt.Name
+		fullName := qualify(interfaceStmt.Name)
 
-		namespacedInterface := InterfaceStmt{
-			Name:   fullName,
-			Fields: interfaceStmt.Fields,
-		}
+		namespacedInterface := interfaceStmt
+		namespacedInterface.Name = fullName
 
 		c.compileInterfaceStatement(namespacedInterface)
 	}
@@ -1283,12 +1351,10 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 			continue
 		}
 
-		namespacedClass := ClassStmt{
-			Name:    stmt.Name + "." + classStmt.Name,
-			Fields:  classStmt.Fields,
-			Methods: classStmt.Methods,
-			Embeds:  classStmt.Embeds,
-		}
+		fullName := qualify(classStmt.Name)
+
+		namespacedClass := classStmt
+		namespacedClass.Name = fullName
 
 		c.compileClass(namespacedClass)
 	}
@@ -1302,15 +1368,10 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 			continue
 		}
 
-		fullName := stmt.Name + "." + fn.Name
+		fullName := qualify(fn.Name)
 
-		namespacedFn := FunctionStmt{
-			Name:       fullName,
-			Params:     fn.Params,
-			ReturnType: fn.ReturnType,
-			Body:       fn.Body,
-			Private:    fn.Private,
-		}
+		namespacedFn := fn
+		namespacedFn.Name = fullName
 
 		c.compileFunction(namespacedFn)
 	}
@@ -1736,7 +1797,14 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 		}
 
 		if c.isCompilingNamespace {
-			LangErrorAt(ErrorName, c.currentFile, c.currentLine, c.currentColumn, "undefined variable in namespace: %s", s.Name)
+			LangErrorAt(
+				ErrorName,
+				s.File,
+				s.Line,
+				s.Column,
+				"undefined variable in namespace: %s",
+				s.Name,
+			)
 		}
 
 		c.emit(OP_ASSIGN_GLOBAL, VariableInfo{
@@ -1745,10 +1813,16 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 		})
 
 	case IndexAssignStmt:
-		c.compileExpr(s.Object)
-		c.compileExpr(s.Index)
-		c.compileExpr(s.Value)
-		c.emit(OP_SET_INDEX, nil)
+		if strLit, ok := s.Index.(StringExpr); ok {
+			c.compileExpr(s.Object)
+			c.compileExpr(s.Value)
+			c.emit(OP_SET_PROPERTY, strLit.Value)
+		} else {
+			c.compileExpr(s.Object)
+			c.compileExpr(s.Index)
+			c.compileExpr(s.Value)
+			c.emit(OP_SET_INDEX, nil)
+		}
 
 	case ThrowStmt:
 		c.compileExpr(s.Value)
@@ -1878,6 +1952,7 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 
 func (c *Compiler) compileEnum(stmt EnumStmt) {
 	if len(stmt.Members) == 0 {
+		c.setLocation(stmt.File, stmt.Line, stmt.Column)
 		c.fatalError(ErrorSyntax, "enum %s must have at least one member", stmt.Name)
 	}
 
@@ -2604,6 +2679,21 @@ func (c *Compiler) collectCapturableBindings() map[string]Binding {
 
 	if c.outerBindings != nil {
 		for name, binding := range c.outerBindings {
+			if _, exists := result[name]; exists {
+				continue
+			}
+
+			if binding.Kind == BindingGlobal {
+				result[name] = binding
+				continue
+			}
+
+			captured, ok := c.ensureCaptured(name)
+			if ok {
+				result[name] = captured
+				continue
+			}
+
 			result[name] = binding
 		}
 	}
@@ -2688,6 +2778,1853 @@ func (c *Compiler) emitIncrementForName(name string, intAmount int, floatAmount 
 	c.emit(OP_INC_GLOBAL, info)
 }
 
+func jitRegionDebugf(format string, args ...any) {
+	if os.Getenv("TINY_JIT_REGION_DEBUG") != "1" {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[JIT REGION] "+format+"\n", args...)
+}
+
+func jitRegionStdMemberCallType(e MemberCallExpr, stdImportModules map[string]string) (string, bool) {
+	if e.Safe || stdImportModules == nil {
+		return "", false
+	}
+
+	ident, ok := e.Object.(IdentExpr)
+	if !ok {
+		return "", false
+	}
+
+	switch stdImportModules[ident.Name] {
+	case "math":
+		switch e.Method {
+		case "floor", "ceil", "sqrt", "abs":
+			return "number", len(e.Args) == 1
+		case "pow":
+			return "number", len(e.Args) == 2
+		}
+
+	case "strings":
+		switch e.Method {
+		case "isDigit":
+			return "bool", len(e.Args) == 1
+		case "random":
+			return "string", len(e.Args) == 1
+		}
+	}
+
+	return "", false
+}
+
+func jitRegionStdMemberCallArgType(e MemberCallExpr, argIndex int, stdImportModules map[string]string) string {
+	ident, ok := e.Object.(IdentExpr)
+	if !ok || argIndex < 0 {
+		return ""
+	}
+
+	switch stdImportModules[ident.Name] {
+	case "math":
+		return "number"
+	case "strings":
+		switch e.Method {
+		case "isDigit":
+			return "string"
+		case "random":
+			return "number"
+		}
+	}
+
+	return ""
+}
+
+func jitRegionNumericStdMemberCall(e MemberCallExpr, stdImportModules map[string]string) bool {
+	typ, ok := jitRegionStdMemberCallType(e, stdImportModules)
+	return ok && typ == "number"
+}
+
+func jitRegionSupportedMethodCall(e MemberCallExpr) bool {
+	if e.Safe {
+		return false
+	}
+	switch e.Method {
+	case "length":
+		return len(e.Args) == 0
+	case "get", "push":
+		return len(e.Args) == 1
+	default:
+		return false
+	}
+}
+
+type jitRegionCandidate struct {
+	start        int
+	end          int
+	helper       FunctionStmt
+	replacements []Stmt
+}
+
+func (c *Compiler) registerOutlinedJitFunctionForInference(fn FunctionStmt) {
+	if c.inlineCandidates != nil {
+		c.inlineCandidates[fn.Name] = fn
+	}
+	if c.declaredFunctions != nil {
+		c.declaredFunctions[fn.Name] = true
+	}
+	if strings.HasPrefix(fn.Name, "__jit_region_") && c.usedFunctions != nil {
+		c.usedFunctions[fn.Name] = true
+	}
+}
+
+func (c *Compiler) registerOutlinedJitFunctionsForInference(helpers []Stmt, rewritten FunctionStmt) {
+	for _, helper := range helpers {
+		if fn, ok := helper.(FunctionStmt); ok {
+			c.registerOutlinedJitFunctionForInference(fn)
+		}
+	}
+	c.registerOutlinedJitFunctionForInference(rewritten)
+}
+
+func (c *Compiler) outlineJitRegionsInStatements(stmts []Stmt) []Stmt {
+	outlined := make([]Stmt, 0, len(stmts))
+
+	// Track simple top-level value types so main-code loops can be outlined too.
+	// Previously only FunctionStmt bodies were visited, so a hot top-level loop like:
+	//
+	//   for let i = 0; i < 5000; i++ { final_result = aggregate(logs_data) }
+	//
+	// stayed in the interpreter and paid the VM -> Wazero call boundary thousands of
+	// times. This map is intentionally conservative: if a type cannot be proven as a
+	// JIT value type, the loop is simply left alone.
+	mainKnownTypes := map[string]string{}
+
+	for i := 0; i < len(stmts); i++ {
+		stmt := stmts[i]
+		switch s := stmt.(type) {
+		case FunctionStmt:
+			helpers, rewritten := c.outlineJitRegionsInFunction(s)
+			// Important: main-region outlining later in this same pass needs the
+			// rewritten function body and any helper return types. Without this,
+			// `let logs_data = generate_logs()` still sees the old unoutlined
+			// generate_logs body and cannot infer array, so the top-level timed
+			// loop rejects `logs_data` as an unknown live-in.
+			c.registerOutlinedJitFunctionsForInference(helpers, rewritten)
+			outlined = append(outlined, helpers...)
+			outlined = append(outlined, rewritten)
+			continue
+
+		case ExportStmt:
+			fn, ok := s.Inner.(FunctionStmt)
+			if !ok {
+				outlined = append(outlined, stmt)
+				continue
+			}
+			helpers, rewritten := c.outlineJitRegionsInFunction(fn)
+			c.registerOutlinedJitFunctionsForInference(helpers, rewritten)
+			outlined = append(outlined, helpers...)
+			s.Inner = rewritten
+			outlined = append(outlined, s)
+			continue
+		}
+
+		if _, ok := stmt.(WhileStmt); ok {
+			jitRegionDebugf("candidate fn=<main> kind=while index=%d known=%v", i, mainKnownTypes)
+			mainFn := FunctionStmt{Name: "main", Body: stmts}
+			if candidate, ok := c.tryBuildJitRegionCandidate(mainFn, stmts, i, mainKnownTypes); ok {
+				jitRegionDebugf("outline fn=<main> helper=%s start=%d end=%d", candidate.helper.Name, candidate.start, candidate.end)
+				if setupCount := i - candidate.start; setupCount > 0 {
+					outlined = outlined[:len(outlined)-setupCount]
+				}
+				c.registerOutlinedJitFunctionForInference(candidate.helper)
+				outlined = append(outlined, candidate.helper)
+				outlined = append(outlined, candidate.replacements...)
+				for name, typ := range jitRegionDeclaredScalarTypesKnown(stmts[candidate.start:candidate.end], mainKnownTypes, c.stdImportModules) {
+					mainKnownTypes[name] = typ
+				}
+				i = candidate.end - 1
+				continue
+			}
+			if candidate, ok := c.tryBuildJitMainSingleLoopCandidate(mainFn, stmts, i, mainKnownTypes); ok {
+				jitRegionDebugf("outline-loose fn=<main> helper=%s start=%d end=%d", candidate.helper.Name, candidate.start, candidate.end)
+				c.registerOutlinedJitFunctionForInference(candidate.helper)
+				outlined = append(outlined, candidate.helper)
+				outlined = append(outlined, candidate.replacements...)
+				i = candidate.end - 1
+				continue
+			}
+		}
+
+		if _, ok := stmt.(ForStmt); ok {
+			jitRegionDebugf("candidate fn=<main> kind=for index=%d known=%v", i, mainKnownTypes)
+			mainFn := FunctionStmt{Name: "main", Body: stmts}
+			if candidate, ok := c.tryBuildJitRegionCandidate(mainFn, stmts, i, mainKnownTypes); ok {
+				jitRegionDebugf("outline fn=<main> helper=%s start=%d end=%d", candidate.helper.Name, candidate.start, candidate.end)
+				if setupCount := i - candidate.start; setupCount > 0 {
+					outlined = outlined[:len(outlined)-setupCount]
+				}
+				c.registerOutlinedJitFunctionForInference(candidate.helper)
+				outlined = append(outlined, candidate.helper)
+				outlined = append(outlined, candidate.replacements...)
+				for name, typ := range jitRegionDeclaredScalarTypesKnown(stmts[candidate.start:candidate.end], mainKnownTypes, c.stdImportModules) {
+					mainKnownTypes[name] = typ
+				}
+				i = candidate.end - 1
+				continue
+			}
+			if candidate, ok := c.tryBuildJitMainSingleLoopCandidate(mainFn, stmts, i, mainKnownTypes); ok {
+				jitRegionDebugf("outline-loose fn=<main> helper=%s start=%d end=%d", candidate.helper.Name, candidate.start, candidate.end)
+				c.registerOutlinedJitFunctionForInference(candidate.helper)
+				outlined = append(outlined, candidate.helper)
+				outlined = append(outlined, candidate.replacements...)
+				i = candidate.end - 1
+				continue
+			}
+		}
+
+		outlined = append(outlined, stmt)
+		if variable, ok := stmt.(VariableStmt); ok {
+			if typ, ok := c.inferJitMainVariableType(variable, mainKnownTypes); ok {
+				mainKnownTypes[variable.Name] = typ
+				jitRegionDebugf("main-known name=%s type=%s", variable.Name, typ)
+			} else {
+				jitRegionDebugf("main-known-miss name=%s known=%v", variable.Name, mainKnownTypes)
+			}
+		}
+	}
+	return outlined
+}
+
+func (c *Compiler) outlineJitRegionsInFunction(fn FunctionStmt) ([]Stmt, FunctionStmt) {
+	jitRegionDebugf("visit fn=%s body=%d async=%v typeParams=%d", fn.Name, len(fn.Body), fn.Async, len(fn.TypeParameters))
+	if fn.Async || len(fn.TypeParameters) > 0 || strings.HasPrefix(fn.Name, "__jit_region_") {
+		jitRegionDebugf("skip fn=%s reason=async/generic/helper", fn.Name)
+		return nil, fn
+	}
+	for _, stmt := range fn.Body {
+		if ret, ok := stmt.(ReturnStmt); ok && ret.HasValue {
+			if _, ok := ret.Value.(ObjectExpr); ok {
+				jitRegionDebugf("skip fn=%s reason=direct-object-return", fn.Name)
+				return nil, fn
+			}
+		}
+	}
+	for _, param := range fn.Params {
+		if param.HasDefault || param.Variadic {
+			jitRegionDebugf("skip fn=%s reason=default-or-variadic-param param=%s", fn.Name, param.Name)
+			return nil, fn
+		}
+	}
+
+	knownTypes := map[string]string{}
+	for _, param := range fn.Params {
+		if isJitRegionValueType(param.TypeHint.Name) {
+			knownTypes[param.Name] = param.TypeHint.Name
+		}
+	}
+
+	helpers := []Stmt{}
+	body := make([]Stmt, 0, len(fn.Body))
+	for i := 0; i < len(fn.Body); i++ {
+		stmt := fn.Body[i]
+		if _, ok := stmt.(WhileStmt); ok {
+			jitRegionDebugf("candidate fn=%s kind=while index=%d known=%v", fn.Name, i, knownTypes)
+			if candidate, ok := c.tryBuildJitRegionCandidate(fn, fn.Body, i, knownTypes); ok {
+				jitRegionDebugf("outline fn=%s helper=%s start=%d end=%d", fn.Name, candidate.helper.Name, candidate.start, candidate.end)
+				helpers = append(helpers, candidate.helper)
+				if setupCount := i - candidate.start; setupCount > 0 {
+					body = body[:len(body)-setupCount]
+				}
+				body = append(body, candidate.replacements...)
+				for name, typ := range jitRegionDeclaredScalarTypesKnown(fn.Body[candidate.start:candidate.end], knownTypes, c.stdImportModules) {
+					knownTypes[name] = typ
+				}
+				i = candidate.end - 1
+				continue
+			}
+		}
+		if _, ok := stmt.(ForStmt); ok {
+			jitRegionDebugf("candidate fn=%s kind=for index=%d known=%v", fn.Name, i, knownTypes)
+			if candidate, ok := c.tryBuildJitRegionCandidate(fn, fn.Body, i, knownTypes); ok {
+				jitRegionDebugf("outline fn=%s helper=%s start=%d end=%d", fn.Name, candidate.helper.Name, candidate.start, candidate.end)
+				helpers = append(helpers, candidate.helper)
+				if setupCount := i - candidate.start; setupCount > 0 {
+					body = body[:len(body)-setupCount]
+				}
+				body = append(body, candidate.replacements...)
+				for name, typ := range jitRegionDeclaredScalarTypesKnown(fn.Body[candidate.start:candidate.end], knownTypes, c.stdImportModules) {
+					knownTypes[name] = typ
+				}
+				i = candidate.end - 1
+				continue
+			}
+		}
+
+		body = append(body, stmt)
+		if variable, ok := stmt.(VariableStmt); ok {
+			if typ, ok := inferJitRegionVariableTypeKnown(variable, knownTypes, c.stdImportModules); ok {
+				knownTypes[variable.Name] = typ
+			}
+		}
+	}
+
+	fn.Body = body
+	return helpers, fn
+}
+
+func (c *Compiler) tryBuildJitRegionCandidate(fn FunctionStmt, body []Stmt, loopIndex int, knownTypes map[string]string) (jitRegionCandidate, bool) {
+	reject := func(reason string, args ...any) (jitRegionCandidate, bool) {
+		jitRegionDebugf("reject setup fn=%s loop=%d reason="+reason, append([]any{fn.Name, loopIndex}, args...)...)
+		return jitRegionCandidate{}, false
+	}
+	start := loopIndex
+	for start > 0 {
+		variable, ok := body[start-1].(VariableStmt)
+		if !ok || variable.Constant || !jitRegionExprSafe(variable.Value, c.stdImportModules) {
+			break
+		}
+		if _, ok := inferJitRegionVariableTypeKnown(variable, knownTypes, c.stdImportModules); !ok {
+			break
+		}
+		start--
+	}
+	if start == loopIndex {
+		jitRegionDebugf("setup fallback fn=%s loop=%d reason=no-setup-vars", fn.Name, loopIndex)
+		return c.tryBuildJitLoopOnlyRegionCandidate(fn, body, loopIndex, knownTypes)
+	}
+
+	region := body[start : loopIndex+1]
+	if !jitRegionStatementsSafe(region, true, c.stdImportModules) {
+		return reject("region-not-safe")
+	}
+
+	setupTypes := jitRegionDeclaredScalarTypesKnown(region[:loopIndex-start], knownTypes, c.stdImportModules)
+	setupNames := map[string]bool{}
+	for name := range setupTypes {
+		setupNames[name] = true
+	}
+	regionDeclaredNames := jitRegionDeclaredNames(region)
+
+	afterUses := map[string]bool{}
+	for _, stmt := range body[loopIndex+1:] {
+		collectJitRegionStmtUses(stmt, afterUses, c.stdImportModules)
+	}
+
+	escapingSetup := []string{}
+	for name := range setupNames {
+		if afterUses[name] {
+			escapingSetup = append(escapingSetup, name)
+		}
+	}
+	if len(escapingSetup) == 0 {
+		return reject("escaping-setup-count=%d escaping=%v setup=%v afterUses=%v", len(escapingSetup), escapingSetup, setupNames, afterUses)
+	}
+	sort.Strings(escapingSetup)
+	for _, liveOut := range escapingSetup {
+		liveOutType := setupTypes[liveOut]
+		if !isJitRegionValueType(liveOutType) {
+			return reject("liveout-not-supported name=%s type=%s", liveOut, liveOutType)
+		}
+	}
+
+	used := map[string]bool{}
+	for _, stmt := range region {
+		collectJitRegionStmtUses(stmt, used, c.stdImportModules)
+	}
+	liveIns := []string{}
+	regionKnownTypes := maps.Clone(knownTypes)
+	for name, typ := range setupTypes {
+		regionKnownTypes[name] = typ
+	}
+
+	for name := range used {
+		if regionDeclaredNames[name] {
+			continue
+		}
+
+		typ, ok := knownTypes[name]
+		if !ok || !isJitRegionValueType(typ) {
+			if inferred, inferredOK := inferJitRegionLiveInType(name, region, regionKnownTypes, c.stdImportModules); inferredOK {
+				typ = inferred
+				knownTypes[name] = inferred
+				regionKnownTypes[name] = inferred
+				ok = true
+			}
+		}
+
+		if !ok || !isJitRegionValueType(typ) {
+			return reject("livein-unknown name=%s known=%v", name, knownTypes)
+		}
+
+		liveIns = append(liveIns, name)
+	}
+	sort.Strings(liveIns)
+
+	params := make([]Param, 0, len(liveIns))
+	args := make([]Expr, 0, len(liveIns))
+	for _, name := range liveIns {
+		params = append(params, Param{Name: name, TypeHint: TypeHint{Name: knownTypes[name]}})
+		args = append(args, IdentExpr{Name: name})
+	}
+
+	helperName := c.nextJitRegionName(fn.Name)
+	jitRegionDebugf("make helper=%s fn=%s liveOuts=%v liveIns=%v params=%d", helperName, fn.Name, escapingSetup, liveIns, len(liveIns))
+	if c.usedFunctions != nil {
+		c.usedFunctions[helperName] = true
+	}
+	if c.declaredFunctions != nil {
+		c.declaredFunctions[helperName] = true
+	}
+	helperBody := append([]Stmt{}, region...)
+	returnType := TypeHint{Name: setupTypes[escapingSetup[0]]}
+	replacements := []Stmt{}
+	if len(escapingSetup) == 1 {
+		liveOut := escapingSetup[0]
+		liveOutType := setupTypes[liveOut]
+		helperBody = append(helperBody, ReturnStmt{
+			Value:    IdentExpr{Name: liveOut},
+			HasValue: true,
+		})
+		replacements = append(replacements, VariableStmt{
+			Name:     liveOut,
+			Value:    CallExpr{Name: helperName, Args: args},
+			Constant: false,
+			TypeHint: TypeHint{Name: liveOutType},
+		})
+	} else {
+		fields := make([]ObjectField, 0, len(escapingSetup))
+		for _, liveOut := range escapingSetup {
+			fields = append(fields, ObjectField{
+				Name:  liveOut,
+				Value: IdentExpr{Name: liveOut},
+			})
+		}
+		helperBody = append(helperBody, ReturnStmt{
+			Value:    ObjectExpr{Fields: fields},
+			HasValue: true,
+		})
+		returnType = TypeHint{Name: "object"}
+
+		resultName := fmt.Sprintf("__jit_region_result_%d", c.jitRegionCount)
+		replacements = append(replacements, VariableStmt{
+			Name:     resultName,
+			Value:    CallExpr{Name: helperName, Args: args},
+			Constant: false,
+		})
+		for _, liveOut := range escapingSetup {
+			replacements = append(replacements, VariableStmt{
+				Name: liveOut,
+				Value: PropertyExpr{
+					Object: IdentExpr{Name: resultName},
+					Name:   liveOut,
+				},
+				Constant: false,
+				TypeHint: TypeHint{Name: setupTypes[liveOut]},
+			})
+		}
+	}
+
+	helper := FunctionStmt{
+		Name:       helperName,
+		Params:     params,
+		ReturnType: returnType,
+		Body:       helperBody,
+		File:       fn.File,
+		Line:       fn.Line,
+		Column:     fn.Column,
+	}
+
+	return jitRegionCandidate{
+		start:        start,
+		end:          loopIndex + 1,
+		helper:       helper,
+		replacements: replacements,
+	}, true
+}
+
+func (c *Compiler) tryBuildJitMainSingleLoopCandidate(fn FunctionStmt, body []Stmt, loopIndex int, knownTypes map[string]string) (jitRegionCandidate, bool) {
+	reject := func(reason string, args ...any) (jitRegionCandidate, bool) {
+		jitRegionDebugf("reject main-single-loop fn=%s loop=%d reason="+reason, append([]any{fn.Name, loopIndex}, args...)...)
+		return jitRegionCandidate{}, false
+	}
+
+	region := body[loopIndex : loopIndex+1]
+	if !jitRegionStatementsSafe(region, true, c.stdImportModules) {
+		return reject("region-not-safe")
+	}
+
+	regionDeclaredNames := jitRegionDeclaredNames(region)
+	assigned := map[string]bool{}
+	for _, stmt := range region {
+		collectJitRegionAssignedNames(stmt, assigned)
+	}
+
+	liveOuts := make([]string, 0, 1)
+	for name := range assigned {
+		if regionDeclaredNames[name] {
+			continue
+		}
+		typ, ok := knownTypes[name]
+		if !ok || !isJitRegionValueType(typ) {
+			if inferred, inferredOK := inferJitRegionLiveInType(name, region, maps.Clone(knownTypes), c.stdImportModules); inferredOK {
+				typ = inferred
+				knownTypes[name] = inferred
+				ok = true
+			}
+		}
+		if ok && isJitRegionValueType(typ) {
+			liveOuts = append(liveOuts, name)
+		}
+	}
+	if len(liveOuts) != 1 {
+		return reject("liveout-count=%d liveouts=%v assigned=%v declared=%v known=%v", len(liveOuts), liveOuts, assigned, regionDeclaredNames, knownTypes)
+	}
+	sort.Strings(liveOuts)
+	liveOut := liveOuts[0]
+	liveOutType := knownTypes[liveOut]
+	if !isJitRegionValueType(liveOutType) {
+		return reject("liveout-type-unknown name=%s type=%s known=%v", liveOut, liveOutType, knownTypes)
+	}
+
+	used := map[string]bool{}
+	for _, stmt := range region {
+		collectJitRegionStmtUses(stmt, used, c.stdImportModules)
+	}
+
+	liveIns := []string{}
+	regionKnownTypes := maps.Clone(knownTypes)
+	for name := range used {
+		if regionDeclaredNames[name] {
+			continue
+		}
+		typ, ok := knownTypes[name]
+		if !ok || !isJitRegionValueType(typ) {
+			if inferred, inferredOK := inferJitRegionLiveInType(name, region, regionKnownTypes, c.stdImportModules); inferredOK {
+				typ = inferred
+				knownTypes[name] = inferred
+				regionKnownTypes[name] = inferred
+				ok = true
+			}
+		}
+		if !ok || !isJitRegionValueType(typ) {
+			return reject("livein-unknown name=%s used=%v known=%v", name, used, knownTypes)
+		}
+		liveIns = append(liveIns, name)
+	}
+
+	if !regionDeclaredNames[liveOut] {
+		found := false
+		for _, name := range liveIns {
+			if name == liveOut {
+				found = true
+				break
+			}
+		}
+		if !found {
+			liveIns = append(liveIns, liveOut)
+		}
+	}
+	sort.Strings(liveIns)
+
+	params := make([]Param, 0, len(liveIns))
+	args := make([]Expr, 0, len(liveIns))
+	for _, name := range liveIns {
+		typ := knownTypes[name]
+		if !isJitRegionValueType(typ) {
+			return reject("param-type-unknown name=%s type=%s known=%v", name, typ, knownTypes)
+		}
+		params = append(params, Param{Name: name, TypeHint: TypeHint{Name: typ}})
+		args = append(args, IdentExpr{Name: name})
+	}
+
+	helperName := c.nextJitRegionName(fn.Name)
+	jitRegionDebugf("make-main-single helper=%s liveOut=%s type=%s liveIns=%v known=%v", helperName, liveOut, liveOutType, liveIns, knownTypes)
+	if c.usedFunctions != nil {
+		c.usedFunctions[helperName] = true
+	}
+	if c.declaredFunctions != nil {
+		c.declaredFunctions[helperName] = true
+	}
+
+	helperBody := append([]Stmt{}, region...)
+	helperBody = append(helperBody, ReturnStmt{Value: IdentExpr{Name: liveOut}, HasValue: true})
+
+	helper := FunctionStmt{
+		Name:       helperName,
+		Params:     params,
+		ReturnType: TypeHint{Name: liveOutType},
+		Body:       helperBody,
+		File:       fn.File,
+		Line:       fn.Line,
+		Column:     fn.Column,
+	}
+
+	return jitRegionCandidate{
+		start:        loopIndex,
+		end:          loopIndex + 1,
+		helper:       helper,
+		replacements: []Stmt{AssignStmt{Name: liveOut, Value: CallExpr{Name: helperName, Args: args}}},
+	}, true
+}
+
+func (c *Compiler) tryBuildJitLoopOnlyRegionCandidate(fn FunctionStmt, body []Stmt, loopIndex int, knownTypes map[string]string) (jitRegionCandidate, bool) {
+	reject := func(reason string, args ...any) (jitRegionCandidate, bool) {
+		jitRegionDebugf("reject loop-only fn=%s loop=%d reason="+reason, append([]any{fn.Name, loopIndex}, args...)...)
+		return jitRegionCandidate{}, false
+	}
+	region := body[loopIndex : loopIndex+1]
+	if !jitRegionStatementsSafe(region, true, c.stdImportModules) {
+		return reject("region-not-safe")
+	}
+
+	regionDeclaredNames := jitRegionDeclaredNames(region)
+
+	afterUses := map[string]bool{}
+	for _, stmt := range body[loopIndex+1:] {
+		collectJitRegionStmtUses(stmt, afterUses, c.stdImportModules)
+	}
+
+	assigned := map[string]bool{}
+	for _, stmt := range region {
+		collectJitRegionAssignedNames(stmt, assigned)
+	}
+
+	liveOuts := []string{}
+	for name := range assigned {
+		if regionDeclaredNames[name] {
+			continue
+		}
+		if !afterUses[name] {
+			continue
+		}
+		typ, ok := knownTypes[name]
+		if !ok || !isJitRegionValueType(typ) {
+			return reject("liveout-unknown name=%s known=%v", name, knownTypes)
+		}
+		liveOuts = append(liveOuts, name)
+	}
+	if len(liveOuts) != 1 {
+		return reject("liveout-count=%d liveouts=%v assigned=%v afterUses=%v declared=%v known=%v", len(liveOuts), liveOuts, assigned, afterUses, regionDeclaredNames, knownTypes)
+	}
+	sort.Strings(liveOuts)
+	liveOut := liveOuts[0]
+	liveOutType := knownTypes[liveOut]
+	if !isJitRegionValueType(liveOutType) {
+		if inferred, ok := inferJitRegionLiveInType(liveOut, region, knownTypes, c.stdImportModules); ok {
+			liveOutType = inferred
+			knownTypes[liveOut] = liveOutType
+		} else {
+			return reject("liveout-unknown name=%s known=%v", liveOut, knownTypes)
+		}
+	}
+
+	used := map[string]bool{}
+	for _, stmt := range region {
+		collectJitRegionStmtUses(stmt, used, c.stdImportModules)
+	}
+
+	liveIns := []string{}
+	regionKnownTypes := maps.Clone(knownTypes)
+	for name := range used {
+		if regionDeclaredNames[name] {
+			continue
+		}
+
+		typ, ok := knownTypes[name]
+		if !ok || !isJitRegionValueType(typ) {
+			if inferred, inferredOK := inferJitRegionLiveInType(name, region, regionKnownTypes, c.stdImportModules); inferredOK {
+				typ = inferred
+				knownTypes[name] = inferred
+				regionKnownTypes[name] = inferred
+				ok = true
+			}
+		}
+
+		if !ok || !isJitRegionValueType(typ) {
+			return reject("livein-unknown name=%s known=%v", name, knownTypes)
+		}
+
+		liveIns = append(liveIns, name)
+	}
+
+	// If the loop assigns an outer variable without reading it first, it still has
+	// to exist inside the generated helper. Passing it as a parameter preserves the
+	// binding and avoids compiling an assignment to an undeclared local. The value
+	// may be unused by the loop, but the extra argument is tiny compared with the
+	// cost of leaving the whole outer loop in the interpreter.
+	if !regionDeclaredNames[liveOut] {
+		foundLiveOutParam := false
+		for _, name := range liveIns {
+			if name == liveOut {
+				foundLiveOutParam = true
+				break
+			}
+		}
+		if !foundLiveOutParam {
+			liveIns = append(liveIns, liveOut)
+		}
+	}
+	sort.Strings(liveIns)
+
+	params := make([]Param, 0, len(liveIns))
+	args := make([]Expr, 0, len(liveIns))
+	for _, name := range liveIns {
+		params = append(params, Param{Name: name, TypeHint: TypeHint{Name: knownTypes[name]}})
+		args = append(args, IdentExpr{Name: name})
+	}
+
+	helperName := c.nextJitRegionName(fn.Name)
+	jitRegionDebugf("make helper=%s fn=%s liveOut=%s liveIns=%v params=%d", helperName, fn.Name, liveOut, liveIns, len(liveIns))
+	if c.usedFunctions != nil {
+		c.usedFunctions[helperName] = true
+	}
+	if c.declaredFunctions != nil {
+		c.declaredFunctions[helperName] = true
+	}
+
+	helperBody := append([]Stmt{}, region...)
+	helperBody = append(helperBody, ReturnStmt{
+		Value:    IdentExpr{Name: liveOut},
+		HasValue: true,
+	})
+
+	replacement := AssignStmt{
+		Name:  liveOut,
+		Value: CallExpr{Name: helperName, Args: args},
+	}
+
+	helper := FunctionStmt{
+		Name:       helperName,
+		Params:     params,
+		ReturnType: TypeHint{Name: liveOutType},
+		Body:       helperBody,
+		File:       fn.File,
+		Line:       fn.Line,
+		Column:     fn.Column,
+	}
+
+	return jitRegionCandidate{
+		start:        loopIndex,
+		end:          loopIndex + 1,
+		helper:       helper,
+		replacements: []Stmt{replacement},
+	}, true
+}
+
+func (c *Compiler) nextJitRegionName(parent string) string {
+	c.jitRegionCount++
+	cleanParent := strings.NewReplacer(".", "_", ":", "_", "-", "_").Replace(parent)
+	return fmt.Sprintf("__jit_region_%s_%d", cleanParent, c.jitRegionCount)
+}
+
+func inferJitRegionVariableType(stmt VariableStmt) (string, bool) {
+	if isJitRegionValueType(stmt.TypeHint.Name) {
+		return stmt.TypeHint.Name, true
+	}
+	return inferJitRegionLiteralType(stmt.Value)
+}
+
+func inferJitRegionVariableTypeKnown(stmt VariableStmt, knownTypes map[string]string, stdImportModules map[string]string) (string, bool) {
+	if isJitRegionValueType(stmt.TypeHint.Name) {
+		return stmt.TypeHint.Name, true
+	}
+	if typ, ok := inferJitRegionLiteralType(stmt.Value); ok {
+		return typ, true
+	}
+	return inferJitRegionExprType(stmt.Value, knownTypes, stdImportModules)
+}
+
+// inferJitMainVariableType is the top-level equivalent of
+// inferJitRegionVariableTypeKnown, but it can use the compiler's predeclared
+// function table / inlineCandidates to infer direct-call return types. This is
+// what lets `let logs_data = generate_logs()` become `array` instead of the old
+// bogus generic `number` fallback used by region expression inference.
+func (c *Compiler) inferJitMainVariableType(stmt VariableStmt, knownTypes map[string]string) (string, bool) {
+	if isJitRegionValueType(stmt.TypeHint.Name) {
+		return stmt.TypeHint.Name, true
+	}
+	if typ, ok := inferJitRegionLiteralType(stmt.Value); ok {
+		return typ, true
+	}
+	return c.inferJitMainExprType(stmt.Value, knownTypes)
+}
+
+func (c *Compiler) inferJitMainExprType(expr Expr, knownTypes map[string]string) (string, bool) {
+	switch e := expr.(type) {
+	case CallExpr:
+		for _, arg := range e.Args {
+			if !jitRegionExprSafe(arg, c.stdImportModules) {
+				return "", false
+			}
+		}
+		if typ, ok := c.inferJitDirectCallReturnType(e.Name, e.Args, knownTypes); ok {
+			jitRegionDebugf("infer-call-return name=%s source=call-expr type=%s", e.Name, typ)
+			return typ, true
+		}
+		return "", false
+	case CallValueExpr:
+		for _, arg := range e.Args {
+			if !jitRegionExprSafe(arg, c.stdImportModules) {
+				return "", false
+			}
+		}
+		name, ok := c.resolveJitDirectCalleeName(e.Callee)
+		if !ok {
+			return "", false
+		}
+		if typ, ok := c.inferJitDirectCallReturnType(name, e.Args, knownTypes); ok {
+			jitRegionDebugf("infer-call-return name=%s source=call-value type=%s", name, typ)
+			return typ, true
+		}
+		return "", false
+	default:
+		return inferJitRegionExprType(expr, knownTypes, c.stdImportModules)
+	}
+}
+
+func (c *Compiler) resolveJitDirectCalleeName(callee Expr) (string, bool) {
+	name, ok := c.resolveFullyQualifiedName(callee)
+	if !ok || name == "" {
+		return "", false
+	}
+	return name, true
+}
+
+func (c *Compiler) inferJitDirectCallReturnType(name string, args []Expr, callerKnownTypes map[string]string) (string, bool) {
+	if fn, ok := c.inlineCandidates[name]; ok {
+		if isJitRegionValueType(fn.ReturnType.Name) && fn.ReturnType.Name != "any" {
+			return fn.ReturnType.Name, true
+		}
+		return c.inferJitFunctionReturnType(fn, args, callerKnownTypes)
+	}
+	if fn, ok := c.functions[name]; ok {
+		if isJitRegionValueType(fn.ReturnType.Name) && fn.ReturnType.Name != "any" {
+			return fn.ReturnType.Name, true
+		}
+	}
+	return "", false
+}
+
+func (c *Compiler) inferJitFunctionReturnType(fn FunctionStmt, args []Expr, callerKnownTypes map[string]string) (string, bool) {
+	if fn.Async || len(fn.TypeParameters) > 0 || len(args) != len(fn.Params) {
+		return "", false
+	}
+
+	known := map[string]string{}
+	for i, param := range fn.Params {
+		if isJitRegionValueType(param.TypeHint.Name) {
+			known[param.Name] = param.TypeHint.Name
+			continue
+		}
+		if typ, ok := c.inferJitMainExprType(args[i], callerKnownTypes); ok && isJitRegionValueType(typ) {
+			known[param.Name] = typ
+		}
+	}
+
+	var scanStmt func(Stmt) (string, bool)
+	scanStmt = func(stmt Stmt) (string, bool) {
+		switch s := stmt.(type) {
+		case VariableStmt:
+			if typ, ok := c.inferJitMainVariableTypeWithKnown(s, known); ok {
+				known[s.Name] = typ
+			}
+		case AssignStmt:
+			if typ, ok := c.inferJitMainExprTypeWithKnown(s.Value, known); ok {
+				known[s.Name] = typ
+			}
+		case ReturnStmt:
+			if !s.HasValue {
+				return "null", true
+			}
+			return c.inferJitMainExprTypeWithKnown(s.Value, known)
+		case IfStmt:
+			// Only infer from branches when both branches return the same proven type.
+			thenType, thenOK := scanStmtListFirstReturn(c, s.ThenBody, maps.Clone(known))
+			elseType, elseOK := scanStmtListFirstReturn(c, s.ElseBody, maps.Clone(known))
+			if thenOK && elseOK && thenType == elseType {
+				return thenType, true
+			}
+		case ForStmt, WhileStmt, ForInStmt:
+			// Loops can mutate locals, but for return-type inference we only need the
+			// simple common case: variables declared before the loop and returned after.
+			return "", false
+		}
+		return "", false
+	}
+
+	for _, stmt := range fn.Body {
+		if typ, ok := scanStmt(stmt); ok {
+			if isJitRegionValueType(typ) {
+				return typ, true
+			}
+			return "", false
+		}
+	}
+	return "", false
+}
+
+func scanStmtListFirstReturn(c *Compiler, body []Stmt, known map[string]string) (string, bool) {
+	for _, stmt := range body {
+		switch s := stmt.(type) {
+		case VariableStmt:
+			if typ, ok := c.inferJitMainVariableTypeWithKnown(s, known); ok {
+				known[s.Name] = typ
+			}
+		case AssignStmt:
+			if typ, ok := c.inferJitMainExprTypeWithKnown(s.Value, known); ok {
+				known[s.Name] = typ
+			}
+		case ReturnStmt:
+			if !s.HasValue {
+				return "null", true
+			}
+			return c.inferJitMainExprTypeWithKnown(s.Value, known)
+		}
+	}
+	return "", false
+}
+
+func (c *Compiler) inferJitMainVariableTypeWithKnown(stmt VariableStmt, knownTypes map[string]string) (string, bool) {
+	if isJitRegionValueType(stmt.TypeHint.Name) {
+		return stmt.TypeHint.Name, true
+	}
+	if typ, ok := inferJitRegionLiteralType(stmt.Value); ok {
+		return typ, true
+	}
+	return c.inferJitMainExprTypeWithKnown(stmt.Value, knownTypes)
+}
+
+func (c *Compiler) inferJitMainExprTypeWithKnown(expr Expr, knownTypes map[string]string) (string, bool) {
+	switch e := expr.(type) {
+	case CallExpr:
+		for _, arg := range e.Args {
+			if !jitRegionExprSafe(arg, c.stdImportModules) {
+				return "", false
+			}
+		}
+		return c.inferJitDirectCallReturnType(e.Name, e.Args, knownTypes)
+	case CallValueExpr:
+		for _, arg := range e.Args {
+			if !jitRegionExprSafe(arg, c.stdImportModules) {
+				return "", false
+			}
+		}
+		name, ok := c.resolveJitDirectCalleeName(e.Callee)
+		if !ok {
+			return "", false
+		}
+		return c.inferJitDirectCallReturnType(name, e.Args, knownTypes)
+	default:
+		return inferJitRegionExprType(expr, knownTypes, c.stdImportModules)
+	}
+}
+
+func inferJitRegionExprType(expr Expr, knownTypes map[string]string, stdImportModules map[string]string) (string, bool) {
+	switch e := expr.(type) {
+	case NumberExpr, FloatExpr:
+		return "number", true
+	case StringExpr:
+		return "string", true
+	case BoolExpr:
+		return "bool", true
+	case ObjectExpr:
+		for _, field := range e.Fields {
+			if field.HasCopy {
+				return "", false
+			}
+			if !jitRegionExprSafe(field.Value, stdImportModules) {
+				return "", false
+			}
+		}
+		return "object", true
+	case ArrayExpr:
+		elemType := ""
+		for _, elem := range e.Elements {
+			typ, ok := inferJitRegionExprType(elem, knownTypes, stdImportModules)
+			if !ok {
+				if !jitRegionExprSafe(elem, stdImportModules) {
+					return "", false
+				}
+				elemType = ""
+				continue
+			}
+			if elemType == "" {
+				elemType = typ
+			} else if elemType != typ {
+				elemType = ""
+			}
+		}
+		if elemType != "" {
+			return jitRegionArrayTypeFromElement(elemType), true
+		}
+		return "array", true
+	case IdentExpr:
+		typ, ok := knownTypes[e.Name]
+		if ok && isJitRegionValueType(typ) {
+			return typ, true
+		}
+		return "", false
+	case UnaryExpr:
+		if e.Op == TOKEN_MINUS {
+			typ, ok := inferJitRegionExprType(e.Right, knownTypes, stdImportModules)
+			return typ, ok && typ == "number"
+		}
+		if e.Op == TOKEN_BANG {
+			typ, ok := inferJitRegionExprType(e.Right, knownTypes, stdImportModules)
+			if ok && typ == "bool" {
+				return "bool", true
+			}
+		}
+		return "", false
+	case BinaryExpr:
+		left, leftOK := inferJitRegionExprType(e.Left, knownTypes, stdImportModules)
+		right, rightOK := inferJitRegionExprType(e.Right, knownTypes, stdImportModules)
+		if !leftOK || !rightOK {
+			return "", false
+		}
+		switch e.Op {
+		case TOKEN_PLUS, TOKEN_MINUS, TOKEN_STAR, TOKEN_SLASH, TOKEN_PERCENT:
+			if e.Op == TOKEN_PLUS && (left == "string" || right == "string") {
+				return "string", true
+			}
+			if left == "number" && right == "number" {
+				return "number", true
+			}
+		case TOKEN_LT, TOKEN_LTE, TOKEN_GT, TOKEN_GTE, TOKEN_EQ, TOKEN_NEQ:
+			if left == right {
+				return "bool", true
+			}
+		case TOKEN_AND, TOKEN_OR:
+			if left == "bool" && right == "bool" {
+				return "bool", true
+			}
+		}
+		return "", false
+	case TernaryExpr:
+		thenType, thenOK := inferJitRegionExprType(e.ThenExpr, knownTypes, stdImportModules)
+		elseType, elseOK := inferJitRegionExprType(e.ElseExpr, knownTypes, stdImportModules)
+		if thenOK && elseOK && thenType == elseType {
+			return thenType, true
+		}
+	case CallExpr:
+		// Do not invent a numeric return type for direct calls here. This helper has
+		// no access to the compiler's function table, so guessing "number" turns
+		// values like `generate_logs()` into bogus number-typed live-ins. Compiler
+		// methods such as inferJitMainExprType / inferJitDirectCallReturnType handle
+		// real direct-call return inference when function metadata is available.
+		return "", false
+	case CallValueExpr:
+		// Function-valued calls are not knowable here. Keep them conservative.
+		return "", false
+	case MemberCallExpr:
+		if retType, ok := jitRegionStdMemberCallType(e, stdImportModules); ok {
+			for argIndex, arg := range e.Args {
+				expected := jitRegionStdMemberCallArgType(e, argIndex, stdImportModules)
+				if expected == "" {
+					if !jitRegionExprSafe(arg, stdImportModules) {
+						return "", false
+					}
+					continue
+				}
+				typ, ok := inferJitRegionExprType(arg, knownTypes, stdImportModules)
+				if !ok || typ != expected {
+					return "", false
+				}
+			}
+			return retType, true
+		}
+		if !jitRegionSupportedMethodCall(e) {
+			return "", false
+		}
+
+		objectType, objectOK := inferJitRegionExprType(e.Object, knownTypes, stdImportModules)
+		if objectOK && objectType != "array" && !strings.HasPrefix(objectType, "array:") {
+			return "", false
+		}
+
+		switch e.Method {
+		case "length":
+			return "number", true
+		case "get":
+			if len(e.Args) != 1 {
+				return "", false
+			}
+			idxType, ok := inferJitRegionExprType(e.Args[0], knownTypes, stdImportModules)
+			if !ok || idxType != "number" {
+				return "", false
+			}
+			if elemType, ok := jitRegionArrayElementType(objectType); ok {
+				return elemType, true
+			}
+			return "number", true
+		case "push":
+			if len(e.Args) != 1 || !jitRegionExprSafe(e.Args[0], stdImportModules) {
+				return "", false
+			}
+			return "array", true
+		default:
+			return "", false
+		}
+	case PropertyExpr:
+		return "number", true
+	case IndexExpr:
+		objectType, objectOK := inferJitRegionExprType(e.Object, knownTypes, stdImportModules)
+		if !objectOK {
+			return "", false
+		}
+		indexType, indexOK := inferJitRegionExprType(e.Index, knownTypes, stdImportModules)
+		if !indexOK || indexType != "number" {
+			return "", false
+		}
+		if elemType, ok := jitRegionArrayElementType(objectType); ok {
+			return elemType, true
+		}
+		if objectType == "array" || objectType == "object" {
+			return "number", true
+		}
+		return "", false
+	}
+	return "", false
+}
+
+func inferJitRegionLiteralType(expr Expr) (string, bool) {
+	switch expr.(type) {
+	case NumberExpr, FloatExpr:
+		return "number", true
+	case StringExpr:
+		return "string", true
+	case BoolExpr:
+		return "bool", true
+	default:
+		return "", false
+	}
+}
+
+func isJitRegionScalarType(name string) bool {
+	return name == "number" || name == "bool"
+}
+
+func isJitRegionValueType(name string) bool {
+	return isJitRegionScalarType(name) || name == "string" || name == "object" || name == "array" || strings.HasPrefix(name, "array:")
+}
+
+func jitRegionArrayTypeFromElement(elemType string) string {
+	switch elemType {
+	case "number", "string", "bool":
+		return "array:" + elemType
+	default:
+		return "array"
+	}
+}
+
+func jitRegionArrayElementType(arrayType string) (string, bool) {
+	if !strings.HasPrefix(arrayType, "array:") {
+		return "", false
+	}
+	elemType := strings.TrimPrefix(arrayType, "array:")
+	if elemType == "" || !isJitRegionValueType(elemType) {
+		return "", false
+	}
+	return elemType, true
+}
+
+func mergeJitRegionRequiredTypes(existing string, next string) (string, bool) {
+	if next == "" {
+		return existing, true
+	}
+	if existing == "" || existing == next {
+		return next, true
+	}
+	if existing == "array" && strings.HasPrefix(next, "array:") {
+		return next, true
+	}
+	if next == "array" && strings.HasPrefix(existing, "array:") {
+		return existing, true
+	}
+	return existing, false
+}
+
+func jitRegionDeclaredScalarTypes(stmts []Stmt) map[string]string {
+	return jitRegionDeclaredScalarTypesKnown(stmts, nil, nil)
+}
+
+func jitRegionDeclaredScalarTypesKnown(stmts []Stmt, knownTypes map[string]string, stdImportModules map[string]string) map[string]string {
+	types := map[string]string{}
+	regionTypes := map[string]string{}
+	if knownTypes != nil {
+		regionTypes = maps.Clone(knownTypes)
+	}
+	for _, stmt := range stmts {
+		variable, ok := stmt.(VariableStmt)
+		if !ok {
+			continue
+		}
+		if typ, ok := inferJitRegionVariableTypeKnown(variable, regionTypes, stdImportModules); ok {
+			types[variable.Name] = typ
+			regionTypes[variable.Name] = typ
+		}
+	}
+	return types
+}
+
+func jitRegionDeclaredNames(stmts []Stmt) map[string]bool {
+	declared := map[string]bool{}
+	for _, stmt := range stmts {
+		collectJitRegionDeclaredNames(stmt, declared)
+	}
+	return declared
+}
+
+func collectJitRegionDeclaredNames(stmt Stmt, declared map[string]bool) {
+	switch s := stmt.(type) {
+	case VariableStmt:
+		declared[s.Name] = true
+	case ForStmt:
+		if s.Init != nil {
+			collectJitRegionDeclaredNames(s.Init, declared)
+		}
+		for _, nested := range s.Body {
+			collectJitRegionDeclaredNames(nested, declared)
+		}
+	case WhileStmt:
+		for _, nested := range s.Body {
+			collectJitRegionDeclaredNames(nested, declared)
+		}
+	case IfStmt:
+		for _, nested := range s.ThenBody {
+			collectJitRegionDeclaredNames(nested, declared)
+		}
+		for _, nested := range s.ElseBody {
+			collectJitRegionDeclaredNames(nested, declared)
+		}
+	}
+}
+
+func jitRegionStatementsSafe(stmts []Stmt, allowLoop bool, stdImportModules map[string]string) bool {
+	for _, stmt := range stmts {
+		if !jitRegionStatementSafe(stmt, allowLoop, stdImportModules) {
+			return false
+		}
+	}
+	return true
+}
+
+func jitRegionStatementSafe(stmt Stmt, allowLoop bool, stdImportModules map[string]string) bool {
+	switch s := stmt.(type) {
+	case VariableStmt:
+		return !s.Constant && jitRegionExprSafe(s.Value, stdImportModules)
+	case AssignStmt:
+		return jitRegionExprSafe(s.Value, stdImportModules)
+	case PropertyAssignStmt:
+		return jitRegionExprSafe(s.Object, stdImportModules) && jitRegionExprSafe(s.Value, stdImportModules)
+	case IndexAssignStmt:
+		return jitRegionExprSafe(s.Object, stdImportModules) && jitRegionExprSafe(s.Index, stdImportModules) && jitRegionExprSafe(s.Value, stdImportModules)
+	case IncrementStmt, DecrementStmt, BreakStmt, ContinueStmt:
+		return true
+	case ExprStmt:
+		return jitRegionExprSafe(s.Value, stdImportModules)
+	case IfStmt:
+		return jitRegionExprSafe(s.Condition, stdImportModules) &&
+			jitRegionStatementsSafe(s.ThenBody, false, stdImportModules) &&
+			jitRegionStatementsSafe(s.ElseBody, false, stdImportModules)
+	case WhileStmt:
+		return allowLoop &&
+			jitRegionExprSafe(s.Condition, stdImportModules) &&
+			jitRegionStatementsSafe(s.Body, allowLoop, stdImportModules)
+	case ForStmt:
+		return allowLoop &&
+			(s.Init == nil || jitRegionStatementSafe(s.Init, false, stdImportModules)) &&
+			jitRegionExprSafe(s.Condition, stdImportModules) &&
+			(s.Update == nil || jitRegionStatementSafe(s.Update, false, stdImportModules)) &&
+			jitRegionStatementsSafe(s.Body, allowLoop, stdImportModules)
+	default:
+		return false
+	}
+}
+
+func jitRegionExprSafe(expr Expr, stdImportModules map[string]string) bool {
+	switch e := expr.(type) {
+	case nil:
+		return true
+	case NumberExpr, FloatExpr, StringExpr, BoolExpr, NullExpr, IdentExpr:
+		return true
+	case UnaryExpr:
+		return jitRegionExprSafe(e.Right, stdImportModules)
+	case BinaryExpr:
+		return jitRegionExprSafe(e.Left, stdImportModules) && jitRegionExprSafe(e.Right, stdImportModules)
+	case TernaryExpr:
+		return jitRegionExprSafe(e.Condition, stdImportModules) && jitRegionExprSafe(e.ThenExpr, stdImportModules) && jitRegionExprSafe(e.ElseExpr, stdImportModules)
+	case NullishCoalescingExpr:
+		return jitRegionExprSafe(e.Left, stdImportModules) && jitRegionExprSafe(e.Right, stdImportModules)
+	case CallExpr:
+		for _, arg := range e.Args {
+			if !jitRegionExprSafe(arg, stdImportModules) {
+				return false
+			}
+		}
+		return true
+	case CallValueExpr:
+		if _, ok := e.Callee.(IdentExpr); !ok {
+			return false
+		}
+		for _, arg := range e.Args {
+			if !jitRegionExprSafe(arg, stdImportModules) {
+				return false
+			}
+		}
+		return true
+	case MemberCallExpr:
+		if _, ok := jitRegionStdMemberCallType(e, stdImportModules); ok {
+			for _, arg := range e.Args {
+				if !jitRegionExprSafe(arg, stdImportModules) {
+					return false
+				}
+			}
+			return true
+		}
+		if !jitRegionSupportedMethodCall(e) {
+			return false
+		}
+		if !jitRegionExprSafe(e.Object, stdImportModules) {
+			return false
+		}
+		for _, arg := range e.Args {
+			if !jitRegionExprSafe(arg, stdImportModules) {
+				return false
+			}
+		}
+		return true
+	case PropertyExpr:
+		return jitRegionExprSafe(e.Object, stdImportModules)
+	case IndexExpr:
+		return jitRegionExprSafe(e.Object, stdImportModules) && jitRegionExprSafe(e.Index, stdImportModules)
+	case ArrayExpr:
+		for _, elem := range e.Elements {
+			if !jitRegionExprSafe(elem, stdImportModules) {
+				return false
+			}
+		}
+		return true
+	case ObjectExpr:
+		for _, field := range e.Fields {
+			if field.HasCopy || !jitRegionExprSafe(field.Value, stdImportModules) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+func inferJitRegionLiveInType(name string, stmts []Stmt, knownTypes map[string]string, stdImportModules map[string]string) (string, bool) {
+	required := ""
+	seen := false
+
+	merge := func(typ string) bool {
+		if typ == "" {
+			return true
+		}
+		if !isJitRegionValueType(typ) {
+			return false
+		}
+		merged, ok := mergeJitRegionRequiredTypes(required, typ)
+		if !ok {
+			return false
+		}
+		seen = true
+		required = merged
+		return true
+	}
+
+	var exprContains func(Expr) bool
+	exprContains = func(expr Expr) bool {
+		switch e := expr.(type) {
+		case nil:
+			return false
+		case IdentExpr:
+			return e.Name == name
+		case UnaryExpr:
+			return exprContains(e.Right)
+		case BinaryExpr:
+			return exprContains(e.Left) || exprContains(e.Right)
+		case TernaryExpr:
+			return exprContains(e.Condition) || exprContains(e.ThenExpr) || exprContains(e.ElseExpr)
+		case NullishCoalescingExpr:
+			return exprContains(e.Left) || exprContains(e.Right)
+		case PropertyExpr:
+			return exprContains(e.Object)
+		case IndexExpr:
+			return exprContains(e.Object) || exprContains(e.Index)
+		case ArrayExpr:
+			for _, elem := range e.Elements {
+				if exprContains(elem) {
+					return true
+				}
+			}
+			return false
+		case ObjectExpr:
+			for _, field := range e.Fields {
+				if field.HasCopy {
+					if exprContains(field.Copy) {
+						return true
+					}
+					continue
+				}
+				if exprContains(field.Value) {
+					return true
+				}
+			}
+			return false
+		case CallValueExpr:
+			for _, arg := range e.Args {
+				if exprContains(arg) {
+					return true
+				}
+			}
+			return false
+		case MemberCallExpr:
+			if _, ok := jitRegionStdMemberCallType(e, stdImportModules); !ok {
+				return exprContains(e.Object)
+			}
+			for _, arg := range e.Args {
+				if exprContains(arg) {
+					return true
+				}
+			}
+			return false
+		default:
+			return false
+		}
+	}
+
+	var exprTypeHint func(Expr) string
+	exprTypeHint = func(expr Expr) string {
+		switch e := expr.(type) {
+		case NumberExpr, FloatExpr:
+			return "number"
+		case StringExpr:
+			return "string"
+		case BoolExpr:
+			return "bool"
+		case IdentExpr:
+			return knownTypes[e.Name]
+		case CallValueExpr:
+			return ""
+		case MemberCallExpr:
+			if typ, ok := jitRegionStdMemberCallType(e, stdImportModules); ok {
+				return typ
+			}
+			if jitRegionSupportedMethodCall(e) {
+				switch e.Method {
+				case "length":
+					return "number"
+				case "get":
+					if elemType, ok := jitRegionArrayElementType(exprTypeHint(e.Object)); ok {
+						return elemType
+					}
+					return "number"
+				case "push":
+					return "array"
+				}
+			}
+			return ""
+		case PropertyExpr:
+			return "number"
+		case IndexExpr:
+			if elemType, ok := jitRegionArrayElementType(exprTypeHint(e.Object)); ok {
+				return elemType
+			}
+			return "number"
+		default:
+			return ""
+		}
+	}
+
+	var walkExpr func(Expr, string) bool
+	walkExpr = func(expr Expr, expected string) bool {
+		switch e := expr.(type) {
+		case nil:
+			return true
+		case IdentExpr:
+			if e.Name == name {
+				return merge(expected)
+			}
+			return true
+		case NumberExpr, FloatExpr, StringExpr, BoolExpr, NullExpr:
+			return true
+		case UnaryExpr:
+			switch e.Op {
+			case TOKEN_MINUS:
+				return walkExpr(e.Right, "number")
+			case TOKEN_BANG:
+				return walkExpr(e.Right, "bool")
+			default:
+				return walkExpr(e.Right, expected)
+			}
+		case BinaryExpr:
+			switch e.Op {
+			case TOKEN_PLUS:
+				if expected == "string" {
+					return walkExpr(e.Left, "") && walkExpr(e.Right, "")
+				}
+				return walkExpr(e.Left, "number") && walkExpr(e.Right, "number")
+			case TOKEN_MINUS, TOKEN_STAR, TOKEN_SLASH, TOKEN_PERCENT:
+				return walkExpr(e.Left, "number") && walkExpr(e.Right, "number")
+			case TOKEN_LT, TOKEN_LTE, TOKEN_GT, TOKEN_GTE:
+				return walkExpr(e.Left, "number") && walkExpr(e.Right, "number")
+			case TOKEN_AND, TOKEN_OR:
+				return walkExpr(e.Left, "bool") && walkExpr(e.Right, "bool")
+			case TOKEN_EQ, TOKEN_NEQ:
+				leftHint := exprTypeHint(e.Left)
+				rightHint := exprTypeHint(e.Right)
+				if exprContains(e.Left) && rightHint != "" {
+					if !walkExpr(e.Left, rightHint) {
+						return false
+					}
+				} else if !walkExpr(e.Left, expected) {
+					return false
+				}
+				if exprContains(e.Right) && leftHint != "" {
+					return walkExpr(e.Right, leftHint)
+				}
+				return walkExpr(e.Right, expected)
+			default:
+				return walkExpr(e.Left, expected) && walkExpr(e.Right, expected)
+			}
+		case TernaryExpr:
+			return walkExpr(e.Condition, "bool") && walkExpr(e.ThenExpr, expected) && walkExpr(e.ElseExpr, expected)
+		case NullishCoalescingExpr:
+			return walkExpr(e.Left, expected) && walkExpr(e.Right, expected)
+		case CallExpr:
+			// A direct-call argument is not inherently numeric. The previous logic forced
+			// every live-in used as a call argument to number, which produced helpers like
+			// __jit_region_main_2(logs_data: number) for aggregate(logs_data). Let known
+			// types drive the parameter instead; unknown call-argument live-ins should
+			// reject outlining rather than generate a wrong signature.
+			for _, arg := range e.Args {
+				if !walkExpr(arg, "") {
+					return false
+				}
+			}
+			return true
+		case CallValueExpr:
+			if _, ok := e.Callee.(IdentExpr); !ok {
+				return false
+			}
+			for _, arg := range e.Args {
+				if !walkExpr(arg, "") {
+					return false
+				}
+			}
+			return true
+		case MemberCallExpr:
+			if _, ok := jitRegionStdMemberCallType(e, stdImportModules); ok {
+				for argIndex, arg := range e.Args {
+					if !walkExpr(arg, jitRegionStdMemberCallArgType(e, argIndex, stdImportModules)) {
+						return false
+					}
+				}
+				return true
+			}
+			if !jitRegionSupportedMethodCall(e) {
+				return false
+			}
+			objectExpected := "array"
+			switch e.Method {
+			case "get":
+				if expected != "" && expected != "array" {
+					objectExpected = jitRegionArrayTypeFromElement(expected)
+				}
+			case "length", "push":
+				objectExpected = "array"
+			}
+			if !walkExpr(e.Object, objectExpected) {
+				return false
+			}
+			for argIndex, arg := range e.Args {
+				argExpected := ""
+				if e.Method == "get" && argIndex == 0 {
+					argExpected = "number"
+				}
+				if !walkExpr(arg, argExpected) {
+					return false
+				}
+			}
+			return true
+		case PropertyExpr:
+			return walkExpr(e.Object, "object")
+		case IndexExpr:
+			objectExpected := "array"
+			if expected != "" && expected != "array" {
+				objectExpected = jitRegionArrayTypeFromElement(expected)
+			}
+			return walkExpr(e.Object, objectExpected) && walkExpr(e.Index, "number")
+		case ArrayExpr:
+			for _, elem := range e.Elements {
+				if !walkExpr(elem, "") {
+					return false
+				}
+			}
+			return true
+		case ObjectExpr:
+			for _, field := range e.Fields {
+				if field.HasCopy {
+					if !walkExpr(field.Copy, "") {
+						return false
+					}
+					continue
+				}
+				if !walkExpr(field.Value, "") {
+					return false
+				}
+			}
+			return true
+		default:
+			return false
+		}
+	}
+
+	var walkStmt func(Stmt) bool
+	walkStmt = func(stmt Stmt) bool {
+		switch s := stmt.(type) {
+		case VariableStmt:
+			expected := ""
+			if typ, ok := inferJitRegionVariableType(s); ok {
+				expected = typ
+			}
+			return walkExpr(s.Value, expected)
+		case AssignStmt:
+			return walkExpr(s.Value, knownTypes[s.Name])
+		case PropertyAssignStmt:
+			return walkExpr(s.Object, "object") && walkExpr(s.Value, "")
+		case IndexAssignStmt:
+			return walkExpr(s.Object, "array") && walkExpr(s.Index, "number") && walkExpr(s.Value, "")
+		case ExprStmt:
+			return walkExpr(s.Value, "")
+		case IfStmt:
+			if !walkExpr(s.Condition, "bool") {
+				return false
+			}
+			for _, nested := range s.ThenBody {
+				if !walkStmt(nested) {
+					return false
+				}
+			}
+			for _, nested := range s.ElseBody {
+				if !walkStmt(nested) {
+					return false
+				}
+			}
+			return true
+		case WhileStmt:
+			if !walkExpr(s.Condition, "bool") {
+				return false
+			}
+			for _, nested := range s.Body {
+				if !walkStmt(nested) {
+					return false
+				}
+			}
+			return true
+		case ForStmt:
+			if s.Init != nil && !walkStmt(s.Init) {
+				return false
+			}
+			if !walkExpr(s.Condition, "bool") {
+				return false
+			}
+			if s.Update != nil && !walkStmt(s.Update) {
+				return false
+			}
+			for _, nested := range s.Body {
+				if !walkStmt(nested) {
+					return false
+				}
+			}
+			return true
+		case ReturnStmt:
+			return walkExpr(s.Value, "")
+		case IncrementStmt, DecrementStmt, BreakStmt, ContinueStmt:
+			return true
+		default:
+			return true
+		}
+	}
+
+	for _, stmt := range stmts {
+		if !walkStmt(stmt) {
+			return "", false
+		}
+	}
+
+	if !seen || required == "" {
+		return "", false
+	}
+	return required, true
+}
+
+func collectJitRegionAssignedNames(stmt Stmt, assigned map[string]bool) {
+	switch s := stmt.(type) {
+	case AssignStmt:
+		assigned[s.Name] = true
+	case IncrementStmt:
+		assigned[s.Name] = true
+	case DecrementStmt:
+		assigned[s.Name] = true
+	case PropertyAssignStmt:
+		if ident, ok := s.Object.(IdentExpr); ok {
+			assigned[ident.Name] = true
+		}
+	case IndexAssignStmt:
+		if ident, ok := s.Object.(IdentExpr); ok {
+			assigned[ident.Name] = true
+		}
+	case IfStmt:
+		for _, nested := range s.ThenBody {
+			collectJitRegionAssignedNames(nested, assigned)
+		}
+		for _, nested := range s.ElseBody {
+			collectJitRegionAssignedNames(nested, assigned)
+		}
+	case WhileStmt:
+		for _, nested := range s.Body {
+			collectJitRegionAssignedNames(nested, assigned)
+		}
+	case ForStmt:
+		if s.Update != nil {
+			collectJitRegionAssignedNames(s.Update, assigned)
+		}
+		for _, nested := range s.Body {
+			collectJitRegionAssignedNames(nested, assigned)
+		}
+	}
+}
+
+func collectJitRegionStmtUses(stmt Stmt, uses map[string]bool, stdImportModules map[string]string) {
+	switch s := stmt.(type) {
+	case VariableStmt:
+		collectJitRegionExprUses(s.Value, uses, stdImportModules)
+	case AssignStmt:
+		collectJitRegionExprUses(s.Value, uses, stdImportModules)
+	case ExprStmt:
+		collectJitRegionExprUses(s.Value, uses, stdImportModules)
+	case IfStmt:
+		collectJitRegionExprUses(s.Condition, uses, stdImportModules)
+		for _, nested := range s.ThenBody {
+			collectJitRegionStmtUses(nested, uses, stdImportModules)
+		}
+		for _, nested := range s.ElseBody {
+			collectJitRegionStmtUses(nested, uses, stdImportModules)
+		}
+	case WhileStmt:
+		collectJitRegionExprUses(s.Condition, uses, stdImportModules)
+		for _, nested := range s.Body {
+			collectJitRegionStmtUses(nested, uses, stdImportModules)
+		}
+	case ForStmt:
+		if s.Init != nil {
+			collectJitRegionStmtUses(s.Init, uses, stdImportModules)
+		}
+		collectJitRegionExprUses(s.Condition, uses, stdImportModules)
+		if s.Update != nil {
+			collectJitRegionStmtUses(s.Update, uses, stdImportModules)
+		}
+		for _, nested := range s.Body {
+			collectJitRegionStmtUses(nested, uses, stdImportModules)
+		}
+	case ReturnStmt:
+		collectJitRegionExprUses(s.Value, uses, stdImportModules)
+	case PropertyAssignStmt:
+		collectJitRegionExprUses(s.Object, uses, stdImportModules)
+		collectJitRegionExprUses(s.Value, uses, stdImportModules)
+	case IndexAssignStmt:
+		collectJitRegionExprUses(s.Object, uses, stdImportModules)
+		collectJitRegionExprUses(s.Index, uses, stdImportModules)
+		collectJitRegionExprUses(s.Value, uses, stdImportModules)
+	}
+}
+
+func collectJitRegionExprUses(expr Expr, uses map[string]bool, stdImportModules map[string]string) {
+	switch e := expr.(type) {
+	case nil:
+		return
+	case IdentExpr:
+		uses[e.Name] = true
+	case UnaryExpr:
+		collectJitRegionExprUses(e.Right, uses, stdImportModules)
+	case BinaryExpr:
+		collectJitRegionExprUses(e.Left, uses, stdImportModules)
+		collectJitRegionExprUses(e.Right, uses, stdImportModules)
+	case TernaryExpr:
+		collectJitRegionExprUses(e.Condition, uses, stdImportModules)
+		collectJitRegionExprUses(e.ThenExpr, uses, stdImportModules)
+		collectJitRegionExprUses(e.ElseExpr, uses, stdImportModules)
+	case NullishCoalescingExpr:
+		collectJitRegionExprUses(e.Left, uses, stdImportModules)
+		collectJitRegionExprUses(e.Right, uses, stdImportModules)
+	case CallExpr:
+		for _, arg := range e.Args {
+			collectJitRegionExprUses(arg, uses, stdImportModules)
+		}
+	case CallValueExpr:
+		if _, ok := e.Callee.(IdentExpr); !ok {
+			collectJitRegionExprUses(e.Callee, uses, stdImportModules)
+		}
+		for _, arg := range e.Args {
+			collectJitRegionExprUses(arg, uses, stdImportModules)
+		}
+	case MemberCallExpr:
+		if _, ok := jitRegionStdMemberCallType(e, stdImportModules); !ok {
+			collectJitRegionExprUses(e.Object, uses, stdImportModules)
+		}
+		for _, arg := range e.Args {
+			collectJitRegionExprUses(arg, uses, stdImportModules)
+		}
+	case PropertyExpr:
+		collectJitRegionExprUses(e.Object, uses, stdImportModules)
+	case IndexExpr:
+		collectJitRegionExprUses(e.Object, uses, stdImportModules)
+		collectJitRegionExprUses(e.Index, uses, stdImportModules)
+	case ArrayExpr:
+		for _, elem := range e.Elements {
+			collectJitRegionExprUses(elem, uses, stdImportModules)
+		}
+	case ObjectExpr:
+		for _, field := range e.Fields {
+			if field.HasCopy {
+				uses[field.Copy.Name] = true
+			}
+			collectJitRegionExprUses(field.Value, uses, stdImportModules)
+		}
+	case InterpolatedStringExpr:
+		for _, part := range e.Parts {
+			if part.IsExpr {
+				collectJitRegionExprUses(part.Expr, uses, stdImportModules)
+			}
+		}
+	case TypeOfExpr:
+		collectJitRegionExprUses(e.Value, uses, stdImportModules)
+	case InstanceOfExpr:
+		collectJitRegionExprUses(e.Object, uses, stdImportModules)
+		collectJitRegionExprUses(e.Class, uses, stdImportModules)
+	case ObjectInExpr:
+		collectJitRegionExprUses(e.Key, uses, stdImportModules)
+		collectJitRegionExprUses(e.Object, uses, stdImportModules)
+	case InstantiatedExpr:
+		collectJitRegionExprUses(e.Object, uses, stdImportModules)
+	case SpawnExpr:
+		collectJitRegionExprUses(e.Function, uses, stdImportModules)
+		for _, arg := range e.Args {
+			collectJitRegionExprUses(arg, uses, stdImportModules)
+		}
+	case AwaitExpr:
+		collectJitRegionExprUses(e.Task, uses, stdImportModules)
+	case DeferExpr:
+		collectJitRegionExprUses(e.Function, uses, stdImportModules)
+	case SpreadExpr:
+		collectJitRegionExprUses(e.Value, uses, stdImportModules)
+	}
+}
+
 func flattenStringConcat(expr Expr, parts *[]Expr) bool {
 	bin, ok := expr.(BinaryExpr)
 	if !ok || bin.Op != TOKEN_PLUS {
@@ -2719,11 +4656,6 @@ func (c *Compiler) functionLooksJitCandidate(stmt FunctionStmt) bool {
 	}
 	if len(stmt.Params) > 0 && stmt.Params[len(stmt.Params)-1].Variadic {
 		return false
-	}
-	for _, param := range stmt.Params {
-		if param.HasDefault {
-			return false
-		}
 	}
 	if c.stmtListHasLoopOrComplexControl(stmt.Body) || c.functionStmtCallsName(stmt, stmt.Name) {
 		return true
@@ -3162,6 +5094,11 @@ func (c *Compiler) compileExpr(expr Expr) {
 		oldInMethod := c.inMethod
 		oldOuterBindings := c.outerBindings
 		oldCurrentCaptures := c.currentCaptures
+		oldReturnType := c.currentReturnType
+		oldFunctionName := c.currentFunctionName
+		oldFile := c.currentFile
+		oldLine := c.currentLine
+		oldColumn := c.currentColumn
 
 		functionInstructions := []Instruction{}
 
@@ -3171,6 +5108,9 @@ func (c *Compiler) compileExpr(expr Expr) {
 		c.inMethod = false
 		c.outerBindings = outerBindings
 		c.currentCaptures = map[string]CapturedVar{}
+		c.currentReturnType = e.ReturnType
+		c.currentFunctionName = name
+		c.setLocation(e.File, e.Line, e.Column)
 
 		c.beginScope()
 
@@ -3214,6 +5154,9 @@ func (c *Compiler) compileExpr(expr Expr) {
 		c.inMethod = oldInMethod
 		c.outerBindings = oldOuterBindings
 		c.currentCaptures = oldCurrentCaptures
+		c.currentReturnType = oldReturnType
+		c.currentFunctionName = oldFunctionName
+		c.setLocation(oldFile, oldLine, oldColumn)
 
 		c.usedFunctions[name] = true
 
@@ -3306,9 +5249,14 @@ func (c *Compiler) compileExpr(expr Expr) {
 		})
 
 	case IndexExpr:
-		c.compileExpr(e.Object)
-		c.compileExpr(e.Index)
-		c.emit(OP_INDEX, nil)
+		if strLit, ok := e.Index.(StringExpr); ok {
+			c.compileExpr(e.Object)
+			c.emit(OP_GET_PROPERTY_SAFE, strLit.Value)
+		} else {
+			c.compileExpr(e.Object)
+			c.compileExpr(e.Index)
+			c.emit(OP_INDEX, nil)
+		}
 
 	case NumberExpr:
 		c.emit(OP_CONST, e.Value)
@@ -3394,7 +5342,14 @@ func (c *Compiler) compileExpr(expr Expr) {
 
 		// 6. Namespace files should not see random parent globals.
 		if c.isCompilingNamespace {
-			LangErrorAt(ErrorName, c.currentFile, c.currentLine, c.currentColumn, "undefined variable in namespace: %s", e.Name)
+			LangErrorAt(
+				ErrorName,
+				e.File,
+				e.Line,
+				e.Column,
+				"undefined variable in namespace: %s",
+				e.Name,
+			)
 		}
 
 		if c.declaredFunctions[e.Name] {
@@ -3854,6 +5809,13 @@ func (c *Compiler) compileExpr(expr Expr) {
 				ArgCount: len(e.Args),
 			})
 
+			return
+		}
+
+		if !e.Safe && e.Method == "length" && len(e.Args) == 0 {
+			c.compileExpr(e.Object)
+			c.setLocation(e.File, e.Line, e.Column)
+			c.emit(OP_LEN, nil)
 			return
 		}
 

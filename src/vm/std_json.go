@@ -6,7 +6,6 @@ import (
 	"os"
 	"strconv"
 	"sync"
-	"unsafe"
 
 	json "github.com/goccy/go-json"
 	. "language.com/src/tinyerrors"
@@ -23,13 +22,6 @@ var tinyJSONBufPool = sync.Pool{
 		b := make([]byte, 0, 512)
 		return &b
 	},
-}
-
-func unsafeStringBytes(s string) []byte {
-	if len(s) == 0 {
-		return nil
-	}
-	return unsafe.Slice(unsafe.StringData(s), len(s))
 }
 
 func appendJSONString(out []byte, s string) []byte {
@@ -108,6 +100,24 @@ func appendTinyJSON(out []byte, value TinyValue) []byte {
 		}
 		return appendTinyJSONObject(out, *v)
 
+	case WasmObjectValue:
+		if v.VM == nil {
+			return append(out, "null"...)
+		}
+		if obj, ok := v.VM.wasmObjectToObjectValue(v); ok {
+			return appendTinyJSONObject(out, obj)
+		}
+		return append(out, "null"...)
+
+	case *WasmObjectValue:
+		if v == nil || v.VM == nil {
+			return append(out, "null"...)
+		}
+		if obj, ok := v.VM.wasmObjectToObjectValue(*v); ok {
+			return appendTinyJSONObject(out, obj)
+		}
+		return append(out, "null"...)
+
 	case ArrayValue:
 		return appendTinyJSONArray(out, v.Elements)
 
@@ -116,6 +126,24 @@ func appendTinyJSON(out []byte, value TinyValue) []byte {
 			return append(out, "null"...)
 		}
 		return appendTinyJSONArray(out, v.Elements)
+
+	case WasmArrayValue:
+		if v.VM == nil {
+			return append(out, "null"...)
+		}
+		if arr, ok := v.VM.wasmArrayToArrayValue(v); ok {
+			return appendTinyJSONArray(out, arr.Elements)
+		}
+		return append(out, "null"...)
+
+	case *WasmArrayValue:
+		if v == nil || v.VM == nil {
+			return append(out, "null"...)
+		}
+		if arr, ok := v.VM.wasmArrayToArrayValue(*v); ok {
+			return appendTinyJSONArray(out, arr.Elements)
+		}
+		return append(out, "null"...)
 
 	default:
 		compatible := valueToJSONCompatible(value)
@@ -181,6 +209,7 @@ func init() {
 		"stringify": stdJsonStringify,
 		"pretty":    stdJsonPretty,
 		"parse":     stdJsonParse,
+		"safeParse": stdJsonSafeParse,
 		"readFile":  stdJsonReadFile,
 		"writeFile": stdJsonWriteFile,
 	}
@@ -208,7 +237,7 @@ func stdJsonPretty(vm *VM, args []TinyValue) {
 	expectArgs(vm, "json.pretty", args, 1)
 
 	switch value := args[0].Value.(type) {
-	case ObjectValue, ArrayValue, *ArrayValue:
+	case ObjectValue, *ObjectValue, ArrayValue, *ArrayValue, WasmObjectValue, *WasmObjectValue, WasmArrayValue, *WasmArrayValue:
 		jsonValue := valueToJSONCompatible(ToValue(value))
 		bytes, err := json.MarshalIndent(jsonValue, "", "  ")
 		if err != nil {
@@ -216,7 +245,7 @@ func stdJsonPretty(vm *VM, args []TinyValue) {
 		}
 		vm.push(NewNative(string(bytes)))
 	default:
-		vm.fatalError(ErrorType, "json.pretty expected an array or an object, got %s", TypeName(ToValue(value)))
+		vm.fatalError(ErrorType, "json.pretty expected an array or an object, got %s", TypeName(args[0]))
 	}
 }
 
@@ -233,6 +262,26 @@ func stdJsonParse(vm *VM, args []TinyValue) {
 	}
 
 	vm.push(result)
+}
+
+func stdJsonSafeParse(vm *VM, args []TinyValue) {
+	expectArgs(vm, "json.safeParse", args, 1)
+
+	stringified := argString(vm, "json.safeParse", args, 0)
+
+	result, err := parseTinyJSONDirect(stringified)
+	if err != nil {
+		vm.push(NewNative(ObjectValue{
+			"success": NewNative(false),
+			"data":    NewNull(),
+		}))
+		return
+	}
+
+	vm.push(NewNative(ObjectValue{
+		"success": NewNative(false),
+		"data":    result,
+	}))
 }
 
 func stdJsonReadFile(vm *VM, args []TinyValue) {

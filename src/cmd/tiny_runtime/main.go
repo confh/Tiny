@@ -14,9 +14,15 @@ func main() {
 
 	bytecode := readAppendedBytecode()
 
-	mainBytecode, functions, classes, interfaces, globalIndex := LoadBytecodeFromBytes(bytecode)
+	mainBytecode, functions, classes, interfaces, _ := LoadBytecodeFromBytes(bytecode)
 
-	vm := NewVM(mainBytecode, functions, classes, interfaces, globalIndex, true)
+	vm := NewVM(VMInfo{
+		MainInstructions: mainBytecode,
+		Functions:        functions,
+		Classes:          classes,
+		Interfaces:       interfaces,
+		Packed:           true,
+	})
 	vm.SetCLIArgs(os.Args[1:])
 	vm.Run()
 }

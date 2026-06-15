@@ -78,6 +78,12 @@ func (vm *VM) callStandardModule(module string, method string, args []TinyValue)
 	case "tray":
 		vm.callStdTray(method, args)
 
+	case "validate":
+		vm.callStdValidate(method, args)
+
+	case "url":
+		vm.callStdUrl(method, args)
+
 	default:
 		vm.fatalError(ErrorName, "unknown standard module: %s", module)
 	}

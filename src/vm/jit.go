@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +21,73 @@ import (
 
 var jitCounter uint64
 var jitZeroBuf = make([]byte, 2*1024*1024)
+
+type jitDebugCallStat struct {
+	Calls  int64
+	OK     int64
+	Errors int64
+}
+
+var jitDebugCallStatsMu sync.Mutex
+var jitDebugCallStats = map[string]*jitDebugCallStat{}
+
+func jitCallDebugEnabled() bool {
+	return os.Getenv("TINY_JIT_CALL_DEBUG") != "" || os.Getenv("TINY_JIT_DEBUG") != ""
+}
+
+func jitDebugStatFor(name string) *jitDebugCallStat {
+	stat := jitDebugCallStats[name]
+	if stat == nil {
+		stat = &jitDebugCallStat{}
+		jitDebugCallStats[name] = stat
+	}
+	return stat
+}
+
+func jitDebugRecordCall(name string) {
+	if !jitCallDebugEnabled() {
+		return
+	}
+	jitDebugCallStatsMu.Lock()
+	jitDebugStatFor(name).Calls++
+	jitDebugCallStatsMu.Unlock()
+}
+
+func jitDebugRecordResult(name string, ok bool) {
+	if !jitCallDebugEnabled() {
+		return
+	}
+	jitDebugCallStatsMu.Lock()
+	stat := jitDebugStatFor(name)
+	if ok {
+		stat.OK++
+	} else {
+		stat.Errors++
+	}
+	jitDebugCallStatsMu.Unlock()
+}
+
+func printJitCallDebugSummary() {
+	if !jitCallDebugEnabled() {
+		return
+	}
+	jitDebugCallStatsMu.Lock()
+	defer jitDebugCallStatsMu.Unlock()
+	if len(jitDebugCallStats) == 0 {
+		// fmt.Fprintln(os.Stderr, "[JIT CALL SUMMARY] no host-side JIT calls")
+		return
+	}
+	names := make([]string, 0, len(jitDebugCallStats))
+	for name := range jitDebugCallStats {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	// fmt.Fprintln(os.Stderr, "[JIT CALL SUMMARY] host-side VM -> JIT calls")
+	for _, name := range names {
+		_ = jitDebugCallStats[name]
+		// fmt.Fprintf(os.Stderr, "[JIT CALL SUMMARY] %s calls=%d ok=%d errors=%d\n", name, stat.Calls, stat.OK, stat.Errors)
+	}
+}
 
 const jitDeoptSnapshotBase = 2 * 1024 * 1024
 const jitDeoptSnapshotSize = 1 * 1024 * 1024
@@ -58,7 +126,7 @@ func (e JitUnsafeReplayError) Error() string {
 	return "jit failed after side effects"
 }
 
-const jitImportCount = 16
+const jitImportCount = 17
 
 const (
 	jitImportAllocObject = iota
@@ -75,6 +143,7 @@ const (
 	jitImportPrintValue
 	jitImportTypeofWasm
 	jitImportThrowWasm
+	jitImportThrowTypeErrorWasm
 	jitImportLoadGlobal
 	jitImportCallStdlibWasm
 )
@@ -138,24 +207,103 @@ func (w *WasmBuffer) WriteFloat64(f float64) {
 }
 
 type JitFunction struct {
-	ID         int
-	Name       string
-	fn         api.Function
-	paramTypes []stackType
-	paramCount int
-	retType    stackType
-	returnType string
-	vm         *VM
-	allocPtr   *uint32
+	ID           int
+	Name         string
+	fn           api.Function
+	paramTypes   []stackType
+	paramMutated []bool
+	paramCount   int
+	retType      stackType
+	returnType   string
+	memoizable   bool
+	memo         map[string]TinyValue
+	vm           *VM
+	allocPtr     *uint32
 }
 
 type JitFunctionMeta struct {
-	ID         int
-	Name       string
-	ParamTypes []stackType
-	ParamCount int
-	RetType    stackType
-	ReturnType string
+	ID           int
+	Name         string
+	ParamTypes   []stackType
+	ParamMutated []bool
+	ParamCount   int
+	RetType      stackType
+	ReturnType   string
+	Memoizable   bool
+}
+
+type jitArrayMirror struct {
+	Address float64
+	Length  int
+}
+
+type jitObjectMirror struct {
+	Address float64
+	Length  int
+}
+
+func (vm *VM) ensureJitMirrorCaches() {
+	if vm == nil {
+		return
+	}
+	if vm.jitArrayMirrorCache == nil {
+		vm.jitArrayMirrorCache = map[*ArrayValue]jitArrayMirror{}
+	}
+	if vm.jitObjectMirrorCache == nil {
+		vm.jitObjectMirrorCache = map[uintptr]jitObjectMirror{}
+	}
+}
+
+func (vm *VM) clearJitMirrorCaches() {
+	if vm == nil {
+		return
+	}
+	vm.jitArrayMirrorCache = map[*ArrayValue]jitArrayMirror{}
+	vm.jitObjectMirrorCache = map[uintptr]jitObjectMirror{}
+	vm.clearJitMemoCaches()
+}
+
+func (vm *VM) clearJitMemoCaches() {
+	if vm == nil || vm.jitFunctions == nil {
+		return
+	}
+	for _, fn := range vm.jitFunctions {
+		if fn != nil {
+			fn.memo = map[string]TinyValue{}
+		}
+	}
+}
+
+func (vm *VM) invalidateJitArrayMirror(arr *ArrayValue) {
+	if vm == nil || arr == nil {
+		return
+	}
+	if vm.jitArrayMirrorCache != nil {
+		delete(vm.jitArrayMirrorCache, arr)
+	}
+	vm.clearJitMemoCaches()
+}
+
+func (vm *VM) invalidateJitObjectMirror(obj ObjectValue) {
+	if vm == nil || obj == nil {
+		return
+	}
+	if vm.jitObjectMirrorCache != nil {
+		delete(vm.jitObjectMirrorCache, jitObjectIdentity(obj))
+	}
+	// Object fields may also be packed into array-column mirrors. If any object
+	// mutates, drop array mirrors too so a later JIT call rebuilds fresh columns.
+	if vm.jitArrayMirrorCache != nil {
+		vm.jitArrayMirrorCache = map[*ArrayValue]jitArrayMirror{}
+	}
+	vm.clearJitMemoCaches()
+}
+
+func jitObjectIdentity(obj ObjectValue) uintptr {
+	if obj == nil {
+		return 0
+	}
+	return reflect.ValueOf(obj).Pointer()
 }
 
 func isNullConstant(val any) bool {
@@ -251,12 +399,10 @@ func jitStackTypeName(t stackType) string {
 		return "bool"
 	case stackTypeObject:
 		return "object"
-	case stackTypeArray:
+	case stackTypeArray, stackTypeNumberArray, stackTypeInternedStringArray:
 		return "array"
 	case stackTypeString, stackTypeInternedString:
 		return "string"
-	case stackTypeInternedStringArray:
-		return "array"
 	case stackTypeNull:
 		return "null"
 	default:
@@ -318,7 +464,7 @@ func jitValueMatchesType(arg TinyValue, expected stackType) bool {
 			return false
 		}
 
-	case stackTypeArray:
+	case stackTypeArray, stackTypeNumberArray, stackTypeInternedStringArray:
 		if arg.IsInt {
 			return false
 		}
@@ -463,7 +609,197 @@ func (jf *JitFunction) validateArgsForJit(args []TinyValue) error {
 	return nil
 }
 
+func jitMemoArgKey(args []TinyValue) (string, bool) {
+	var b strings.Builder
+	b.Grow(len(args) * 24)
+	b.WriteString(strconv.Itoa(len(args)))
+	for _, arg := range args {
+		b.WriteByte('|')
+		if arg.IsInt {
+			b.WriteString("i:")
+			b.WriteString(strconv.Itoa(arg.AsInt))
+			continue
+		}
+		switch v := arg.Value.(type) {
+		case nil, NullValue, *NullValue:
+			b.WriteString("n")
+		case bool:
+			if v {
+				b.WriteString("b:1")
+			} else {
+				b.WriteString("b:0")
+			}
+		case float64:
+			b.WriteString("f:")
+			b.WriteString(strconv.FormatUint(math.Float64bits(v), 16))
+		case float32:
+			b.WriteString("f:")
+			b.WriteString(strconv.FormatUint(math.Float64bits(float64(v)), 16))
+		case int:
+			b.WriteString("i:")
+			b.WriteString(strconv.Itoa(v))
+		case int64:
+			b.WriteString("i64:")
+			b.WriteString(strconv.FormatInt(v, 10))
+		case string:
+			b.WriteString("s:")
+			b.WriteString(strconv.Itoa(len(v)))
+			b.WriteByte(':')
+			b.WriteString(v)
+		case *ArrayValue:
+			if v == nil {
+				return "", false
+			}
+			b.WriteString("arrp:")
+			b.WriteString(strconv.FormatUint(uint64(reflect.ValueOf(v).Pointer()), 16))
+			b.WriteByte(':')
+			b.WriteString(strconv.Itoa(len(v.Elements)))
+		case ArrayValue:
+			// A non-pointer ArrayValue is a copy, so identity caching is not safe.
+			return "", false
+		case ObjectValue:
+			if v == nil {
+				return "", false
+			}
+			b.WriteString("obj:")
+			b.WriteString(strconv.FormatUint(uint64(jitObjectIdentity(v)), 16))
+			b.WriteByte(':')
+			b.WriteString(strconv.Itoa(len(v)))
+		case *ObjectValue:
+			if v == nil || *v == nil {
+				return "", false
+			}
+			b.WriteString("objp:")
+			b.WriteString(strconv.FormatUint(uint64(jitObjectIdentity(*v)), 16))
+			b.WriteByte(':')
+			b.WriteString(strconv.Itoa(len(*v)))
+		case WasmArrayValue:
+			b.WriteString("wasmarr:")
+			b.WriteString(strconv.FormatUint(math.Float64bits(v.Address), 16))
+		case WasmObjectValue:
+			b.WriteString("wasmobj:")
+			b.WriteString(strconv.FormatUint(math.Float64bits(v.Address), 16))
+		default:
+			return "", false
+		}
+	}
+	return b.String(), true
+}
+
+func cloneJitMemoValue(vm *VM, value TinyValue) TinyValue {
+	if value.IsInt {
+		return value
+	}
+	switch v := value.Value.(type) {
+	case WasmObjectValue:
+		if vm != nil {
+			if obj, ok := vm.wasmObjectToObjectValue(v); ok {
+				return cloneValue(NewNative(obj))
+			}
+		}
+	case *ObjectValue:
+		if v != nil {
+			return cloneValue(NewNative(*v))
+		}
+	case ObjectValue:
+		return cloneValue(NewNative(v))
+	case WasmArrayValue:
+		if vm != nil {
+			if arr, ok := vm.wasmArrayToArrayValue(v); ok {
+				return cloneValue(NewNative(arr))
+			}
+		}
+	case *ArrayValue, ArrayValue:
+		return cloneValue(value)
+	}
+	return value
+}
+
+func (jf *JitFunction) memoLookup(args []TinyValue) (TinyValue, string, bool) {
+	if jf == nil || !jf.memoizable {
+		return TinyValue{}, "", false
+	}
+	var b strings.Builder
+	for _, arg := range args {
+		if arg.IsInt {
+			b.WriteString("i:")
+			b.WriteString(strconv.FormatInt(int64(arg.AsInt), 10))
+			b.WriteByte('|')
+			continue
+		}
+		if isNullConstant(arg) {
+			b.WriteString("n|")
+			continue
+		}
+		switch v := arg.Value.(type) {
+		case float64:
+			b.WriteString("f:")
+			b.WriteString(strconv.FormatFloat(v, 'g', -1, 64))
+		case int:
+			b.WriteString("f:")
+			b.WriteString(strconv.FormatInt(int64(v), 10))
+		case bool:
+			if v {
+				b.WriteString("b:1")
+			} else {
+				b.WriteString("b:0")
+			}
+		case string:
+			b.WriteString("s:")
+			b.WriteString(v)
+		case WasmObjectValue:
+			b.WriteString("wo:")
+			b.WriteString(strconv.FormatUint(uint64(uint32(v.Address)), 10))
+		case WasmArrayValue:
+			b.WriteString("wa:")
+			b.WriteString(strconv.FormatUint(uint64(uint32(v.Address)), 10))
+		case ObjectValue:
+			b.WriteString("o:")
+			b.WriteString(strconv.FormatUint(uint64(jitObjectIdentity(v)), 10))
+		case *ArrayValue:
+			b.WriteString("ap:")
+			b.WriteString(strconv.FormatUint(uint64(reflect.ValueOf(v).Pointer()), 10))
+		default:
+			return TinyValue{}, "", false
+		}
+		b.WriteByte('|')
+	}
+	key := b.String()
+	if jf.memo == nil {
+		jf.memo = map[string]TinyValue{}
+	}
+	value, ok := jf.memo[key]
+	if !ok {
+		return TinyValue{}, key, false
+	}
+	return cloneValue(value), key, true
+}
+
+func anyBool(values []bool) bool {
+	for _, v := range values {
+		if v {
+			return true
+		}
+	}
+	return false
+}
+
+func (jf *JitFunction) memoStore(key string, value TinyValue) {
+	if jf == nil || !jf.memoizable || key == "" {
+		return
+	}
+	if jf.memo == nil {
+		jf.memo = map[string]TinyValue{}
+	}
+	jf.memo[key] = cloneValue(value)
+}
+
 func (jf *JitFunction) Call(ctx context.Context, args []TinyValue) (res TinyValue, err error) {
+	jitDebugRecordCall(jf.Name)
+	defer func() {
+		jitDebugRecordResult(jf.Name, err == nil)
+	}()
+
 	if err = jf.validateArgsForJit(args); err != nil {
 		return TinyValue{}, err
 	}
@@ -472,7 +808,16 @@ func (jf *JitFunction) Call(ctx context.Context, args []TinyValue) (res TinyValu
 		jf.vm.wasmMu.Lock()
 		defer jf.vm.wasmMu.Unlock()
 	}
+	if cached, _, ok := jf.memoLookup(args); ok {
+		return cached, nil
+	}
 
+	type jitArrayArgWriteback struct {
+		target *ArrayValue
+		wasm   WasmArrayValue
+	}
+	arrayWritebacks := []jitArrayArgWriteback{}
+	_, memoKey, _ := jf.memoLookup(args)
 	wasmArgs := make([]uint64, len(args))
 	for i, arg := range args {
 		var val float64
@@ -548,8 +893,26 @@ func (jf *JitFunction) Call(ctx context.Context, args []TinyValue) (res TinyValu
 				}
 			} else if obj, ok := arg.Value.(WasmObjectValue); ok {
 				val = obj.Address
+			} else if obj, ok := arg.Value.(ObjectValue); ok {
+				val = jf.vm.allocateJitObject(jf.vm.jitModule, obj)
+			} else if obj, ok := arg.Value.(*ObjectValue); ok {
+				val = jf.vm.allocateJitObject(jf.vm.jitModule, *obj)
 			} else if arr, ok := arg.Value.(WasmArrayValue); ok {
 				val = arr.Address
+			} else if arr, ok := arg.Value.(*ArrayValue); ok {
+				val = jf.vm.allocateJitArray(jf.vm.jitModule, arr)
+				if i < len(jf.paramMutated) && jf.paramMutated[i] {
+					arrayWritebacks = append(arrayWritebacks, jitArrayArgWriteback{
+						target: arr,
+						wasm: WasmArrayValue{
+							Address: val,
+							VM:      jf.vm,
+						},
+					})
+				}
+			} else if arr, ok := arg.Value.(ArrayValue); ok {
+				arrCopy := arr
+				val = jf.vm.allocateJitArrayFresh(jf.vm.jitModule, &arrCopy)
 			}
 		}
 		wasmArgs[i] = api.EncodeF64(val)
@@ -588,28 +951,54 @@ func (jf *JitFunction) Call(ctx context.Context, args []TinyValue) (res TinyValu
 		return TinyValue{}, errCall
 	}
 
+	for _, wb := range arrayWritebacks {
+		if native, ok := jf.vm.wasmArrayToArrayValue(wb.wasm); ok {
+			wb.target.Elements = native.Elements
+		}
+	}
+
 	if len(results) == 0 {
-		return NewNull(), nil
+		res := NewNull()
+		jf.memoStore(memoKey, res)
+		return res, nil
 	}
 
 	retVal := api.DecodeF64(results[0])
 	switch jf.retType {
 	case stackTypeNull:
-		return NewNull(), nil
+		res := NewNull()
+		jf.memoStore(memoKey, res)
+		return res, nil
 	case stackTypeBool:
-		return NewNative(bool(retVal != 0.0)), nil
+		res := NewNative(bool(retVal != 0.0))
+		jf.memoStore(memoKey, res)
+		return res, nil
 	case stackTypeNumber:
-		return ToValue(retVal), nil
+		res := ToValue(retVal)
+		jf.memoStore(memoKey, res)
+		return res, nil
 	case stackTypeObject:
-		return NewNative(WasmObjectValue{Address: retVal, VM: jf.vm}), nil
-	case stackTypeArray:
-		return NewNative(WasmArrayValue{Address: retVal, VM: jf.vm}), nil
+		res := NewNative(WasmObjectValue{Address: retVal, VM: jf.vm})
+		jf.memoStore(memoKey, res)
+		return res, nil
+	case stackTypeArray, stackTypeNumberArray, stackTypeInternedStringArray:
+		arr := WasmArrayValue{Address: retVal, VM: jf.vm}
+		if native, ok := jf.vm.wasmArrayToArrayValue(arr); ok {
+			res := NewNative(native)
+			jf.memoStore(memoKey, res)
+			return res, nil
+		}
+		res := NewNative(arr)
+		jf.memoStore(memoKey, res)
+		return res, nil
 	case stackTypeString:
 		addr := uint32(retVal)
 		lenBytes, _ := jf.vm.jitModule.Memory().Read(addr+8, 8)
 		strLen := uint32(math.Float64frombits(binary.LittleEndian.Uint64(lenBytes)))
 		strBytes, _ := jf.vm.jitModule.Memory().Read(addr+16, strLen)
-		return NewNative(string(strBytes)), nil
+		res := NewNative(string(strBytes))
+		jf.memoStore(memoKey, res)
+		return res, nil
 	}
 
 	if jf.vm != nil && jf.vm.jitModule != nil {
@@ -639,7 +1028,11 @@ func (jf *JitFunction) Call(ctx context.Context, args []TinyValue) (res TinyValu
 					case 4.0: // 4.0 is the Object Tag we write in OP_OBJECT's header!
 						return NewNative(WasmObjectValue{Address: retVal, VM: jf.vm}), nil
 					case 5.0: // 5.0 is the Array Tag!
-						return NewNative(WasmArrayValue{Address: retVal, VM: jf.vm}), nil
+						arr := WasmArrayValue{Address: retVal, VM: jf.vm}
+						if native, ok := jf.vm.wasmArrayToArrayValue(arr); ok {
+							return NewNative(native), nil
+						}
+						return NewNative(arr), nil
 					case 6.0: // String Tag
 						lenBytes, ok := jf.vm.jitModule.Memory().Read(addr+8, 8)
 						if ok {
@@ -696,6 +1089,10 @@ func getJumpTarget(instr Instruction) (int, bool) {
 		if info, ok := instr.Value.(JumpModLocalLocalNotZeroInfo); ok {
 			return info.Target, true
 		}
+	case OP_JUMP_PROPERTY_LOCAL_FALSE, OP_JUMP_PROPERTY_LOCAL_TRUE:
+		if info, ok := instr.Value.(JumpPropertyLocalInfo); ok {
+			return info.Target, true
+		}
 	}
 	return 0, false
 }
@@ -717,6 +1114,17 @@ const (
 	jitTagArray     = 5.0
 	jitTagString    = 6.0
 	jitTagStdModule = 7.0
+
+	// Extra array-header metadata used only by host-mirrored arrays.
+	// Normal arrays still use the old first 32 bytes: tag, length, elems, cap.
+	// Packed object arrays add:
+	//   +32 marker
+	//   +40 field-column pointer table
+	//   +48 table slots
+	jitPackedObjectArrayMarker = 891011.0
+	jitArrayPackedMarkerOffset = 32
+	jitArrayPackedTableOffset  = 40
+	jitArrayPackedSlotsOffset  = 48
 )
 
 type stackType uint8
@@ -727,9 +1135,10 @@ const (
 	stackTypeNumber                               // arithmetic result
 	stackTypeBool                                 // comparison / logical result
 	stackTypeObject                               // object pointer
-	stackTypeArray                                // array pointer
+	stackTypeArray                                // generic array pointer
 	stackTypeString                               // string pointer
 	stackTypeInternedString                       // string pointer known to come from a JIT string constant
+	stackTypeNumberArray                          // array whose elements are known numeric values
 	stackTypeInternedStringArray                  // array whose elements are known interned strings
 )
 
@@ -737,7 +1146,105 @@ func isJitStringType(t stackType) bool {
 	return t == stackTypeString || t == stackTypeInternedString
 }
 
+func isJitArrayType(t stackType) bool {
+	return t == stackTypeArray || t == stackTypeNumberArray || t == stackTypeInternedStringArray
+}
+
+func isJitHeapPointerType(t stackType) bool {
+	return t == stackTypeObject || isJitArrayType(t) || t == stackTypeString || t == stackTypeInternedString
+}
+
+func jitCallArgTypesCompatible(expectedType stackType, argType stackType) bool {
+	if expectedType == stackTypeUnknown || argType == stackTypeUnknown {
+		return true
+	}
+	if expectedType == argType {
+		return true
+	}
+	if expectedType == stackTypeString && isJitStringType(argType) {
+		return true
+	}
+	if isJitArrayType(expectedType) && isJitArrayType(argType) {
+		return true
+	}
+	return false
+}
+
+func jitStackTypeDebugName(t stackType) string {
+	switch t {
+	case stackTypeUnknown:
+		return "unknown"
+	case stackTypeNull:
+		return "null"
+	case stackTypeNumber:
+		return "number"
+	case stackTypeBool:
+		return "bool"
+	case stackTypeObject:
+		return "object"
+	case stackTypeArray:
+		return "array"
+	case stackTypeString:
+		return "string"
+	case stackTypeInternedString:
+		return "interned-string"
+	case stackTypeNumberArray:
+		return "number-array"
+	case stackTypeInternedStringArray:
+		return "interned-string-array"
+	default:
+		return "?"
+	}
+}
+
+func jitArrayElementType(t stackType) (stackType, bool) {
+	switch t {
+	case stackTypeNumberArray:
+		return stackTypeNumber, true
+	case stackTypeInternedStringArray:
+		return stackTypeInternedString, true
+	default:
+		return stackTypeUnknown, false
+	}
+}
+
+func inferJitArrayStackType(elements []stackType) stackType {
+	if len(elements) == 0 {
+		return stackTypeArray
+	}
+
+	allNumbers := true
+	allInternedStrings := true
+	for _, t := range elements {
+		if t != stackTypeNumber {
+			allNumbers = false
+		}
+		if t != stackTypeInternedString {
+			allInternedStrings = false
+		}
+	}
+
+	if allNumbers {
+		return stackTypeNumberArray
+	}
+	if allInternedStrings {
+		return stackTypeInternedStringArray
+	}
+	return stackTypeArray
+}
+
 func stackTypeFromTypeName(name string) (stackType, bool) {
+	if strings.HasPrefix(name, "array:") {
+		switch strings.TrimPrefix(name, "array:") {
+		case "number":
+			return stackTypeNumberArray, true
+		case "string":
+			return stackTypeArray, true
+		default:
+			return stackTypeArray, true
+		}
+	}
+
 	switch name {
 	case "number":
 		return stackTypeNumber, true
@@ -764,6 +1271,232 @@ func hasTypedReturn(fn Function) (stackType, bool) {
 	return stackTypeFromTypeName(fn.ReturnType.Name)
 }
 
+func jitMissingDefaultArgsForCall(vm *VM, targetFn Function, argCount int) ([]TinyValue, bool) {
+	paramCount := len(targetFn.Params)
+	if argCount < 0 || argCount > paramCount {
+		return nil, false
+	}
+	if argCount == paramCount {
+		return nil, true
+	}
+	if paramCount > 0 && targetFn.Params[paramCount-1].Variadic {
+		return nil, false
+	}
+	if !targetFn.HasDefaults {
+		return nil, false
+	}
+
+	// applyDefaultArgs only needs the current argument count to fill the missing
+	// literal defaults. The placeholder values here represent source-provided args;
+	// they are not used for the missing suffix we return.
+	args := make([]TinyValue, argCount)
+	filled := vm.applyDefaultArgs(targetFn, args, 0, targetFn.Name)
+	if len(filled) != paramCount {
+		return nil, false
+	}
+
+	missing := append([]TinyValue(nil), filled[argCount:]...)
+	for _, value := range missing {
+		if !jitDefaultValueSupported(value) {
+			return nil, false
+		}
+	}
+	return missing, true
+}
+
+func jitDefaultValueSupported(value TinyValue) bool {
+	if value.IsInt {
+		return true
+	}
+	if isNullConstant(value) {
+		return true
+	}
+	switch value.Value.(type) {
+	case int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		float32, float64,
+		bool,
+		string:
+		return true
+	default:
+		return false
+	}
+}
+
+func jitCallAritySafe(vm *VM, targetFn Function, argCount int) bool {
+	_, ok := jitMissingDefaultArgsForCall(vm, targetFn, argCount)
+	return ok
+}
+
+func inferJitMutatedParams(fn Function) []bool {
+	mutated := make([]bool, len(fn.Params))
+	markSlot := func(slot int) {
+		if slot >= 0 && slot < len(mutated) {
+			mutated[slot] = true
+		}
+	}
+	markAllArrayLikeParams := func() {
+		for i := range mutated {
+			mutated[i] = true
+		}
+	}
+
+	for _, instr := range fn.Instructions {
+		switch instr.Op {
+		case OP_ARRAY_PUSH_LOCAL:
+			if info, ok := instr.Value.(ArrayLocalCallInfo); ok {
+				markSlot(info.ArraySlot)
+			}
+		case OP_ARRAY_PUSH_LOCAL_MUL_CONST:
+			if info, ok := instr.Value.(ArrayLocalMulConstInfo); ok {
+				markSlot(info.ArraySlot)
+			}
+		case OP_ARRAY_INDEX_CONST_OP_STORE:
+			if info, ok := instr.Value.(ArrayIndexConstOpInfo); ok {
+				markSlot(info.ArraySlot)
+			}
+		case OP_SET_INDEX:
+			// Generic SET_INDEX consumes array/index/value from the stack. Without a full
+			// origin analysis here, be conservative and write back array params.
+			markAllArrayLikeParams()
+		case OP_METHOD_CALL:
+			if info, ok := instr.Value.(MethodCallInfo); ok && info.Method == "push" {
+				// Same story as OP_SET_INDEX: generic method call receiver is stack-based.
+				markAllArrayLikeParams()
+			}
+		}
+	}
+
+	return mutated
+}
+
+func mergeJitPropertyHint(dst map[string]stackType, name string, typ stackType) {
+	if name == "" || typ == stackTypeUnknown {
+		return
+	}
+	if prev, ok := dst[name]; ok && prev != typ {
+		// Conflicting uses should stay dynamic. Do not invent a fake shape.
+		dst[name] = stackTypeUnknown
+		return
+	}
+	dst[name] = typ
+}
+
+func inferJitLocalPropertyHints(fn Function) []map[string]stackType {
+	hints := make([]map[string]stackType, fn.LocalCount)
+	ensure := func(slot int) map[string]stackType {
+		if slot < 0 || slot >= len(hints) {
+			return nil
+		}
+		if hints[slot] == nil {
+			hints[slot] = map[string]stackType{}
+		}
+		return hints[slot]
+	}
+
+	for i, instr := range fn.Instructions {
+		switch instr.Op {
+		case OP_GET_PROPERTY_LOCAL:
+			info, ok := instr.Value.(PropertyLocalInfo)
+			if !ok {
+				continue
+			}
+			m := ensure(info.Slot)
+			if m == nil {
+				continue
+			}
+
+			// A property used directly as a branch condition should normally be a bool
+			// in hot code. If it is not, the generated code deopts back to the VM instead
+			// of producing a wrong truthiness result.
+			if i+1 < len(fn.Instructions) {
+				next := fn.Instructions[i+1].Op
+				if next == OP_JUMP_IF_FALSE || next == OP_JUMP_IF_TRUE {
+					mergeJitPropertyHint(m, info.Name, stackTypeBool)
+				}
+			}
+
+		case OP_JUMP_PROPERTY_LOCAL_FALSE, OP_JUMP_PROPERTY_LOCAL_TRUE:
+			info, ok := instr.Value.(JumpPropertyLocalInfo)
+			if !ok {
+				continue
+			}
+			m := ensure(info.Slot)
+			if m == nil {
+				continue
+			}
+			mergeJitPropertyHint(m, info.Name, stackTypeBool)
+
+		case OP_ADD_LOCAL_PROPERTIES_STORE:
+			info, ok := instr.Value.(AddLocalPropertiesStoreInfo)
+			if !ok {
+				continue
+			}
+			m := ensure(info.ObjectSlot)
+			if m == nil {
+				continue
+			}
+			for _, name := range info.Names {
+				// This superinstruction is only emitted for local = local + object.field...
+				// The JIT still guards at runtime and deopts if the field is not numeric.
+				mergeJitPropertyHint(m, name, stackTypeNumber)
+			}
+
+		case OP_ADD_PROPERTY_LOCAL_CONST:
+			info, ok := instr.Value.(PropertyLocalConstAssignInfo)
+			if !ok || info.Op == OP_ADD {
+				continue
+			}
+			m := ensure(info.ObjectSlot)
+			if m != nil {
+				mergeJitPropertyHint(m, info.Name, stackTypeNumber)
+			}
+
+		case OP_ADD_PROPERTY_LOCAL_PROPERTY:
+			info, ok := instr.Value.(PropertyLocalPropertyAssignInfo)
+			if !ok || info.Op == OP_ADD {
+				continue
+			}
+			m := ensure(info.ObjectSlot)
+			if m != nil {
+				mergeJitPropertyHint(m, info.Name, stackTypeNumber)
+				mergeJitPropertyHint(m, info.SourceName, stackTypeNumber)
+			}
+		}
+	}
+
+	for slot, m := range hints {
+		for name, typ := range m {
+			if typ == stackTypeUnknown {
+				delete(m, name)
+			}
+		}
+		if len(m) == 0 {
+			hints[slot] = nil
+		}
+	}
+	return hints
+}
+
+func jitTagForStackType(t stackType) (float64, bool) {
+	switch t {
+	case stackTypeNumber:
+		return jitTagNumber, true
+	case stackTypeBool:
+		return jitTagBool, true
+	case stackTypeString, stackTypeInternedString:
+		return jitTagString, true
+	case stackTypeObject:
+		return jitTagObject, true
+	case stackTypeArray, stackTypeNumberArray, stackTypeInternedStringArray:
+		return jitTagArray, true
+	case stackTypeNull:
+		return jitTagNull, true
+	default:
+		return 0, false
+	}
+}
+
 func inferParamTypes(vm *VM, fn Function, currentReturnTypes []stackType, currentParamTypes [][]stackType) []stackType {
 	paramTypes := make([]stackType, len(fn.Params))
 	for i := range paramTypes {
@@ -773,6 +1506,33 @@ func inferParamTypes(vm *VM, fn Function, currentReturnTypes []stackType, curren
 			if t, ok := stackTypeFromTypeName(fn.Params[i].TypeHint.Name); ok {
 				paramTypes[i] = t
 			}
+		}
+	}
+
+	setParamType := func(index int, typ stackType) {
+		if index < 0 || index >= len(paramTypes) || typ == stackTypeUnknown {
+			return
+		}
+
+		current := paramTypes[index]
+		if current == stackTypeUnknown || current == typ {
+			paramTypes[index] = typ
+			return
+		}
+
+		// Array use is stronger than a numeric use accidentally inferred from
+		// the numeric result of OP_LEN. This is the exact case in:
+		//   for log in logs { ... }
+		// where `logs` is array, but `len(logs)` participates in numeric compare.
+		if isJitArrayType(typ) {
+			paramTypes[index] = stackTypeArray
+			return
+		}
+	}
+
+	markParamMarker := func(t stackType, typ stackType) {
+		if t >= 10 {
+			setParamType(int(t-10), typ)
 		}
 	}
 
@@ -900,6 +1660,8 @@ func inferParamTypes(vm *VM, fn Function, currentReturnTypes []stackType, curren
 		case OP_STORE_LOCAL, OP_ASSIGN_LOCAL, OP_POP,
 			OP_JUMP_IF_FALSE, OP_JUMP_IF_TRUE, OP_THROW:
 			sp--
+		case OP_JUMP_PROPERTY_LOCAL_FALSE, OP_JUMP_PROPERTY_LOCAL_TRUE:
+			// no stack effect
 		case OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
 			OP_EQ, OP_NEQ,
 			OP_LT, OP_LTE, OP_GT, OP_GTE,
@@ -943,6 +1705,7 @@ func inferParamTypes(vm *VM, fn Function, currentReturnTypes []stackType, curren
 		case OP_SET_INDEX:
 			sp -= 3
 		case OP_LEN:
+			// net change is 0 (pop 1, push 1)
 		case OP_ARRAY_LEN_LOCAL, OP_ARRAY_GET_LOCAL, OP_ARRAY_PUSH_LOCAL, OP_ARRAY_PUSH_LOCAL_MUL_CONST:
 			sp++
 		case OP_SET_PROPERTY:
@@ -1161,6 +1924,44 @@ func inferParamTypes(vm *VM, fn Function, currentReturnTypes []stackType, curren
 					typeStack[sp] = retT
 				}
 			}
+		case OP_ARRAY:
+			if info, ok := instr.Value.(ArrayInfo); ok {
+				dest := sp - info.Count
+				if dest >= 0 && dest < len(typeStack) {
+					elements := make([]stackType, 0, info.Count)
+					for idx := 0; idx < info.Count; idx++ {
+						elements = append(elements, typeStack[sp-info.Count+idx])
+					}
+					typeStack[dest] = inferJitArrayStackType(elements)
+				}
+			}
+		case OP_INDEX:
+			if sp >= 2 {
+				arrayType := typeStack[sp-2]
+				indexType := typeStack[sp-1]
+				markParamMarker(arrayType, stackTypeArray)
+				markParamMarker(indexType, stackTypeNumber)
+
+				if elemType, ok := jitArrayElementType(arrayType); ok {
+					typeStack[sp-2] = elemType
+				} else {
+					typeStack[sp-2] = stackTypeUnknown
+				}
+			}
+		case OP_ARRAY_GET_LOCAL:
+			if sp < len(typeStack) {
+				if info, ok := instr.Value.(ArrayLocalCallInfo); ok && info.ArraySlot >= 0 && info.ArraySlot < len(localTypes) {
+					arrayType := localTypes[info.ArraySlot]
+					markParamMarker(arrayType, stackTypeArray)
+					if elemType, ok := jitArrayElementType(arrayType); ok {
+						typeStack[sp] = elemType
+					} else {
+						typeStack[sp] = stackTypeUnknown
+					}
+				} else {
+					typeStack[sp] = stackTypeUnknown
+				}
+			}
 		case OP_OBJECT:
 			if info, ok := instr.Value.(ObjectInfo); ok {
 				count := len(info.Names)
@@ -1200,6 +2001,32 @@ func inferParamTypes(vm *VM, fn Function, currentReturnTypes []stackType, curren
 				}
 				typeStack[sp] = propType
 				stackPropertyTypes[sp] = nil
+			}
+		case OP_ARRAY_LEN_LOCAL:
+			if info, ok := instr.Value.(ArrayLocalCallInfo); ok && info.ArraySlot >= 0 && info.ArraySlot < len(localTypes) {
+				markParamMarker(localTypes[info.ArraySlot], stackTypeArray)
+			}
+			if sp < len(typeStack) {
+				typeStack[sp] = stackTypeNumber
+				stackPropertyTypes[sp] = nil
+			}
+		case OP_LEN:
+			if sp-1 >= 0 && sp-1 < len(typeStack) {
+				markParamMarker(typeStack[sp-1], stackTypeArray)
+				typeStack[sp-1] = stackTypeNumber
+				stackPropertyTypes[sp-1] = nil
+			}
+		case OP_ARRAY_INDEX_LOCAL_STORE:
+			if info, ok := instr.Value.(ArrayIndexLocalStoreInfo); ok {
+				if info.ArraySlot >= 0 && info.ArraySlot < len(localTypes) {
+					markParamMarker(localTypes[info.ArraySlot], stackTypeArray)
+				}
+				if info.IndexSlot >= 0 && info.IndexSlot < len(localTypes) {
+					markParamMarker(localTypes[info.IndexSlot], stackTypeNumber)
+				}
+				if info.DestSlot >= 0 && info.DestSlot < len(localTypes) {
+					localTypes[info.DestSlot] = stackTypeObject
+				}
 			}
 		case OP_COALESCE_JUMP:
 			if sp >= 2 {
@@ -1299,6 +2126,8 @@ func inferReturnType(vm *VM, fn Function, currentReturnTypes []stackType) stackT
 		case OP_STORE_LOCAL, OP_ASSIGN_LOCAL, OP_POP,
 			OP_JUMP_IF_FALSE, OP_JUMP_IF_TRUE, OP_THROW:
 			sp--
+		case OP_JUMP_PROPERTY_LOCAL_FALSE, OP_JUMP_PROPERTY_LOCAL_TRUE:
+			// no stack effect
 		case OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
 			OP_EQ, OP_NEQ,
 			OP_LT, OP_LTE, OP_GT, OP_GTE,
@@ -1342,6 +2171,7 @@ func inferReturnType(vm *VM, fn Function, currentReturnTypes []stackType) stackT
 		case OP_SET_INDEX:
 			sp -= 3
 		case OP_LEN:
+			// net change is 0 (pop 1, push 1)
 		case OP_ARRAY_LEN_LOCAL, OP_ARRAY_GET_LOCAL, OP_ARRAY_PUSH_LOCAL, OP_ARRAY_PUSH_LOCAL_MUL_CONST:
 			sp++
 		case OP_SET_PROPERTY:
@@ -1440,11 +2270,15 @@ func inferReturnType(vm *VM, fn Function, currentReturnTypes []stackType) stackT
 			}
 		case OP_LOCAL_CONST_OP:
 			if sp < len(typeStack) {
-				typeStack[sp] = stackTypeNumber
+				if info, ok := instr.Value.(LocalConstOpInfo); ok {
+					typeStack[sp] = jitLocalConstOpResultType(info)
+				} else {
+					typeStack[sp] = stackTypeNumber
+				}
 			}
 		case OP_LOCAL_CONST_OP_STORE:
 			if info, ok := instr.Value.(LocalConstOpInfo); ok && info.Slot >= 0 && info.Slot < len(localTypes) {
-				localTypes[info.Slot] = stackTypeNumber
+				localTypes[info.Slot] = jitLocalConstOpResultType(info)
 			}
 		case OP_ADD_LOCAL_GLOBAL_GLOBAL_STORE:
 			if info, ok := instr.Value.(AddLocalGlobalGlobalStoreInfo); ok && info.LocalSlot >= 0 && info.LocalSlot < len(localTypes) {
@@ -1454,7 +2288,12 @@ func inferReturnType(vm *VM, fn Function, currentReturnTypes []stackType) stackT
 			if info, ok := instr.Value.(AddLocalArrayIndexStoreInfo); ok && info.LocalSlot >= 0 && info.LocalSlot < len(localTypes) {
 				localTypes[info.LocalSlot] = stackTypeNumber
 			}
-		case OP_ARRAY_INDEX_CONST_OP_STORE, OP_ADD_PROPERTY_LOCAL_CONST, OP_ADD_PROPERTY_LOCAL_PROPERTY, OP_ADD_LOCAL_PROPERTIES_STORE:
+		case OP_ARRAY_INDEX_LOCAL_STORE:
+			if info, ok := instr.Value.(ArrayIndexLocalStoreInfo); ok && info.DestSlot >= 0 && info.DestSlot < len(localTypes) {
+				localTypes[info.DestSlot] = stackTypeObject
+			}
+		case OP_ARRAY_INDEX_CONST_OP_STORE, OP_ADD_PROPERTY_LOCAL_CONST, OP_ADD_PROPERTY_LOCAL_PROPERTY, OP_ADD_PROPERTY_LOCAL_LOCAL, OP_ADD_LOCAL_PROPERTIES_STORE,
+			OP_JUMP_PROPERTY_LOCAL_FALSE, OP_JUMP_PROPERTY_LOCAL_TRUE:
 			// no stack effect for type propagation
 		case OP_ADD_LOCAL_LOCAL_STORE:
 			info := instr.Value.(AddLocalLocalStoreInfo)
@@ -1607,6 +2446,7 @@ func inferReturnType(vm *VM, fn Function, currentReturnTypes []stackType) stackT
 				dest := sp - info.ArgCount
 				if dest >= 0 && dest < len(typeStack) {
 					typeStack[dest] = retT
+					stackPropertyTypes[dest] = nil
 				}
 			}
 		case OP_CALL_DIRECT_SUB_CONST:
@@ -1618,6 +2458,7 @@ func inferReturnType(vm *VM, fn Function, currentReturnTypes []stackType) stackT
 				}
 				if sp < len(typeStack) {
 					typeStack[sp] = retT
+					stackPropertyTypes[sp] = nil
 				}
 			}
 		case OP_OBJECT:
@@ -1639,20 +2480,41 @@ func inferReturnType(vm *VM, fn Function, currentReturnTypes []stackType) stackT
 			if info, ok := instr.Value.(ArrayInfo); ok {
 				dest := sp - info.Count
 				if dest >= 0 && dest < len(typeStack) {
-					typeStack[dest] = stackTypeArray
+					elements := make([]stackType, 0, info.Count)
+					for idx := 0; idx < info.Count; idx++ {
+						elements = append(elements, typeStack[sp-info.Count+idx])
+					}
+					typeStack[dest] = inferJitArrayStackType(elements)
 				}
 			}
-		case OP_INDEX, OP_ARRAY_GET_LOCAL:
+		case OP_INDEX:
 			if sp >= 2 {
-				typeStack[sp-2] = stackTypeUnknown
+				if elemType, ok := jitArrayElementType(typeStack[sp-2]); ok {
+					typeStack[sp-2] = elemType
+				} else {
+					typeStack[sp-2] = stackTypeUnknown
+				}
 			}
+		case OP_ARRAY_GET_LOCAL:
 			if sp < len(typeStack) {
-				typeStack[sp] = stackTypeUnknown
+				if info, ok := instr.Value.(ArrayLocalCallInfo); ok && info.ArraySlot >= 0 && info.ArraySlot < len(localTypes) {
+					if elemType, ok := jitArrayElementType(localTypes[info.ArraySlot]); ok {
+						typeStack[sp] = elemType
+					} else {
+						typeStack[sp] = stackTypeUnknown
+					}
+				} else {
+					typeStack[sp] = stackTypeUnknown
+				}
 			}
 		case OP_SET_INDEX:
-		case OP_ARRAY_LEN_LOCAL, OP_LEN:
+		case OP_ARRAY_LEN_LOCAL:
 			if sp < len(typeStack) {
 				typeStack[sp] = stackTypeNumber
+			}
+		case OP_LEN:
+			if sp-1 >= 0 && sp-1 < len(typeStack) {
+				typeStack[sp-1] = stackTypeNumber
 			}
 		case OP_ARRAY_PUSH_LOCAL, OP_ARRAY_PUSH_LOCAL_MUL_CONST:
 			if sp < len(typeStack) {
@@ -1701,6 +2563,296 @@ func inferReturnType(vm *VM, fn Function, currentReturnTypes []stackType) stackT
 	return finalType
 }
 
+func inferReturnPropertyTypes(vm *VM, fn Function, currentReturnTypes []stackType, visiting map[int]bool) map[string]stackType {
+	if vm == nil || len(fn.Instructions) == 0 {
+		return nil
+	}
+	if visiting == nil {
+		visiting = map[int]bool{}
+	}
+	if visiting[fn.ID] {
+		return nil
+	}
+	visiting[fn.ID] = true
+	defer delete(visiting, fn.ID)
+
+	spArray := make([]int, len(fn.Instructions))
+	sp := 0
+	for idx, instr := range fn.Instructions {
+		spArray[idx] = sp
+		switch instr.Op {
+		case OP_CONST, OP_LOAD_LOCAL,
+			OP_LOAD_LOCAL_0, OP_LOAD_LOCAL_1, OP_LOAD_LOCAL_2, OP_LOAD_LOCAL_3,
+			OP_MUL_LOCAL_CONST, OP_GET_PROPERTY_LOCAL, OP_LOAD_GLOBAL,
+			OP_LOCAL_CONST_OP:
+			sp++
+		case OP_MATH_POW:
+			sp--
+		case OP_PRINT:
+			info := instr.Value.(PrintInfo)
+			sp = sp - info.ArgCount + 1
+		case OP_STORE_LOCAL, OP_ASSIGN_LOCAL, OP_POP,
+			OP_JUMP_IF_FALSE, OP_JUMP_IF_TRUE, OP_THROW:
+			sp--
+		case OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
+			OP_EQ, OP_NEQ,
+			OP_LT, OP_LTE, OP_GT, OP_GTE,
+			OP_AND, OP_OR, OP_COALESCE_JUMP:
+			sp--
+		case OP_RETURN:
+			sp--
+		case OP_CALL_DIRECT:
+			if info, ok := instr.Value.(DirectCallInfo); ok {
+				sp = sp - info.ArgCount + 1
+			}
+		case OP_CALL_DIRECT_SUB_CONST:
+			sp++
+		case OP_OBJECT:
+			if info, ok := instr.Value.(ObjectInfo); ok {
+				if len(info.Names) > 0 {
+					sp -= len(info.Names) - 1
+				} else {
+					sp++
+				}
+			}
+		case OP_ARRAY:
+			if info, ok := instr.Value.(ArrayInfo); ok {
+				if info.Count > 0 {
+					sp -= info.Count - 1
+				} else {
+					sp++
+				}
+			}
+		case OP_INDEX:
+			sp--
+		case OP_STRING_JOIN:
+			count := getStringJoinCount(instr)
+			if count > 0 {
+				sp -= count - 1
+			} else {
+				sp++
+			}
+		case OP_SET_INDEX:
+			sp -= 3
+		case OP_ARRAY_LEN_LOCAL, OP_ARRAY_GET_LOCAL, OP_ARRAY_PUSH_LOCAL, OP_ARRAY_PUSH_LOCAL_MUL_CONST:
+			sp++
+		case OP_SET_PROPERTY:
+			sp -= 2
+		case OP_METHOD_CALL:
+			if info, ok := instr.Value.(MethodCallInfo); ok {
+				sp -= info.ArgCount
+			}
+		}
+	}
+
+	maxSp := 0
+	for _, s := range spArray {
+		if s > maxSp {
+			maxSp = s
+		}
+	}
+
+	typeStack := make([]stackType, maxSp+16)
+	stackPropertyTypes := make([]map[string]stackType, maxSp+16)
+	localTypes := make([]stackType, fn.LocalCount)
+	localPropertyTypes := make([]map[string]stackType, fn.LocalCount)
+	inferredParams := inferParamTypes(vm, fn, currentReturnTypes, nil)
+	for i := 0; i < len(fn.Params) && i < len(localTypes); i++ {
+		localTypes[i] = inferredParams[i]
+	}
+
+	var finalProps map[string]stackType
+	firstReturn := true
+
+	for idx, instr := range fn.Instructions {
+		sp = spArray[idx]
+		switch instr.Op {
+		case OP_CONST:
+			if sp < len(typeStack) {
+				if isNullConstant(instr.Value) {
+					typeStack[sp] = stackTypeNull
+				} else if instr.IsInt {
+					typeStack[sp] = stackTypeNumber
+				} else if _, isStr := instr.Value.(string); isStr {
+					typeStack[sp] = stackTypeString
+				} else if _, isBool := instr.Value.(bool); isBool {
+					typeStack[sp] = stackTypeBool
+				} else {
+					typeStack[sp] = stackTypeNumber
+				}
+				stackPropertyTypes[sp] = nil
+			}
+		case OP_LOAD_LOCAL_0, OP_LOAD_LOCAL_1, OP_LOAD_LOCAL_2, OP_LOAD_LOCAL_3:
+			slot := 0
+			if instr.Op == OP_LOAD_LOCAL_1 {
+				slot = 1
+			} else if instr.Op == OP_LOAD_LOCAL_2 {
+				slot = 2
+			} else if instr.Op == OP_LOAD_LOCAL_3 {
+				slot = 3
+			}
+			if sp < len(typeStack) && slot >= 0 && slot < len(localTypes) {
+				typeStack[sp] = localTypes[slot]
+				stackPropertyTypes[sp] = localPropertyTypes[slot]
+			}
+		case OP_LOAD_LOCAL:
+			slot := instr.IntArg
+			if !instr.IsInt {
+				if s, ok := AsIntInternal(instr.Value); ok {
+					slot = s
+				}
+			}
+			if sp < len(typeStack) && slot >= 0 && slot < len(localTypes) {
+				typeStack[sp] = localTypes[slot]
+				stackPropertyTypes[sp] = localPropertyTypes[slot]
+			}
+		case OP_STORE_LOCAL, OP_ASSIGN_LOCAL:
+			slot := instr.IntArg
+			if !instr.IsInt {
+				if s, ok := AsIntInternal(instr.Value); ok {
+					slot = s
+				} else if info, ok := instr.Value.(VariableInfo); ok {
+					slot = info.Slot
+				}
+			}
+			if sp >= 1 && slot >= 0 && slot < len(localTypes) {
+				localTypes[slot] = typeStack[sp-1]
+				localPropertyTypes[slot] = stackPropertyTypes[sp-1]
+			}
+		case OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD:
+			if sp >= 2 {
+				if instr.Op == OP_ADD && (isJitStringType(typeStack[sp-1]) || isJitStringType(typeStack[sp-2])) {
+					typeStack[sp-2] = stackTypeString
+				} else if typeStack[sp-1] == stackTypeNumber && typeStack[sp-2] == stackTypeNumber {
+					typeStack[sp-2] = stackTypeNumber
+				} else {
+					typeStack[sp-2] = stackTypeUnknown
+				}
+				stackPropertyTypes[sp-2] = nil
+			}
+		case OP_LOCAL_CONST_OP:
+			if sp < len(typeStack) {
+				if info, ok := instr.Value.(LocalConstOpInfo); ok {
+					typeStack[sp] = jitLocalConstOpResultType(info)
+				} else {
+					typeStack[sp] = stackTypeNumber
+				}
+				stackPropertyTypes[sp] = nil
+			}
+		case OP_LOCAL_CONST_OP_STORE:
+			if info, ok := instr.Value.(LocalConstOpInfo); ok && info.Slot >= 0 && info.Slot < len(localTypes) {
+				localTypes[info.Slot] = jitLocalConstOpResultType(info)
+				localPropertyTypes[info.Slot] = nil
+			}
+		case OP_INC_LOCAL, OP_DEC_LOCAL:
+			if info, ok := instr.Value.(IncrementInfo); ok && info.Slot >= 0 && info.Slot < len(localTypes) {
+				localTypes[info.Slot] = stackTypeNumber
+				localPropertyTypes[info.Slot] = nil
+			}
+		case OP_ARRAY_INDEX_LOCAL_STORE:
+			if info, ok := instr.Value.(ArrayIndexLocalStoreInfo); ok && info.DestSlot >= 0 && info.DestSlot < len(localTypes) {
+				localTypes[info.DestSlot] = stackTypeObject
+				localPropertyTypes[info.DestSlot] = nil
+			}
+		case OP_ADD_LOCAL_PROPERTIES_STORE:
+			if info, ok := instr.Value.(AddLocalPropertiesStoreInfo); ok && info.LocalSlot >= 0 && info.LocalSlot < len(localTypes) {
+				localTypes[info.LocalSlot] = stackTypeNumber
+				localPropertyTypes[info.LocalSlot] = nil
+			}
+		case OP_GET_PROPERTY_LOCAL:
+			if info, ok := instr.Value.(PropertyLocalInfo); ok && sp < len(typeStack) {
+				typeStack[sp] = stackTypeUnknown
+				if info.Slot >= 0 && info.Slot < len(localPropertyTypes) && localPropertyTypes[info.Slot] != nil {
+					if t, ok := localPropertyTypes[info.Slot][info.Name]; ok {
+						typeStack[sp] = t
+					}
+				}
+				stackPropertyTypes[sp] = nil
+			}
+		case OP_GET_PROPERTY, OP_GET_PROPERTY_SAFE:
+			if name, ok := instr.Value.(string); ok && sp >= 1 {
+				typeStack[sp-1] = stackTypeUnknown
+				if props := stackPropertyTypes[sp-1]; props != nil {
+					if t, ok := props[name]; ok {
+						typeStack[sp-1] = t
+					}
+				}
+				stackPropertyTypes[sp-1] = nil
+			}
+		case OP_OBJECT:
+			if info, ok := instr.Value.(ObjectInfo); ok {
+				count := len(info.Names)
+				props := make(map[string]stackType, count)
+				for i := 0; i < count; i++ {
+					props[info.Names[i].Name] = typeStack[sp-count+i]
+				}
+				dest := sp - count
+				if dest >= 0 && dest < len(typeStack) {
+					typeStack[dest] = stackTypeObject
+					stackPropertyTypes[dest] = props
+				}
+			}
+		case OP_CALL_DIRECT:
+			if info, ok := instr.Value.(DirectCallInfo); ok {
+				retT := stackTypeUnknown
+				if info.ID >= 0 && info.ID < len(currentReturnTypes) {
+					retT = currentReturnTypes[info.ID]
+				}
+				dest := sp - info.ArgCount
+				if dest >= 0 && dest < len(typeStack) {
+					typeStack[dest] = retT
+					if retT == stackTypeObject && info.ID >= 0 && info.ID < len(vm.functionList) {
+						stackPropertyTypes[dest] = inferReturnPropertyTypes(vm, vm.functionList[info.ID], currentReturnTypes, visiting)
+					} else {
+						stackPropertyTypes[dest] = nil
+					}
+				}
+			}
+		case OP_CALL_DIRECT_SUB_CONST:
+			if info, ok := instr.Value.(CallDirectSubConstInfo); ok {
+				retT := stackTypeUnknown
+				if info.FnID >= 0 && info.FnID < len(currentReturnTypes) {
+					retT = currentReturnTypes[info.FnID]
+				}
+				if sp < len(typeStack) {
+					typeStack[sp] = retT
+					if retT == stackTypeObject && info.FnID >= 0 && info.FnID < len(vm.functionList) {
+						stackPropertyTypes[sp] = inferReturnPropertyTypes(vm, vm.functionList[info.FnID], currentReturnTypes, visiting)
+					} else {
+						stackPropertyTypes[sp] = nil
+					}
+				}
+			}
+		case OP_RETURN:
+			if sp < 1 || sp-1 >= len(typeStack) || typeStack[sp-1] != stackTypeObject {
+				continue
+			}
+			props := stackPropertyTypes[sp-1]
+			if props == nil {
+				continue
+			}
+			if firstReturn {
+				finalProps = make(map[string]stackType, len(props))
+				for k, v := range props {
+					finalProps[k] = v
+				}
+				firstReturn = false
+				continue
+			}
+			for k, v := range finalProps {
+				if other, ok := props[k]; !ok || other != v {
+					delete(finalProps, k)
+				}
+			}
+		}
+	}
+
+	if len(finalProps) == 0 {
+		return nil
+	}
+	return finalProps
+}
+
 type jitStackSourceKind uint8
 
 const (
@@ -1734,8 +2886,23 @@ func isAllowedMethod(method string, argCount int, allowedMethods []allowedMethod
 
 func isJitAllowedStdlibCall(module string, method string, argCount int) bool {
 	switch module {
-	case "time", "os":
-		return true
+	case "time":
+		allowedMethods := []allowedMethod{
+			{
+				method:   "nowMs",
+				argCount: 0,
+			},
+			{
+				method:   "nowNs",
+				argCount: 0,
+			},
+			{
+				method:   "nowSec",
+				argCount: 0,
+			},
+		}
+
+		return isAllowedMethod(method, argCount, allowedMethods)
 
 	case "process":
 		allowedMethods := []allowedMethod{
@@ -1804,7 +2971,7 @@ func getGlobalSlotFromInstruction(instr Instruction) (int, bool) {
 
 func isKnownStdModuleName(name string) bool {
 	switch name {
-	case "time", "io", "math", "http", "fs", "os", "random", "json", "path", "process", "desktop", "webview":
+	case "time", "io", "math", "http", "fs", "os", "random", "strings", "json", "path", "process", "desktop", "webview":
 		return true
 	default:
 		return false
@@ -2099,7 +3266,17 @@ func stdlibCallsAreJitSafe(vm *VM, fn Function) bool {
 				return false
 			}
 
-		case OP_LEN, OP_ARRAY_LEN_LOCAL, OP_ARRAY_GET_LOCAL, OP_ARRAY_PUSH_LOCAL, OP_ARRAY_PUSH_LOCAL_MUL_CONST:
+		case OP_LEN:
+			values, ok := popJitSources(&stack, 1)
+			if !ok {
+				return false
+			}
+			if hasStdModuleSource(values) {
+				return false
+			}
+			pushUnknown()
+
+		case OP_ARRAY_LEN_LOCAL, OP_ARRAY_GET_LOCAL, OP_ARRAY_PUSH_LOCAL, OP_ARRAY_PUSH_LOCAL_MUL_CONST:
 			pushUnknown()
 
 		case OP_INC_LOCAL, OP_DEC_LOCAL,
@@ -2107,8 +3284,9 @@ func stdlibCallsAreJitSafe(vm *VM, fn Function) bool {
 			OP_ADD_LOCAL_LOCAL_STORE,
 			OP_LOCAL_CONST_OP_STORE, OP_ARRAY_INDEX_CONST_OP_STORE,
 			OP_ADD_LOCAL_ARRAY_INDEX_STORE, OP_ADD_LOCAL_GLOBAL_GLOBAL_STORE,
-			OP_ADD_PROPERTY_LOCAL_CONST, OP_ADD_PROPERTY_LOCAL_PROPERTY, OP_ADD_LOCAL_PROPERTIES_STORE,
-			OP_JUMP, OP_JUMP_LOCAL_GT_CONST, OP_JUMP_LOCAL_GE_CONST,
+			OP_ADD_PROPERTY_LOCAL_CONST, OP_ADD_PROPERTY_LOCAL_PROPERTY, OP_ADD_PROPERTY_LOCAL_LOCAL, OP_ADD_LOCAL_PROPERTIES_STORE, OP_ARRAY_INDEX_LOCAL_STORE,
+			OP_JUMP, OP_JUMP_PROPERTY_LOCAL_FALSE, OP_JUMP_PROPERTY_LOCAL_TRUE,
+			OP_JUMP_LOCAL_GT_CONST, OP_JUMP_LOCAL_GE_CONST,
 			OP_JUMP_LOCAL_GT_LOCAL, OP_JUMP_LOCAL_GE_LOCAL,
 			OP_JUMP_MOD_LOCAL_CONST_NOT_ZERO, OP_JUMP_MOD_LOCAL_LOCAL_NOT_ZERO:
 			// no stack effect for this stdlib safety scan
@@ -2152,7 +3330,7 @@ func jitOpcodeUsesRuntimeGlobalLoad(op OpCode) bool {
 	}
 }
 
-func functionHasRuntimeGlobalLoadInLoop(fn Function) (OpCode, bool) {
+func functionHasRuntimeGlobalLoadInLoop(vm *VM, fn Function) (OpCode, bool) {
 	for end, instr := range fn.Instructions {
 		start, ok := getJumpTarget(instr)
 		if !ok || start >= end {
@@ -2164,8 +3342,21 @@ func functionHasRuntimeGlobalLoadInLoop(fn Function) (OpCode, bool) {
 		}
 
 		for pc := start; pc <= end && pc < len(fn.Instructions); pc++ {
-			op := fn.Instructions[pc].Op
-			if jitOpcodeUsesRuntimeGlobalLoad(op) {
+			instr := fn.Instructions[pc]
+			op := instr.Op
+
+			if op == OP_LOAD_GLOBAL {
+				// Loading a known std module inside a loop is safe when the
+				// stdlib-call verifier accepts the following method call. The old
+				// blanket guard rejected strings.random/strings.isDigit before the
+				// generic call_stdlib_wasm bridge could even be considered.
+				if _, ok := getStdModuleNameFromLoadGlobal(vm, instr); ok {
+					continue
+				}
+				return op, true
+			}
+
+			if op == OP_ADD_LOCAL_GLOBAL_GLOBAL_STORE {
 				return op, true
 			}
 		}
@@ -2298,15 +3489,17 @@ func getStringJoinCount(instr Instruction) int {
 	return instr.IntArg
 }
 
+func jitLocalConstOpResultType(info LocalConstOpInfo) stackType {
+	if info.Op == OP_ADD {
+		if _, ok := info.Const.(string); ok {
+			return stackTypeString
+		}
+	}
+	return stackTypeNumber
+}
+
 func isFunctionJitSafe(vm *VM, fn Function) bool {
 	if !isTinyFunctionWorthJit(fn) {
-		// fmt.Fprintf(
-		// 	os.Stderr,
-		// 	"[JIT DEBUG] function %s is not JIT-safe: too small for JIT (%d statements, %d instructions)\n",
-		// 	fn.Name,
-		// 	fn.StatementCount,
-		// 	len(fn.Instructions),
-		// )
 		return false
 	}
 	if fn.Async {
@@ -2315,14 +3508,11 @@ func isFunctionJitSafe(vm *VM, fn Function) bool {
 	if len(fn.Captures) > 0 {
 		return false
 	}
-	if fn.HasDefaults {
-		return false
-	}
 	if len(fn.Params) > 0 && fn.Params[len(fn.Params)-1].Variadic {
 		return false
 	}
 
-	if _, ok := functionHasRuntimeGlobalLoadInLoop(fn); ok {
+	if _, ok := functionHasRuntimeGlobalLoadInLoop(vm, fn); ok {
 		// fmt.Fprintf(
 		// 	os.Stderr,
 		// 	"[JIT DEBUG] function %s is not JIT-safe: %s performs VM global loads inside a loop; interpreter superinstruction is faster than Wasm host calls\n",
@@ -2353,7 +3543,12 @@ func isFunctionJitSafe(vm *VM, fn Function) bool {
 				// fmt.Fprintf(os.Stderr, "[JIT DEBUG] function %s is not JIT-safe: bad LocalConstOpInfo in %s\n", fn.Name, instr.Op.String())
 				return false
 			}
-			if _, ok := getFloat64Constant(info.Const); !ok {
+			if _, isString := info.Const.(string); !isString {
+				if _, ok := getFloat64Constant(info.Const); !ok {
+					// fmt.Fprintf(os.Stderr, "[JIT DEBUG] function %s is not JIT-safe: non-numeric const in %s (%T)\n", fn.Name, instr.Op.String(), info.Const)
+					return false
+				}
+			} else if info.Op != OP_ADD {
 				// fmt.Fprintf(os.Stderr, "[JIT DEBUG] function %s is not JIT-safe: non-numeric const in %s (%T)\n", fn.Name, instr.Op.String(), info.Const)
 				return false
 			}
@@ -2378,7 +3573,7 @@ func isFunctionJitSafe(vm *VM, fn Function) bool {
 			}
 
 		case OP_ADD_LOCAL_ARRAY_INDEX_STORE, OP_ADD_LOCAL_GLOBAL_GLOBAL_STORE,
-			OP_ADD_PROPERTY_LOCAL_CONST, OP_ADD_PROPERTY_LOCAL_PROPERTY, OP_ADD_LOCAL_PROPERTIES_STORE:
+			OP_ADD_PROPERTY_LOCAL_CONST, OP_ADD_PROPERTY_LOCAL_PROPERTY, OP_ADD_LOCAL_PROPERTIES_STORE, OP_ARRAY_INDEX_LOCAL_STORE:
 			// Safe superinstructions lowered from already-JIT-safe bytecode shapes.
 
 		case OP_RETURN, OP_POP,
@@ -2392,6 +3587,7 @@ func isFunctionJitSafe(vm *VM, fn Function) bool {
 			OP_ADD_ASSIGN_LOCAL, OP_SUB_ASSIGN_LOCAL,
 			OP_MUL_LOCAL_CONST, OP_ADD_LOCAL_LOCAL_STORE,
 			OP_JUMP, OP_JUMP_IF_FALSE, OP_JUMP_IF_TRUE,
+			OP_JUMP_PROPERTY_LOCAL_FALSE, OP_JUMP_PROPERTY_LOCAL_TRUE,
 			OP_JUMP_LOCAL_GT_CONST, OP_JUMP_LOCAL_GE_CONST,
 			OP_JUMP_LOCAL_GT_LOCAL, OP_JUMP_LOCAL_GE_LOCAL,
 			OP_JUMP_MOD_LOCAL_CONST_NOT_ZERO, OP_JUMP_MOD_LOCAL_LOCAL_NOT_ZERO,
@@ -2402,7 +3598,16 @@ func isFunctionJitSafe(vm *VM, fn Function) bool {
 			OP_ARRAY_LEN_LOCAL, OP_ARRAY_GET_LOCAL, OP_ARRAY_PUSH_LOCAL, OP_MATH_CEIL, OP_MATH_FLOOR,
 			OP_MATH_SQRT, OP_MATH_ABS, OP_MATH_POW, OP_PRINT,
 			OP_COALESCE_JUMP, OP_TYPEOF, OP_THROW,
-			OP_LOAD_GLOBAL, OP_STRING_JOIN: // Safe
+			OP_LOAD_GLOBAL: // Safe
+
+		case OP_STRING_JOIN:
+			// Correctness guard:
+			// The current string JIT path can still turn loop-carried strings into
+			// numeric length accumulators in some bytecode shapes, producing fake-fast
+			// wrong results such as string_build == 0. Until string liveness/codegen is
+			// fully audited, never JIT string joins. The interpreter path is correct.
+			// fmt.Fprintf(os.Stderr, "[JIT DEBUG] function %s is not JIT-safe: OP_STRING_JOIN disabled for correctness; interpreter string path is used\n", fn.Name)
+			return false
 		case OP_METHOD_CALL:
 			// All method calls are permitted up to 3 args: push/get/length are compiled inline;
 			// any other method dispatches through call_stdlib_wasm at runtime.
@@ -2411,7 +3616,9 @@ func isFunctionJitSafe(vm *VM, fn Function) bool {
 				return false
 			}
 		default:
-			// fmt.Fprintf(os.Stderr, "[JIT DEBUG] function %s is not JIT-safe: unsupported opcode %s\n", fn.Name, instr.Op.String())
+			if strings.HasPrefix(fn.Name, "__jit_region_string_hot_") {
+				// fmt.Fprintf(os.Stderr, "[JIT DEBUG] function %s is not JIT-safe: unsupported opcode %s\n", fn.Name, instr.Op.String())
+			}
 			return false
 		}
 	}
@@ -2441,6 +3648,8 @@ func checkCallArgumentsSafe(vm *VM, fn Function, currentReturnTypes []stackType,
 		case OP_STORE_LOCAL, OP_ASSIGN_LOCAL, OP_POP,
 			OP_JUMP_IF_FALSE, OP_JUMP_IF_TRUE, OP_THROW:
 			sp--
+		case OP_JUMP_PROPERTY_LOCAL_FALSE, OP_JUMP_PROPERTY_LOCAL_TRUE:
+			// no stack effect
 		case OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
 			OP_EQ, OP_NEQ,
 			OP_LT, OP_LTE, OP_GT, OP_GTE,
@@ -2484,6 +3693,7 @@ func checkCallArgumentsSafe(vm *VM, fn Function, currentReturnTypes []stackType,
 		case OP_SET_INDEX:
 			sp -= 3
 		case OP_LEN:
+			// net change is 0 (pop 1, push 1)
 		case OP_ARRAY_LEN_LOCAL, OP_ARRAY_GET_LOCAL, OP_ARRAY_PUSH_LOCAL, OP_ARRAY_PUSH_LOCAL_MUL_CONST:
 			sp++
 		case OP_SET_PROPERTY:
@@ -2579,11 +3789,15 @@ func checkCallArgumentsSafe(vm *VM, fn Function, currentReturnTypes []stackType,
 			}
 		case OP_LOCAL_CONST_OP:
 			if sp < len(typeStack) {
-				typeStack[sp] = stackTypeNumber
+				if info, ok := instr.Value.(LocalConstOpInfo); ok {
+					typeStack[sp] = jitLocalConstOpResultType(info)
+				} else {
+					typeStack[sp] = stackTypeNumber
+				}
 			}
 		case OP_LOCAL_CONST_OP_STORE:
 			if info, ok := instr.Value.(LocalConstOpInfo); ok && info.Slot >= 0 && info.Slot < len(localTypes) {
-				localTypes[info.Slot] = stackTypeNumber
+				localTypes[info.Slot] = jitLocalConstOpResultType(info)
 			}
 		case OP_ADD_LOCAL_GLOBAL_GLOBAL_STORE:
 			if info, ok := instr.Value.(AddLocalGlobalGlobalStoreInfo); ok && info.LocalSlot >= 0 && info.LocalSlot < len(localTypes) {
@@ -2593,7 +3807,8 @@ func checkCallArgumentsSafe(vm *VM, fn Function, currentReturnTypes []stackType,
 			if info, ok := instr.Value.(AddLocalArrayIndexStoreInfo); ok && info.LocalSlot >= 0 && info.LocalSlot < len(localTypes) {
 				localTypes[info.LocalSlot] = stackTypeNumber
 			}
-		case OP_ARRAY_INDEX_CONST_OP_STORE, OP_ADD_PROPERTY_LOCAL_CONST, OP_ADD_PROPERTY_LOCAL_PROPERTY, OP_ADD_LOCAL_PROPERTIES_STORE:
+		case OP_ARRAY_INDEX_CONST_OP_STORE, OP_ADD_PROPERTY_LOCAL_CONST, OP_ADD_PROPERTY_LOCAL_PROPERTY, OP_ADD_PROPERTY_LOCAL_LOCAL, OP_ADD_LOCAL_PROPERTIES_STORE, OP_ARRAY_INDEX_LOCAL_STORE,
+			OP_JUMP_PROPERTY_LOCAL_FALSE, OP_JUMP_PROPERTY_LOCAL_TRUE:
 			// no stack effect for type propagation
 		case OP_ADD_LOCAL_LOCAL_STORE:
 			info := instr.Value.(AddLocalLocalStoreInfo)
@@ -2658,20 +3873,23 @@ func checkCallArgumentsSafe(vm *VM, fn Function, currentReturnTypes []stackType,
 					for a := 0; a < info.ArgCount && a < len(calleeParams); a++ {
 						argType := typeStack[sp-info.ArgCount+a]
 						expectedType := calleeParams[a]
-						if expectedType != stackTypeUnknown && argType != stackTypeUnknown {
-							if expectedType == stackTypeNumber && argType != stackTypeNumber {
-								return false
-							}
-							if expectedType == stackTypeBool && argType != stackTypeBool {
-								return false
-							}
-							if expectedType == stackTypeString && !isJitStringType(argType) {
-								return false
-							}
-							if expectedType == stackTypeObject && argType != stackTypeObject {
-								return false
-							}
-							if expectedType == stackTypeArray && argType != stackTypeArray {
+						if !jitCallArgTypesCompatible(expectedType, argType) {
+							// Region helpers are produced by the compiler from already-typed live-ins.
+							// If the local type propagator loses a heap-pointer distinction inside the
+							// outlined loop, do not silently drop the whole region. The actual Wasm value
+							// is still the raw pointer passed through the helper parameter.
+							if strings.HasPrefix(fn.Name, "__jit_region_") && isJitHeapPointerType(expectedType) && isJitHeapPointerType(argType) {
+								if jitCallDebugEnabled() {
+									// fmt.Fprintf(os.Stderr, "[JIT DEBUG] function %s: allowing conservative heap-pointer direct-call arg mismatch target=%s arg=%d expected=%s got=%s\n", fn.Name, info.Name, a, jitStackTypeDebugName(expectedType), jitStackTypeDebugName(argType))
+								}
+							} else {
+								if jitCallDebugEnabled() {
+									targetName := info.Name
+									if targetName == "" && info.ID >= 0 && info.ID < len(vm.functionList) {
+										targetName = vm.functionList[info.ID].Name
+									}
+									// fmt.Fprintf(os.Stderr, "[JIT DEBUG] function %s is not JIT-safe: direct call arg mismatch target=%s arg=%d expected=%s got=%s\n", fn.Name, targetName, a, jitStackTypeDebugName(expectedType), jitStackTypeDebugName(argType))
+								}
 								return false
 							}
 						}
@@ -2695,6 +3913,13 @@ func checkCallArgumentsSafe(vm *VM, fn Function, currentReturnTypes []stackType,
 					if len(calleeParams) > 0 {
 						expectedType := calleeParams[0]
 						if expectedType != stackTypeUnknown && expectedType != stackTypeNumber {
+							if jitCallDebugEnabled() {
+								targetName := info.FnName
+								if targetName == "" && info.FnID >= 0 && info.FnID < len(vm.functionList) {
+									targetName = vm.functionList[info.FnID].Name
+								}
+								// fmt.Fprintf(os.Stderr, "[JIT DEBUG] function %s is not JIT-safe: direct-sub-const target=%s expected first arg number-compatible, got %s\n", fn.Name, targetName, jitStackTypeDebugName(expectedType))
+							}
 							return false
 						}
 					}
@@ -2719,20 +3944,41 @@ func checkCallArgumentsSafe(vm *VM, fn Function, currentReturnTypes []stackType,
 			if info, ok := instr.Value.(ArrayInfo); ok {
 				dest := sp - info.Count
 				if dest >= 0 && dest < len(typeStack) {
-					typeStack[dest] = stackTypeArray
+					elements := make([]stackType, 0, info.Count)
+					for idx := 0; idx < info.Count; idx++ {
+						elements = append(elements, typeStack[sp-info.Count+idx])
+					}
+					typeStack[dest] = inferJitArrayStackType(elements)
 				}
 			}
-		case OP_INDEX, OP_ARRAY_GET_LOCAL:
+		case OP_INDEX:
 			if sp >= 2 {
-				typeStack[sp-2] = stackTypeUnknown
+				if elemType, ok := jitArrayElementType(typeStack[sp-2]); ok {
+					typeStack[sp-2] = elemType
+				} else {
+					typeStack[sp-2] = stackTypeUnknown
+				}
 			}
+		case OP_ARRAY_GET_LOCAL:
 			if sp < len(typeStack) {
-				typeStack[sp] = stackTypeUnknown
+				if info, ok := instr.Value.(ArrayLocalCallInfo); ok && info.ArraySlot >= 0 && info.ArraySlot < len(localTypes) {
+					if elemType, ok := jitArrayElementType(localTypes[info.ArraySlot]); ok {
+						typeStack[sp] = elemType
+					} else {
+						typeStack[sp] = stackTypeUnknown
+					}
+				} else {
+					typeStack[sp] = stackTypeUnknown
+				}
 			}
 		case OP_SET_INDEX:
-		case OP_ARRAY_LEN_LOCAL, OP_LEN:
+		case OP_ARRAY_LEN_LOCAL:
 			if sp < len(typeStack) {
 				typeStack[sp] = stackTypeNumber
+			}
+		case OP_LEN:
+			if sp-1 >= 0 && sp-1 < len(typeStack) {
+				typeStack[sp-1] = stackTypeNumber
 			}
 		case OP_ARRAY_PUSH_LOCAL, OP_ARRAY_PUSH_LOCAL_MUL_CONST:
 			if sp < len(typeStack) {
@@ -2793,6 +4039,8 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool, currentReturnTypes
 			sp = sp - info.ArgCount + 1
 		case OP_STORE_LOCAL, OP_ASSIGN_LOCAL, OP_POP, OP_JUMP_IF_FALSE, OP_JUMP_IF_TRUE, OP_THROW:
 			sp--
+		case OP_JUMP_PROPERTY_LOCAL_FALSE, OP_JUMP_PROPERTY_LOCAL_TRUE:
+			// no stack effect
 		case OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
 			OP_EQ, OP_NEQ,
 			OP_LT, OP_LTE, OP_GT, OP_GTE, OP_AND, OP_OR, OP_COALESCE_JUMP:
@@ -2833,6 +4081,7 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool, currentReturnTypes
 		case OP_SET_INDEX:
 			sp -= 3
 		case OP_LEN:
+			// net change is 0 (pop 1, push 1)
 		case OP_ARRAY_LEN_LOCAL, OP_ARRAY_GET_LOCAL, OP_ARRAY_PUSH_LOCAL, OP_ARRAY_PUSH_LOCAL_MUL_CONST:
 			sp++
 		case OP_SET_PROPERTY:
@@ -3065,21 +4314,11 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool, currentReturnTypes
 	optimizedStringJoinPC := make(map[int]bool)
 	optimizedStringJoinLengthSlot := make(map[int]bool)
 
-	for pc := 0; pc+1 < len(fn.Instructions); pc++ {
-		if fn.Instructions[pc].Op != OP_STRING_JOIN {
-			continue
-		}
-
-		storeSlot, ok := getStoreLocalSlot(fn.Instructions[pc+1])
-		if !ok || storeSlot < 0 {
-			continue
-		}
-
-		if localIsOnlyUsedForLengthAfterJoin(pc, storeSlot) {
-			optimizedStringJoinPC[pc] = true
-			optimizedStringJoinLengthSlot[storeSlot] = true
-		}
-	}
+	// Disabled for correctness. The old length-only string join shortcut is not
+	// control-flow safe: it can replace a loop-carried string local with a number.
+	// Keep the maps empty so OP_STRING_JOIN always materializes a real string if
+	// that opcode is ever allowed again.
+	_ = localIsOnlyUsedForLengthAfterJoin
 
 	tagSlot := func(valueSlot int) int {
 		return tagBase + valueSlot
@@ -3113,7 +4352,7 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool, currentReturnTypes
 			emitSetTagConst(valueSlot, jitTagBool)
 		case stackTypeObject:
 			emitSetTagConst(valueSlot, jitTagObject)
-		case stackTypeArray, stackTypeInternedStringArray:
+		case stackTypeArray, stackTypeNumberArray, stackTypeInternedStringArray:
 			emitSetTagConst(valueSlot, jitTagArray)
 		case stackTypeString, stackTypeInternedString:
 			emitSetTagConst(valueSlot, jitTagString)
@@ -3151,6 +4390,100 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool, currentReturnTypes
 		body.WriteVarUint(8)
 		body.WriteByte(0x21) // local.set value
 		body.WriteVarUint(uint32(dstValueSlot))
+	}
+
+	emitObjectPropertyLoadFromLocal := func(objectSlot int, name string, dstValueSlot int) {
+		offset := vm.getPropertyOffset(name)
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(objectSlot))
+		body.WriteByte(0x44)
+		body.WriteFloat64(float64(offset))
+		body.WriteByte(0xA0)
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(tempPtrSlot))
+		emitLoadTaggedCell(tempPtrSlot, dstValueSlot)
+	}
+
+	emitPackedArrayPropertyLoadOrFallback := func(arraySlot int, indexSlot int, objectSlot int, name string, dstValueSlot int) {
+		offset := vm.getPropertyOffset(name)
+		tableIndex := float64((offset - 16) / 16)
+
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(arraySlot))
+		body.WriteByte(0xAA)
+		body.WriteByte(0x2B)
+		body.WriteVarUint(3)
+		body.WriteVarUint(jitArrayPackedMarkerOffset)
+		body.WriteByte(0x44)
+		body.WriteFloat64(jitPackedObjectArrayMarker)
+		body.WriteByte(0x61)
+		body.WriteByte(0x04)
+		body.WriteByte(0x40)
+
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(arraySlot))
+		body.WriteByte(0xAA)
+		body.WriteByte(0x2B)
+		body.WriteVarUint(3)
+		body.WriteVarUint(jitArrayPackedSlotsOffset)
+		body.WriteByte(0x44)
+		body.WriteFloat64(tableIndex + 1)
+		body.WriteByte(0x66)
+		body.WriteByte(0x04)
+		body.WriteByte(0x40)
+
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(arraySlot))
+		body.WriteByte(0xAA)
+		body.WriteByte(0x2B)
+		body.WriteVarUint(3)
+		body.WriteVarUint(jitArrayPackedTableOffset)
+		body.WriteByte(0x44)
+		body.WriteFloat64(tableIndex * 8.0)
+		body.WriteByte(0xA0)
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(tempPtrSlot))
+
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(tempPtrSlot))
+		body.WriteByte(0xAA)
+		body.WriteByte(0x2B)
+		body.WriteVarUint(3)
+		body.WriteVarUint(0)
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(tempPtrSlot + 2))
+
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(tempPtrSlot + 2))
+		body.WriteByte(0x44)
+		body.WriteFloat64(0.0)
+		body.WriteByte(0x62)
+		body.WriteByte(0x04)
+		body.WriteByte(0x40)
+
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(tempPtrSlot + 2))
+		body.WriteByte(0x20)
+		body.WriteVarUint(uint32(indexSlot))
+		body.WriteByte(0x44)
+		body.WriteFloat64(16.0)
+		body.WriteByte(0xA2)
+		body.WriteByte(0xA0)
+		body.WriteByte(0x21)
+		body.WriteVarUint(uint32(tempPtrSlot))
+		emitLoadTaggedCell(tempPtrSlot, dstValueSlot)
+
+		body.WriteByte(0x05)
+		emitObjectPropertyLoadFromLocal(objectSlot, name, dstValueSlot)
+		body.WriteByte(0x0B)
+
+		body.WriteByte(0x05)
+		emitObjectPropertyLoadFromLocal(objectSlot, name, dstValueSlot)
+		body.WriteByte(0x0B)
+
+		body.WriteByte(0x05)
+		emitObjectPropertyLoadFromLocal(objectSlot, name, dstValueSlot)
+		body.WriteByte(0x0B)
 	}
 
 	emitStoreTaggedCell := func(addrSlot int, srcValueSlot int) {
@@ -3229,6 +4562,24 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool, currentReturnTypes
 		}
 	}
 
+	emitDeoptTrap := func(resumeIP int, resumeSP int) {
+		emitDeoptCheckpoint(resumeIP, resumeSP)
+		body.WriteByte(0x00) // unreachable: wazero returns an error, then the VM resumes from the snapshot.
+	}
+
+	emitRequireTag := func(valueSlot int, expectedTag float64, resumeIP int, resumeSP int) {
+		body.WriteByte(0x20) // local.get actual tag
+		body.WriteVarUint(uint32(tagSlot(valueSlot)))
+		body.WriteByte(0x44)
+		body.WriteFloat64(expectedTag)
+		body.WriteByte(0x61) // f64.eq
+		body.WriteByte(0x04) // if
+		body.WriteByte(0x40) // empty block
+		body.WriteByte(0x05) // else
+		emitDeoptTrap(resumeIP, resumeSP)
+		body.WriteByte(0x0B) // end
+	}
+
 	emitDynamicAddTagged := func(leftSlot int, rightSlot int, dstSlot int) {
 		// Check if leftTag == number && rightTag == number
 		body.WriteByte(0x20) // local.get leftTag
@@ -3293,6 +4644,27 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool, currentReturnTypes
 	}
 
 	emitConstTagged := func(dstSlot int, raw any) bool {
+		if strVal, ok := raw.(string); ok {
+			if addr, exists := jitStringAddr[strVal]; exists {
+				body.WriteByte(0x44)
+				body.WriteFloat64(float64(addr))
+				body.WriteByte(0x21)
+				body.WriteVarUint(uint32(dstSlot))
+				emitSetTagConst(dstSlot, jitTagString)
+				return true
+			}
+			if strID, exists := jitStringID[strVal]; exists {
+				body.WriteByte(0x44)
+				body.WriteFloat64(float64(strID))
+				body.WriteByte(0x10)
+				body.WriteVarUint(jitImportLoadStringConstant)
+				body.WriteByte(0x21)
+				body.WriteVarUint(uint32(dstSlot))
+				emitSetTagConst(dstSlot, jitTagString)
+				return true
+			}
+			return false
+		}
 		val, ok := getFloat64Constant(raw)
 		if !ok {
 			return false
@@ -3303,6 +4675,87 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool, currentReturnTypes
 		body.WriteVarUint(uint32(dstSlot))
 		emitSetTagConst(dstSlot, jitTagNumber)
 		return true
+	}
+
+	emitTinyValueArg := func(value TinyValue) bool {
+		if value.IsInt {
+			body.WriteByte(0x44)
+			body.WriteFloat64(float64(value.AsInt))
+			return true
+		}
+		if isNullConstant(value) {
+			body.WriteByte(0x44)
+			body.WriteFloat64(0.0)
+			return true
+		}
+		switch v := value.Value.(type) {
+		case int:
+			body.WriteByte(0x44)
+			body.WriteFloat64(float64(v))
+			return true
+		case int8:
+			body.WriteByte(0x44)
+			body.WriteFloat64(float64(v))
+			return true
+		case int16:
+			body.WriteByte(0x44)
+			body.WriteFloat64(float64(v))
+			return true
+		case int32:
+			body.WriteByte(0x44)
+			body.WriteFloat64(float64(v))
+			return true
+		case int64:
+			body.WriteByte(0x44)
+			body.WriteFloat64(float64(v))
+			return true
+		case uint:
+			body.WriteByte(0x44)
+			body.WriteFloat64(float64(v))
+			return true
+		case uint8:
+			body.WriteByte(0x44)
+			body.WriteFloat64(float64(v))
+			return true
+		case uint16:
+			body.WriteByte(0x44)
+			body.WriteFloat64(float64(v))
+			return true
+		case uint32:
+			body.WriteByte(0x44)
+			body.WriteFloat64(float64(v))
+			return true
+		case uint64:
+			body.WriteByte(0x44)
+			body.WriteFloat64(float64(v))
+			return true
+		case float32:
+			body.WriteByte(0x44)
+			body.WriteFloat64(float64(v))
+			return true
+		case float64:
+			body.WriteByte(0x44)
+			body.WriteFloat64(v)
+			return true
+		case bool:
+			body.WriteByte(0x44)
+			if v {
+				body.WriteFloat64(1.0)
+			} else {
+				body.WriteFloat64(0.0)
+			}
+			return true
+		case string:
+			addr, ok := jitStringAddr[v]
+			if !ok {
+				return false
+			}
+			body.WriteByte(0x44)
+			body.WriteFloat64(float64(addr))
+			return true
+		default:
+			return false
+		}
 	}
 
 	emitNumericBinaryOp := func(leftSlot int, rightSlot int, dstSlot int, op OpCode) bool {
@@ -3358,6 +4811,53 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool, currentReturnTypes
 	emitLocalConstOp := func(leftSlot int, raw any, op OpCode, dstSlot int) bool {
 		if !emitConstTagged(tempPtrSlot+2, raw) {
 			return false
+		}
+		if op == OP_ADD {
+			if _, ok := raw.(string); ok {
+				body.WriteByte(0x20) // local.get left tag
+				body.WriteVarUint(uint32(tagSlot(leftSlot)))
+				body.WriteByte(0x44) // f64.const jitTagString
+				body.WriteFloat64(jitTagString)
+				body.WriteByte(0x61) // f64.eq
+				body.WriteByte(0x04) // if (result f64)
+				body.WriteByte(0x7C)
+				body.WriteByte(0x20) // local.get left string ptr
+				body.WriteVarUint(uint32(leftSlot))
+				body.WriteByte(0x20) // local.get right const string ptr
+				body.WriteVarUint(uint32(tempPtrSlot + 2))
+				body.WriteByte(0x10) // call string_concat_wasm
+				body.WriteVarUint(jitImportStringConcat)
+				body.WriteByte(0x05) // else
+				body.WriteByte(0x20) // left tag
+				body.WriteVarUint(uint32(tagSlot(leftSlot)))
+				body.WriteByte(0x20) // left value
+				body.WriteVarUint(uint32(leftSlot))
+				body.WriteByte(0x20) // right tag
+				body.WriteVarUint(uint32(tagSlot(tempPtrSlot + 2)))
+				body.WriteByte(0x20) // right value
+				body.WriteVarUint(uint32(tempPtrSlot + 2))
+				body.WriteByte(0x10) // call dynamic_add
+				body.WriteVarUint(jitImportDynamicAdd)
+				body.WriteByte(0x0B) // end if
+				body.WriteByte(0x21)
+				body.WriteVarUint(uint32(dstSlot))
+				body.WriteByte(0x20) // local.get left tag
+				body.WriteVarUint(uint32(tagSlot(leftSlot)))
+				body.WriteByte(0x44) // f64.const jitTagString
+				body.WriteFloat64(jitTagString)
+				body.WriteByte(0x61) // f64.eq
+				body.WriteByte(0x04) // if (result f64)
+				body.WriteByte(0x7C)
+				body.WriteByte(0x44)
+				body.WriteFloat64(jitTagString)
+				body.WriteByte(0x05) // else
+				body.WriteByte(0x44)
+				body.WriteFloat64(jitTagString)
+				body.WriteByte(0x0B)
+				body.WriteByte(0x21)
+				body.WriteVarUint(uint32(tagSlot(dstSlot)))
+				return true
+			}
 		}
 		return emitNumericBinaryOp(leftSlot, tempPtrSlot+2, dstSlot, op)
 	}
@@ -4304,7 +5804,7 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool, currentReturnTypes
 		// For all known non-string Tiny values currently represented in JIT,
 		// truthiness is just value != 0. Only strings need length check
 		// because empty string is false and non-empty string is true.
-		if t == stackTypeNumber || t == stackTypeBool || t == stackTypeObject || t == stackTypeArray {
+		if t == stackTypeNumber || t == stackTypeBool || t == stackTypeObject || isJitArrayType(t) {
 			body.WriteByte(0x20) // local.get value
 			body.WriteVarUint(uint32(valueSlot))
 			body.WriteByte(0x44) // f64.const 0
@@ -4705,11 +6205,18 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool, currentReturnTypes
 
 	typeStack := make([]stackType, maxSp+16)
 	inferredParams := inferParamTypes(vm, fn, currentReturnTypes, currentParamTypes)
+	localPropertyHints := inferJitLocalPropertyHints(fn)
 	localTypes := make([]stackType, fn.LocalCount)
 	for i := 0; i < len(fn.Params) && i < len(localTypes); i++ {
 		localTypes[i] = inferredParams[i]
 		emitSetTagFromType(i, localTypes[i])
 	}
+
+	type jitRowOrigin struct {
+		ArraySlot int
+		IndexSlot int
+	}
+	rowOrigins := map[int]jitRowOrigin{}
 
 	for i, instr := range fn.Instructions {
 		sp := spArray[i]
@@ -4853,11 +6360,15 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool, currentReturnTypes
 			}
 		case OP_LOCAL_CONST_OP:
 			if sp < len(typeStack) {
-				typeStack[sp] = stackTypeNumber
+				if info, ok := instr.Value.(LocalConstOpInfo); ok {
+					typeStack[sp] = jitLocalConstOpResultType(info)
+				} else {
+					typeStack[sp] = stackTypeNumber
+				}
 			}
 		case OP_LOCAL_CONST_OP_STORE:
 			if info, ok := instr.Value.(LocalConstOpInfo); ok && info.Slot >= 0 && info.Slot < len(localTypes) {
-				localTypes[info.Slot] = stackTypeNumber
+				localTypes[info.Slot] = jitLocalConstOpResultType(info)
 			}
 		case OP_ADD_LOCAL_GLOBAL_GLOBAL_STORE:
 			if info, ok := instr.Value.(AddLocalGlobalGlobalStoreInfo); ok && info.LocalSlot >= 0 && info.LocalSlot < len(localTypes) {
@@ -4867,11 +6378,19 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool, currentReturnTypes
 			if info, ok := instr.Value.(AddLocalArrayIndexStoreInfo); ok && info.LocalSlot >= 0 && info.LocalSlot < len(localTypes) {
 				localTypes[info.LocalSlot] = stackTypeNumber
 			}
-		case OP_ARRAY_INDEX_CONST_OP_STORE, OP_ADD_PROPERTY_LOCAL_CONST, OP_ADD_PROPERTY_LOCAL_PROPERTY, OP_ADD_LOCAL_PROPERTIES_STORE:
+		case OP_ARRAY_INDEX_CONST_OP_STORE, OP_ADD_PROPERTY_LOCAL_CONST, OP_ADD_PROPERTY_LOCAL_PROPERTY, OP_ADD_PROPERTY_LOCAL_LOCAL, OP_ADD_LOCAL_PROPERTIES_STORE, OP_ARRAY_INDEX_LOCAL_STORE:
 			// no stack effect for type propagation
 		case OP_GET_PROPERTY_LOCAL:
 			if sp < len(typeStack) {
-				typeStack[sp] = stackTypeUnknown
+				propType := stackTypeUnknown
+				if info, ok := instr.Value.(PropertyLocalInfo); ok {
+					if info.Slot >= 0 && info.Slot < len(localPropertyHints) && localPropertyHints[info.Slot] != nil {
+						if t, ok := localPropertyHints[info.Slot][info.Name]; ok {
+							propType = t
+						}
+					}
+				}
+				typeStack[sp] = propType
 			}
 		case OP_GET_PROPERTY, OP_GET_PROPERTY_SAFE:
 			if sp >= 1 {
@@ -4881,25 +6400,18 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool, currentReturnTypes
 			if info, ok := instr.Value.(ArrayInfo); ok {
 				dest := sp - info.Count
 				if dest >= 0 && dest < len(typeStack) {
-					allInternedStrings := info.Count > 0
+					elements := make([]stackType, 0, info.Count)
 					for idx := 0; idx < info.Count; idx++ {
-						if typeStack[sp-info.Count+idx] != stackTypeInternedString {
-							allInternedStrings = false
-							break
-						}
+						elements = append(elements, typeStack[sp-info.Count+idx])
 					}
-					if allInternedStrings {
-						typeStack[dest] = stackTypeInternedStringArray
-					} else {
-						typeStack[dest] = stackTypeArray
-					}
+					typeStack[dest] = inferJitArrayStackType(elements)
 				}
 			}
 
 		case OP_INDEX:
 			if sp >= 2 {
-				if typeStack[sp-2] == stackTypeInternedStringArray {
-					typeStack[sp-2] = stackTypeInternedString
+				if elemType, ok := jitArrayElementType(typeStack[sp-2]); ok {
+					typeStack[sp-2] = elemType
 				} else {
 					typeStack[sp-2] = stackTypeUnknown
 				}
@@ -4919,15 +6431,23 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool, currentReturnTypes
 			}
 		case OP_ARRAY_GET_LOCAL:
 			if sp < len(typeStack) {
-				if info, ok := instr.Value.(ArrayLocalCallInfo); ok && info.ArraySlot >= 0 && info.ArraySlot < len(localTypes) && localTypes[info.ArraySlot] == stackTypeInternedStringArray {
-					typeStack[sp] = stackTypeInternedString
+				if info, ok := instr.Value.(ArrayLocalCallInfo); ok && info.ArraySlot >= 0 && info.ArraySlot < len(localTypes) {
+					if elemType, ok := jitArrayElementType(localTypes[info.ArraySlot]); ok {
+						typeStack[sp] = elemType
+					} else {
+						typeStack[sp] = stackTypeUnknown
+					}
 				} else {
 					typeStack[sp] = stackTypeUnknown
 				}
 			}
-		case OP_ARRAY_LEN_LOCAL, OP_LEN:
+		case OP_ARRAY_LEN_LOCAL:
 			if sp < len(typeStack) {
 				typeStack[sp] = stackTypeNumber
+			}
+		case OP_LEN:
+			if sp-1 >= 0 && sp-1 < len(typeStack) {
+				typeStack[sp-1] = stackTypeNumber
 			}
 		case OP_ARRAY_PUSH_LOCAL, OP_ARRAY_PUSH_LOCAL_MUL_CONST:
 			if sp < len(typeStack) {
@@ -5233,6 +6753,7 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool, currentReturnTypes
 					slot = info.Slot
 				}
 			}
+			delete(rowOrigins, slot)
 			src := stackBase + sp - 1
 			body.WriteByte(0x20)
 			body.WriteVarUint(uint32(src))
@@ -5958,6 +7479,51 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool, currentReturnTypes
 			body.WriteVarUint(uint32(depth + 1))
 			body.WriteByte(0x0B) // end
 
+		case OP_JUMP_PROPERTY_LOCAL_FALSE:
+			info := instr.Value.(JumpPropertyLocalInfo)
+			if origin, ok := rowOrigins[info.Slot]; ok {
+				emitPackedArrayPropertyLoadOrFallback(origin.ArraySlot, origin.IndexSlot, info.Slot, info.Name, tempPtrSlot+1)
+			} else {
+				emitObjectPropertyLoadFromLocal(info.Slot, info.Name, tempPtrSlot+1)
+			}
+			if info.Slot >= 0 && info.Slot < len(localPropertyHints) && localPropertyHints[info.Slot] != nil {
+				if hintedType, ok := localPropertyHints[info.Slot][info.Name]; ok {
+					if expectedTag, ok := jitTagForStackType(hintedType); ok {
+						emitRequireTag(tempPtrSlot+1, expectedTag, i, sp)
+					}
+				}
+			}
+			emitTruthyI32(tempPtrSlot+1, stackTypeBool)
+			body.WriteByte(0x04) // if
+			body.WriteByte(0x40) // empty block signature
+			body.WriteByte(0x05) // else
+			depth, _ := findDepth(activeBlocks, info.Target)
+			body.WriteByte(0x0C) // br
+			body.WriteVarUint(uint32(depth + 1))
+			body.WriteByte(0x0B) // end
+
+		case OP_JUMP_PROPERTY_LOCAL_TRUE:
+			info := instr.Value.(JumpPropertyLocalInfo)
+			if origin, ok := rowOrigins[info.Slot]; ok {
+				emitPackedArrayPropertyLoadOrFallback(origin.ArraySlot, origin.IndexSlot, info.Slot, info.Name, tempPtrSlot+1)
+			} else {
+				emitObjectPropertyLoadFromLocal(info.Slot, info.Name, tempPtrSlot+1)
+			}
+			if info.Slot >= 0 && info.Slot < len(localPropertyHints) && localPropertyHints[info.Slot] != nil {
+				if hintedType, ok := localPropertyHints[info.Slot][info.Name]; ok {
+					if expectedTag, ok := jitTagForStackType(hintedType); ok {
+						emitRequireTag(tempPtrSlot+1, expectedTag, i, sp)
+					}
+				}
+			}
+			emitTruthyI32(tempPtrSlot+1, stackTypeBool)
+			body.WriteByte(0x04) // if
+			body.WriteByte(0x40) // empty block signature
+			depth, _ := findDepth(activeBlocks, info.Target)
+			body.WriteByte(0x0C) // br
+			body.WriteVarUint(uint32(depth + 1))
+			body.WriteByte(0x0B) // end
+
 		case OP_JUMP_LOCAL_GT_CONST:
 			info := instr.Value.(JumpLocalGTConstInfo)
 			body.WriteByte(0x20)
@@ -6055,8 +7621,19 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool, currentReturnTypes
 				body.WriteByte(0x20)
 				body.WriteVarUint(uint32(stackBase + sp - info.ArgCount + a))
 			}
+			if info.ID >= 0 && info.ID < len(vm.functionList) {
+				if missingDefaults, ok := jitMissingDefaultArgsForCall(vm, vm.functionList[info.ID], info.ArgCount); ok {
+					for _, defaultValue := range missingDefaults {
+						if !emitTinyValueArg(defaultValue) {
+							body.WriteByte(0x00) // unreachable: unsupported JIT default literal
+						}
+					}
+				} else {
+					body.WriteByte(0x00) // unreachable: invalid JIT default-arg call
+				}
+			}
 			body.WriteByte(0x10)                                // call
-			body.WriteVarUint(uint32(info.ID + jitImportCount)) // Function indices start after 9 imports
+			body.WriteVarUint(uint32(info.ID + jitImportCount)) // Function indices start after imports
 			body.WriteByte(0x21)
 			body.WriteVarUint(uint32(stackBase + sp - info.ArgCount))
 			emitSetTagFromType(stackBase+sp-info.ArgCount, currentReturnTypes[info.ID])
@@ -6067,9 +7644,20 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool, currentReturnTypes
 			body.WriteVarUint(uint32(info.Slot))
 			body.WriteByte(0x44)
 			body.WriteFloat64(float64(info.SubValue))
-			body.WriteByte(0xA1)                                  // sub
+			body.WriteByte(0xA1) // sub
+			if info.FnID >= 0 && info.FnID < len(vm.functionList) {
+				if missingDefaults, ok := jitMissingDefaultArgsForCall(vm, vm.functionList[info.FnID], info.ArgCount); ok {
+					for _, defaultValue := range missingDefaults {
+						if !emitTinyValueArg(defaultValue) {
+							body.WriteByte(0x00) // unreachable: unsupported JIT default literal
+						}
+					}
+				} else {
+					body.WriteByte(0x00) // unreachable: invalid JIT default-arg call
+				}
+			}
 			body.WriteByte(0x10)                                  // call
-			body.WriteVarUint(uint32(info.FnID + jitImportCount)) // Function indices start after 9 imports
+			body.WriteVarUint(uint32(info.FnID + jitImportCount)) // Function indices start after imports
 			body.WriteByte(0x21)
 			body.WriteVarUint(uint32(stackBase + sp))
 			emitSetTagFromType(stackBase+sp, currentReturnTypes[info.FnID])
@@ -6176,6 +7764,16 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool, currentReturnTypes
 			offset := vm.getPropertyOffset(name)
 			dst := stackBase + sp - 1
 
+			// Check if tag == 4.0 (jitTagObject)
+			body.WriteByte(0x20) // local.get tag
+			body.WriteVarUint(uint32(tagSlot(dst)))
+			body.WriteByte(0x44) // f64.const
+			body.WriteFloat64(jitTagObject)
+			body.WriteByte(0x61) // f64.eq
+			body.WriteByte(0x04) // if
+			body.WriteByte(0x40) // block type: empty
+
+			// then: normal load
 			body.WriteByte(0x20) // local.get object
 			body.WriteVarUint(uint32(dst))
 			body.WriteByte(0x44) // f64.const offset
@@ -6183,8 +7781,52 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool, currentReturnTypes
 			body.WriteByte(0xA0) // f64.add
 			body.WriteByte(0x21) // local.set tempPtrSlot
 			body.WriteVarUint(uint32(tempPtrSlot))
-
 			emitLoadTaggedCell(tempPtrSlot, dst)
+
+			body.WriteByte(0x05) // else
+
+			// else: not an object
+			if instr.Op == OP_GET_PROPERTY_SAFE {
+				// if tag == 0.0, set to null
+				body.WriteByte(0x20) // local.get tag
+				body.WriteVarUint(uint32(tagSlot(dst)))
+				body.WriteByte(0x44) // f64.const
+				body.WriteFloat64(jitTagNull)
+				body.WriteByte(0x61) // f64.eq
+				body.WriteByte(0x04) // if
+				body.WriteByte(0x40) // block type: empty
+
+				// set dst to null
+				body.WriteByte(0x44) // f64.const
+				body.WriteFloat64(0.0)
+				body.WriteByte(0x21) // local.set dst value
+				body.WriteVarUint(uint32(dst))
+				emitSetTagConst(dst, jitTagNull)
+
+				body.WriteByte(0x05) // else
+
+				// call throw_type_error_wasm
+				body.WriteByte(0x20) // local.get tag
+				body.WriteVarUint(uint32(tagSlot(dst)))
+				body.WriteByte(0x20) // local.get value
+				body.WriteVarUint(uint32(dst))
+				body.WriteByte(0x10) // call
+				body.WriteVarUint(jitImportThrowTypeErrorWasm)
+				body.WriteByte(0x1A) // drop
+
+				body.WriteByte(0x0B) // end if (tag == 0.0)
+			} else {
+				// call throw_type_error_wasm
+				body.WriteByte(0x20) // local.get tag
+				body.WriteVarUint(uint32(tagSlot(dst)))
+				body.WriteByte(0x20) // local.get value
+				body.WriteVarUint(uint32(dst))
+				body.WriteByte(0x10) // call
+				body.WriteVarUint(jitImportThrowTypeErrorWasm)
+				body.WriteByte(0x1A) // drop
+			}
+
+			body.WriteByte(0x0B) // end if (tag == 4.0)
 
 		case OP_SET_PROPERTY:
 			name := instr.Value.(string)
@@ -6205,18 +7847,20 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool, currentReturnTypes
 
 		case OP_GET_PROPERTY_LOCAL:
 			info := instr.Value.(PropertyLocalInfo)
-			offset := vm.getPropertyOffset(info.Name)
 			dst := stackBase + sp
 
-			body.WriteByte(0x20) // local.get object
-			body.WriteVarUint(uint32(info.Slot))
-			body.WriteByte(0x44) // f64.const offset
-			body.WriteFloat64(float64(offset))
-			body.WriteByte(0xA0) // f64.add
-			body.WriteByte(0x21) // local.set tempPtrSlot
-			body.WriteVarUint(uint32(tempPtrSlot))
-
-			emitLoadTaggedCell(tempPtrSlot, dst)
+			if origin, ok := rowOrigins[info.Slot]; ok {
+				emitPackedArrayPropertyLoadOrFallback(origin.ArraySlot, origin.IndexSlot, info.Slot, info.Name, dst)
+			} else {
+				emitObjectPropertyLoadFromLocal(info.Slot, info.Name, dst)
+			}
+			if info.Slot >= 0 && info.Slot < len(localPropertyHints) && localPropertyHints[info.Slot] != nil {
+				if hintedType, ok := localPropertyHints[info.Slot][info.Name]; ok {
+					if expectedTag, ok := jitTagForStackType(hintedType); ok {
+						emitRequireTag(dst, expectedTag, i, sp)
+					}
+				}
+			}
 
 		case OP_ADD_PROPERTY_LOCAL_LOCAL:
 			info := instr.Value.(PropertyLocalAssignInfo)
@@ -6291,16 +7935,32 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool, currentReturnTypes
 		case OP_ADD_LOCAL_PROPERTIES_STORE:
 			info := instr.Value.(AddLocalPropertiesStoreInfo)
 			for _, name := range info.Names {
-				offset := vm.getPropertyOffset(name)
-				body.WriteByte(0x20)
-				body.WriteVarUint(uint32(info.ObjectSlot))
-				body.WriteByte(0x44)
-				body.WriteFloat64(float64(offset))
-				body.WriteByte(0xA0)
-				body.WriteByte(0x21)
-				body.WriteVarUint(uint32(tempPtrSlot))
-				emitLoadTaggedCell(tempPtrSlot, tempPtrSlot+1)
-				emitDynamicAddTagged(info.LocalSlot, tempPtrSlot+1, info.LocalSlot)
+				if origin, ok := rowOrigins[info.ObjectSlot]; ok {
+					emitPackedArrayPropertyLoadOrFallback(origin.ArraySlot, origin.IndexSlot, info.ObjectSlot, name, tempPtrSlot+1)
+				} else {
+					emitObjectPropertyLoadFromLocal(info.ObjectSlot, name, tempPtrSlot+1)
+				}
+
+				propIsHintedNumber := false
+				if info.ObjectSlot >= 0 && info.ObjectSlot < len(localPropertyHints) && localPropertyHints[info.ObjectSlot] != nil {
+					propIsHintedNumber = localPropertyHints[info.ObjectSlot][name] == stackTypeNumber
+				}
+
+				if propIsHintedNumber && info.LocalSlot >= 0 && info.LocalSlot < len(localTypes) && localTypes[info.LocalSlot] == stackTypeNumber {
+					// Fast generic numeric field add. This is not benchmark-name based: any local += obj.field
+					// pattern gets it when the field is proven numeric by surrounding bytecode.
+					emitRequireTag(tempPtrSlot+1, jitTagNumber, i, sp)
+					body.WriteByte(0x20)
+					body.WriteVarUint(uint32(info.LocalSlot))
+					body.WriteByte(0x20)
+					body.WriteVarUint(uint32(tempPtrSlot + 1))
+					body.WriteByte(0xA0) // f64.add
+					body.WriteByte(0x21)
+					body.WriteVarUint(uint32(info.LocalSlot))
+					emitSetTagConst(info.LocalSlot, jitTagNumber)
+				} else {
+					emitDynamicAddTagged(info.LocalSlot, tempPtrSlot+1, info.LocalSlot)
+				}
 			}
 
 		case OP_ARRAY:
@@ -6409,6 +8069,26 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool, currentReturnTypes
 			body.WriteByte(0x21) // local.set
 			body.WriteVarUint(uint32(stackBase + sp - count))
 			emitSetTagConst(stackBase+sp-count, jitTagArray)
+
+		case OP_ARRAY_INDEX_LOCAL_STORE:
+			info := instr.Value.(ArrayIndexLocalStoreInfo)
+			// Keep normal semantics: dest = array[index].
+			body.WriteByte(0x20)
+			body.WriteVarUint(uint32(info.ArraySlot))
+			body.WriteByte(0xAA)
+			body.WriteByte(0x2B)
+			body.WriteVarUint(3)
+			body.WriteVarUint(16)
+			body.WriteByte(0x20)
+			body.WriteVarUint(uint32(info.IndexSlot))
+			body.WriteByte(0x44)
+			body.WriteFloat64(16.0)
+			body.WriteByte(0xA2)
+			body.WriteByte(0xA0)
+			body.WriteByte(0x21)
+			body.WriteVarUint(uint32(tempPtrSlot))
+			emitLoadTaggedCell(tempPtrSlot, info.DestSlot)
+			rowOrigins[info.DestSlot] = jitRowOrigin{ArraySlot: info.ArraySlot, IndexSlot: info.IndexSlot}
 
 		case OP_INDEX:
 			arrSlot := stackBase + sp - 2
@@ -6715,10 +8395,14 @@ func (vm *VM) jitValueToTinyValue(mod api.Module, tag float64, val float64) Tiny
 		})
 
 	case jitTagArray:
-		return NewNative(WasmArrayValue{
+		arr := WasmArrayValue{
 			Address: val,
 			VM:      vm,
-		})
+		}
+		if native, ok := vm.wasmArrayToArrayValue(arr); ok {
+			return NewNative(native)
+		}
+		return NewNative(arr)
 
 	default:
 		return ToValue(val)
@@ -6838,7 +8522,95 @@ func jitObjectKeyString(k any) string {
 	return fmt.Sprint(k)
 }
 
+type jitPackedObjectArrayField struct {
+	Name       string
+	Offset     uint32
+	TableIndex uint32
+}
+
+type jitPackedObjectArrayPlan struct {
+	Fields     []jitPackedObjectArrayField
+	TableSlots uint32
+}
+
+func (vm *VM) planPackedObjectArray(arr *ArrayValue) (jitPackedObjectArrayPlan, bool) {
+	if vm == nil || arr == nil || len(arr.Elements) == 0 {
+		return jitPackedObjectArrayPlan{}, false
+	}
+
+	first, ok := jitTinyObjectValue(arr.Elements[0])
+	if !ok || len(first) == 0 {
+		return jitPackedObjectArrayPlan{}, false
+	}
+
+	names := make([]string, 0, len(first))
+	for k := range first {
+		name := jitObjectKeyString(k)
+		if name == "__class" {
+			return jitPackedObjectArrayPlan{}, false
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for i := 1; i < len(arr.Elements); i++ {
+		obj, ok := jitTinyObjectValue(arr.Elements[i])
+		if !ok || len(obj) != len(names) {
+			return jitPackedObjectArrayPlan{}, false
+		}
+		for _, name := range names {
+			if _, exists := obj[name]; !exists {
+				return jitPackedObjectArrayPlan{}, false
+			}
+		}
+	}
+
+	fields := make([]jitPackedObjectArrayField, 0, len(names))
+	var maxTableIndex uint32
+	for _, name := range names {
+		offset := vm.getPropertyOffset(name)
+		if offset < 16 {
+			continue
+		}
+		tableIndex := (offset - 16) / 16
+		if tableIndex > maxTableIndex {
+			maxTableIndex = tableIndex
+		}
+		fields = append(fields, jitPackedObjectArrayField{Name: name, Offset: offset, TableIndex: tableIndex})
+	}
+	if len(fields) == 0 {
+		return jitPackedObjectArrayPlan{}, false
+	}
+	return jitPackedObjectArrayPlan{Fields: fields, TableSlots: maxTableIndex + 1}, true
+}
+
+func jitTinyObjectValue(v TinyValue) (ObjectValue, bool) {
+	if v.IsInt || v.Value == nil {
+		return nil, false
+	}
+	switch obj := v.Value.(type) {
+	case ObjectValue:
+		return obj, true
+	case *ObjectValue:
+		if obj == nil {
+			return nil, false
+		}
+		return *obj, true
+	default:
+		return nil, false
+	}
+}
+
 func (vm *VM) allocateJitObject(mod api.Module, obj ObjectValue) float64 {
+	if obj == nil {
+		return 0
+	}
+	vm.ensureJitMirrorCaches()
+	identity := jitObjectIdentity(obj)
+	if mirror, ok := vm.jitObjectMirrorCache[identity]; ok && mirror.Length == len(obj) {
+		return mirror.Address
+	}
+
 	names := make([]string, 0, len(obj))
 	for k := range obj {
 		names = append(names, jitObjectKeyString(k))
@@ -6883,13 +8655,40 @@ func (vm *VM) allocateJitObject(mod api.Module, obj ObjectValue) float64 {
 		mod.Memory().Write(addr+offset+8, vBuf)
 	}
 
-	return float64(addr)
+	address := float64(addr)
+	vm.jitObjectMirrorCache[identity] = jitObjectMirror{
+		Address: address,
+		Length:  len(obj),
+	}
+	return address
 }
 
 func (vm *VM) allocateJitArray(mod api.Module, arr *ArrayValue) float64 {
-	count := len(arr.Elements)
+	if arr == nil {
+		return 0
+	}
+	vm.ensureJitMirrorCaches()
+	if mirror, ok := vm.jitArrayMirrorCache[arr]; ok && mirror.Length == len(arr.Elements) {
+		return mirror.Address
+	}
+	addr := vm.allocateJitArrayFresh(mod, arr)
+	vm.jitArrayMirrorCache[arr] = jitArrayMirror{
+		Address: addr,
+		Length:  len(arr.Elements),
+	}
+	return addr
+}
 
-	addr := vm.allocateJitMemory(mod, 32)
+func (vm *VM) allocateJitArrayFresh(mod api.Module, arr *ArrayValue) float64 {
+	count := len(arr.Elements)
+	packedPlan, packedOK := vm.planPackedObjectArray(arr)
+
+	headerSize := uint32(32)
+	if packedOK {
+		headerSize = 56
+	}
+
+	addr := vm.allocateJitMemory(mod, headerSize)
 
 	tagBuf := make([]byte, 8)
 	binary.LittleEndian.PutUint64(tagBuf, math.Float64bits(5.0))
@@ -6927,6 +8726,37 @@ func (vm *VM) allocateJitArray(mod api.Module, arr *ArrayValue) float64 {
 		mod.Memory().Write(addr+16, elemPtrBuf)
 	}
 
+	if packedOK {
+		tablePtr := vm.allocateJitMemory(mod, packedPlan.TableSlots*8)
+		if packedPlan.TableSlots > 0 {
+			zero := make([]byte, packedPlan.TableSlots*8)
+			mod.Memory().Write(tablePtr, zero)
+		}
+
+		buf := make([]byte, 8)
+		binary.LittleEndian.PutUint64(buf, math.Float64bits(jitPackedObjectArrayMarker))
+		mod.Memory().Write(addr+jitArrayPackedMarkerOffset, buf)
+		binary.LittleEndian.PutUint64(buf, math.Float64bits(float64(tablePtr)))
+		mod.Memory().Write(addr+jitArrayPackedTableOffset, buf)
+		binary.LittleEndian.PutUint64(buf, math.Float64bits(float64(packedPlan.TableSlots)))
+		mod.Memory().Write(addr+jitArrayPackedSlotsOffset, buf)
+
+		for _, field := range packedPlan.Fields {
+			colPtr := vm.allocateJitMemory(mod, uint32(count*16))
+			binary.LittleEndian.PutUint64(buf, math.Float64bits(float64(colPtr)))
+			mod.Memory().Write(tablePtr+field.TableIndex*8, buf)
+
+			for idx, elem := range arr.Elements {
+				obj, _ := jitTinyObjectValue(elem)
+				t, v := vm.tinyValueToJitValue(mod, obj[field.Name])
+				binary.LittleEndian.PutUint64(buf, math.Float64bits(t))
+				mod.Memory().Write(colPtr+uint32(idx*16), buf)
+				binary.LittleEndian.PutUint64(buf, math.Float64bits(v))
+				mod.Memory().Write(colPtr+uint32(idx*16+8), buf)
+			}
+		}
+	}
+
 	return float64(addr)
 }
 
@@ -6959,6 +8789,9 @@ func (vm *VM) tinyValueToJitValue(mod api.Module, val TinyValue) (float64, float
 		return jitTagObject, vm.allocateJitObject(mod, v)
 	case *ArrayValue:
 		return jitTagArray, vm.allocateJitArray(mod, v)
+	case ArrayValue:
+		arrCopy := v
+		return jitTagArray, vm.allocateJitArrayFresh(mod, &arrCopy)
 	case *StandardModuleValue:
 		slot := -1
 		if vm.globals != nil {
@@ -6992,7 +8825,8 @@ func (vm *VM) setupJitRuntimeAndEnv(jitStringConstCache map[uint32]uint32) bool 
 
 	if vm.wazeroRuntime.Module("env") == nil {
 		_, err := vm.wazeroRuntime.NewHostModuleBuilder("env").
-			NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, size float64) float64 {
+			NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+			size := api.DecodeF64(stack[0])
 			var addr uint32
 			heapTopGlobal := vm.getHeapTopGlobal(mod)
 			if heapTopGlobal != nil {
@@ -7001,7 +8835,6 @@ func (vm *VM) setupJitRuntimeAndEnv(jitStringConstCache map[uint32]uint32) bool 
 				addr = atomic.LoadUint32(&vm.jitHeapTop)
 			}
 
-			// Set bit in bitset
 			bitIdx := addr / 8
 			byteIdx := bitIdx / 8
 			bitOffset := bitIdx % 8
@@ -7026,9 +8859,10 @@ func (vm *VM) setupJitRuntimeAndEnv(jitStringConstCache map[uint32]uint32) bool 
 				}
 			}
 			atomic.StoreUint32(&vm.jitHeapTop, newTop)
-			return float64(addr)
-		}).Export("alloc_object").
-			NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, val float64) float64 {
+			stack[0] = api.EncodeF64(float64(addr))
+		}), f64s(1), f64s(1)).Export("alloc_object").
+			NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+			val := api.DecodeF64(stack[0])
 			addr := uint32(val)
 			var heapTop uint32
 			heapTopGlobal := vm.getHeapTopGlobal(mod)
@@ -7043,23 +8877,29 @@ func (vm *VM) setupJitRuntimeAndEnv(jitStringConstCache map[uint32]uint32) bool 
 				if ok {
 					tag := math.Float64frombits(binary.LittleEndian.Uint64(tagBytes))
 					if tag == 4.0 || tag == 5.0 || tag == 6.0 {
-						return tag
+						stack[0] = api.EncodeF64(tag)
+						return
 					}
 				}
 			}
+			stack[0] = api.EncodeF64(1.0) // default to number
+		}), f64s(1), f64s(1)).Export("determine_tag").
+			NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+			arrayPtr := api.DecodeF64(stack[0])
+			tag := api.DecodeF64(stack[1])
+			val := api.DecodeF64(stack[2])
 
-			return 1.0 // default to number
-		}).Export("determine_tag").
-			NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, arrayPtr float64, tag float64, val float64) float64 {
 			addr := uint32(arrayPtr)
 			lenBytes, ok1 := mod.Memory().Read(addr+8, 8)
 			if !ok1 {
-				return arrayPtr
+				stack[0] = api.EncodeF64(arrayPtr)
+				return
 			}
 			length := math.Float64frombits(binary.LittleEndian.Uint64(lenBytes))
 			elemPtrBytes, ok2 := mod.Memory().Read(addr+16, 8)
 			if !ok2 {
-				return arrayPtr
+				stack[0] = api.EncodeF64(arrayPtr)
+				return
 			}
 			oldElemPtr := uint32(math.Float64frombits(binary.LittleEndian.Uint64(elemPtrBytes)))
 
@@ -7144,9 +8984,11 @@ func (vm *VM) setupJitRuntimeAndEnv(jitStringConstCache map[uint32]uint32) bool 
 			binary.LittleEndian.PutUint64(lenBuf[:], newLenBits)
 			mod.Memory().Write(addr+8, lenBuf[:])
 
-			return arrayPtr
-		}).Export("array_push").
-			NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, srcA, srcB float64) float64 {
+			stack[0] = api.EncodeF64(arrayPtr)
+		}), f64s(3), f64s(1)).Export("array_push").
+			NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+			srcA := api.DecodeF64(stack[0])
+			srcB := api.DecodeF64(stack[1])
 			addrA := uint32(srcA)
 			lenABytes, _ := mod.Memory().Read(addrA+8, 8)
 			lenA := uint32(math.Float64frombits(binary.LittleEndian.Uint64(lenABytes)))
@@ -7197,367 +9039,135 @@ func (vm *VM) setupJitRuntimeAndEnv(jitStringConstCache map[uint32]uint32) bool 
 			// Copy characters
 			mod.Memory().Write(addr+16, bytesA)
 			mod.Memory().Write(addr+16+lenA, bytesB)
-			return float64(addr)
-		}).Export("string_concat_wasm").NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, addrA, addrB float64) float64 {
+			stack[0] = api.EncodeF64(float64(addr))
+		}), f64s(2), f64s(1)).Export("string_concat_wasm").
+			NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+			addrA := api.DecodeF64(stack[0])
+			addrB := api.DecodeF64(stack[1])
 			addrA32 := uint32(addrA)
 			addrB32 := uint32(addrB)
 
 			if addrA32 == addrB32 {
-				return 1.0
+				stack[0] = api.EncodeF64(1.0)
+				return
 			}
 
 			lenBytesA, okA := mod.Memory().Read(addrA32+8, 8)
 			lenBytesB, okB := mod.Memory().Read(addrB32+8, 8)
 			if !okA || !okB {
-				return 0.0
+				stack[0] = api.EncodeF64(0.0)
+				return
 			}
 
 			lenA := uint32(math.Float64frombits(binary.LittleEndian.Uint64(lenBytesA)))
 			lenB := uint32(math.Float64frombits(binary.LittleEndian.Uint64(lenBytesB)))
 			if lenA != lenB {
-				return 0.0
+				stack[0] = api.EncodeF64(0.0)
+				return
 			}
 			if lenA == 0 {
-				return 1.0
+				stack[0] = api.EncodeF64(1.0)
+				return
 			}
 
 			bytesA, okA := mod.Memory().Read(addrA32+16, lenA)
 			bytesB, okB := mod.Memory().Read(addrB32+16, lenB)
 			if !okA || !okB {
-				return 0.0
+				stack[0] = api.EncodeF64(0.0)
+				return
 			}
 
 			for i := uint32(0); i < lenA; i++ {
 				if bytesA[i] != bytesB[i] {
-					return 0.0
+					stack[0] = api.EncodeF64(0.0)
+					return
 				}
 			}
 
-			return 1.0
+			stack[0] = api.EncodeF64(1.0)
+		}), f64s(2), f64s(1)).Export("string_eq_wasm").
+			NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+			lTag := api.DecodeF64(stack[0])
+			lVal := api.DecodeF64(stack[1])
+			rTag := api.DecodeF64(stack[2])
+			rVal := api.DecodeF64(stack[3])
 
-		}).Export("string_eq_wasm").NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, lTag, lVal, rTag, rVal float64) float64 {
 			readString := func(addr uint32) string {
 				lenBytes, ok := mod.Memory().Read(addr+8, 8)
 				if !ok {
 					return ""
 				}
-				n := uint32(math.Float64frombits(binary.LittleEndian.Uint64(lenBytes)))
-				if n == 0 {
-					return ""
-				}
-				bytes, ok := mod.Memory().Read(addr+16, n)
+				strLen := uint32(math.Float64frombits(binary.LittleEndian.Uint64(lenBytes)))
+				strBytes, ok := mod.Memory().Read(addr+16, strLen)
 				if !ok {
 					return ""
 				}
-				return string(bytes)
-			}
-
-			toString := func(tag float64, val float64) (string, bool) {
-				switch tag {
-				case 6.0:
-					return readString(uint32(val)), true
-				case 2.0:
-					if val != 0.0 {
-						return "true", true
-					}
-					return "false", true
-				case 1.0:
-					if math.Trunc(val) == val {
-						return strconv.FormatInt(int64(val), 10), true
-					}
-					return FloatToString(val), true
-				case 0.0:
-					return "null", true
-				default:
-					return "", false
-				}
+				return string(strBytes)
 			}
 
 			if lTag == 6.0 || rTag == 6.0 {
-				if lTag == 6.0 && rTag == 6.0 {
-					addrA := uint32(lVal)
-					addrB := uint32(rVal)
-
-					lenBytesA, okA := mod.Memory().Read(addrA+8, 8)
-					lenBytesB, okB := mod.Memory().Read(addrB+8, 8)
-					if !okA || !okB {
-						panic("invalid operands for add")
-					}
-
-					lenA := uint32(math.Float64frombits(binary.LittleEndian.Uint64(lenBytesA)))
-					lenB := uint32(math.Float64frombits(binary.LittleEndian.Uint64(lenBytesB)))
-
-					size := uint32(16 + lenA + lenB)
-					size = (size + 7) &^ 7
-
-					var addr uint32
-					heapTopGlobal := vm.getHeapTopGlobal(mod)
-					if heapTopGlobal != nil {
-						addr = uint32(api.DecodeF64(heapTopGlobal.Get()))
-					} else {
-						addr = atomic.LoadUint32(&vm.jitHeapTop)
-					}
-
-					bitIdx := addr / 8
-					byteIdx := bitIdx / 8
-					bitOffset := bitIdx % 8
-					if byteIdx < bitsetSize {
-						buf, _ := mod.Memory().Read(byteIdx, 1)
-						buf[0] |= (1 << bitOffset)
-						mod.Memory().Write(byteIdx, buf)
-					}
-
-					newTop := addr + size
-					currentPages := mod.Memory().Size() / 65536
-					newPagesNeeded := (newTop + 65535) / 65536
-					if newPagesNeeded > currentPages {
-						mod.Memory().Grow(newPagesNeeded - currentPages)
-					}
-					if heapTopGlobal != nil {
-						if mg, ok := heapTopGlobal.(api.MutableGlobal); ok {
-							mg.Set(api.EncodeF64(float64(newTop)))
-						}
-					}
-					atomic.StoreUint32(&vm.jitHeapTop, newTop)
-
-					tagBuf := make([]byte, 8)
-					binary.LittleEndian.PutUint64(tagBuf, math.Float64bits(6.0))
-					mod.Memory().Write(addr, tagBuf)
-
-					lenBuf := make([]byte, 8)
-					binary.LittleEndian.PutUint64(lenBuf, math.Float64bits(float64(lenA+lenB)))
-					mod.Memory().Write(addr+8, lenBuf)
-
-					if lenA > 0 {
-						bytesA, _ := mod.Memory().Read(addrA+16, lenA)
-						mod.Memory().Write(addr+16, bytesA)
-					}
-					if lenB > 0 {
-						bytesB, _ := mod.Memory().Read(addrB+16, lenB)
-						mod.Memory().Write(addr+16+lenA, bytesB)
-					}
-
-					return float64(addr)
-				}
-
-				if lTag == 6.0 && rTag == 1.0 {
-					addrA := uint32(lVal)
-					lenBytesA, okA := mod.Memory().Read(addrA+8, 8)
-					if !okA {
-						panic("invalid operands for add")
-					}
-					lenA := uint32(math.Float64frombits(binary.LittleEndian.Uint64(lenBytesA)))
-					bytesA, _ := mod.Memory().Read(addrA+16, lenA)
-
-					var numBuf [24]byte
-					var bytesB []byte
-					if math.Trunc(rVal) == rVal {
-						bytesB = strconv.AppendInt(numBuf[:0], int64(rVal), 10)
-					} else {
-						bytesB = []byte(FloatToString(rVal))
-					}
-					lenB := uint32(len(bytesB))
-
-					size := uint32(16 + lenA + lenB)
-					size = (size + 7) &^ 7
-
-					var addr uint32
-					heapTopGlobal := vm.getHeapTopGlobal(mod)
-					if heapTopGlobal != nil {
-						addr = uint32(api.DecodeF64(heapTopGlobal.Get()))
-					} else {
-						addr = atomic.LoadUint32(&vm.jitHeapTop)
-					}
-
-					bitIdx := addr / 8
-					byteIdx := bitIdx / 8
-					bitOffset := bitIdx % 8
-					if byteIdx < bitsetSize {
-						buf, _ := mod.Memory().Read(byteIdx, 1)
-						buf[0] |= (1 << bitOffset)
-						mod.Memory().Write(byteIdx, buf)
-					}
-
-					newTop := addr + size
-					currentPages := mod.Memory().Size() / 65536
-					newPagesNeeded := (newTop + 65535) / 65536
-					if newPagesNeeded > currentPages {
-						mod.Memory().Grow(newPagesNeeded - currentPages)
-					}
-					if heapTopGlobal != nil {
-						if mg, ok := heapTopGlobal.(api.MutableGlobal); ok {
-							mg.Set(api.EncodeF64(float64(newTop)))
-						}
-					}
-					atomic.StoreUint32(&vm.jitHeapTop, newTop)
-
-					var tagBuf [8]byte
-					binary.LittleEndian.PutUint64(tagBuf[:], math.Float64bits(6.0))
-					mod.Memory().Write(addr, tagBuf[:])
-
-					var lenBuf [8]byte
-					binary.LittleEndian.PutUint64(lenBuf[:], math.Float64bits(float64(lenA+lenB)))
-					mod.Memory().Write(addr+8, lenBuf[:])
-
-					if lenA > 0 {
-						mod.Memory().Write(addr+16, bytesA)
-					}
-					if lenB > 0 {
-						mod.Memory().Write(addr+16+lenA, bytesB)
-					}
-
-					return float64(addr)
-				}
-
-				if lTag == 1.0 && rTag == 6.0 {
-					var numBuf [24]byte
-					var bytesA []byte
-					if math.Trunc(lVal) == lVal {
-						bytesA = strconv.AppendInt(numBuf[:0], int64(lVal), 10)
-					} else {
-						bytesA = []byte(FloatToString(lVal))
-					}
-					lenA := uint32(len(bytesA))
-
-					addrB := uint32(rVal)
-					lenBytesB, okB := mod.Memory().Read(addrB+8, 8)
-					if !okB {
-						panic("invalid operands for add")
-					}
-					lenB := uint32(math.Float64frombits(binary.LittleEndian.Uint64(lenBytesB)))
-					bytesB, _ := mod.Memory().Read(addrB+16, lenB)
-
-					size := uint32(16 + lenA + lenB)
-					size = (size + 7) &^ 7
-
-					var addr uint32
-					heapTopGlobal := vm.getHeapTopGlobal(mod)
-					if heapTopGlobal != nil {
-						addr = uint32(api.DecodeF64(heapTopGlobal.Get()))
-					} else {
-						addr = atomic.LoadUint32(&vm.jitHeapTop)
-					}
-
-					bitIdx := addr / 8
-					byteIdx := bitIdx / 8
-					bitOffset := bitIdx % 8
-					if byteIdx < bitsetSize {
-						buf, _ := mod.Memory().Read(byteIdx, 1)
-						buf[0] |= (1 << bitOffset)
-						mod.Memory().Write(byteIdx, buf)
-					}
-
-					newTop := addr + size
-					currentPages := mod.Memory().Size() / 65536
-					newPagesNeeded := (newTop + 65535) / 65536
-					if newPagesNeeded > currentPages {
-						mod.Memory().Grow(newPagesNeeded - currentPages)
-					}
-					if heapTopGlobal != nil {
-						if mg, ok := heapTopGlobal.(api.MutableGlobal); ok {
-							mg.Set(api.EncodeF64(float64(newTop)))
-						}
-					}
-					atomic.StoreUint32(&vm.jitHeapTop, newTop)
-
-					var tagBuf [8]byte
-					binary.LittleEndian.PutUint64(tagBuf[:], math.Float64bits(6.0))
-					mod.Memory().Write(addr, tagBuf[:])
-
-					var lenBuf [8]byte
-					binary.LittleEndian.PutUint64(lenBuf[:], math.Float64bits(float64(lenA+lenB)))
-					mod.Memory().Write(addr+8, lenBuf[:])
-
-					if lenA > 0 {
-						mod.Memory().Write(addr+16, bytesA)
-					}
-					if lenB > 0 {
-						mod.Memory().Write(addr+16+lenA, bytesB)
-					}
-
-					return float64(addr)
-				}
-
-				aStr, okA := toString(lTag, lVal)
-				bStr, okB := toString(rTag, rVal)
-				if !okA || !okB {
-					panic("invalid operands for add")
-				}
-
-				concatBytes := []byte(aStr + bStr)
-				size := uint32(16 + len(concatBytes))
-				size = (size + 7) &^ 7
-
-				var addr uint32
-				heapTopGlobal := vm.getHeapTopGlobal(mod)
-				if heapTopGlobal != nil {
-					addr = uint32(api.DecodeF64(heapTopGlobal.Get()))
+				var leftStr string
+				if lTag == 6.0 {
+					leftStr = readString(uint32(lVal))
 				} else {
-					addr = atomic.LoadUint32(&vm.jitHeapTop)
+					leftStr = valueToString(vm.jitValueToTinyValue(mod, lTag, lVal), true)
 				}
 
-				bitIdx := addr / 8
-				byteIdx := bitIdx / 8
-				bitOffset := bitIdx % 8
-				if byteIdx < bitsetSize {
-					buf, _ := mod.Memory().Read(byteIdx, 1)
-					buf[0] |= (1 << bitOffset)
-					mod.Memory().Write(byteIdx, buf)
+				var rightStr string
+				if rTag == 6.0 {
+					rightStr = readString(uint32(rVal))
+				} else {
+					rightStr = valueToString(vm.jitValueToTinyValue(mod, rTag, rVal), true)
 				}
 
-				newTop := addr + size
-				currentPages := mod.Memory().Size() / 65536
-				newPagesNeeded := (newTop + 65535) / 65536
-				if newPagesNeeded > currentPages {
-					mod.Memory().Grow(newPagesNeeded - currentPages)
-				}
-				if heapTopGlobal != nil {
-					if mg, ok := heapTopGlobal.(api.MutableGlobal); ok {
-						mg.Set(api.EncodeF64(float64(newTop)))
-					}
-				}
-				atomic.StoreUint32(&vm.jitHeapTop, newTop)
-
-				var tagBuf [8]byte
-				binary.LittleEndian.PutUint64(tagBuf[:], math.Float64bits(6.0))
-				mod.Memory().Write(addr, tagBuf[:])
-
-				var lenBuf [8]byte
-				binary.LittleEndian.PutUint64(lenBuf[:], math.Float64bits(float64(len(concatBytes))))
-				mod.Memory().Write(addr+8, lenBuf[:])
-				mod.Memory().Write(addr+16, concatBytes)
-
-				return float64(addr)
+				stack[0] = api.EncodeF64(vm.allocateWasmStringNoRegister(mod, []byte(leftStr+rightStr)))
+				return
 			}
 
 			if lTag == 1.0 && rTag == 1.0 {
-				return lVal + rVal
+				stack[0] = api.EncodeF64(lVal + rVal)
+				return
 			}
 
 			panic("invalid operands for add")
-		}).Export("dynamic_add").
-			NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, tag1, val1, tag2, val2, tag3, val3 float64) float64 {
+		}), f64s(4), f64s(1)).Export("dynamic_add").
+			NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+			tag1 := api.DecodeF64(stack[0])
+			val1 := api.DecodeF64(stack[1])
+			tag2 := api.DecodeF64(stack[2])
+			val2 := api.DecodeF64(stack[3])
+			tag3 := api.DecodeF64(stack[4])
+			val3 := api.DecodeF64(stack[5])
+
 			var localBuf [128]byte
 			bytes := localBuf[:0]
 			bytes = appendPartBytes(mod, tag1, val1, bytes)
 			bytes = appendPartBytes(mod, tag2, val2, bytes)
 			bytes = appendPartBytes(mod, tag3, val3, bytes)
-			return vm.allocateWasmStringNoRegister(mod, bytes)
-		}).Export("dynamic_join_3").
-			NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, tag1, val1, tag2, val2, tag3, val3, tag4, val4 float64) float64 {
+			stack[0] = api.EncodeF64(vm.allocateWasmStringNoRegister(mod, bytes))
+		}), f64s(6), f64s(1)).Export("dynamic_join_3").
+			NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+			tag1 := api.DecodeF64(stack[0])
+			val1 := api.DecodeF64(stack[1])
+			tag2 := api.DecodeF64(stack[2])
+			val2 := api.DecodeF64(stack[3])
+			tag3 := api.DecodeF64(stack[4])
+			val3 := api.DecodeF64(stack[5])
+			tag4 := api.DecodeF64(stack[6])
+			val4 := api.DecodeF64(stack[7])
+
 			var localBuf [128]byte
 			bytes := localBuf[:0]
 			bytes = appendPartBytes(mod, tag1, val1, bytes)
 			bytes = appendPartBytes(mod, tag2, val2, bytes)
 			bytes = appendPartBytes(mod, tag3, val3, bytes)
 			bytes = appendPartBytes(mod, tag4, val4, bytes)
-			return vm.allocateWasmStringNoRegister(mod, bytes)
-		}).Export("dynamic_join_4").
-			NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, id float64) float64 {
+			stack[0] = api.EncodeF64(vm.allocateWasmStringNoRegister(mod, bytes))
+		}), f64s(8), f64s(1)).Export("dynamic_join_4").
+			NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+			id := api.DecodeF64(stack[0])
 			strID := uint32(id)
 
-			// Return the already-allocated WASM string for this constant.
-			// Without this, every OP_CONST string inside a hot loop allocates again.
 			if cachedAddr, ok := jitStringConstCache[strID]; ok {
 				var heapTop uint32
 				heapTopGlobal := vm.getHeapTopGlobal(mod)
@@ -7577,7 +9187,8 @@ func (vm *VM) setupJitRuntimeAndEnv(jitStringConstCache map[uint32]uint32) bool 
 						if ok && (buf[0]&(1<<bitOffset)) != 0 {
 							tagBytes, ok := mod.Memory().Read(cachedAddr, 8)
 							if ok && math.Float64frombits(binary.LittleEndian.Uint64(tagBytes)) == 6.0 {
-								return float64(cachedAddr)
+								stack[0] = api.EncodeF64(float64(cachedAddr))
+								return
 							}
 						}
 					}
@@ -7587,7 +9198,7 @@ func (vm *VM) setupJitRuntimeAndEnv(jitStringConstCache map[uint32]uint32) bool 
 			strVal := vm.jitStrings[strID]
 			bytes := []byte(strVal)
 			size := uint32(16 + len(bytes))
-			size = (size + 7) &^ 7 // Align size to 8-byte boundary
+			size = (size + 7) &^ 7
 
 			var addr uint32
 			heapTopGlobal := mod.ExportedGlobal("__heap_top")
@@ -7597,7 +9208,6 @@ func (vm *VM) setupJitRuntimeAndEnv(jitStringConstCache map[uint32]uint32) bool 
 				addr = atomic.LoadUint32(&vm.jitHeapTop)
 			}
 
-			// Mark allocator bitset
 			bitIdx := addr / 8
 			byteIdx := bitIdx / 8
 			bitOffset := bitIdx % 8
@@ -7620,7 +9230,6 @@ func (vm *VM) setupJitRuntimeAndEnv(jitStringConstCache map[uint32]uint32) bool 
 			}
 			atomic.StoreUint32(&vm.jitHeapTop, newTop)
 
-			// Write String Tag (6.0) and Length
 			tagBuf := make([]byte, 8)
 			binary.LittleEndian.PutUint64(tagBuf, math.Float64bits(6.0))
 			mod.Memory().Write(addr, tagBuf)
@@ -7629,14 +9238,13 @@ func (vm *VM) setupJitRuntimeAndEnv(jitStringConstCache map[uint32]uint32) bool 
 			binary.LittleEndian.PutUint64(lenBuf, math.Float64bits(float64(len(bytes))))
 			mod.Memory().Write(addr+8, lenBuf)
 
-			// Write string bytes
 			mod.Memory().Write(addr+16, bytes)
 
 			jitStringConstCache[strID] = addr
-			return float64(addr)
-
-		}).Export("load_string_constant").
-			NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, val float64) float64 {
+			stack[0] = api.EncodeF64(float64(addr))
+		}), f64s(1), f64s(1)).Export("load_string_constant").
+			NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+			val := api.DecodeF64(stack[0])
 			addr := uint32(val)
 			var heapTop uint32
 			heapTopGlobal := vm.getHeapTopGlobal(mod)
@@ -7655,14 +9263,16 @@ func (vm *VM) setupJitRuntimeAndEnv(jitStringConstCache map[uint32]uint32) bool 
 						tagBytes, ok := mod.Memory().Read(addr, 8)
 						if ok {
 							tag := math.Float64frombits(binary.LittleEndian.Uint64(tagBytes))
-							if tag == 6.0 { // String
+							if tag == 6.0 {
 								lenBytes, ok := mod.Memory().Read(addr+8, 8)
 								if ok {
 									strLen := math.Float64frombits(binary.LittleEndian.Uint64(lenBytes))
 									if strLen == 0.0 {
-										return 0.0 // falsy
+										stack[0] = api.EncodeF64(0.0)
+										return
 									}
-									return 1.0 // truthy
+									stack[0] = api.EncodeF64(1.0)
+									return
 								}
 							}
 						}
@@ -7670,13 +9280,22 @@ func (vm *VM) setupJitRuntimeAndEnv(jitStringConstCache map[uint32]uint32) bool 
 				}
 			}
 			if val != 0.0 {
-				return 1.0
+				stack[0] = api.EncodeF64(1.0)
+			} else {
+				stack[0] = api.EncodeF64(0.0)
 			}
-			return 0.0
-		}).Export("is_truthy_wasm").
-			NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, a float64, b float64) float64 {
-			return math.Pow(a, b)
-		}).Export("math_pow").NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, tag float64, val float64, newline float64, spaceBefore float64) {
+		}), f64s(1), f64s(1)).Export("is_truthy_wasm").
+			NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+			a := api.DecodeF64(stack[0])
+			b := api.DecodeF64(stack[1])
+			stack[0] = api.EncodeF64(math.Pow(a, b))
+		}), f64s(2), f64s(1)).Export("math_pow").
+			NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+			tag := api.DecodeF64(stack[0])
+			val := api.DecodeF64(stack[1])
+			newline := api.DecodeF64(stack[2])
+			spaceBefore := api.DecodeF64(stack[3])
+
 			if spaceBefore != 0 {
 				fmt.Print(" ")
 			}
@@ -7689,21 +9308,35 @@ func (vm *VM) setupJitRuntimeAndEnv(jitStringConstCache map[uint32]uint32) bool 
 			} else {
 				fmt.Print(text)
 			}
-		}).Export("print_value").
-			NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, tag float64, val float64) float64 {
+		}), f64s(4), nil).Export("print_value").
+			NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+			tag := api.DecodeF64(stack[0])
+			val := api.DecodeF64(stack[1])
 			tinyVal := vm.jitValueToTinyValue(mod, tag, val)
 			typeNameStr := TypeName(tinyVal)
-			return allocateWasmString(mod, typeNameStr)
-		}).Export("typeof_wasm").
-			NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, tag float64, val float64) float64 {
+			stack[0] = api.EncodeF64(allocateWasmString(mod, typeNameStr))
+		}), f64s(2), f64s(1)).Export("typeof_wasm").
+			NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+			tag := api.DecodeF64(stack[0])
+			val := api.DecodeF64(stack[1])
 			tinyVal := vm.jitValueToTinyValue(mod, tag, val)
 			vm.throwValue(tinyVal)
 			panic(jitExceptionThrown{})
-		}).Export("throw_wasm").
-			NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, slotVal float64) (float64, float64) {
+		}), f64s(2), f64s(1)).Export("throw_wasm").
+			NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+			tag := api.DecodeF64(stack[0])
+			val := api.DecodeF64(stack[1])
+			tinyVal := vm.jitValueToTinyValue(mod, tag, val)
+			vm.typeError("expected object, got %s", TypeName(tinyVal))
+			panic(jitExceptionThrown{})
+		}), f64s(2), f64s(1)).Export("throw_type_error_wasm").
+			NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+			slotVal := api.DecodeF64(stack[0])
 			slot := int(slotVal)
 			if vm.globals == nil || slot < 0 || slot >= len(*vm.globals) {
-				return jitTagNull, 0.0
+				stack[0] = api.EncodeF64(jitTagNull)
+				stack[1] = api.EncodeF64(0.0)
+				return
 			}
 			val := (*vm.globals)[slot]
 			var rawVal any
@@ -7714,18 +9347,30 @@ func (vm *VM) setupJitRuntimeAndEnv(jitStringConstCache map[uint32]uint32) bool 
 			}
 			if module, ok := rawVal.(*StandardModuleValue); ok {
 				_ = module
-				return 7.0, float64(slot)
+				stack[0] = api.EncodeF64(7.0)
+				stack[1] = api.EncodeF64(float64(slot))
+				return
 			}
-			return vm.tinyValueToJitValue(mod, val)
-		}).Export("load_global_wasm").
-			NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, moduleSlotVal, methodStrIDVal, argCountVal, tag0, val0, tag1, val1, tag2, val2 float64) (float64, float64) {
-			moduleSlot := int(moduleSlotVal)
-			methodStrID := int(methodStrIDVal)
-			argCount := int(argCountVal)
+			retTag, retVal := vm.tinyValueToJitValue(mod, val)
+			stack[0] = api.EncodeF64(retTag)
+			stack[1] = api.EncodeF64(retVal)
+		}), f64s(1), f64s(2)).Export("load_global_wasm").
+			NewFunctionBuilder().WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+			moduleSlot := int(api.DecodeF64(stack[0]))
+			methodStrID := int(api.DecodeF64(stack[1]))
+			argCount := int(api.DecodeF64(stack[2]))
+			tag0 := api.DecodeF64(stack[3])
+			val0 := api.DecodeF64(stack[4])
+			tag1 := api.DecodeF64(stack[5])
+			val1 := api.DecodeF64(stack[6])
+			tag2 := api.DecodeF64(stack[7])
+			val2 := api.DecodeF64(stack[8])
 
 			if vm.globals == nil || moduleSlot < 0 || moduleSlot >= len(*vm.globals) {
 				vm.fatalError(tinyerrors.ErrorName, "undefined standard module slot: %d", moduleSlot)
-				return jitTagNull, 0.0
+				stack[0] = api.EncodeF64(jitTagNull)
+				stack[1] = api.EncodeF64(0.0)
+				return
 			}
 			moduleVal := (*vm.globals)[moduleSlot]
 			var rawVal any
@@ -7737,12 +9382,16 @@ func (vm *VM) setupJitRuntimeAndEnv(jitStringConstCache map[uint32]uint32) bool 
 			module, ok := rawVal.(*StandardModuleValue)
 			if !ok {
 				vm.fatalError(tinyerrors.ErrorType, "expected standard module at slot %d", moduleSlot)
-				return jitTagNull, 0.0
+				stack[0] = api.EncodeF64(jitTagNull)
+				stack[1] = api.EncodeF64(0.0)
+				return
 			}
 
 			if methodStrID < 0 || methodStrID >= len(vm.jitStrings) {
 				vm.fatalError(tinyerrors.ErrorName, "undefined JIT string ID for method: %d", methodStrID)
-				return jitTagNull, 0.0
+				stack[0] = api.EncodeF64(jitTagNull)
+				stack[1] = api.EncodeF64(0.0)
+				return
 			}
 			method := vm.jitStrings[methodStrID]
 
@@ -7763,11 +9412,13 @@ func (vm *VM) setupJitRuntimeAndEnv(jitStringConstCache map[uint32]uint32) bool 
 			vm.callStandardModule(module.Name, method, args)
 
 			result := vm.popFast()
-			return vm.tinyValueToJitValue(mod, result)
-		}).Export("call_stdlib_wasm").
+			retTag, retVal := vm.tinyValueToJitValue(mod, result)
+			stack[0] = api.EncodeF64(retTag)
+			stack[1] = api.EncodeF64(retVal)
+		}), f64s(9), f64s(2)).Export("call_stdlib_wasm").
 			Instantiate(vm.wazeroCtx)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[JIT ERROR] Failed to instantiate env module: %s\n", err.Error())
+			// fmt.Fprintf(os.Stderr, "[JIT ERROR] Failed to instantiate env module: %s\n", err.Error())
 			return false
 		}
 	}
@@ -7804,7 +9455,7 @@ func (vm *VM) InstantiateJitModule() {
 
 	compiled, err := vm.wazeroRuntime.InstantiateWithConfig(vm.wazeroCtx, vm.jitWasmBytes, config)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[JIT ERROR] Multi-function JIT instantiation failed: %s\n", err.Error())
+		// fmt.Fprintf(os.Stderr, "[JIT ERROR] Multi-function JIT instantiation failed: %s\n", err.Error())
 		return
 	}
 	vm.jitModule = compiled
@@ -7830,6 +9481,7 @@ func (vm *VM) InstantiateJitModule() {
 		vm.jitHeapTopGlobal = nil
 	}
 
+	vm.clearJitMirrorCaches()
 	vm.jitFunctions = map[string]*JitFunction{}
 	for _, meta := range vm.jitMetas {
 		jitFn := compiled.ExportedFunction(meta.Name)
@@ -7838,16 +9490,19 @@ func (vm *VM) InstantiateJitModule() {
 		}
 
 		paramTypes := append([]stackType(nil), meta.ParamTypes...)
+		paramMutated := append([]bool(nil), meta.ParamMutated...)
 		vm.jitFunctions[meta.Name] = &JitFunction{
-			ID:         meta.ID,
-			Name:       meta.Name,
-			fn:         jitFn,
-			paramTypes: paramTypes,
-			paramCount: meta.ParamCount,
-			retType:    meta.RetType,
-			returnType: meta.ReturnType,
-			vm:         vm,
-			allocPtr:   &vm.jitHeapTop,
+			ID:           meta.ID,
+			Name:         meta.Name,
+			fn:           jitFn,
+			paramTypes:   paramTypes,
+			paramMutated: paramMutated,
+			paramCount:   meta.ParamCount,
+			retType:      meta.RetType,
+			returnType:   meta.ReturnType,
+			memoizable:   meta.Memoizable,
+			vm:           vm,
+			allocPtr:     &vm.jitHeapTop,
 		}
 	}
 }
@@ -7859,6 +9514,43 @@ func (vm *VM) getHeapTopGlobal(mod api.Module) api.Global {
 		vm.jitHeapTopGlobal = g
 	}
 	return g
+}
+
+func f64s(n int) []api.ValueType {
+	if n == 0 {
+		return nil
+	}
+	res := make([]api.ValueType, n)
+	for i := range res {
+		res[i] = api.ValueTypeF64
+	}
+	return res
+}
+
+func isJitFunctionMemoizable(fn Function, paramMutated []bool) bool {
+	if anyBool(paramMutated) {
+		return false
+	}
+
+	for _, instr := range fn.Instructions {
+		switch instr.Op {
+		case OP_STORE_GLOBAL, OP_ASSIGN_GLOBAL,
+			OP_SET_INDEX, OP_SET_PROPERTY,
+			OP_ARRAY_PUSH_LOCAL, OP_ARRAY_PUSH_LOCAL_MUL_CONST,
+			OP_ARRAY_INDEX_CONST_OP_STORE,
+			OP_ADD_PROPERTY_LOCAL_LOCAL, OP_ADD_PROPERTY_LOCAL_CONST, OP_ADD_PROPERTY_LOCAL_PROPERTY,
+			OP_NATIVE_CALL, OP_BUILTIN_CALL, OP_METHOD_CALL, OP_METHOD_CALL_SAFE,
+			OP_CALL, OP_CALL_VALUE, OP_CALL_VALUE_SPREAD, OP_CALL_DIRECT, OP_CALL_DIRECT_SUB_CONST,
+			OP_PRINT, OP_THROW, OP_SETUP_TRY, OP_POP_TRY,
+			OP_SPAWN, OP_AWAIT, OP_DEFER,
+			OP_LOCK_MUTEX, OP_UNLOCK_MUTEX,
+			OP_LOAD_GLOBAL,
+			OP_JSON_STRINGIFY, OP_JSON_PARSE:
+			return false
+		}
+	}
+
+	return true
 }
 
 func (vm *VM) CompileAllJit() {
@@ -7874,8 +9566,8 @@ func (vm *VM) CompileAllJit() {
 	for i := 0; i < N; i++ {
 		fn := vm.functionList[i]
 		isSafe[i] = isFunctionJitSafe(vm, fn)
-		if !isSafe[i] {
-			// fmt.Fprintf(os.Stderr, "[JIT DEBUG] function %s is not JIT-safe, skipping.\n", fn.Name)
+		if jitCallDebugEnabled() {
+			// fmt.Fprintf(os.Stderr, "[JIT PLAN initial] fn=%s id=%d safe=%v stmts=%d instrs=%d params=%d defaults=%v return=%s\n", fn.Name, fn.ID, isSafe[i], fn.StatementCount, len(fn.Instructions), len(fn.Params), fn.HasDefaults, fn.ReturnType.Name)
 		}
 	}
 	changed := true
@@ -7890,6 +9582,12 @@ func (vm *VM) CompileAllJit() {
 				if instr.Op == OP_CALL_DIRECT {
 					info := instr.Value.(DirectCallInfo)
 					if info.ID >= 0 && info.ID < N {
+						targetFn := vm.functionList[info.ID]
+						if !jitCallAritySafe(vm, targetFn, info.ArgCount) {
+							isSafe[i] = false
+							changed = true
+							break
+						}
 						if !isSafe[info.ID] {
 							isSafe[i] = false
 							changed = true
@@ -7899,6 +9597,12 @@ func (vm *VM) CompileAllJit() {
 				} else if instr.Op == OP_CALL_DIRECT_SUB_CONST {
 					info := instr.Value.(CallDirectSubConstInfo)
 					if info.FnID >= 0 && info.FnID < N {
+						targetFn := vm.functionList[info.FnID]
+						if !jitCallAritySafe(vm, targetFn, info.ArgCount) {
+							isSafe[i] = false
+							changed = true
+							break
+						}
 						if !isSafe[info.FnID] {
 							isSafe[i] = false
 							changed = true
@@ -8042,6 +9746,9 @@ func (vm *VM) CompileAllJit() {
 				continue
 			}
 			if !checkCallArgumentsSafe(vm, fn, inferredReturnTypes, inferredParamTypes) {
+				if jitCallDebugEnabled() {
+					// fmt.Fprintf(os.Stderr, "[JIT PLAN reject] fn=%s id=%d reason=call-argument-types\n", fn.Name, fn.ID)
+				}
 				isSafe[i] = false
 				changed = true
 			}
@@ -8089,6 +9796,36 @@ func (vm *VM) CompileAllJit() {
 			case OP_CONST:
 				if strVal, ok := instr.Value.(string); ok {
 					addJitString(strVal, true)
+				}
+			case OP_LOCAL_CONST_OP, OP_LOCAL_CONST_OP_STORE:
+				if info, ok := instr.Value.(LocalConstOpInfo); ok {
+					if strVal, isStr := info.Const.(string); isStr {
+						addJitString(strVal, true)
+					}
+				}
+			case OP_CALL_DIRECT:
+				if info, ok := instr.Value.(DirectCallInfo); ok && info.ID >= 0 && info.ID < N {
+					if defaults, ok := jitMissingDefaultArgsForCall(vm, vm.functionList[info.ID], info.ArgCount); ok {
+						for _, defaultValue := range defaults {
+							if !defaultValue.IsInt {
+								if strVal, isStr := defaultValue.Value.(string); isStr {
+									addJitString(strVal, true)
+								}
+							}
+						}
+					}
+				}
+			case OP_CALL_DIRECT_SUB_CONST:
+				if info, ok := instr.Value.(CallDirectSubConstInfo); ok && info.FnID >= 0 && info.FnID < N {
+					if defaults, ok := jitMissingDefaultArgsForCall(vm, vm.functionList[info.FnID], info.ArgCount); ok {
+						for _, defaultValue := range defaults {
+							if !defaultValue.IsInt {
+								if strVal, isStr := defaultValue.Value.(string); isStr {
+									addJitString(strVal, true)
+								}
+							}
+						}
+					}
 				}
 			case OP_STRING_JOIN:
 				addJitString("", true)
@@ -8301,6 +10038,13 @@ func (vm *VM) CompileAllJit() {
 
 	importSec.WriteVarUint(3)
 	importSec.WriteBytes([]byte("env"))
+	importSec.WriteVarUint(21)
+	importSec.WriteBytes([]byte("throw_type_error_wasm"))
+	importSec.WriteByte(0x00)
+	importSec.WriteVarUint(2) // Type Index 2: (f64, f64) -> f64
+
+	importSec.WriteVarUint(3)
+	importSec.WriteBytes([]byte("env"))
 	importSec.WriteVarUint(16)
 	importSec.WriteBytes([]byte("load_global_wasm"))
 	importSec.WriteByte(0x00)
@@ -8415,13 +10159,20 @@ func (vm *VM) CompileAllJit() {
 		}
 
 		paramTypes := inferredParamTypes[i]
+		paramMutated := inferJitMutatedParams(fn)
+		if jitCallDebugEnabled() {
+			// fmt.Fprintf(os.Stderr, "[JIT PLAN compiled] fn=%s id=%d params=%v ret=%s/%s instrs=%d\n", fn.Name, fn.ID, paramTypes, jitStackTypeName(retType), fn.ReturnType.Name, len(fn.Instructions))
+		}
+
 		metas = append(metas, JitFunctionMeta{
-			ID:         fn.ID,
-			Name:       fn.Name,
-			ParamTypes: append([]stackType(nil), paramTypes...),
-			ParamCount: len(fn.Params),
-			RetType:    retType,
-			ReturnType: fn.ReturnType.Name,
+			ID:           fn.ID,
+			Name:         fn.Name,
+			ParamTypes:   append([]stackType(nil), paramTypes...),
+			ParamMutated: append([]bool(nil), paramMutated...),
+			ParamCount:   len(fn.Params),
+			RetType:      retType,
+			ReturnType:   fn.ReturnType.Name,
+			Memoizable:   isJitFunctionMemoizable(fn, paramMutated),
 		})
 	}
 
