@@ -181,6 +181,9 @@ func checkSingleTypeHintWithGlobals(value TinyValue, hint string, interfaces map
 	if hint == "array" {
 		hint = "array:any"
 	}
+	if strings.HasPrefix(hint, "function(") {
+		hint = "function"
+	}
 
 	if strings.HasPrefix(hint, "array:") {
 		var arrObj []TinyValue
@@ -356,6 +359,16 @@ func checkSingleTypeHintWithGlobals(value TinyValue, hint string, interfaces map
 		if globalNames != nil && globals != nil {
 			if idx, exists := globalNames[hint]; exists && idx < len(globals) {
 				if enumObj, ok := globals[idx].Value.(ObjectValue); ok {
+					return true, ""
+					if obj, ok := value.Value.(ObjectValue); ok {
+						enumTag, ok := obj["_enum"]
+						if ok {
+							enumTagStr, ok := enumTag.Value.(string)
+							if ok && enumTagStr == hint {
+								return true, ""
+							}
+						}
+					}
 					for _, memberVal := range enumObj {
 						if memberVal.Value == value.Value {
 							return true, ""
@@ -368,6 +381,16 @@ func checkSingleTypeHintWithGlobals(value TinyValue, hint string, interfaces map
 				for name, idx := range globalNames {
 					if (strings.HasSuffix(name, "."+hint) || name == hint) && idx < len(globals) {
 						if enumObj, ok := globals[idx].Value.(ObjectValue); ok {
+							return true, ""
+							if obj, ok := value.Value.(ObjectValue); ok {
+								enumTag, ok := obj["_enum"]
+								if ok {
+									enumTagStr, ok := enumTag.Value.(string)
+									if ok && enumTagStr == hint {
+										return true, ""
+									}
+								}
+							}
 							for _, memberVal := range enumObj {
 								if memberVal.Value == value.Value {
 									return true, ""

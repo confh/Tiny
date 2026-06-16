@@ -128,8 +128,11 @@ type ForInStmt struct {
 func (s ForInStmt) stmtNode() {}
 
 type MatchCase struct {
-	Value Expr
-	Body  []Stmt
+	Values   []Expr
+	Value    Expr
+	Guard    Expr
+	BindName string
+	Body     []Stmt
 }
 
 type MatchStmt struct {
@@ -566,3 +569,60 @@ type SpreadExpr struct {
 }
 
 func (e SpreadExpr) exprNode() {}
+
+type DestructurePattern interface {
+	destructureNode()
+}
+
+type ObjectDestructureField struct {
+	Key       string
+	Alias     string
+	AliasIsRenamed bool
+	Default   Expr
+	HasDefault bool
+	Pattern   DestructurePattern
+	HasNested bool
+}
+
+type ObjectDestructurePattern struct {
+	Fields []ObjectDestructureField
+	Spread string
+	HasSpread bool
+}
+
+func (o ObjectDestructurePattern) destructureNode() {}
+
+type ArrayDestructureElement struct {
+	Name    string
+	Pattern DestructurePattern
+	HasNested bool
+	IsSpread bool
+}
+
+type ArrayDestructurePattern struct {
+	Elements []ArrayDestructureElement
+}
+
+func (a ArrayDestructurePattern) destructureNode() {}
+
+type DestructureStmt struct {
+	Target    DestructurePattern
+	Value     Expr
+	Constant  bool
+	File      string
+	Line      int
+	Column    int
+}
+
+func (s DestructureStmt) stmtNode() {}
+
+type EnumVariantExpr struct {
+	EnumName string
+	Variant  string
+	Args     []Expr
+	File     string
+	Line     int
+	Column   int
+}
+
+func (e EnumVariantExpr) exprNode() {}

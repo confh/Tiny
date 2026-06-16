@@ -157,3 +157,124 @@ func TestFormatTinyDocumentReturnTypeSpacing(t *testing.T) {
 		t.Fatalf("unexpected formatted return type spacing:\nwant:\n%q\ngot:\n%q", want, got)
 	}
 }
+
+func TestFormatTinyDocumentCuddledElse(t *testing.T) {
+	input := "if true {\n    io.println(\"yes\")\n}\nelse {\n    io.println(\"no\")\n}\n"
+	got := formatTinyDocument(input)
+	want := "if true {\n    io.println(\"yes\")\n} else {\n    io.println(\"no\")\n}\n"
+
+	if got != want {
+		t.Fatalf("unexpected formatted cuddled else:\nwant:\n%q\ngot:\n%q", want, got)
+	}
+}
+
+func TestFormatTinyDocumentCuddledElseIf(t *testing.T) {
+	input := "if x > 0 {\n    io.println(\"positive\")\n}\nelse if x < 0 {\n    io.println(\"negative\")\n}\nelse {\n    io.println(\"zero\")\n}\n"
+	got := formatTinyDocument(input)
+	want := "if x > 0 {\n    io.println(\"positive\")\n} else if x < 0 {\n    io.println(\"negative\")\n} else {\n    io.println(\"zero\")\n}\n"
+
+	if got != want {
+		t.Fatalf("unexpected formatted cuddled else if:\nwant:\n%q\ngot:\n%q", want, got)
+	}
+}
+
+func TestFormatTinyDocumentCuddledCatch(t *testing.T) {
+	input := "try {\n    io.println(\"try\")\n}\ncatch (e) {\n    io.println(\"catch\")\n}\n"
+	got := formatTinyDocument(input)
+	want := "try {\n    io.println(\"try\")\n} catch (e) {\n    io.println(\"catch\")\n}\n"
+
+	if got != want {
+		t.Fatalf("unexpected formatted cuddled catch:\nwant:\n%q\ngot:\n%q", want, got)
+	}
+}
+
+func TestFormatTinyDocumentCuddledFinally(t *testing.T) {
+	input := "try {\n    io.println(\"try\")\n}\ncatch (e) {\n    io.println(\"catch\")\n}\nfinally {\n    io.println(\"finally\")\n}\n"
+	got := formatTinyDocument(input)
+	want := "try {\n    io.println(\"try\")\n} catch (e) {\n    io.println(\"catch\")\n} finally {\n    io.println(\"finally\")\n}\n"
+
+	if got != want {
+		t.Fatalf("unexpected formatted cuddled finally:\nwant:\n%q\ngot:\n%q", want, got)
+	}
+}
+
+func TestFormatTinyDocumentCollapseBlankLines(t *testing.T) {
+	input := "fn main() {\n    io.println(1)\n\n\n    io.println(2)\n}\n"
+	got := formatTinyDocument(input)
+	want := "fn main() {\n    io.println(1)\n\n    io.println(2)\n}\n"
+
+	if got != want {
+		t.Fatalf("unexpected formatted blank line collapse:\nwant:\n%q\ngot:\n%q", want, got)
+	}
+}
+
+func TestFormatTinyDocumentCuddledElseWithBlankLines(t *testing.T) {
+	input := "if true {\n    io.println(\"yes\")\n}\n\nelse {\n    io.println(\"no\")\n}\n"
+	got := formatTinyDocument(input)
+	want := "if true {\n    io.println(\"yes\")\n} else {\n    io.println(\"no\")\n}\n"
+
+	if got != want {
+		t.Fatalf("unexpected formatted cuddled else with blank lines:\nwant:\n%q\ngot:\n%q", want, got)
+	}
+}
+
+func TestFormatTinyDocumentCollapseMultilineCallArgs(t *testing.T) {
+	input := "fn main() {\n    function(\n        data\n    )\n}\n"
+	got := formatTinyDocument(input)
+	want := "fn main() {\n    function(data)\n}\n"
+
+	if got != want {
+		t.Fatalf("unexpected formatted collapse multiline call args:\nwant:\n%q\ngot:\n%q", want, got)
+	}
+}
+
+func TestFormatTinyDocumentCollapseMultilineCallMultipleArgs(t *testing.T) {
+	input := "fn main() {\n    function(\n        a,\n        b\n    )\n}\n"
+	got := formatTinyDocument(input)
+	want := "fn main() {\n    function(a, b)\n}\n"
+
+	if got != want {
+		t.Fatalf("unexpected formatted collapse multiline call multiple args:\nwant:\n%q\ngot:\n%q", want, got)
+	}
+}
+
+func TestFormatTinyDocumentCollapseMultilineArray(t *testing.T) {
+	input := "fn main() {\n    const x = [\n        1,\n        2,\n        3\n    ]\n}\n"
+	got := formatTinyDocument(input)
+	want := "fn main() {\n    const x = [1, 2, 3]\n}\n"
+
+	if got != want {
+		t.Fatalf("unexpected formatted collapse multiline array:\nwant:\n%q\ngot:\n%q", want, got)
+	}
+}
+
+func TestFormatTinyDocumentDoesNotCollapseLongArgs(t *testing.T) {
+	longArg := strings.Repeat("a", 90)
+	input := "fn main() {\n    function(\n        " + longArg + "\n    )\n}\n"
+	got := formatTinyDocument(input)
+	want := "fn main() {\n    function(\n    " + longArg + "\n    )\n}\n"
+
+	if got != want {
+		t.Fatalf("unexpected formatted long args should not collapse:\nwant:\n%q\ngot:\n%q", want, got)
+	}
+}
+
+func TestFormatTinyDocumentCollapseNestedCalls(t *testing.T) {
+	input := "fn main() {\n    foo(\n        bar(1, 2),\n        baz(3)\n    )\n}\n"
+	got := formatTinyDocument(input)
+	want := "fn main() {\n    foo(bar(1, 2), baz(3))\n}\n"
+
+	if got != want {
+		t.Fatalf("unexpected formatted collapse nested calls:\nwant:\n%q\ngot:\n%q", want, got)
+	}
+}
+
+func TestFormatTinyDocumentCollapseMultilineFnParams(t *testing.T) {
+	input := "fn process(\n    a,\n    b\n) {\n    io.println(a)\n}\n"
+	got := formatTinyDocument(input)
+	want := "fn process(a, b) {\n    io.println(a)\n}\n"
+
+	if got != want {
+		t.Fatalf("unexpected formatted collapse fn params:\nwant:\n%q\ngot:\n%q", want, got)
+	}
+}

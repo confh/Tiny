@@ -92,6 +92,9 @@ func collectPluginPathsFromProgram(program Program, target string) []string {
 		case VariableStmt:
 			scanExpr(s.Value)
 
+		case DestructureStmt:
+			scanExpr(s.Value)
+
 		case ExprStmt:
 			scanExpr(s.Value)
 
@@ -198,6 +201,10 @@ func rewritePluginStmtForDist(stmt Stmt, target string) Stmt {
 		return s
 
 	case VariableStmt:
+		s.Value = rewritePluginExprForDist(s.Value, target)
+		return s
+
+	case DestructureStmt:
 		s.Value = rewritePluginExprForDist(s.Value, target)
 		return s
 

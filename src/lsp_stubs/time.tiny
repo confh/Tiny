@@ -1,3 +1,14 @@
+export enum TimerType {
+    Timer,
+    Ticker
+}
+
+export class Timer {
+    fn cancel(): null {}
+    fn reset(ms: number): null {}
+    fn type(): TimerType {}
+}
+
 // Suspends execution of the current thread for the specified milliseconds.
 export fn sleep(ms: number): null {}
 
@@ -12,3 +23,7 @@ export fn nowSec(): number {}
 
 // Returns the elapsed CPU execution time in seconds.
 export fn clock(): number {}
+
+export fn timeout(ms: number, func: function): Timer {}
+
+export fn interval(ms: number, func: function): Timer {}

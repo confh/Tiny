@@ -282,7 +282,7 @@ tiny src/main.tiny</code></pre>
       </section>
 
       <section class="doc-section" id="language"
-        data-search="language basics let const strings arrays objects interpolation typeof operators">
+        data-search="language basics let const strings arrays objects interpolation typeof operators bitwise destructuring">
         <div class="section-heading">
           <p class="eyebrow">04</p>
           <h2>Language Basics</h2>
@@ -295,24 +295,17 @@ tiny src/main.tiny</code></pre>
             <h3>Variables</h3>
             <p>Use `let` for mutable bindings and `const` for values that should not be reassigned.</p>
             <pre><code>const language: string = "Tiny"
-let count: number = 3
+let count: number = 1_000_000 // support underscores
 
-count = count + 1
-count += 2
+count = count + (1 << 2) // bitwise ops
 count++</code></pre>
           </article>
 
           <article>
-            <h3>Values</h3>
-            <p>Core values include numbers, strings, booleans, arrays, objects, functions, classes, buffers, errors, and
-              `null`.</p>
-            <pre><code>let enabled = true
-let empty = null
-let words = ["tiny", "docs"]
-let user = {
-    name: "Ada",
-    active: enabled
-}</code></pre>
+            <h3>Destructuring</h3>
+            <p>Extract values from objects and arrays directly into variables.</p>
+            <pre><code>const { name, age } = user
+let [x, y] = point</code></pre>
           </article>
 
           <article>
@@ -422,43 +415,39 @@ fn logRequest(req: Request) {
           </article>
           <article>
             <h3>Match</h3>
-            <pre><code>match state {
-    "Small" {
-        io.println("small")
+            <pre><code>match result {
+    Result.Ok(val) if val > 0 {
+        io.println("success")
     }
-    "Medium" {
-        io.println("medium")
+    Result.Error(msg) {
+        io.println(msg)
     }
     _ { // default
-        io.println("large")
+        io.println("default")
     }
 }</code></pre>
           </article>
         </div>
 
         <h3>Enums</h3>
+        <pre><code>enum Result {
+    Ok(value),
+    Error(message)
+}</code></pre>
         <pre><code>enum State {
     Small = "small",
     Medium = "medium",
     Large = "large"
 }</code></pre>
-        <pre><code>enum State {
-    Small = 1,
-    Medium = 2,
-    Large = 3
-}</code></pre>
-        <pre><code>enum State {
-    Small = iota, // starts from 0
+        <pre><code>enum Priority {
+    Low = iota, // starts from 0
     Medium,
-    Large
+    High
 }</code></pre>
-        <pre><code>enum State {
-    Small, // becomes "Small"
-    Medium,
-    Large
-}
-
-let current = State.Small</code></pre>
+        <pre><code>enum Mode {
+    Read, // becomes "Read"
+    Write
+}</code></pre>
       </section>
 
       <section class="doc-section" id="functions"
@@ -872,7 +861,7 @@ const html = assets["index.html"]</code></pre>
           </div>
           <div role="row">
             <strong role="cell">`array`</strong>
-            <span role="cell">Helpers such as `range`, `from`, and array methods exposed on values.</span>
+            <span role="cell">Helpers such as `range`, `from`, and native operations: `reduce`, `sort`, `flat`, `map`, `filter`.</span>
           </div>
           <div role="row">
             <strong role="cell">`math`</strong>
@@ -888,7 +877,7 @@ const html = assets["index.html"]</code></pre>
           </div>
           <div role="row">
             <strong role="cell">`time`</strong>
-            <span role="cell">Sleep, clock, measurement, and current time in ns, ms, or seconds.</span>
+            <span role="cell">Sleep, clock, managed timers (`timeout`, `interval`), and current time in ns/ms/sec.</span>
           </div>
           <div role="row">
             <strong role="cell">`ui`</strong>
@@ -1295,13 +1284,12 @@ export fn hash(text: string, method: string): HashResult {
       </section>
 
       <section class="doc-section" id="lsp"
-        data-search="lsp editor vscode autocomplete diagnostics formatter language server type narrowing jump definition">
+        data-search="lsp editor vscode autocomplete diagnostics formatter language server type narrowing jump definition inlay hints semantic tokens">
         <div class="section-heading">
           <p class="eyebrow">22</p>
           <h2>Editor Support</h2>
           <p>The project includes a Tiny language server with diagnostics, formatting, autocomplete, type analysis, and
-            jump-to-definition support. The LSP also ships stubs for the standard library so editors can understand
-            `std` imports.</p>
+            jump-to-definition support. The LSP also provides **semantic highlighting** and **callback type inlay hints** to improve development speed.</p>
           <p><a href="https://marketplace.visualstudio.com/items?itemName=Confis.tiny" target="_blank"
               rel="noopener noreferrer">Open the Tiny VS Code extension on the Marketplace</a>.</p>
         </div>

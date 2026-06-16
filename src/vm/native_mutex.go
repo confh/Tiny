@@ -13,7 +13,6 @@ func init() {
 		"lock":   mutexLock,
 		"unlock": mutexUnlock,
 	}
-	registerNativeType(mutexNativeData)
 }
 
 func (vm *VM) callNativeMutexMethod(mutex *NativeMutexValue, method string, args []TinyValue) {

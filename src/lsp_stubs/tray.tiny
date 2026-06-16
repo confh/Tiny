@@ -38,14 +38,14 @@ class Tray {
     // app.add("Open", fn() {
     //     io.println("Open clicked")
     // })
-    fn add(label: string, callback: function): null {}
+    fn add(label: string, callback: function()): null {}
 
     // Adds a normal menu item with a PNG icon to the tray context menu.
     // Example:
     // app.addWithIcon("Open", openIconBytes, fn() {
     //     io.println("Open clicked")
     // })
-    fn addWithIcon(label: string, icon: buffer, callback: function): null {}
+    fn addWithIcon(label: string, icon: buffer, callback: function()): null {}
 
     // Adds a visual separator to the tray context menu.
     // Example:
@@ -59,28 +59,28 @@ class Tray {
     // app.addCheckbox("Enable sync", true, fn() {
     //     io.println("Sync toggled")
     // })
-    fn addCheckbox(label: string, checked: bool, callback: function): null {}
+    fn addCheckbox(label: string, checked: bool, callback: function()): null {}
 
     // Registers a left-click handler for the tray icon.
     // Example:
     // app.onClick(fn() {
     //     app.notify("Tiny", "Tray clicked")
     // })
-    fn onClick(callback: function): null {}
+    fn onClick(callback: function()): null {}
 
     // Registers a double-click handler for the tray icon.
     // Example:
     // app.onDoubleClick(fn() {
     //     io.println("Tray double-clicked")
     // })
-    fn onDoubleClick(callback: function): null {}
+    fn onDoubleClick(callback: function()): null {}
 
     // Registers a right-click handler for the tray icon.
     // Example:
     // app.onRightClick(fn() {
     //     io.println("Tray right-clicked")
     // })
-    fn onRightClick(callback: function): null {}
+    fn onRightClick(callback: function()): null {}
 
     // Shows an OS-level notification.
     // Example:

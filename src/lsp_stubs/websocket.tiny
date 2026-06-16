@@ -162,11 +162,11 @@ export class Conn {
     //
     // Example:
     // ```tiny
-    // conn.onMessage(fn(msg: websocket.Message) {
+    // conn.onMessage(fn(con: websocket.Conn, msg: websocket.Message) {
     //     io.println(msg.data)
     // })
     // ```
-    fn onMessage(handler: function) {}
+    fn onMessage(handler: function(Conn, Message)) {}
 
     // Registers a handler that runs when the connection closes.
     //
@@ -176,7 +176,7 @@ export class Conn {
     //     io.println("closed: " + event.reason)
     // })
     // ```
-    fn onClose(handler: function) {}
+    fn onClose(handler: function(CloseEvent)) {}
 
     // Registers a handler that runs when a WebSocket error happens.
     //
@@ -281,7 +281,7 @@ export class Server {
     //     conn.sendText("welcome")
     // })
     // ```
-    fn onConnection(handler: function) {}
+    fn onConnection(handler: function(Conn)) {}
 
     // Registers a global message handler for all connected clients.
     //
@@ -293,7 +293,7 @@ export class Server {
     //     conn.sendText("echo: " + msg.data)
     // })
     // ```
-    fn onMessage(handler: function) {}
+    fn onMessage(handler: function(Conn, Message)) {}
 
     // Registers a global close handler for all connected clients.
     //
@@ -303,7 +303,7 @@ export class Server {
     //     io.println("client disconnected")
     // })
     // ```
-    fn onClose(handler: function) {}
+    fn onClose(handler: function(Conn, CloseEvent)) {}
 
     // Registers a global error handler.
     //

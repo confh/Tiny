@@ -182,6 +182,278 @@ func TestLSPPrimitiveMethodCallAssignmentInferenceFromFunctionParam(t *testing.T
 	}
 }
 
+func TestLSPInfersInlineFunctionParameterTypesFromExpectedFunctionType(t *testing.T) {
+	text := strings.Join([]string{
+		`fn test(callback: function(number, string)) {`,
+		`}`,
+		`test(fn(i, v) {`,
+		`    i.`,
+		`    v.`,
+		`});`,
+	}, "\n")
+
+	scope := scopeAtPosition("file:///callback_types.tiny", text, Position{
+		Line:      3,
+		Character: len(`    i.`),
+	})
+	if got := expectedInlineFunctionParamTypes(scope, text, Position{Line: 2, Character: len(`test(`)}, strings.Index(text, `fn(i, v)`)); len(got) != 2 || got[0] != "number" || got[1] != "string" {
+		t.Fatalf("expected inline function param types [number string], got %#v", got)
+	}
+
+	iSym, ok := scope.Resolve("i")
+	if !ok {
+		t.Fatal("expected callback parameter i in scope")
+	}
+	if iSym.Type != "number" {
+		t.Fatalf("i type = %q, want number", iSym.Type)
+	}
+
+	vSym, ok := scope.Resolve("v")
+	if !ok {
+		t.Fatal("expected callback parameter v in scope")
+	}
+	if vSym.Type != "string" {
+		t.Fatalf("v type = %q, want string", vSym.Type)
+	}
+
+	items := getCompletions("file:///callback_types.tiny", text, Position{
+		Line:      4,
+		Character: len(`    v.`),
+	})
+	if !completionLabelsContain(items, "split") {
+		t.Fatalf("expected v. completions to include string method split, got %#v", completionLabels(items))
+	}
+}
+
+func TestLSPInlineCallbackParamTypeForArrayFindMethod(t *testing.T) {
+	text := strings.Join([]string{
+		`const test = [""];`,
+		`test.find(fn(v) {`,
+		`    v.`,
+		`});`,
+	}, "\n")
+
+	scope := scopeAtPosition("file:///array_find.tiny", text, Position{
+		Line:      2,
+		Character: len(`    v.`),
+	})
+
+	vSym, ok := scope.Resolve("v")
+	if !ok {
+		t.Fatal("expected callback parameter v in scope")
+	}
+	if vSym.Type != "string" {
+		t.Fatalf("v type = %q, want string", vSym.Type)
+	}
+
+	items := getCompletions("file:///array_find.tiny", text, Position{
+		Line:      2,
+		Character: len(`    v.`),
+	})
+	if !completionLabelsContain(items, "split") {
+		t.Fatalf("expected v. completions to include string method split, got %#v", completionLabels(items))
+	}
+}
+
+func TestLSPHoverCallbackParameterFromArrayFindMethod(t *testing.T) {
+	text := strings.Join([]string{
+		`const test = [""];`,
+		`test.find(fn(v) {`,
+		`    v`,
+		`});`,
+	}, "\n")
+
+	result := getHover("file:///array_find_hover.tiny", text, Position{
+		Line:      2,
+		Character: 6,
+	})
+	hover, ok := result.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover for v in array.find callback, got %#v", result)
+	}
+	if !strings.Contains(hover.Contents.Value, "string") {
+		t.Fatalf("expected hover to show string type for v, got %q", hover.Contents.Value)
+	}
+}
+
+func TestLSPCallbackParameterCountDiagnostics(t *testing.T) {
+	t.Run("too few callback parameters", func(t *testing.T) {
+		text := strings.Join([]string{
+			`fn test(callback: function(number, string)) {`,
+			`}`,
+			`test(fn() {`,
+			`});`,
+		}, "\n")
+
+		diagnostics := semanticDiagnostics("file:///callback_too_few.tiny", text)
+		if !diagnosticsContain(diagnostics, "not enough parameters") {
+			t.Fatalf("expected too-few callback params diagnostic, got %#v", diagnostics)
+		}
+	})
+
+	t.Run("too many callback parameters", func(t *testing.T) {
+		text := strings.Join([]string{
+			`fn test(callback: function(number)) {`,
+			`}`,
+			`test(fn(i, v) {`,
+			`});`,
+		}, "\n")
+
+		diagnostics := semanticDiagnostics("file:///callback_too_many.tiny", text)
+		if !diagnosticsContain(diagnostics, "too many parameters") {
+			t.Fatalf("expected too-many callback params diagnostic, got %#v", diagnostics)
+		}
+	})
+
+	t.Run("exact callback parameters no diagnostic", func(t *testing.T) {
+		text := strings.Join([]string{
+			`fn test(callback: function(number, string)) {`,
+			`}`,
+			`test(fn(i, v) {`,
+			`});`,
+		}, "\n")
+
+		diagnostics := semanticDiagnostics("file:///callback_exact.tiny", text)
+		if diagnosticsContain(diagnostics, "parameters") {
+			t.Fatalf("expected no callback param count diagnostic, got %#v", diagnostics)
+		}
+	})
+}
+
+func TestLSPMethodCallbackParamCountFromTypedReceiver(t *testing.T) {
+	t.Run("callback on method of typed class param catches too few", func(t *testing.T) {
+		text := strings.Join([]string{
+			`class Conn {`,
+			`    fn onMessage(handler: function(Conn, Message)) {}`,
+			`}`,
+			`interface Message {`,
+			`    type: string,`,
+			`    data: any`,
+			`}`,
+			`fn onConnection(handler: function(Conn)) {}`,
+			`onConnection(fn(conn) {`,
+			`    conn.onMessage(fn(msg) {`,
+			`    })`,
+			`})`,
+		}, "\n")
+
+		diagnostics := semanticDiagnostics("file:///method_callback.tiny", text)
+		if !diagnosticsContain(diagnostics, "not enough parameters") {
+			t.Fatalf("expected callback param count diagnostic, got %#v", diagnostics)
+		}
+	})
+
+	t.Run("callback on method of typed class param catches too many", func(t *testing.T) {
+		text := strings.Join([]string{
+			`class Conn {`,
+			`    fn onMessage(handler: function(Conn)) {}`,
+			`}`,
+			`fn onConnection(handler: function(Conn)) {}`,
+			`onConnection(fn(conn) {`,
+			`    conn.onMessage(fn(a, b) {`,
+			`    })`,
+			`})`,
+		}, "\n")
+
+		diagnostics := semanticDiagnostics("file:///method_callback_many.tiny", text)
+		if !diagnosticsContain(diagnostics, "too many parameters") {
+			t.Fatalf("expected too many callback params diagnostic, got %#v", diagnostics)
+		}
+	})
+
+	t.Run("correct callback count no diagnostic", func(t *testing.T) {
+		text := strings.Join([]string{
+			`class Conn {`,
+			`    fn onMessage(handler: function(Conn, Message)) {}`,
+			`}`,
+			`interface Message {`,
+			`    type: string,`,
+			`    data: any`,
+			`}`,
+			`fn onConnection(handler: function(Conn)) {}`,
+			`onConnection(fn(conn) {`,
+			`    conn.onMessage(fn(c, msg) {`,
+			`    })`,
+			`})`,
+		}, "\n")
+
+		diagnostics := semanticDiagnostics("file:///method_callback_ok.tiny", text)
+		if diagnosticsContain(diagnostics, "parameters") {
+			t.Fatalf("expected no callback param count diagnostic, got %#v", diagnostics)
+		}
+	})
+}
+
+func TestLSPFunctionTypeHintDiagnosticsAndCallability(t *testing.T) {
+	valid := strings.Join([]string{
+		`fn run(callback: function(string)) {`,
+		`    callback("ok");`,
+		`}`,
+	}, "\n")
+
+	diagnostics := semanticDiagnostics("file:///function_type_valid.tiny", valid)
+	if diagnosticsContain(diagnostics, "unknown type: function(string)") {
+		t.Fatalf("did not expect function(string) to be reported as unknown, got %#v", diagnostics)
+	}
+	if diagnosticsContain(diagnostics, "cannot call non-function type 'function(string)'") {
+		t.Fatalf("expected function(string) parameter to be callable, got %#v", diagnostics)
+	}
+
+	invalid := strings.Join([]string{
+		`fn run(callback: function(sdfsdf)) {`,
+		`}`,
+	}, "\n")
+	diagnostics = semanticDiagnostics("file:///function_type_invalid.tiny", invalid)
+	if !diagnosticsContain(diagnostics, "unknown type: sdfsdf") {
+		t.Fatalf("expected unknown inner callback parameter type diagnostic, got %#v", diagnostics)
+	}
+	if diagnosticsContain(diagnostics, "unknown type: function(sdfsdf)") {
+		t.Fatalf("expected diagnostic for inner type only, got %#v", diagnostics)
+	}
+}
+
+func TestLSPFunctionTypeInUnion(t *testing.T) {
+	valid := strings.Join([]string{
+		`fn run(callback: function(string) | number) {`,
+		`    if typeof callback == "function" {`,
+		`        callback("ok");`,
+		`    }`,
+		`}`,
+	}, "\n")
+
+	diagnostics := semanticDiagnostics("file:///func_union.tiny", valid)
+	if diagnosticsContain(diagnostics, "unknown type: function(string)") {
+		t.Fatalf("did not expect function(string) in union to be reported as unknown, got %#v", diagnostics)
+	}
+}
+
+func TestLSPNullableFunctionType(t *testing.T) {
+	valid := strings.Join([]string{
+		`fn run(callback: function(string)?) {`,
+		`    if typeof callback == "function" {`,
+		`        callback("ok");`,
+		`    }`,
+		`}`,
+	}, "\n")
+
+	diagnostics := semanticDiagnostics("file:///nullable_func.tiny", valid)
+	if diagnosticsContain(diagnostics, "unknown type: function(string)") {
+		t.Fatalf("did not expect function(string) to be reported as unknown, got %#v", diagnostics)
+	}
+	if diagnosticsContain(diagnostics, "unknown type: function(string) | null") {
+		t.Fatalf("did not expect function(string) | null to be reported as unknown, got %#v", diagnostics)
+	}
+}
+
+func TestLSPFunctionParamUnionType(t *testing.T) {
+	valid := `fn process(x: function(string | array)) {}`
+
+	diagnostics := semanticDiagnostics("file:///func_param_union.tiny", valid)
+	if diagnosticsContain(diagnostics, "unknown type") {
+		t.Fatalf("did not expect any unknown type diagnostics, got %#v", diagnostics)
+	}
+}
+
 func TestLSPClassConstructorSignatureUsesInit(t *testing.T) {
 	text := strings.Join([]string{
 		"class User {",
@@ -332,6 +604,39 @@ func TestLSPInlayHintsParameterNamesForMultilineMemberCall(t *testing.T) {
 	}
 	if labelsByLine["ttl:"] != 8 {
 		t.Fatalf("ttl hint line = %d, want 8; hints %#v", labelsByLine["ttl:"], hints)
+	}
+}
+
+func TestLSPInlayHintsInlineFunctionParameterTypesFromExpectedFunctionType(t *testing.T) {
+	text := strings.Join([]string{
+		`fn test(callback: function(number, string)) {`,
+		`}`,
+		`test(fn(i, v) {`,
+		`    i;`,
+		`    v;`,
+		`});`,
+	}, "\n")
+
+	hints := getInlayHints("file:///callback_inlay.tiny", text, LSPRange{
+		Start: Position{Line: 0, Character: 0},
+		End:   Position{Line: 5, Character: len(`});`)},
+	})
+
+	want := map[string]Position{
+		": number": {Line: 2, Character: len(`test(fn(i`)},
+		": string": {Line: 2, Character: len(`test(fn(i, v`)},
+	}
+	for label, pos := range want {
+		found := false
+		for _, hint := range hints {
+			if hint.Label == label && hint.Position == pos {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected inlay hint %q at %#v, got %#v", label, pos, hints)
+		}
 	}
 }
 
@@ -1455,6 +1760,36 @@ func TestLSPReferencesAndRename(t *testing.T) {
 	}
 }
 
+func TestLSPDocumentHighlightsUseReferences(t *testing.T) {
+	text := strings.Join([]string{
+		`const status = "ok";`,
+		`const payload = {`,
+		`    status: status,`,
+		`    note: "status",`,
+		`}`,
+		`// status`,
+		`io.println(status);`,
+	}, "\n")
+
+	highlights := getDocumentHighlights("file:///highlights.tiny", text, Position{
+		Line:      0,
+		Character: len("const status") - 1,
+	})
+
+	if len(highlights) != 3 {
+		t.Fatalf("expected declaration and two value references to be highlighted, got %#v", highlights)
+	}
+	for _, highlight := range highlights {
+		line := highlight.Range.Start.Line
+		if line == 3 || line == 5 {
+			t.Fatalf("string/comment occurrence was highlighted: %#v", highlights)
+		}
+		if line == 2 && highlight.Range.Start.Character == len(`    `) {
+			t.Fatalf("object literal key was highlighted: %#v", highlights)
+		}
+	}
+}
+
 func TestLSPRenameUsesURIKeysForOpenDocuments(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "refs.tiny")
@@ -1618,6 +1953,127 @@ func TestLSPUnusedSymbolDiagnosticsCountsTemplateInterpolationUses(t *testing.T)
 	if diagnosticsContain(diagnostics, "unused variable: end") {
 		t.Fatalf("did not expect end to be unused when referenced in interpolation, got %#v", diagnostics)
 	}
+}
+
+func TestLSPDiagnosticsUsedBeforeInitialization(t *testing.T) {
+	t.Run("const used before declaration line", func(t *testing.T) {
+		text := strings.Join([]string{
+			`io.println(test.toLowerCase());`,
+			`const test = "hello";`,
+		}, "\n")
+
+		diagnostics := semanticDiagnostics("file:///used_before_init.tiny", text)
+		if !diagnosticsContain(diagnostics, "'test' is used before initialization") {
+			t.Fatalf("expected used-before-init diagnostic, got %#v", diagnostics)
+		}
+	})
+
+	t.Run("let assigned before declaration line", func(t *testing.T) {
+		text := strings.Join([]string{
+			`test = "world";`,
+			`const test = "hello";`,
+		}, "\n")
+
+		diagnostics := semanticDiagnostics("file:///assign_before_decl.tiny", text)
+		if !diagnosticsContain(diagnostics, "'test' is used before initialization") {
+			t.Fatalf("expected used-before-init diagnostic, got %#v", diagnostics)
+		}
+	})
+
+	t.Run("normal usage after declaration no diagnostic", func(t *testing.T) {
+		text := strings.Join([]string{
+			`const test = "hello";`,
+			`io.println(test.toLowerCase());`,
+		}, "\n")
+
+		diagnostics := semanticDiagnostics("file:///normal_use.tiny", text)
+		if diagnosticsContain(diagnostics, "used before initialization") {
+			t.Fatalf("expected no used-before-init diagnostic, got %#v", diagnostics)
+		}
+	})
+
+	t.Run("no false positive across functions with same variable names", func(t *testing.T) {
+		text := strings.Join([]string{
+			`fn fibText(n) {`,
+			`  let result = 0`,
+			`  let i = 0`,
+			`  return result`,
+			`}`,
+			`fn joinWords() {`,
+			`  let result = ""`,
+			`  let i = 0`,
+			`  return result`,
+			`}`,
+		}, "\n")
+
+		diagnostics := semanticDiagnostics("file:///cross_func.tiny", text)
+		if diagnosticsContain(diagnostics, "used before initialization") {
+			t.Fatalf("expected no used-before-init diagnostic across functions, got %#v", diagnostics)
+		}
+	})
+
+	t.Run("for loop increment no false positive", func(t *testing.T) {
+		text := strings.Join([]string{
+			`fn foo() {`,
+			`  for (let i = 0; i < 10; i++) {`,
+			`    io.println(i)`,
+			`  }`,
+			`}`,
+		}, "\n")
+
+		diagnostics := semanticDiagnostics("file:///for_loop.tiny", text)
+		if diagnosticsContain(diagnostics, "used before initialization") {
+			t.Fatalf("expected no used-before-init diagnostic in for loop, got %#v", diagnostics)
+		}
+	})
+
+	t.Run("for loop decrement no false positive", func(t *testing.T) {
+		text := strings.Join([]string{
+			`fn foo() {`,
+			`  for (let i = 10; i > 0; i--) {`,
+			`    io.println(i)`,
+			`  }`,
+			`}`,
+		}, "\n")
+
+		diagnostics := semanticDiagnostics("file:///for_loop_dec.tiny", text)
+		if diagnosticsContain(diagnostics, "used before initialization") {
+			t.Fatalf("expected no used-before-init diagnostic in for loop with decrement, got %#v", diagnostics)
+		}
+	})
+
+	t.Run("for loop plus assign no false positive", func(t *testing.T) {
+		text := strings.Join([]string{
+			`fn foo() {`,
+			`  for (let i = 0; i < 10; i += 1) {`,
+			`    io.println(i)`,
+			`  }`,
+			`}`,
+		}, "\n")
+
+		diagnostics := semanticDiagnostics("file:///for_loop_plusassign.tiny", text)
+		if diagnosticsContain(diagnostics, "used before initialization") {
+			t.Fatalf("expected no used-before-init diagnostic in for loop with +=, got %#v", diagnostics)
+		}
+	})
+
+	t.Run("dual for loops same variable no false positive", func(t *testing.T) {
+		text := strings.Join([]string{
+			`fn foo() {`,
+			`  for let i = 0; i < 3; i++ {`,
+			`    io.println(i)`,
+			`  }`,
+			`  for let i = 0; i < 3; i++ {`,
+			`    io.println(i)`,
+			`  }`,
+			`}`,
+		}, "\n")
+
+		diagnostics := semanticDiagnostics("file:///dual_for.tiny", text)
+		if diagnosticsContain(diagnostics, "used before initialization") {
+			t.Fatalf("expected no used-before-init diagnostic in dual for loops, got %#v", diagnostics)
+		}
+	})
 }
 
 func TestLSPSemanticDiagnosticsNewStdModuleScriptDoesNotHang(t *testing.T) {
@@ -4134,4 +4590,120 @@ func TestLSPValidateSchemaVariableInference(t *testing.T) {
 	if strings.Contains(hoverPostResult.Contents.Value, "`T`") {
 		t.Fatalf("expected post hover to not leak raw type parameter T, got %q", hoverPostResult.Contents.Value)
 	}
+}
+
+func TestLSPGenericFunctionTypeParamResolution(t *testing.T) {
+	text := strings.Join([]string{
+		`fn test:T(testFn: function(T)) {`,
+		`    testFn("hello");`,
+		`}`,
+		`test:string(fn(v) {`,
+		`    v.`,
+		`});`,
+	}, "\n")
+
+	scope := scopeAtPosition("file:///generic_callback.tiny", text, Position{
+		Line:      4,
+		Character: len(`    v.`),
+	})
+	if got := expectedInlineFunctionParamTypes(scope, text, Position{Line: 3, Character: len(`test:string(`)}, strings.Index(text, `fn(v)`)); len(got) != 1 || got[0] != "string" {
+		t.Fatalf("expected inline function param types [string], got %#v", got)
+	}
+
+	vSym, ok := scope.Resolve("v")
+	if !ok {
+		t.Fatal("expected callback parameter v in scope")
+	}
+	if vSym.Type != "string" {
+		t.Fatalf("v type = %q, want string", vSym.Type)
+	}
+
+	items := getCompletions("file:///generic_callback.tiny", text, Position{
+		Line:      4,
+		Character: len(`    v.`),
+	})
+	if !completionLabelsContain(items, "split") {
+		t.Fatalf("expected v. completions to include string method split, got %#v", completionLabels(items))
+	}
+}
+
+func TestLSPGenericImplicitTypeInferenceFromArgs(t *testing.T) {
+	text := strings.Join([]string{
+		`fn test:T(testing: T, testFn: function(T)): T {`,
+		`    return`,
+		`}`,
+		`test("", fn(i) {`,
+		`    i.`,
+		`});`,
+	}, "\n")
+
+	scope := scopeAtPosition("file:///generic_implicit.tiny", text, Position{
+		Line:      4,
+		Character: len(`    i.`),
+	})
+	if got := expectedInlineFunctionParamTypes(scope, text, Position{Line: 3, Character: len(`test(`)}, strings.Index(text, `fn(i)`)); len(got) != 1 || got[0] != "string" {
+		t.Fatalf("expected inline function param types [string] from implicit inference, got %#v", got)
+	}
+
+	vSym, ok := scope.Resolve("i")
+	if !ok {
+		t.Fatal("expected callback parameter i in scope")
+	}
+	if vSym.Type != "string" {
+		t.Fatalf("i type = %q, want string", vSym.Type)
+	}
+
+	items := getCompletions("file:///generic_implicit.tiny", text, Position{
+		Line:      4,
+		Character: len(`    i.`),
+	})
+	if !completionLabelsContain(items, "split") {
+		t.Fatalf("expected i. completions to include string method split, got %#v", completionLabels(items))
+	}
+}
+
+func TestLSPNestedCallbackParamTypeResolution(t *testing.T) {
+	text := strings.Join([]string{
+		`class Conn {`,
+		`    fn onMessage(handler: function(Message)) {}`,
+		`}`,
+		`interface Message {`,
+		`    type: string,`,
+		`    data: any`,
+		`}`,
+		`fn onConnection(handler: function(Conn)) {}`,
+		`onConnection(fn(conn) {`,
+		`    conn.onMessage(fn(msg) {`,
+		`        msg.`,
+		`    })`,
+		`})`,
+	}, "\n")
+
+	scope := scopeAtPosition("file:///nested_callback.tiny", text, Position{
+		Line:      9,
+		Character: len(`        msg.`),
+	})
+
+	connSym, ok := scope.Resolve("conn")
+	if !ok {
+		t.Fatal("expected conn in scope")
+	}
+	t.Logf("conn type: %q", connSym.Type)
+
+	msgSym, ok := scope.Resolve("msg")
+	if !ok {
+		t.Fatal("expected callback parameter msg in scope")
+	}
+	t.Logf("msg type: %q", msgSym.Type)
+
+	fnMsgOffset := strings.Index(text, `fn(msg)`)
+	fnByteOffset := bytePositionAtOffset(text, fnMsgOffset)
+	inferredTypes := expectedInlineFunctionParamTypes(scope, text, fnByteOffset, fnMsgOffset)
+	t.Logf("inferredTypes for fn(msg): %#v", inferredTypes)
+
+	open := findUnclosedCallParen(text[:fnMsgOffset])
+	t.Logf("findUnclosedCallParen returned offset %d, char: %q", open, string(text[open]))
+
+	callee := extractCalleeBefore(text, open)
+	t.Logf("callee: %q", callee)
 }

@@ -118,6 +118,8 @@ type Compiler struct {
 	inlineCandidates map[string]FunctionStmt
 	inlineDepth      int
 
+	enumVariants map[string]map[string][]Param // enumName -> variantName -> params
+
 	jitRegionCount int
 }
 
@@ -422,6 +424,7 @@ func NewCompiler() *Compiler {
 		virtualObjects:         map[VarNodeKey]map[string]int{},
 		stdImportModules:       map[string]string{},
 		inlineCandidates:       map[string]FunctionStmt{},
+		enumVariants:           map[string]map[string][]Param{},
 	}
 
 	c.currentInstructions = &c.mainInstructions
@@ -1266,6 +1269,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		fullName := qualify(enumStmt.Name)
 
 		obj := ObjectValue{}
+		variants := map[string][]Param{}
 
 		for _, member := range enumStmt.Members {
 			if _, exists := obj[member.Name]; exists {
@@ -1273,6 +1277,14 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 			}
 
 			obj[member.Name] = c.evalConstantExpr(member.Value, "enum member must be constant.")
+
+			if len(member.VariantParams) > 0 {
+				variants[member.Name] = member.VariantParams
+			}
+		}
+
+		if len(variants) > 0 {
+			c.enumVariants[fullName] = variants
 		}
 
 		c.emit(OP_CONST, obj)
@@ -1435,6 +1447,92 @@ func (c *Compiler) compileMatchStatement(stmt MatchStmt) {
 	endJumps := []int{}
 
 	for _, matchCase := range stmt.Cases {
+		// If there's a bind name, create a new scope for it
+		if matchCase.BindName != "" {
+			c.beginScope()
+		}
+
+		if c.compileEnumMatchCase(matchCase, tempBinding, &endJumps) {
+			if matchCase.BindName != "" {
+				c.endScope()
+			}
+			continue
+		}
+
+		if len(matchCase.Values) > 1 {
+			// Union pattern: match against ANY of the alternatives
+			alternativeJumps := []int{}
+
+			for _, caseValue := range matchCase.Values {
+				// load temp
+				if tempBinding.Kind == BindingLocal {
+					c.emit(OP_LOAD_LOCAL, tempBinding.Slot)
+				} else {
+					c.emit(OP_LOAD_GLOBAL, VariableInfo{
+						Name: tempBinding.Name,
+						Slot: tempBinding.Slot,
+					})
+				}
+
+				// load case value
+				c.compileExpr(caseValue)
+
+				// compare
+				c.emit(OP_EQ, nil)
+
+				// if true, we matched - jump to guard/body
+				alternativeJumps = append(alternativeJumps, c.emitJump(OP_JUMP_IF_TRUE))
+			}
+
+			// None of the alternatives matched, jump to next case
+			jumpToNext := c.emitJump(OP_JUMP)
+
+			// Patch all the "matched" jumps to land here
+			for _, j := range alternativeJumps {
+				c.patchJump(j)
+			}
+
+		// Now check guard if present
+		if matchCase.Guard != nil {
+			if matchCase.BindName != "" {
+				c.compileMatchBindName(matchCase.BindName, tempBinding)
+			}
+
+			c.compileExpr(matchCase.Guard)
+			guardFailJump := c.emitJump(OP_JUMP_IF_FALSE)
+
+			c.compileScopedBlock(matchCase.Body)
+			endJumps = append(endJumps, c.emitJump(OP_JUMP))
+
+			c.patchJump(guardFailJump)
+		} else {
+			if matchCase.BindName != "" {
+				c.compileMatchBindName(matchCase.BindName, tempBinding)
+			}
+
+			c.compileScopedBlock(matchCase.Body)
+			endJumps = append(endJumps, c.emitJump(OP_JUMP))
+		}
+
+		c.patchJump(jumpToNext)
+	} else if matchCase.BindName != "" && matchCase.Values[0] == nil {
+		// Bind-only pattern: always matches, just binds the value
+		c.compileMatchBindName(matchCase.BindName, tempBinding)
+
+		if matchCase.Guard != nil {
+			c.compileExpr(matchCase.Guard)
+			guardFailJump := c.emitJump(OP_JUMP_IF_FALSE)
+
+			c.compileScopedBlock(matchCase.Body)
+			endJumps = append(endJumps, c.emitJump(OP_JUMP))
+
+			c.patchJump(guardFailJump)
+		} else {
+			c.compileScopedBlock(matchCase.Body)
+			endJumps = append(endJumps, c.emitJump(OP_JUMP))
+		}
+	} else {
+		// Single value pattern
 		// load temp
 		if tempBinding.Kind == BindingLocal {
 			c.emit(OP_LOAD_LOCAL, tempBinding.Slot)
@@ -1446,7 +1544,7 @@ func (c *Compiler) compileMatchStatement(stmt MatchStmt) {
 		}
 
 		// load case value
-		c.compileExpr(matchCase.Value)
+		c.compileExpr(matchCase.Values[0])
 
 		// compare
 		c.emit(OP_EQ, nil)
@@ -1454,14 +1552,36 @@ func (c *Compiler) compileMatchStatement(stmt MatchStmt) {
 		// if false, jump to next case
 		jumpToNext := c.emitJump(OP_JUMP_IF_FALSE)
 
-		// body
-		c.compileScopedBlock(matchCase.Body)
+		// Check guard if present
+		if matchCase.Guard != nil {
+			if matchCase.BindName != "" {
+				c.compileMatchBindName(matchCase.BindName, tempBinding)
+			}
 
-		// after matching body, jump to end
-		endJumps = append(endJumps, c.emitJump(OP_JUMP))
+			c.compileExpr(matchCase.Guard)
+			guardFailJump := c.emitJump(OP_JUMP_IF_FALSE)
 
-		// next case starts here
-		c.patchJump(jumpToNext)
+			c.compileScopedBlock(matchCase.Body)
+			endJumps = append(endJumps, c.emitJump(OP_JUMP))
+
+			c.patchJump(guardFailJump)
+			c.patchJump(jumpToNext)
+		} else {
+			if matchCase.BindName != "" {
+				c.compileMatchBindName(matchCase.BindName, tempBinding)
+			}
+
+			c.compileScopedBlock(matchCase.Body)
+			endJumps = append(endJumps, c.emitJump(OP_JUMP))
+
+			c.patchJump(jumpToNext)
+		}
+	}
+
+		// End bind name scope
+		if matchCase.BindName != "" {
+			c.endScope()
+		}
 	}
 
 	if stmt.Default != nil {
@@ -1471,6 +1591,125 @@ func (c *Compiler) compileMatchStatement(stmt MatchStmt) {
 	for _, jump := range endJumps {
 		c.patchJump(jump)
 	}
+}
+
+func (c *Compiler) compileMatchBindName(name string, tempBinding Binding) {
+	binding := c.declareVariable(name, true)
+
+	if tempBinding.Kind == BindingLocal {
+		c.emit(OP_LOAD_LOCAL, tempBinding.Slot)
+	} else {
+		c.emit(OP_LOAD_GLOBAL, VariableInfo{
+			Name: tempBinding.Name,
+			Slot: tempBinding.Slot,
+		})
+	}
+
+	if binding.Kind == BindingLocal {
+		c.emit(OP_STORE_LOCAL, VariableInfo{
+			Name:     name,
+			Slot:     binding.Slot,
+			Constant: true,
+		})
+	} else {
+		c.emit(OP_STORE_GLOBAL, VariableInfo{
+			Name:     binding.Name,
+			Slot:     binding.Slot,
+			Constant: true,
+		})
+	}
+}
+
+func (c *Compiler) compileEnumMatchCase(matchCase MatchCase, tempBinding Binding, endJumps *[]int) bool {
+	if len(matchCase.Values) != 1 {
+		return false
+	}
+
+	call, ok := matchCase.Value.(MemberCallExpr)
+	if !ok {
+		return false
+	}
+
+	enumName, ok := c.resolveFullyQualifiedName(call.Object)
+	if !ok || !c.isEnumVariant(enumName, call.Method) {
+		return false
+	}
+
+	variantParams := c.enumVariants[enumName][call.Method]
+	if len(call.Args) != len(variantParams) {
+		c.fatalError(ErrorSyntax, "enum pattern %s.%s expects %d payload value(s), got %d", enumName, call.Method, len(variantParams), len(call.Args))
+	}
+
+	c.beginScope()
+	defer c.endScope()
+
+	failJumps := []int{}
+
+	loadTemp := func() {
+		if tempBinding.Kind == BindingLocal {
+			c.emit(OP_LOAD_LOCAL, tempBinding.Slot)
+		} else {
+			c.emit(OP_LOAD_GLOBAL, VariableInfo{Name: tempBinding.Name, Slot: tempBinding.Slot})
+		}
+	}
+
+	loadTemp()
+	c.emit(OP_GET_PROPERTY, "_enum")
+	c.emit(OP_CONST, enumName)
+	c.emit(OP_EQ, nil)
+	failJumps = append(failJumps, c.emitJump(OP_JUMP_IF_FALSE))
+
+	loadTemp()
+	c.emit(OP_GET_PROPERTY, "_variant")
+	c.emit(OP_CONST, call.Method)
+	c.emit(OP_EQ, nil)
+	failJumps = append(failJumps, c.emitJump(OP_JUMP_IF_FALSE))
+
+	for i, arg := range call.Args {
+		fieldName := fmt.Sprintf("_%d", i)
+		if ident, ok := arg.(IdentExpr); ok {
+			binding := c.declareVariable(ident.Name, true)
+
+			loadTemp()
+			c.emit(OP_GET_PROPERTY, fieldName)
+
+			if binding.Kind == BindingLocal {
+				c.emit(OP_STORE_LOCAL, VariableInfo{Name: ident.Name, Slot: binding.Slot, Constant: true})
+			} else {
+				c.emit(OP_STORE_GLOBAL, VariableInfo{Name: binding.Name, Slot: binding.Slot, Constant: true})
+			}
+			continue
+		}
+
+		loadTemp()
+		c.emit(OP_GET_PROPERTY, fieldName)
+		c.compileExpr(arg)
+		c.emit(OP_EQ, nil)
+		failJumps = append(failJumps, c.emitJump(OP_JUMP_IF_FALSE))
+	}
+
+	if matchCase.BindName != "" {
+		c.compileMatchBindName(matchCase.BindName, tempBinding)
+	}
+
+	if matchCase.Guard != nil {
+		c.compileExpr(matchCase.Guard)
+		guardFailJump := c.emitJump(OP_JUMP_IF_FALSE)
+
+		c.compileScopedBlock(matchCase.Body)
+		*endJumps = append(*endJumps, c.emitJump(OP_JUMP))
+
+		c.patchJump(guardFailJump)
+	} else {
+		c.compileScopedBlock(matchCase.Body)
+		*endJumps = append(*endJumps, c.emitJump(OP_JUMP))
+	}
+
+	for _, jump := range failJumps {
+		c.patchJump(jump)
+	}
+
+	return true
 }
 
 func (c *Compiler) emitStoreBinding(binding Binding, name string, constant bool, typeHint TypeHint) {
@@ -1514,6 +1753,145 @@ func (c *Compiler) emitAssignBinding(binding Binding) {
 		Name: binding.Name,
 		Slot: binding.Slot,
 	})
+}
+
+func (c *Compiler) compileDestructureStmt(stmt DestructureStmt) {
+	c.setLocation(stmt.File, stmt.Line, stmt.Column)
+
+	c.compileExpr(stmt.Value)
+
+	tempName := "__destructure_" + strconv.Itoa(c.matchTempID)
+	c.matchTempID++
+
+	tempBinding := c.declareVariable(tempName, true)
+	c.emitStoreBinding(tempBinding, tempName, true, TypeHint{})
+
+	switch target := stmt.Target.(type) {
+	case ObjectDestructurePattern:
+		for _, field := range target.Fields {
+			c.setLocation(stmt.File, stmt.Line, stmt.Column)
+			c.emitLoadBinding(tempBinding)
+
+			c.emit(OP_GET_PROPERTY, field.Key)
+
+			if field.HasNested {
+				c.compileDestructureNestedField(stmt, field, tempBinding)
+				continue
+			}
+
+			if field.AliasIsRenamed {
+				binding := c.declareVariable(field.Alias, stmt.Constant)
+				c.emitStoreBinding(binding, field.Alias, stmt.Constant, TypeHint{})
+			} else {
+				binding := c.declareVariable(field.Key, stmt.Constant)
+				c.emitStoreBinding(binding, field.Key, stmt.Constant, TypeHint{})
+			}
+
+			if field.HasDefault {
+				_ = field.Default
+			}
+		}
+
+	case ArrayDestructurePattern:
+		for i, elem := range target.Elements {
+			c.setLocation(stmt.File, stmt.Line, stmt.Column)
+			c.emitLoadBinding(tempBinding)
+
+			c.emit(OP_CONST, i)
+			c.emit(OP_INDEX, nil)
+
+			if elem.IsSpread {
+				_ = elem
+				continue
+			}
+
+			if elem.HasNested {
+				c.compileDestructureNestedArrayElem(stmt, elem, tempBinding, i)
+				continue
+			}
+
+			binding := c.declareVariable(elem.Name, stmt.Constant)
+			c.emitStoreBinding(binding, elem.Name, stmt.Constant, TypeHint{})
+		}
+	}
+}
+
+func (c *Compiler) compileDestructureNestedField(stmt DestructureStmt, field ObjectDestructureField, tempBinding Binding) {
+	nestedTempName := "__destructure_nested_" + strconv.Itoa(c.matchTempID)
+	c.matchTempID++
+
+	nestedTempBinding := c.declareVariable(nestedTempName, true)
+	c.emitStoreBinding(nestedTempBinding, nestedTempName, true, TypeHint{})
+
+	switch nested := field.Pattern.(type) {
+	case ObjectDestructurePattern:
+		for _, nestedField := range nested.Fields {
+			c.emitLoadBinding(nestedTempBinding)
+			c.emit(OP_GET_PROPERTY, nestedField.Key)
+
+			if nestedField.HasNested {
+				c.compileDestructureNestedField(stmt, nestedField, nestedTempBinding)
+				continue
+			}
+
+			name := nestedField.Key
+			if nestedField.AliasIsRenamed {
+				name = nestedField.Alias
+			}
+
+			binding := c.declareVariable(name, stmt.Constant)
+			c.emitStoreBinding(binding, name, stmt.Constant, TypeHint{})
+		}
+
+	case ArrayDestructurePattern:
+		for i, elem := range nested.Elements {
+			c.emitLoadBinding(nestedTempBinding)
+			c.emit(OP_CONST, i)
+			c.emit(OP_INDEX, nil)
+
+			if elem.HasNested {
+				c.compileDestructureNestedArrayElem(stmt, elem, nestedTempBinding, i)
+				continue
+			}
+
+			binding := c.declareVariable(elem.Name, stmt.Constant)
+			c.emitStoreBinding(binding, elem.Name, stmt.Constant, TypeHint{})
+		}
+	}
+}
+
+func (c *Compiler) compileDestructureNestedArrayElem(stmt DestructureStmt, elem ArrayDestructureElement, tempBinding Binding, index int) {
+	nestedTempName := "__destructure_nested_" + strconv.Itoa(c.matchTempID)
+	c.matchTempID++
+
+	nestedTempBinding := c.declareVariable(nestedTempName, true)
+	c.emitStoreBinding(nestedTempBinding, nestedTempName, true, TypeHint{})
+
+	switch nested := elem.Pattern.(type) {
+	case ObjectDestructurePattern:
+		for _, field := range nested.Fields {
+			c.emitLoadBinding(nestedTempBinding)
+			c.emit(OP_GET_PROPERTY, field.Key)
+
+			name := field.Key
+			if field.AliasIsRenamed {
+				name = field.Alias
+			}
+
+			binding := c.declareVariable(name, stmt.Constant)
+			c.emitStoreBinding(binding, name, stmt.Constant, TypeHint{})
+		}
+
+	case ArrayDestructurePattern:
+		for i, nestedElem := range nested.Elements {
+			c.emitLoadBinding(nestedTempBinding)
+			c.emit(OP_CONST, i)
+			c.emit(OP_INDEX, nil)
+
+			binding := c.declareVariable(nestedElem.Name, stmt.Constant)
+			c.emitStoreBinding(binding, nestedElem.Name, stmt.Constant, TypeHint{})
+		}
+	}
 }
 
 func (c *Compiler) compileForInStatement(stmt ForInStmt) {
@@ -1642,6 +2020,9 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 				Slot:     binding.Slot,
 			})
 		}
+
+	case DestructureStmt:
+		c.compileDestructureStmt(s)
 
 	case IncrementStmt:
 		if binding, exists := c.resolveVariable(s.Name); exists {
@@ -1958,12 +2339,22 @@ func (c *Compiler) compileEnum(stmt EnumStmt) {
 
 	obj := ObjectValue{}
 
+	variants := map[string][]Param{}
+
 	for _, member := range stmt.Members {
 		if _, exists := obj[member.Name]; exists {
 			c.fatalError(ErrorName, "duplicate enum member %s.%s", stmt.Name, member.Name)
 		}
 
 		obj[member.Name] = c.evalConstantExpr(member.Value, "enum member must be constant.")
+
+		if len(member.VariantParams) > 0 {
+			variants[member.Name] = member.VariantParams
+		}
+	}
+
+	if len(variants) > 0 {
+		c.enumVariants[stmt.Name] = variants
 	}
 
 	c.emit(OP_CONST, obj)
@@ -1983,6 +2374,34 @@ func (c *Compiler) compileEnum(stmt EnumStmt) {
 			Slot:     binding.Slot,
 		})
 	}
+}
+
+func (c *Compiler) isEnumVariant(enumName, variantName string) bool {
+	if variants, ok := c.enumVariants[enumName]; ok {
+		_, exists := variants[variantName]
+		return exists
+	}
+	return false
+}
+
+func (c *Compiler) compileEnumVariantConstruction(enumName string, variantName string, args []Expr, file string, line int, column int) {
+	c.setLocation(file, line, column)
+
+	c.emit(OP_CONST, enumName)
+	c.emit(OP_CONST, variantName)
+
+	for _, arg := range args {
+		c.compileExpr(arg)
+	}
+
+	names := make([]ObjectFieldsInfo, 2+len(args))
+	names[0] = ObjectFieldsInfo{Name: "_enum", Copy: false}
+	names[1] = ObjectFieldsInfo{Name: "_variant", Copy: false}
+	for i := range args {
+		names[2+i] = ObjectFieldsInfo{Name: fmt.Sprintf("_%d", i), Copy: false}
+	}
+
+	c.emit(OP_OBJECT, ObjectInfo{Names: names})
 }
 
 func (c *Compiler) storeImportedAlias(name string, constant bool) Binding {
@@ -3767,6 +4186,10 @@ func inferJitRegionExprType(expr Expr, knownTypes map[string]string, stdImportMo
 			typ, ok := inferJitRegionExprType(e.Right, knownTypes, stdImportModules)
 			return typ, ok && typ == "number"
 		}
+		if e.Op == TOKEN_TILDE {
+			typ, ok := inferJitRegionExprType(e.Right, knownTypes, stdImportModules)
+			return typ, ok && typ == "number"
+		}
 		if e.Op == TOKEN_BANG {
 			typ, ok := inferJitRegionExprType(e.Right, knownTypes, stdImportModules)
 			if ok && typ == "bool" {
@@ -3795,6 +4218,10 @@ func inferJitRegionExprType(expr Expr, knownTypes map[string]string, stdImportMo
 		case TOKEN_AND, TOKEN_OR:
 			if left == "bool" && right == "bool" {
 				return "bool", true
+			}
+		case TOKEN_AMP, TOKEN_PIPE, TOKEN_CARET, TOKEN_LSHIFT, TOKEN_RSHIFT:
+			if left == "number" && right == "number" {
+				return "number", true
 			}
 		}
 		return "", false
@@ -5058,6 +5485,9 @@ func (c *Compiler) compileExpr(expr Expr) {
 		case TOKEN_MINUS:
 			c.emit(OP_NEGATE, nil)
 
+		case TOKEN_TILDE:
+			c.emit(OP_NOT_BIT, nil)
+
 		default:
 			c.fatalError(ErrorInternal, "unknown unary operator: %s", e.Op)
 		}
@@ -5439,6 +5869,17 @@ func (c *Compiler) compileExpr(expr Expr) {
 		case TOKEN_PERCENT:
 			c.emit(OP_MOD, nil)
 
+		case TOKEN_AMP:
+			c.emit(OP_AND_BIT, nil)
+		case TOKEN_PIPE:
+			c.emit(OP_OR_BIT, nil)
+		case TOKEN_CARET:
+			c.emit(OP_XOR, nil)
+		case TOKEN_LSHIFT:
+			c.emit(OP_LSHIFT, nil)
+		case TOKEN_RSHIFT:
+			c.emit(OP_RSHIFT, nil)
+
 		default:
 			c.fatalError(ErrorInternal, "unknown binary operator")
 		}
@@ -5817,6 +6258,14 @@ func (c *Compiler) compileExpr(expr Expr) {
 			c.setLocation(e.File, e.Line, e.Column)
 			c.emit(OP_LEN, nil)
 			return
+		}
+
+		// Check for enum variant construction: Enum.Variant(args)
+		if ident, ok := e.Object.(IdentExpr); ok {
+			if enumName, ok := c.resolveFullyQualifiedName(ident); ok && c.isEnumVariant(enumName, e.Method) {
+				c.compileEnumVariantConstruction(enumName, e.Method, e.Args, e.File, e.Line, e.Column)
+				return
+			}
 		}
 
 		c.compileExpr(e.Object)
@@ -6210,6 +6659,12 @@ func (c *Compiler) compareCompileTimeTypes(got string, expected string) bool {
 	}
 
 	if expected == "any" || got == "any" {
+		return true
+	}
+	if strings.HasPrefix(expected, "function(") && got == "function" {
+		return true
+	}
+	if expected == "function" && strings.HasPrefix(got, "function(") {
 		return true
 	}
 

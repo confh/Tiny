@@ -76,6 +76,61 @@ fn identity(input: string | number): any {
 	}
 }
 
+func TestParserFunctionParameterTypeHint(t *testing.T) {
+	program := parseSourceForTest(t, `
+fn test(callback: function(number, string)) {
+    callback(1, "value");
+}
+`)
+
+	if len(program.Statements) != 1 {
+		t.Fatalf("expected 1 statement, got %d", len(program.Statements))
+	}
+
+	fn, ok := program.Statements[0].(FunctionStmt)
+	if !ok {
+		t.Fatalf("expected function statement, got %T", program.Statements[0])
+	}
+	if len(fn.Params) != 1 {
+		t.Fatalf("expected 1 param, got %#v", fn.Params)
+	}
+	if got := fn.Params[0].TypeHint.String(); got != "function(number, string)" {
+		t.Fatalf("unexpected function parameter type hint: %q", got)
+	}
+}
+
+func TestParserNullableFunctionType(t *testing.T) {
+	program := parseSourceForTest(t, `fn test(callback: function(string)?) {}`)
+	fn := program.Statements[0].(FunctionStmt)
+	if got := fn.Params[0].TypeHint.String(); got != "function(string) | null" {
+		t.Fatalf("expected 'function(string) | null', got %q", got)
+	}
+}
+
+func TestParserFunctionTypeInUnion(t *testing.T) {
+	program := parseSourceForTest(t, `fn test(x: function(string) | number) {}`)
+	fn := program.Statements[0].(FunctionStmt)
+	if got := fn.Params[0].TypeHint.String(); got != "function(string) | number" {
+		t.Fatalf("expected 'function(string) | number', got %q", got)
+	}
+}
+
+func TestParserNullableRegularType(t *testing.T) {
+	program := parseSourceForTest(t, `fn test(x: string?) {}`)
+	fn := program.Statements[0].(FunctionStmt)
+	if got := fn.Params[0].TypeHint.String(); got != "string | null" {
+		t.Fatalf("expected 'string | null', got %q", got)
+	}
+}
+
+func TestParserNullableFunctionTypeWithUnion(t *testing.T) {
+	program := parseSourceForTest(t, `fn test(x: function(string) | number?) {}`)
+	fn := program.Statements[0].(FunctionStmt)
+	if got := fn.Params[0].TypeHint.String(); got != "function(string) | number | null" {
+		t.Fatalf("expected 'function(string) | number | null', got %q", got)
+	}
+}
+
 func TestParserDefaultParams(t *testing.T) {
 	program := parseSourceForTest(t, `
 fn greet(name, prefix = "Hello") {
@@ -232,5 +287,21 @@ validate.enum(["a", "b"]);
 
 	if call.Method != "enum" {
 		t.Fatalf("expected member call to enum, got %q", call.Method)
+	}
+}
+
+func TestParserFunctionParamUnionType(t *testing.T) {
+	program := parseSourceForTest(t, `fn process(x: function(string | array)) {}`)
+	fn := program.Statements[0].(FunctionStmt)
+	if got := fn.Params[0].TypeHint.String(); got != "function(string | array)" {
+		t.Fatalf("expected 'function(string | array)', got %q", got)
+	}
+}
+
+func TestParserFunctionReturnTypeUnionType(t *testing.T) {
+	program := parseSourceForTest(t, `fn process(x: string): function(string) | null { return null; }`)
+	fn := program.Statements[0].(FunctionStmt)
+	if got := fn.ReturnType.String(); got != "function(string) | null" {
+		t.Fatalf("expected 'function(string) | null', got %q", got)
 	}
 }

@@ -53,38 +53,121 @@ func GetNativeTypeInfo(name string) (NativeTypeInfo, bool) {
 	return info, ok
 }
 
+type ArrayMethodMutator func(elementType string, info *StdMethodInfo)
+
+var arrayMutators = map[string]ArrayMethodMutator{
+	"get": func(el string, info *StdMethodInfo) {
+		info.Returns = el
+	},
+	"pop": func(el string, info *StdMethodInfo) {
+		info.Returns = el
+	},
+	"find": func(el string, info *StdMethodInfo) {
+		info.Returns = el + " | null"
+		if len(info.Args) > 0 {
+			info.Args[0].Type = "function(" + el + ")"
+		}
+	},
+	"push": func(el string, info *StdMethodInfo) {
+		info.Returns = "array:" + el
+		if len(info.Args) > 0 {
+			info.Args[0].Type = el
+		}
+	},
+	"set": func(el string, info *StdMethodInfo) {
+		info.Returns = "array:" + el
+		if len(info.Args) > 1 {
+			info.Args[1].Type = el
+		}
+	},
+	"reverse": func(el string, info *StdMethodInfo) {
+		info.Returns = "array:" + el
+	},
+	"filter": func(el string, info *StdMethodInfo) {
+		info.Returns = "array:" + el
+		if len(info.Args) > 0 {
+			info.Args[0].Type = "function(number, " + el + ")"
+		}
+	},
+	"map": func(el string, info *StdMethodInfo) {
+		info.Returns = "array:" + el
+		if len(info.Args) > 0 {
+			info.Args[0].Type = "function(number, " + el + ")"
+		}
+	},
+	"forEach": func(el string, info *StdMethodInfo) {
+		if len(info.Args) > 0 {
+			info.Args[0].Type = "function(number, " + el + ")"
+		}
+	},
+	"contains": func(el string, info *StdMethodInfo) {
+		if len(info.Args) > 0 {
+			info.Args[0].Type = el
+		}
+	},
+	"reduce": func(el string, info *StdMethodInfo) {
+		info.Returns = el
+		if len(info.Args) > 0 {
+			info.Args[0].Type = "function(number, " + el + ")"
+		}
+	},
+	"sort": func(el string, info *StdMethodInfo) {
+		info.Returns = "array:" + el
+		if len(info.Args) > 0 {
+			info.Args[0].Type = "function(any, " + el + ") | null"
+		}
+	},
+	"slice": func(el string, info *StdMethodInfo) {
+		info.Returns = "array:" + el
+	},
+	"flat": func(el string, info *StdMethodInfo) {
+		info.Returns = "array:" + el
+	},
+	"flatMap": func(el string, info *StdMethodInfo) {
+		info.Returns = "array:" + el
+		if len(info.Args) > 0 {
+			info.Args[0].Type = "function(number, " + el + ")"
+		}
+	},
+	"findIndex": func(el string, info *StdMethodInfo) {
+		if len(info.Args) > 0 {
+			info.Args[0].Type = "function(" + el + ")"
+		}
+	},
+}
+
 func GetNativeMethodInfo(typeName string, method string) (StdMethodInfo, bool) {
 	origTypeName := typeName
-	if strings.HasPrefix(typeName, "array:") {
+	isArray := strings.HasPrefix(typeName, "array:")
+
+	if isArray {
 		typeName = "array"
 	}
+
 	info, ok := GetNativeTypeInfo(typeName)
 	if !ok {
 		return StdMethodInfo{}, false
 	}
 
 	methodInfo, ok := info.Methods[method]
-	if ok && strings.HasPrefix(origTypeName, "array:") {
-		elementType := strings.TrimPrefix(strings.Replace(origTypeName, "array:empty", "array:any", 1), "array:")
-		if methodInfo.Returns == "any" && (method == "get" || method == "pop") {
-			methodInfo.Returns = elementType
-		} else if methodInfo.Returns == "any" && (method == "find") {
-			methodInfo.Returns = elementType + " | null"
-		} else if methodInfo.Returns == "array" && (method == "push" || method == "set" || method == "reverse" || method == "filter") {
-			methodInfo.Returns = "array:" + elementType
-		}
+	if !ok {
+		return StdMethodInfo{}, false
+	}
+
+	if isArray {
+		cleanType := strings.Replace(origTypeName, "array:empty", "array:any", 1)
+		elementType := strings.TrimPrefix(cleanType, "array:")
 
 		if len(methodInfo.Args) > 0 {
 			newArgs := make([]StdArg, len(methodInfo.Args))
 			copy(newArgs, methodInfo.Args)
 			methodInfo.Args = newArgs
+		}
 
-			if method == "push" || method == "contains" {
-				methodInfo.Args[0].Type = elementType
-			} else if method == "set" && len(methodInfo.Args) > 1 {
-				methodInfo.Args[1].Type = elementType
-			}
+		if mutator, exists := arrayMutators[method]; exists {
+			mutator(elementType, &methodInfo)
 		}
 	}
-	return methodInfo, ok
+
+	return methodInfo, true
 }

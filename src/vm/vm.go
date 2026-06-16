@@ -54,10 +54,9 @@ type globalPairInlineCache struct {
 type Frame struct {
 	function     Function
 	ip           int
+	cellSlab     []Cell
 	locals       []*Cell
-	constants    []bool
 	instructions []Instruction
-	localTypes   []TypeHint
 	methodClass  string
 
 	lockedMutexes []*NativeMutexValue
@@ -160,6 +159,9 @@ func intToString(n int) string {
 	if n == 0 {
 		return "0"
 	}
+	if n < 0 {
+		return "-" + uintToString(uint64(-(n+1))+1)
+	}
 
 	var buf [20]byte
 	i := len(buf)
@@ -176,6 +178,9 @@ func intToString(n int) string {
 func int64ToString(n int64) string {
 	if n == 0 {
 		return "0"
+	}
+	if n < 0 {
+		return "-" + uintToString(uint64(-(n+1))+1)
 	}
 
 	var buf [20]byte
@@ -447,9 +452,9 @@ func (vm *VM) resumeJitDeopt(fn Function, args []TinyValue, deopt JitDeoptError)
 			break
 		}
 		setCellValue(frame.locals[i], arg)
-		frame.constants[i] = false
+		frame.locals[i].Constant = false
 		if i < len(fn.Params) {
-			frame.localTypes[i] = fn.Params[i].TypeHint
+			frame.locals[i].TypeHint = fn.Params[i].TypeHint
 		}
 	}
 
@@ -460,16 +465,16 @@ func (vm *VM) resumeJitDeopt(fn Function, args []TinyValue, deopt JitDeoptError)
 		setCellValue(frame.locals[i], local)
 	}
 	for i, constant := range deopt.Constants {
-		if i >= len(frame.constants) {
+		if i >= len(frame.locals) {
 			break
 		}
-		frame.constants[i] = constant
+		frame.locals[i].Constant = constant
 	}
 	for i, typ := range deopt.LocalTypes {
-		if i >= len(frame.localTypes) {
+		if i >= len(frame.locals) {
 			break
 		}
-		frame.localTypes[i] = typ
+		frame.locals[i].TypeHint = typ
 	}
 
 	stack := deopt.Stack
@@ -541,11 +546,6 @@ func (vm *VM) currentMainCallSite() (NativeCallFrame, bool) {
 }
 
 func (vm *VM) pushFrame(frame *Frame) {
-	if site, ok := vm.currentMainCallSite(); ok {
-		frame.hasMainCallSite = true
-		frame.mainCallSite = site
-	}
-
 	vm.frames = append(vm.frames, frame)
 }
 
@@ -556,49 +556,41 @@ func (vm *VM) getFrame(fn Function) *Frame {
 		last := len(vm.framePool) - 1
 		frame = vm.framePool[last]
 		vm.framePool = vm.framePool[:last]
-	}
 
-	if frame == nil {
-		frame = &Frame{}
-	}
-
-	if cap(frame.locals) < fn.LocalCount {
-		frame.locals = make([]*Cell, fn.LocalCount)
-	} else {
-		frame.locals = frame.locals[:fn.LocalCount]
-	}
-
-	if cap(frame.constants) < fn.LocalCount {
-		frame.constants = make([]bool, fn.LocalCount)
-	} else {
-		frame.constants = frame.constants[:fn.LocalCount]
-	}
-
-	if cap(frame.localTypes) < fn.LocalCount {
-		frame.localTypes = make([]TypeHint, fn.LocalCount)
-	} else {
-		frame.localTypes = frame.localTypes[:fn.LocalCount]
-	}
-
-	for i := 0; i < fn.LocalCount; i++ {
-		if frame.locals[i] == nil {
-			frame.locals[i] = &Cell{}
+		if cap(frame.cellSlab) < fn.LocalCount {
+			frame.cellSlab = make([]Cell, fn.LocalCount)
+			frame.locals = make([]*Cell, fn.LocalCount)
+			for i := range frame.cellSlab {
+				frame.locals[i] = &frame.cellSlab[i]
+			}
+		} else {
+			frame.cellSlab = frame.cellSlab[:fn.LocalCount]
+			frame.locals = frame.locals[:fn.LocalCount]
 		}
 
-		setCellValue(frame.locals[i], NewNull())
-		frame.constants[i] = false
-		frame.localTypes[i] = TypeHint{}
+		frame.function = fn
+		frame.ip = 0
+		frame.instructions = fn.Instructions
+		frame.methodClass = ""
+		frame.returnOverride = TinyValue{}
+		frame.hasReturnOverride = false
+		frame.hasEscapedLocals = false
+
+		return frame
 	}
 
-	frame.function = fn
-	frame.ip = 0
-	frame.instructions = fn.Instructions
-	frame.methodClass = ""
-	frame.returnOverride = TinyValue{}
-	frame.hasReturnOverride = false
-	frame.hasEscapedLocals = false
-	frame.hasMainCallSite = false
-	frame.mainCallSite = NativeCallFrame{}
+	cellSlab := make([]Cell, fn.LocalCount)
+	locals := make([]*Cell, fn.LocalCount)
+	for i := range cellSlab {
+		locals[i] = &cellSlab[i]
+	}
+
+	frame = &Frame{
+		cellSlab:     cellSlab,
+		locals:       locals,
+		function:     fn,
+		instructions: fn.Instructions,
+	}
 
 	return frame
 }
@@ -612,10 +604,8 @@ func (vm *VM) releaseFrame(frame *Frame) {
 		return
 	}
 
-	for i := range frame.locals {
-		if frame.locals[i] != nil {
-			setCellValue(frame.locals[i], TinyValue{})
-		}
+	for i := range frame.cellSlab {
+		frame.cellSlab[i] = Cell{}
 	}
 
 	frame.function = Function{}
@@ -1952,7 +1942,7 @@ func (vm *VM) callClassWithArgs(class Class, args []TinyValue) {
 		frame.methodClass = class.Name
 
 		setCellValue(frame.locals[0], NewNative(object))
-		frame.constants[0] = true
+		frame.locals[0].Constant = true
 
 		if isVariadic {
 			fixedCount := expected - 1
@@ -1964,8 +1954,8 @@ func (vm *VM) callClassWithArgs(class Class, args []TinyValue) {
 
 				vm.checkCallableArgType(fn, "method", "init", "parameter", param, arg)
 				setCellValue(frame.locals[paramIndex], arg)
-				frame.constants[paramIndex] = false
-				frame.localTypes[paramIndex] = eraseGenericTypeHintForRuntime(param.TypeHint, vm.genericTypeParamsForFunction(fn))
+				frame.locals[paramIndex].Constant = false
+				frame.locals[paramIndex].TypeHint = eraseGenericTypeHintForRuntime(param.TypeHint, vm.genericTypeParamsForFunction(fn))
 			}
 
 			restSlot := paramOffset + fixedCount
@@ -1982,8 +1972,8 @@ func (vm *VM) callClassWithArgs(class Class, args []TinyValue) {
 			}
 
 			setCellValue(frame.locals[restSlot], NewNative(rest))
-			frame.constants[restSlot] = false
-			frame.localTypes[restSlot] = TypeHint{Name: "array"}
+			frame.locals[restSlot].Constant = false
+			frame.locals[restSlot].TypeHint = TypeHint{Name: "array"}
 		} else {
 			for i, arg := range args {
 				paramIndex := paramOffset + i
@@ -1991,8 +1981,8 @@ func (vm *VM) callClassWithArgs(class Class, args []TinyValue) {
 
 				vm.checkCallableArgType(fn, "method", "init", "parameter", param, arg)
 				setCellValue(frame.locals[paramIndex], arg)
-				frame.constants[paramIndex] = false
-				frame.localTypes[paramIndex] = eraseGenericTypeHintForRuntime(param.TypeHint, vm.genericTypeParamsForFunction(fn))
+				frame.locals[paramIndex].Constant = false
+				frame.locals[paramIndex].TypeHint = eraseGenericTypeHintForRuntime(param.TypeHint, vm.genericTypeParamsForFunction(fn))
 			}
 		}
 
@@ -2309,38 +2299,34 @@ func (vm *VM) objectIsOrEmbedsClass(object ObjectValue, className string) bool {
 }
 
 func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableName string) {
-	vm.ensureJitReadyFor(fn.Name)
-	jitFn := vm.jitFunctions[fn.Name]
+	expected := len(fn.Params)
+	isVariadic := expected > 0 && fn.Params[expected-1].Variadic
 
-	if !vm.jitDisabled && jitFn != nil && argCount == jitFn.paramCount && vm.stackArgsMatchJit(jitFn, argCount) {
-		args := vm.popArgs(argCount)
-		res, err := jitFn.Call(vm.wazeroCtx, args)
-		if err == nil {
-			vm.push(res)
-			return
-		}
-		if _, ok := err.(JitExceptionThrownError); ok {
-			// A JIT exception signal must not silently turn the call result into null.
-			// Re-run the call in the interpreter so real Tiny exceptions propagate
-			// through the normal VM machinery and non-side-effecting JIT bugs do not
-			// corrupt the caller stack.
+	if !vm.jitDisabled && !isVariadic {
+		vm.ensureJitReadyFor(fn.Name)
+		jitFn := vm.jitFunctions[fn.Name]
+
+		if jitFn != nil && argCount == jitFn.paramCount && vm.stackArgsMatchJit(jitFn, argCount) {
+			args := vm.popArgs(argCount)
+			res, err := jitFn.Call(vm.wazeroCtx, args)
+			if err == nil {
+				vm.push(res)
+				return
+			}
+			if _, ok := err.(JitExceptionThrownError); ok {
+				vm.callFunctionDirectInterpreted(fn, args)
+				return
+			}
+
+			if deopt, ok := jitDeoptFromError(err); ok {
+				vm.resumeJitDeopt(fn, args, deopt)
+				return
+			}
+
 			vm.callFunctionDirectInterpreted(fn, args)
 			return
 		}
-
-		if deopt, ok := jitDeoptFromError(err); ok {
-			vm.resumeJitDeopt(fn, args, deopt)
-			return
-		}
-
-		// println("JIT call failed for:", fn.Name, "error:", err.Error())
-
-		vm.callFunctionDirectInterpreted(fn, args)
-		return
 	}
-
-	expected := len(fn.Params)
-	isVariadic := expected > 0 && fn.Params[expected-1].Variadic
 
 	if fn.HasDefaults && !isVariadic {
 		args := vm.popArgs(argCount)
@@ -2404,8 +2390,8 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 			}
 
 			setCellValue(frame.locals[i], arg)
-			frame.constants[i] = false
-			frame.localTypes[i] = eraseGenericTypeHintForRuntime(param.TypeHint, vm.genericTypeParamsForFunction(fn))
+			frame.locals[i].Constant = false
+			frame.locals[i].TypeHint = eraseGenericTypeHintForRuntime(param.TypeHint, vm.genericTypeParamsForFunction(fn))
 
 			vm.stack[start+i] = TinyValue{}
 		}
@@ -2437,8 +2423,8 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 		}
 
 		setCellValue(frame.locals[fixedCount], NewNative(rest))
-		frame.constants[fixedCount] = false
-		frame.localTypes[fixedCount] = TypeHint{Name: "array"}
+		frame.locals[fixedCount].Constant = false
+		frame.locals[fixedCount].TypeHint = TypeHint{Name: "array"}
 
 		vm.top = start
 		vm.pushFrame(frame)
@@ -2465,15 +2451,15 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 			}
 
 			setCellValue(frame.locals[i], arg)
-			frame.constants[i] = false
-			frame.localTypes[i] = eraseGenericTypeHintForRuntime(param.TypeHint, vm.genericTypeParamsForFunction(fn))
+			frame.locals[i].Constant = false
+			frame.locals[i].TypeHint = eraseGenericTypeHintForRuntime(param.TypeHint, vm.genericTypeParamsForFunction(fn))
 
 			vm.stack[start+i] = TinyValue{}
 		}
 	} else {
 		for i := 0; i < argCount; i++ {
 			setCellValue(frame.locals[i], vm.stack[start+i])
-			frame.constants[i] = false
+			frame.locals[i].Constant = false
 
 			vm.stack[start+i] = TinyValue{}
 		}
@@ -2552,7 +2538,7 @@ func (vm *VM) throwValue(value TinyValue) {
 		}
 
 		setCellValue(frame.locals[handler.Slot], NewNative(errorObject))
-		frame.constants[handler.Slot] = false
+		frame.locals[handler.Slot].Constant = false
 	} else {
 		vm.setGlobal(handler.Slot, NewNative(errorObject))
 		vm.globalConstants[handler.Name] = false
@@ -2700,7 +2686,7 @@ func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []TinyValue)
 
 		for i := range fixedCount {
 			setCellValue(frame.locals[i], args[i])
-			frame.constants[i] = false
+			frame.locals[i].Constant = false
 		}
 
 		rest := &ArrayValue{
@@ -2712,7 +2698,7 @@ func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []TinyValue)
 		}
 
 		setCellValue(frame.locals[fixedCount], NewNative(rest))
-		frame.constants[fixedCount] = false
+		frame.locals[fixedCount].Constant = false
 	} else {
 		for i, arg := range args {
 			param := fn.Params[i]
@@ -2732,8 +2718,8 @@ func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []TinyValue)
 			}
 
 			setCellValue(frame.locals[i], arg)
-			frame.constants[i] = false
-			frame.localTypes[i] = eraseGenericTypeHintForRuntime(param.TypeHint, vm.genericTypeParamsForFunction(fn))
+			frame.locals[i].Constant = false
+			frame.locals[i].TypeHint = eraseGenericTypeHintForRuntime(param.TypeHint, vm.genericTypeParamsForFunction(fn))
 		}
 	}
 
@@ -2774,7 +2760,9 @@ func (vm *VM) runFrameToCompletion(frame *Frame) TinyValue {
 }
 
 func (vm *VM) callFunctionDirectInterpreted(fn Function, args []TinyValue) {
-	args = vm.applyDefaultArgs(fn, args, 0, "function "+fn.Name)
+	if fn.HasDefaults {
+		args = vm.applyDefaultArgs(fn, args, 0, fn.Name)
+	}
 
 	frame := vm.getFrame(fn)
 
@@ -2796,38 +2784,40 @@ func (vm *VM) callFunctionDirectInterpreted(fn Function, args []TinyValue) {
 		}
 
 		setCellValue(frame.locals[i], arg)
-		frame.constants[i] = false
-		frame.localTypes[i] = eraseGenericTypeHintForRuntime(param.TypeHint, vm.genericTypeParamsForFunction(fn))
+		frame.locals[i].Constant = false
+		frame.locals[i].TypeHint = eraseGenericTypeHintForRuntime(param.TypeHint, vm.genericTypeParamsForFunction(fn))
 	}
 
 	vm.pushFrame(frame)
 }
 
 func (vm *VM) callFunctionDirect(fn Function, args []TinyValue) {
-	vm.ensureJitReadyFor(fn.Name)
-
 	expected := len(fn.Params)
 	isVariadic := expected > 0 && fn.Params[expected-1].Variadic
-	if fn.HasDefaults && !isVariadic {
-		args = vm.applyDefaultArgs(fn, args, 0, fn.Name)
+
+	if !vm.jitDisabled && !isVariadic {
+		vm.ensureJitReadyFor(fn.Name)
+		jitFn := vm.jitFunctions[fn.Name]
+
+		if jitFn != nil && vm.argsMatchJit(jitFn, args) {
+			res, err := jitFn.Call(vm.wazeroCtx, args)
+			if err == nil {
+				vm.push(res)
+				return
+			}
+			if _, ok := err.(JitExceptionThrownError); ok {
+				vm.callFunctionDirectInterpreted(fn, args)
+				return
+			}
+			if deopt, ok := jitDeoptFromError(err); ok {
+				vm.resumeJitDeopt(fn, args, deopt)
+				return
+			}
+		}
 	}
 
-	jitFn := vm.jitFunctions[fn.Name]
-
-	if !vm.jitDisabled && jitFn != nil && vm.argsMatchJit(jitFn, args) {
-		res, err := jitFn.Call(vm.wazeroCtx, args)
-		if err == nil {
-			vm.push(res)
-			return
-		}
-		if _, ok := err.(JitExceptionThrownError); ok {
-			vm.callFunctionDirectInterpreted(fn, args)
-			return
-		}
-		if deopt, ok := jitDeoptFromError(err); ok {
-			vm.resumeJitDeopt(fn, args, deopt)
-			return
-		}
+	if fn.HasDefaults && !isVariadic {
+		args = vm.applyDefaultArgs(fn, args, 0, fn.Name)
 	}
 
 	vm.callFunctionDirectInterpreted(fn, args)
@@ -2975,17 +2965,10 @@ func (vm *VM) execute(targetDepth int) bool {
 		instr := cfInstructions[cfIP]
 		cfIP++
 
-		// Keep IP in sync on VM/Frame before executing instruction
-		if cfFrame == nil {
-			vm.ip = cfIP
-		} else {
-			cfFrame.ip = cfIP
-		}
-
 		if cfFrame != nil {
-			vm.lastFunctionName = cfFrame.function.Name
+			cfFrame.ip = cfIP
 		} else {
-			vm.lastFunctionName = "<main>"
+			vm.ip = cfIP
 		}
 
 		if len(vm.frames) > 0 {
@@ -3066,7 +3049,7 @@ func (vm *VM) execute(targetDepth int) bool {
 			info := instr.Value.(AddLocalLocalStoreInfo)
 			frame := vm.frames[len(vm.frames)-1]
 
-			if frame.constants[info.DestSlot] {
+			if frame.locals[info.DestSlot].Constant {
 				vm.fatalError(ErrorConst, "cannot assign to constant local")
 			}
 
@@ -3087,7 +3070,7 @@ func (vm *VM) execute(targetDepth int) bool {
 			if info.Slot < 0 || info.Slot >= len(frame.locals) {
 				vm.fatalError(ErrorInternal, "local slot out of range in OP_LOCAL_CONST_OP_STORE")
 			}
-			if frame.constants[info.Slot] {
+			if frame.locals[info.Slot].Constant {
 				vm.fatalError(ErrorConst, "cannot assign to constant local")
 			}
 			cell := frame.locals[info.Slot]
@@ -3116,7 +3099,7 @@ func (vm *VM) execute(targetDepth int) bool {
 			if info.LocalSlot < 0 || info.LocalSlot >= len(frame.locals) {
 				vm.fatalError(ErrorInternal, "local slot out of range in OP_ADD_LOCAL_GLOBAL_GLOBAL_STORE")
 			}
-			if frame.constants[info.LocalSlot] {
+			if frame.locals[info.LocalSlot].Constant {
 				vm.fatalError(ErrorConst, "cannot assign to constant local")
 			}
 			cell := frame.locals[info.LocalSlot]
@@ -3299,7 +3282,7 @@ func (vm *VM) execute(targetDepth int) bool {
 			info := instr.Value.(AssignLocalInfo)
 			frame := vm.frames[len(vm.frames)-1]
 
-			if frame.constants[info.TargetSlot] {
+			if frame.locals[info.TargetSlot].Constant {
 				vm.fatalError(ErrorConst, "cannot assign to constant local")
 			}
 
@@ -3336,7 +3319,7 @@ func (vm *VM) execute(targetDepth int) bool {
 			if info.SourceSlot < 0 || info.SourceSlot >= len(frame.locals) {
 				vm.fatalError(ErrorInternal, "source local slot out of range in OP_SUB_ASSIGN_LOCAL")
 			}
-			if frame.constants[info.TargetSlot] {
+			if frame.locals[info.TargetSlot].Constant {
 				vm.fatalError(ErrorConst, "cannot assign to constant local")
 			}
 
@@ -3885,24 +3868,11 @@ func (vm *VM) execute(targetDepth int) bool {
 				)
 			}
 
-			if frame.locals[slot] == nil {
-				vm.fatalError(
-					ErrorInternal,
-					"local slot is nil: function=%s slot=%d locals=%d",
-					frame.function.Name,
-					slot,
-					len(frame.locals),
-				)
-			}
-
 			vm.push(cellValue(frame.locals[slot]))
 
 		case OP_LOAD_LOCAL_0:
 			frame := vm.frames[len(vm.frames)-1]
 			cell := frame.locals[0]
-			if cell == nil {
-				vm.fatalError(ErrorInternal, "local slot is nil: function=%s slot=0 locals=%d", frame.function.Name, len(frame.locals))
-			}
 			if cell.IsInt {
 				vm.push(NewInt(cell.Int))
 			} else {
@@ -3915,9 +3885,6 @@ func (vm *VM) execute(targetDepth int) bool {
 			if cell.IsInt {
 				vm.push(NewInt(cell.Int))
 			} else {
-				if cell == nil {
-					vm.fatalError(ErrorInternal, "local slot is nil: function=%s slot=1 locals=%d", frame.function.Name, len(frame.locals))
-				}
 				vm.push(cell.Value)
 			}
 
@@ -3927,9 +3894,6 @@ func (vm *VM) execute(targetDepth int) bool {
 			if cell.IsInt {
 				vm.push(NewInt(cell.Int))
 			} else {
-				if cell == nil {
-					vm.fatalError(ErrorInternal, "local slot is nil: function=%s slot=2 locals=%d", frame.function.Name, len(frame.locals))
-				}
 				vm.push(cell.Value)
 			}
 
@@ -3939,9 +3903,6 @@ func (vm *VM) execute(targetDepth int) bool {
 			if cell.IsInt {
 				vm.push(NewInt(cell.Int))
 			} else {
-				if cell == nil {
-					vm.fatalError(ErrorInternal, "local slot is nil: function=%s slot=3 locals=%d", frame.function.Name, len(frame.locals))
-				}
 				vm.push(cell.Value)
 			}
 
@@ -3982,8 +3943,8 @@ func (vm *VM) execute(targetDepth int) bool {
 				frame.locals[info.Slot] = cell
 			}
 			setCellValue(cell, value)
-			frame.constants[info.Slot] = info.Constant
-			frame.localTypes[info.Slot] = info.TypeHint
+			frame.locals[info.Slot].Constant = info.Constant
+			frame.locals[info.Slot].TypeHint = info.TypeHint
 
 		case OP_ASSIGN_GLOBAL:
 			value := vm.popFast()
@@ -4069,7 +4030,7 @@ func (vm *VM) execute(targetDepth int) bool {
 				vm.fatalError(ErrorInternal, "local cell is nil in OP_INC_LOCAL")
 			}
 
-			if frame.constants[slot] {
+			if frame.locals[slot].Constant {
 				vm.fatalError(ErrorConst, "cannot assign to constant local")
 			}
 
@@ -4136,7 +4097,7 @@ func (vm *VM) execute(targetDepth int) bool {
 				vm.fatalError(ErrorInternal, "local cell is nil in OP_DEC_LOCAL")
 			}
 
-			if frame.constants[slot] {
+			if frame.locals[slot].Constant {
 				vm.fatalError(ErrorConst, "cannot assign to constant local")
 			}
 
@@ -4324,21 +4285,11 @@ func (vm *VM) execute(targetDepth int) bool {
 				)
 			}
 
-			if frame.locals[slot] == nil {
-				vm.fatalError(
-					ErrorInternal,
-					"local slot is nil during assignment: function=%s slot=%d locals=%d",
-					frame.function.Name,
-					slot,
-					len(frame.locals),
-				)
-			}
-
-			if frame.constants[slot] {
+			if frame.locals[slot].Constant {
 				vm.fatalError(ErrorConst, "cannot assign to constant local")
 			}
 
-			hint := frame.localTypes[slot]
+			hint := frame.locals[slot].TypeHint
 
 			if !hint.IsEmpty() {
 				if ok, reason := vm.checkTypeHint(value, hint); !ok {
@@ -4668,7 +4619,7 @@ func (vm *VM) execute(targetDepth int) bool {
 			if info.LocalSlot < 0 || info.LocalSlot >= len(frame.locals) {
 				vm.fatalError(ErrorInternal, "local slot out of range in OP_ADD_LOCAL_ARRAY_INDEX_STORE")
 			}
-			if frame.constants[info.LocalSlot] {
+			if frame.locals[info.LocalSlot].Constant {
 				vm.fatalError(ErrorConst, "cannot assign to constant local")
 			}
 			targetCell := frame.locals[info.LocalSlot]
@@ -5367,7 +5318,7 @@ func (vm *VM) execute(targetDepth int) bool {
 			if info.LocalSlot < 0 || info.LocalSlot >= len(frame.locals) {
 				vm.fatalError(ErrorInternal, "local slot out of range in OP_ADD_LOCAL_PROPERTIES_STORE")
 			}
-			if frame.constants[info.LocalSlot] {
+			if frame.locals[info.LocalSlot].Constant {
 				vm.fatalError(ErrorConst, "cannot assign to constant local")
 			}
 			cell := frame.locals[info.LocalSlot]
@@ -5885,6 +5836,10 @@ func (vm *VM) callMethodResolved(method string, objectValue TinyValue, args []Ti
 		vm.callFileMethod(val, method, args)
 		return
 
+	case *NativeTimerValue:
+		vm.callNativeTimerMethod(val, method, args)
+		return
+
 	case *ArrayValue:
 		vm.callArrayMethod(val, method, args)
 		return
@@ -5996,7 +5951,7 @@ func (vm *VM) callMethodResolved(method string, objectValue TinyValue, args []Ti
 	frame.methodClass = ownerClass
 
 	setCellValue(frame.locals[0], NewNative(receiver))
-	frame.constants[0] = true
+	frame.locals[0].Constant = true
 
 	if isVariadic {
 		fixedCount := userParamCount - 1
@@ -6021,8 +5976,8 @@ func (vm *VM) callMethodResolved(method string, objectValue TinyValue, args []Ti
 			}
 
 			setCellValue(frame.locals[paramIndex], arg)
-			frame.constants[paramIndex] = false
-			frame.localTypes[paramIndex] = eraseGenericTypeHintForRuntime(param.TypeHint, vm.genericTypeParamsForFunction(fn))
+			frame.locals[paramIndex].Constant = false
+			frame.locals[paramIndex].TypeHint = eraseGenericTypeHintForRuntime(param.TypeHint, vm.genericTypeParamsForFunction(fn))
 		}
 
 		restSlot := paramOffset + fixedCount
@@ -6053,8 +6008,8 @@ func (vm *VM) callMethodResolved(method string, objectValue TinyValue, args []Ti
 		}
 
 		setCellValue(frame.locals[restSlot], NewNative(rest))
-		frame.constants[restSlot] = false
-		frame.localTypes[restSlot] = TypeHint{
+		frame.locals[restSlot].Constant = false
+		frame.locals[restSlot].TypeHint = TypeHint{
 			Name: "array",
 		}
 	} else {
@@ -6077,8 +6032,8 @@ func (vm *VM) callMethodResolved(method string, objectValue TinyValue, args []Ti
 			}
 
 			setCellValue(frame.locals[paramIndex], arg)
-			frame.constants[paramIndex] = false
-			frame.localTypes[paramIndex] = eraseGenericTypeHintForRuntime(param.TypeHint, vm.genericTypeParamsForFunction(fn))
+			frame.locals[paramIndex].Constant = false
+			frame.locals[paramIndex].TypeHint = eraseGenericTypeHintForRuntime(param.TypeHint, vm.genericTypeParamsForFunction(fn))
 		}
 	}
 
@@ -6184,8 +6139,8 @@ func (vm *VM) callFunction(name string, argCount int) {
 		}
 
 		setCellValue(frame.locals[i], arg)
-		frame.constants[i] = false
-		frame.localTypes[i] = eraseGenericTypeHintForRuntime(param.TypeHint, vm.genericTypeParamsForFunction(fn))
+		frame.locals[i].Constant = false
+		frame.locals[i].TypeHint = eraseGenericTypeHintForRuntime(param.TypeHint, vm.genericTypeParamsForFunction(fn))
 	}
 
 	vm.pushFrame(frame)

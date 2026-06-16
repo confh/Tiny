@@ -15,7 +15,6 @@ func init() {
 		"writeString": stringBuilderWriteString,
 		"stringify":   stringBuilderString,
 	}
-	registerNativeType(stringBuilderNativeMetadata)
 }
 
 func (vm *VM) callStringBuilderMethod(sb *NativeStringBuilderValue, method string, args []TinyValue) {

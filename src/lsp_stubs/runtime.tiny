@@ -1,3 +1,10 @@
+export interface MemoryStats {
+    alloc: number,
+    totalAlloc: number,
+    sys: number,
+    numGC: number
+}
+
 // Locks the current OS thread to the active goroutine/execution state.
 export fn lockThread(): null {}
 
@@ -11,7 +18,7 @@ export fn onFatal(callback: function): null {}
 export fn clearFatalHandler(): null {}
 
 // Returns an object containing memory allocation statistics.
-export fn memoryStats(): object {}
+export fn memoryStats(): MemoryStats {}
 
 // Triggers a garbage collection run to reclaim unused memory.
 export fn gc(): null {}

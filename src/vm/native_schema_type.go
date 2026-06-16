@@ -42,8 +42,6 @@ func init() {
 		"refine":    schemaTypeRefine,
 		"transform": schemaTypeTransform,
 	}
-
-	registerNativeType(schemaNativeMetadata)
 }
 
 type validateResult struct {

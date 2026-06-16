@@ -1,6 +1,6 @@
 {
   "name": "tiny",
-  "version": "0.2.4",
+  "version": "0.2.6",
   "entry": "examples/01-basics/src/main.tiny",
   "outDir": "",
   "target": "",

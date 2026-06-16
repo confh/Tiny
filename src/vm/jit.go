@@ -82,10 +82,10 @@ func printJitCallDebugSummary() {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	// fmt.Fprintln(os.Stderr, "[JIT CALL SUMMARY] host-side VM -> JIT calls")
+	//fmt.Fprintln(os.Stderr, "[JIT CALL SUMMARY] host-side VM -> JIT calls")
 	for _, name := range names {
 		_ = jitDebugCallStats[name]
-		// fmt.Fprintf(os.Stderr, "[JIT CALL SUMMARY] %s calls=%d ok=%d errors=%d\n", name, stat.Calls, stat.OK, stat.Errors)
+		//fmt.Fprintf(os.Stderr, "[JIT CALL SUMMARY] %s calls=%d ok=%d errors=%d\n", name, stat.Calls, stat.OK, stat.Errors)
 	}
 }
 
@@ -607,112 +607,6 @@ func (jf *JitFunction) validateArgsForJit(args []TinyValue) error {
 	}
 
 	return nil
-}
-
-func jitMemoArgKey(args []TinyValue) (string, bool) {
-	var b strings.Builder
-	b.Grow(len(args) * 24)
-	b.WriteString(strconv.Itoa(len(args)))
-	for _, arg := range args {
-		b.WriteByte('|')
-		if arg.IsInt {
-			b.WriteString("i:")
-			b.WriteString(strconv.Itoa(arg.AsInt))
-			continue
-		}
-		switch v := arg.Value.(type) {
-		case nil, NullValue, *NullValue:
-			b.WriteString("n")
-		case bool:
-			if v {
-				b.WriteString("b:1")
-			} else {
-				b.WriteString("b:0")
-			}
-		case float64:
-			b.WriteString("f:")
-			b.WriteString(strconv.FormatUint(math.Float64bits(v), 16))
-		case float32:
-			b.WriteString("f:")
-			b.WriteString(strconv.FormatUint(math.Float64bits(float64(v)), 16))
-		case int:
-			b.WriteString("i:")
-			b.WriteString(strconv.Itoa(v))
-		case int64:
-			b.WriteString("i64:")
-			b.WriteString(strconv.FormatInt(v, 10))
-		case string:
-			b.WriteString("s:")
-			b.WriteString(strconv.Itoa(len(v)))
-			b.WriteByte(':')
-			b.WriteString(v)
-		case *ArrayValue:
-			if v == nil {
-				return "", false
-			}
-			b.WriteString("arrp:")
-			b.WriteString(strconv.FormatUint(uint64(reflect.ValueOf(v).Pointer()), 16))
-			b.WriteByte(':')
-			b.WriteString(strconv.Itoa(len(v.Elements)))
-		case ArrayValue:
-			// A non-pointer ArrayValue is a copy, so identity caching is not safe.
-			return "", false
-		case ObjectValue:
-			if v == nil {
-				return "", false
-			}
-			b.WriteString("obj:")
-			b.WriteString(strconv.FormatUint(uint64(jitObjectIdentity(v)), 16))
-			b.WriteByte(':')
-			b.WriteString(strconv.Itoa(len(v)))
-		case *ObjectValue:
-			if v == nil || *v == nil {
-				return "", false
-			}
-			b.WriteString("objp:")
-			b.WriteString(strconv.FormatUint(uint64(jitObjectIdentity(*v)), 16))
-			b.WriteByte(':')
-			b.WriteString(strconv.Itoa(len(*v)))
-		case WasmArrayValue:
-			b.WriteString("wasmarr:")
-			b.WriteString(strconv.FormatUint(math.Float64bits(v.Address), 16))
-		case WasmObjectValue:
-			b.WriteString("wasmobj:")
-			b.WriteString(strconv.FormatUint(math.Float64bits(v.Address), 16))
-		default:
-			return "", false
-		}
-	}
-	return b.String(), true
-}
-
-func cloneJitMemoValue(vm *VM, value TinyValue) TinyValue {
-	if value.IsInt {
-		return value
-	}
-	switch v := value.Value.(type) {
-	case WasmObjectValue:
-		if vm != nil {
-			if obj, ok := vm.wasmObjectToObjectValue(v); ok {
-				return cloneValue(NewNative(obj))
-			}
-		}
-	case *ObjectValue:
-		if v != nil {
-			return cloneValue(NewNative(*v))
-		}
-	case ObjectValue:
-		return cloneValue(NewNative(v))
-	case WasmArrayValue:
-		if vm != nil {
-			if arr, ok := vm.wasmArrayToArrayValue(v); ok {
-				return cloneValue(NewNative(arr))
-			}
-		}
-	case *ArrayValue, ArrayValue:
-		return cloneValue(value)
-	}
-	return value
 }
 
 func (jf *JitFunction) memoLookup(args []TinyValue) (TinyValue, string, bool) {
@@ -1858,10 +1752,24 @@ func inferParamTypes(vm *VM, fn Function, currentReturnTypes []stackType, curren
 
 				if t1 == stackTypeString || t2 == stackTypeString {
 					typeStack[sp-2] = stackTypeString
-				} else if t1 == stackTypeNumber && t2 == stackTypeNumber {
-					typeStack[sp-2] = stackTypeNumber
 				} else {
-					typeStack[sp-2] = stackTypeUnknown
+					if t1 >= 10 {
+						paramIdx := int(t1 - 10)
+						if paramIdx < len(paramTypes) {
+							paramTypes[paramIdx] = stackTypeNumber
+						}
+					}
+					if t2 >= 10 {
+						paramIdx := int(t2 - 10)
+						if paramIdx < len(paramTypes) {
+							paramTypes[paramIdx] = stackTypeNumber
+						}
+					}
+					if t1 == stackTypeNumber || t2 == stackTypeNumber {
+						typeStack[sp-2] = stackTypeNumber
+					} else {
+						typeStack[sp-2] = stackTypeUnknown
+					}
 				}
 			}
 		case OP_EQ, OP_NEQ:
@@ -2250,11 +2158,15 @@ func inferReturnType(vm *VM, fn Function, currentReturnTypes []stackType) stackT
 					typeStack[sp] = stackTypeNumber
 				}
 			}
-		case OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD:
+		case OP_SUB, OP_MUL, OP_DIV, OP_MOD:
 			if sp >= 2 {
-				if instr.Op == OP_ADD && (isJitStringType(typeStack[sp-1]) || isJitStringType(typeStack[sp-2])) {
+				typeStack[sp-2] = stackTypeNumber
+			}
+		case OP_ADD:
+			if sp >= 2 {
+				if isJitStringType(typeStack[sp-1]) || isJitStringType(typeStack[sp-2]) {
 					typeStack[sp-2] = stackTypeString
-				} else if typeStack[sp-1] == stackTypeNumber && typeStack[sp-2] == stackTypeNumber {
+				} else if typeStack[sp-1] == stackTypeNumber || typeStack[sp-2] == stackTypeNumber {
 					typeStack[sp-2] = stackTypeNumber
 				} else {
 					typeStack[sp-2] = stackTypeUnknown
@@ -2719,11 +2631,16 @@ func inferReturnPropertyTypes(vm *VM, fn Function, currentReturnTypes []stackTyp
 				localTypes[slot] = typeStack[sp-1]
 				localPropertyTypes[slot] = stackPropertyTypes[sp-1]
 			}
-		case OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD:
+		case OP_SUB, OP_MUL, OP_DIV, OP_MOD:
 			if sp >= 2 {
-				if instr.Op == OP_ADD && (isJitStringType(typeStack[sp-1]) || isJitStringType(typeStack[sp-2])) {
+				typeStack[sp-2] = stackTypeNumber
+				stackPropertyTypes[sp-2] = nil
+			}
+		case OP_ADD:
+			if sp >= 2 {
+				if isJitStringType(typeStack[sp-1]) || isJitStringType(typeStack[sp-2]) {
 					typeStack[sp-2] = stackTypeString
-				} else if typeStack[sp-1] == stackTypeNumber && typeStack[sp-2] == stackTypeNumber {
+				} else if typeStack[sp-1] == stackTypeNumber || typeStack[sp-2] == stackTypeNumber {
 					typeStack[sp-2] = stackTypeNumber
 				} else {
 					typeStack[sp-2] = stackTypeUnknown
@@ -3598,16 +3515,8 @@ func isFunctionJitSafe(vm *VM, fn Function) bool {
 			OP_ARRAY_LEN_LOCAL, OP_ARRAY_GET_LOCAL, OP_ARRAY_PUSH_LOCAL, OP_MATH_CEIL, OP_MATH_FLOOR,
 			OP_MATH_SQRT, OP_MATH_ABS, OP_MATH_POW, OP_PRINT,
 			OP_COALESCE_JUMP, OP_TYPEOF, OP_THROW,
-			OP_LOAD_GLOBAL: // Safe
+			OP_STRING_JOIN, OP_LOAD_GLOBAL: // Safe
 
-		case OP_STRING_JOIN:
-			// Correctness guard:
-			// The current string JIT path can still turn loop-carried strings into
-			// numeric length accumulators in some bytecode shapes, producing fake-fast
-			// wrong results such as string_build == 0. Until string liveness/codegen is
-			// fully audited, never JIT string joins. The interpreter path is correct.
-			// fmt.Fprintf(os.Stderr, "[JIT DEBUG] function %s is not JIT-safe: OP_STRING_JOIN disabled for correctness; interpreter string path is used\n", fn.Name)
-			return false
 		case OP_METHOD_CALL:
 			// All method calls are permitted up to 3 args: push/get/length are compiled inline;
 			// any other method dispatches through call_stdlib_wasm at runtime.
@@ -3769,11 +3678,15 @@ func checkCallArgumentsSafe(vm *VM, fn Function, currentReturnTypes []stackType,
 					typeStack[sp] = stackTypeNumber
 				}
 			}
-		case OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD:
+		case OP_SUB, OP_MUL, OP_DIV, OP_MOD:
 			if sp >= 2 {
-				if instr.Op == OP_ADD && (isJitStringType(typeStack[sp-1]) || isJitStringType(typeStack[sp-2])) {
+				typeStack[sp-2] = stackTypeNumber
+			}
+		case OP_ADD:
+			if sp >= 2 {
+				if isJitStringType(typeStack[sp-1]) || isJitStringType(typeStack[sp-2]) {
 					typeStack[sp-2] = stackTypeString
-				} else if typeStack[sp-1] == stackTypeNumber && typeStack[sp-2] == stackTypeNumber {
+				} else if typeStack[sp-1] == stackTypeNumber || typeStack[sp-2] == stackTypeNumber {
 					typeStack[sp-2] = stackTypeNumber
 				} else {
 					typeStack[sp-2] = stackTypeUnknown
@@ -7689,21 +7602,13 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool, currentReturnTypes
 				objectSize = maxOffset + 16
 			}
 
-			// INLINED NATIVE ALLOCATOR (BUMP POINTER)
-			// 1. Get current heap top
-			body.WriteByte(0x23) // global.get
-			body.WriteVarUint(0) // global 0
-			body.WriteByte(0x21) // local.set tempPtrSlot
-			body.WriteVarUint(uint32(tempPtrSlot))
-
-			// 2. Increment heap top
-			body.WriteByte(0x23) // global.get
-			body.WriteVarUint(0)
+			// CALL alloc_object(size) -> addr (handles memory growth)
 			body.WriteByte(0x44) // f64.const
 			body.WriteFloat64(float64(objectSize))
-			body.WriteByte(0xA0) // f64.add
-			body.WriteByte(0x24) // global.set
-			body.WriteVarUint(0)
+			body.WriteByte(0x10) // call
+			body.WriteVarUint(jitImportAllocObject)
+			body.WriteByte(0x21) // local.set tempPtrSlot
+			body.WriteVarUint(uint32(tempPtrSlot))
 
 			// The address is now stored in tempPtrSlot
 			body.WriteByte(0x20) // local.get tempPtrSlot
@@ -8584,6 +8489,130 @@ func (vm *VM) planPackedObjectArray(arr *ArrayValue) (jitPackedObjectArrayPlan, 
 	return jitPackedObjectArrayPlan{Fields: fields, TableSlots: maxTableIndex + 1}, true
 }
 
+func (vm *VM) packWasmObjectArray(mod api.Module, arrayAddr uint32) bool {
+	if vm == nil || mod == nil {
+		return false
+	}
+
+	markerBytes, ok := mod.Memory().Read(arrayAddr+jitArrayPackedMarkerOffset, 8)
+	if ok && math.Float64frombits(binary.LittleEndian.Uint64(markerBytes)) == jitPackedObjectArrayMarker {
+		return true
+	}
+
+	lenBytes, ok := mod.Memory().Read(arrayAddr+8, 8)
+	if !ok {
+		return false
+	}
+	length := uint32(math.Float64frombits(binary.LittleEndian.Uint64(lenBytes)))
+	if length == 0 {
+		return false
+	}
+
+	elemPtrBytes, ok := mod.Memory().Read(arrayAddr+16, 8)
+	if !ok {
+		return false
+	}
+	elemPtr := uint32(math.Float64frombits(binary.LittleEndian.Uint64(elemPtrBytes)))
+	if elemPtr == 0 {
+		return false
+	}
+
+	firstTagBytes, ok := mod.Memory().Read(elemPtr, 8)
+	if !ok || math.Float64frombits(binary.LittleEndian.Uint64(firstTagBytes)) != 4.0 {
+		return false
+	}
+	firstValBytes, ok := mod.Memory().Read(elemPtr+8, 8)
+	if !ok {
+		return false
+	}
+	firstAddr := uint32(math.Float64frombits(binary.LittleEndian.Uint64(firstValBytes)))
+	shapeIDBytes, ok := mod.Memory().Read(firstAddr+8, 8)
+	if !ok {
+		return false
+	}
+	shapeID := int(math.Float64frombits(binary.LittleEndian.Uint64(shapeIDBytes)))
+	if shapeID < 0 || shapeID >= len(vm.objectShapes) {
+		return false
+	}
+
+	names := vm.objectShapes[shapeID]
+	if len(names) == 0 {
+		return false
+	}
+
+	fields := make([]jitPackedObjectArrayField, 0, len(names))
+	var maxTableIndex uint32
+	for _, name := range names {
+		if name == "__class" {
+			return false
+		}
+		offset := vm.getPropertyOffset(name)
+		if offset < 16 {
+			continue
+		}
+		tableIndex := (offset - 16) / 16
+		if tableIndex > maxTableIndex {
+			maxTableIndex = tableIndex
+		}
+		fields = append(fields, jitPackedObjectArrayField{Name: name, Offset: offset, TableIndex: tableIndex})
+	}
+	if len(fields) == 0 {
+		return false
+	}
+
+	capacityBytes, ok := mod.Memory().Read(arrayAddr+24, 8)
+	if !ok {
+		return false
+	}
+	capacity := uint32(math.Float64frombits(binary.LittleEndian.Uint64(capacityBytes)))
+	if capacity < length {
+		capacity = length
+	}
+
+	tableSlots := maxTableIndex + 1
+	tablePtr := vm.allocateJitMemory(mod, tableSlots*8)
+	if tableSlots > 0 {
+		zero := make([]byte, tableSlots*8)
+		mod.Memory().Write(tablePtr, zero)
+	}
+
+	buf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(buf, math.Float64bits(jitPackedObjectArrayMarker))
+	mod.Memory().Write(arrayAddr+jitArrayPackedMarkerOffset, buf)
+	binary.LittleEndian.PutUint64(buf, math.Float64bits(float64(tablePtr)))
+	mod.Memory().Write(arrayAddr+jitArrayPackedTableOffset, buf)
+	binary.LittleEndian.PutUint64(buf, math.Float64bits(float64(tableSlots)))
+	mod.Memory().Write(arrayAddr+jitArrayPackedSlotsOffset, buf)
+
+	for _, field := range fields {
+		colPtr := vm.allocateJitMemory(mod, capacity*16)
+		binary.LittleEndian.PutUint64(buf, math.Float64bits(float64(colPtr)))
+		mod.Memory().Write(tablePtr+field.TableIndex*8, buf)
+
+		for i := uint32(0); i < length; i++ {
+			rowAddr := elemPtr + i*16
+			tagBytes, okTag := mod.Memory().Read(rowAddr, 8)
+			valBytes, okVal := mod.Memory().Read(rowAddr+8, 8)
+			if !okTag || !okVal {
+				continue
+			}
+			if math.Float64frombits(binary.LittleEndian.Uint64(tagBytes)) != 4.0 {
+				continue
+			}
+			objAddr := uint32(math.Float64frombits(binary.LittleEndian.Uint64(valBytes)))
+			propTagBytes, okPropTag := mod.Memory().Read(objAddr+field.Offset, 8)
+			propValBytes, okPropVal := mod.Memory().Read(objAddr+field.Offset+8, 8)
+			if !okPropTag || !okPropVal {
+				continue
+			}
+			mod.Memory().Write(colPtr+i*16, propTagBytes)
+			mod.Memory().Write(colPtr+i*16+8, propValBytes)
+		}
+	}
+
+	return true
+}
+
 func jitTinyObjectValue(v TinyValue) (ObjectValue, bool) {
 	if v.IsInt || v.Value == nil {
 		return nil, false
@@ -8914,8 +8943,8 @@ func (vm *VM) setupJitRuntimeAndEnv(jitStringConstCache map[uint32]uint32) bool 
 
 			if newLength > capacity {
 				newCapacity := capacity * 2
-				if newCapacity < 4 {
-					newCapacity = 4
+				if newCapacity < 4096 {
+					newCapacity = 4096
 				}
 				newSize := uint32(newCapacity * 16)
 
@@ -9418,7 +9447,6 @@ func (vm *VM) setupJitRuntimeAndEnv(jitStringConstCache map[uint32]uint32) bool 
 		}), f64s(9), f64s(2)).Export("call_stdlib_wasm").
 			Instantiate(vm.wazeroCtx)
 		if err != nil {
-			// fmt.Fprintf(os.Stderr, "[JIT ERROR] Failed to instantiate env module: %s\n", err.Error())
 			return false
 		}
 	}
@@ -9455,7 +9483,6 @@ func (vm *VM) InstantiateJitModule() {
 
 	compiled, err := vm.wazeroRuntime.InstantiateWithConfig(vm.wazeroCtx, vm.jitWasmBytes, config)
 	if err != nil {
-		// fmt.Fprintf(os.Stderr, "[JIT ERROR] Multi-function JIT instantiation failed: %s\n", err.Error())
 		return
 	}
 	vm.jitModule = compiled
@@ -9525,6 +9552,15 @@ func f64s(n int) []api.ValueType {
 		res[i] = api.ValueTypeF64
 	}
 	return res
+}
+
+func jitMinMemoryPages(nextAddr uint32) uint32 {
+	const defaultJitMemoryPages = 64
+	pagesNeeded := (nextAddr + 65535) / 65536
+	if pagesNeeded < defaultJitMemoryPages {
+		return defaultJitMemoryPages
+	}
+	return pagesNeeded
 }
 
 func isJitFunctionMemoizable(fn Function, paramMutated []bool) bool {
@@ -9747,7 +9783,7 @@ func (vm *VM) CompileAllJit() {
 			}
 			if !checkCallArgumentsSafe(vm, fn, inferredReturnTypes, inferredParamTypes) {
 				if jitCallDebugEnabled() {
-					// fmt.Fprintf(os.Stderr, "[JIT PLAN reject] fn=%s id=%d reason=call-argument-types\n", fn.Name, fn.ID)
+					//fmt.Fprintf(os.Stderr, "[JIT PLAN reject] fn=%s id=%d reason=call-argument-types\n", fn.Name, fn.ID)
 				}
 				isSafe[i] = false
 				changed = true
@@ -10069,9 +10105,9 @@ func (vm *VM) CompileAllJit() {
 	module.WriteVarUint(uint32(len(funcSec.buf)))
 	module.WriteBytes(funcSec.buf)
 	memSec := &WasmBuffer{}
-	memSec.WriteVarUint(1)    // 1 memory definition
-	memSec.WriteByte(0x00)    // limits: minimum only
-	memSec.WriteVarUint(2000) // 2000 pages (~128MB) minimum for high-perf benchmarks
+	memSec.WriteVarUint(1) // 1 memory definition
+	memSec.WriteByte(0x00) // limits: minimum only
+	memSec.WriteVarUint(jitMinMemoryPages(nextAddr))
 
 	module.WriteByte(5)
 	module.WriteVarUint(uint32(len(memSec.buf)))
@@ -10161,7 +10197,7 @@ func (vm *VM) CompileAllJit() {
 		paramTypes := inferredParamTypes[i]
 		paramMutated := inferJitMutatedParams(fn)
 		if jitCallDebugEnabled() {
-			// fmt.Fprintf(os.Stderr, "[JIT PLAN compiled] fn=%s id=%d params=%v ret=%s/%s instrs=%d\n", fn.Name, fn.ID, paramTypes, jitStackTypeName(retType), fn.ReturnType.Name, len(fn.Instructions))
+			//fmt.Fprintf(os.Stderr, "[JIT PLAN compiled] fn=%s id=%d params=%v ret=%s/%s instrs=%d\n", fn.Name, fn.ID, paramTypes, jitStackTypeName(retType), fn.ReturnType.Name, len(fn.Instructions))
 		}
 
 		metas = append(metas, JitFunctionMeta{

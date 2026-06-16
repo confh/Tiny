@@ -77,6 +77,10 @@ func formatTinyDocument(text string) string {
 		}
 	}
 
+	formatted = cuddleElseBraces(formatted)
+	formatted = collapseBlankLines(formatted)
+	formatted = collapseMultilineCallAndArrayLiterals(formatted)
+
 	result := strings.Join(formatted, "\n")
 
 	if strings.HasSuffix(text, "\n") && !strings.HasSuffix(result, "\n") {
@@ -923,4 +927,190 @@ func collapseSpacesOutsideStrings(code string) string {
 	}
 
 	return out.String()
+}
+
+func collapseBlankLines(lines []string) []string {
+	if len(lines) == 0 {
+		return lines
+	}
+
+	result := []string{}
+	lastWasBlank := false
+
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			if lastWasBlank {
+				continue
+			}
+			lastWasBlank = true
+			result = append(result, line)
+			continue
+		}
+		lastWasBlank = false
+		result = append(result, line)
+	}
+
+	return result
+}
+
+func cuddleElseBraces(lines []string) []string {
+	if len(lines) == 0 {
+		return lines
+	}
+
+	result := []string{}
+	i := 0
+
+	for i < len(lines) {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+
+		if trimmed == "}" {
+			j := i + 1
+			for j < len(lines) && strings.TrimSpace(lines[j]) == "" {
+				j++
+			}
+
+			if j < len(lines) {
+				nextTrimmed := strings.TrimSpace(lines[j])
+				if strings.HasPrefix(nextTrimmed, "else") ||
+					strings.HasPrefix(nextTrimmed, "catch") ||
+					strings.HasPrefix(nextTrimmed, "finally") {
+					indent := line[:len(line)-len(trimmed)]
+					result = append(result, indent+"} "+nextTrimmed)
+					i = j + 1
+					continue
+				}
+			}
+		}
+
+		result = append(result, line)
+		i++
+	}
+
+	return result
+}
+
+const maxCollapseLineLen = 100
+
+func collapseMultilineCallAndArrayLiterals(lines []string) []string {
+	result := []string{}
+	i := 0
+
+	for i < len(lines) {
+		trimmed := strings.TrimSpace(lines[i])
+
+		if len(trimmed) == 0 {
+			result = append(result, lines[i])
+			i++
+			continue
+		}
+
+		lastChar := trimmed[len(trimmed)-1]
+
+		if lastChar == '(' || lastChar == '[' {
+			openChar := lastChar
+			closeChar := byte(')')
+			if openChar == '[' {
+				closeChar = ']'
+			}
+
+			indent := lines[i][:len(lines[i])-len(trimmed)]
+			prefix := trimmed[:len(trimmed)-1]
+
+			inner, closingLine, suffix, ok := collectToClosingBrace(lines, i+1, openChar, closeChar)
+			if ok {
+				candidate := buildCollapsedLine(prefix, openChar, inner, closeChar, suffix)
+				if len(indent)+len(candidate) <= maxCollapseLineLen && inner != "" {
+					result = append(result, indent+candidate)
+					i = closingLine + 1
+					continue
+				}
+			}
+		}
+
+		result = append(result, lines[i])
+		i++
+	}
+
+	return result
+}
+
+func buildCollapsedLine(prefix string, openChar byte, inner string, closeChar byte, suffix string) string {
+	between := ""
+	if len(prefix) > 0 {
+		last := prefix[len(prefix)-1]
+		if openChar == '[' && (last == '=' || last == ',' || last == ':' || last == ' ') {
+			between = " "
+		}
+	}
+
+	afterClose := ""
+	if suffix != "" {
+		afterClose = " " + suffix
+	}
+
+	return prefix + between + string(openChar) + inner + string(closeChar) + afterClose
+}
+
+func collectToClosingBrace(lines []string, start int, openChar, closeChar byte) (string, int, string, bool) {
+	inner := ""
+	depth := 1
+	j := start
+	inString := false
+	strCh := byte(0)
+	escaped := false
+
+	for j < len(lines) && depth > 0 {
+		code := stripLineCommentAware(lines[j])
+
+		for k := 0; k < len(code); k++ {
+			ch := code[k]
+
+			if inString {
+				if escaped {
+					escaped = false
+					continue
+				}
+				if ch == '\\' {
+					escaped = true
+					continue
+				}
+				if ch == strCh {
+					inString = false
+				}
+				continue
+			}
+
+			if ch == '"' || ch == '\'' || ch == '`' {
+				inString = true
+				strCh = ch
+				continue
+			}
+
+			if ch == openChar {
+				depth++
+			} else if ch == closeChar {
+				depth--
+				if depth == 0 {
+					suffix := strings.TrimSpace(code[k+1:])
+					return inner, j, suffix, true
+				}
+			}
+		}
+
+		if depth > 0 {
+			trimmed := strings.TrimSpace(code)
+			if trimmed != "" {
+				if inner != "" {
+					inner += " " + trimmed
+				} else {
+					inner = trimmed
+				}
+			}
+		}
+		j++
+	}
+
+	return "", 0, "", false
 }

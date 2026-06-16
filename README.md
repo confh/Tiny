@@ -92,6 +92,29 @@ printTask({ title: "Write Compiler Tests", done: true });
 printTask({ title: "Optimize VM Dispatcher", done: false, priority: 1 });
 ```
 
+### Destructuring Assignment
+
+Tiny supports object and array destructuring for both `let` and `const` declarations. This includes support for nested patterns, default values, and property renaming.
+
+```ts
+import std "io";
+
+const user = {
+    name: "Alice",
+    age: 30,
+    address: { city: "NYC", zip: "10001" }
+};
+
+// Object destructuring with renaming and nesting
+let { name, address: { city } } = user;
+io.println(`${name} lives in ${city}`);
+
+// Array destructuring
+let coordinates = [10.5, 20.8, 30.0];
+let [x, y] = coordinates;
+io.println(`X: ${x}, Y: ${y}`);
+```
+
 ### Class Composition and Embedding
 
 Tiny emphasizes composition over deep inheritance. The `embed` keyword allows a class to delegate behavior to another class instance. If a method or field is missing on the parent, it is automatically resolved from the embedded instance.
@@ -139,30 +162,34 @@ io.println(json.pretty(session.dump()));
 
 ### Pattern Matching
 
-The `match` block provides branch dispatching with support for literal values, variables, enums, and a default fallback case (`_`).
+The `match` block provides branch dispatching with support for literal values, variables, enums, union patterns, and guards. It is the primary way to extract data from enum variants.
 
 ```ts
 import std "io";
 
-enum Status {
-    Idle,
-    Running,
-    Failed
+enum Result {
+    Ok(value: any),
+    Error(message: string)
 }
 
-let current = Status.Running;
-
-match current {
-    "Idle" {
-        io.println("System is idling");
-    }
-    "Running" {
-        io.println("System is actively running");
-    }
-    _ {
-        io.println("System encountered an error or unknown state");
+fn process(res: Result) {
+    match res {
+        Result.Ok(val) if val > 0 {
+            io.println(`Success: ${val}`);
+        }
+        Result.Ok(val) {
+            io.println("Success with zero or negative value");
+        }
+        Result.Error(msg) {
+            io.println(`Error: ${msg}`);
+        }
+        _ {
+            io.println("Unknown state");
+        }
     }
 }
+
+process(Result.Ok(42));
 ```
 
 ### Scoped Cleanups with Defer
@@ -238,14 +265,14 @@ Tiny includes a multi-function JIT compilation engine that translates hot byteco
 The compiler automatically identifies hot loops in top-level code and function bodies, outlining them into specialized JIT regions. This ensures that even scripts and timed benchmarks run at native speed without manual function encapsulation.
 
 ### Packed Object Arrays
-For arrays containing objects of uniform shape, the JIT implements host-memory mirroring. It utilizes field-column pointer tables to access object properties directly in linear memory, bypassing the host-call overhead typically associated with VM-to-Native interop.
+For arrays containing objects of uniform shape, the JIT implements host-memory mirroring. It utilizes field-column pointer tables to access object properties directly in linear memory, bypassing the host-call overhead typically associated with VM-to-Native interop. **Packed arrays now support dynamic growth and Wasm-side optimization.**
 
 ### JIT-Safe Best Practices
 The JIT automatically selects eligible functions. For maximum performance:
 - **Avoid Closures with Captures**: Functions that close over mutable outer variables are executed by the interpreter.
 - **Stay Synchronous**: `async` functions are not currently eligible for JIT compilation.
-- **Type Hints**: Provide explicit hints (e.g., `: number`) to help the JIT generate specialized machine code and avoid deoptimizations.
-- **Fixed Arity**: Avoid variadic parameters (`...args`). Note that **default parameters are supported** and optimized in JIT code.
+- **Type Hints**: Provide explicit hints (e.g., `: number`) to help the JIT generate specialized machine code.
+- **Efficient Strings**: **String join operations are now JIT-accelerated.** For large builds, prefer `stringBuilder` from the standard library.
 
 ```ts
 // Highly JIT-optimized: typed, synchronous, no captures, uses loops
@@ -309,6 +336,27 @@ if result.success {
 
 ### `url` (URL Encoding & Decoding)
 Encode & Decode URL
+
+### `time` (Timers and Measurement)
+Support for execution delays, performance measurement, and managed timers.
+
+```ts
+import std "io";
+import std "time";
+
+// Managed interval timer
+let timer = time.interval(1000, fn() {
+    io.println("Tick");
+});
+
+time.sleep(5000);
+timer.cancel();
+```
+
+---
+
+### `array` (Native Operations)
+Native operations for array manipulation, including `find`, `filter`, `map`, `reduce`, `sort`, `flat`, and `findIndex`.
 
 ---
 

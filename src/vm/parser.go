@@ -233,26 +233,54 @@ func (p *Parser) parseTypeName() string {
 	name := p.current.Literal
 	p.advance()
 
-	for p.current.Type == TOKEN_DOT {
+	if name == "function" && p.current.Type == TOKEN_LPAREN {
 		p.advance()
 
-		if !p.isValidType(p.current.Type) {
-			LangErrorAt(
-				ErrorSyntax,
-				p.current.File,
-				p.current.Line,
-				p.current.Column,
-				"expected type name after .",
-			)
+		params := []string{}
+		for p.current.Type != TOKEN_RPAREN {
+			paramType := p.parseTypeName()
+			for p.current.Type == TOKEN_PIPE {
+				p.advance()
+				paramType += " | " + p.parseTypeName()
+			}
+			params = append(params, paramType)
+
+			if p.current.Type != TOKEN_COMMA {
+				break
+			}
+
+			p.advance()
 		}
 
-		name += "." + p.current.Literal
-		p.advance()
+		p.expect(TOKEN_RPAREN)
+		name = "function(" + strings.Join(params, ", ") + ")"
+	} else {
+		for p.current.Type == TOKEN_DOT {
+			p.advance()
+
+			if !p.isValidType(p.current.Type) {
+				LangErrorAt(
+					ErrorSyntax,
+					p.current.File,
+					p.current.Line,
+					p.current.Column,
+					"expected type name after .",
+				)
+			}
+
+			name += "." + p.current.Literal
+			p.advance()
+		}
+
+		for p.current.Type == TOKEN_COLON {
+			p.advance()
+			name += ":" + p.parseTypeName()
+		}
 	}
 
-	for p.current.Type == TOKEN_COLON {
+	if p.current.Type == TOKEN_QUESTION {
 		p.advance()
-		name += ":" + p.parseTypeName()
+		name += " | null"
 	}
 
 	return name
@@ -720,6 +748,231 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 				"invalid /= target",
 			)
 		}
+
+	case TOKEN_AMP_ASSIGN:
+		p.advance()
+
+		value := p.parseExpression()
+
+		p.consumeTerminator()
+
+		switch target := left.(type) {
+		case IdentExpr:
+			return AssignStmt{
+				Name: target.Name,
+				Value: BinaryExpr{
+					Left:  IdentExpr{Name: target.Name},
+					Op:    TOKEN_AMP,
+					Right: value,
+				},
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
+			}
+
+		case PropertyExpr:
+			return PropertyAssignStmt{
+				Object: target.Object,
+				Name:   target.Name,
+				Value: BinaryExpr{
+					Left:  target,
+					Op:    TOKEN_AMP,
+					Right: value,
+				},
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
+			}
+
+		default:
+			LangErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"invalid &= target",
+			)
+		}
+
+	case TOKEN_PIPE_ASSIGN:
+		p.advance()
+
+		value := p.parseExpression()
+
+		p.consumeTerminator()
+
+		switch target := left.(type) {
+		case IdentExpr:
+			return AssignStmt{
+				Name: target.Name,
+				Value: BinaryExpr{
+					Left:  IdentExpr{Name: target.Name},
+					Op:    TOKEN_PIPE,
+					Right: value,
+				},
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
+			}
+
+		case PropertyExpr:
+			return PropertyAssignStmt{
+				Object: target.Object,
+				Name:   target.Name,
+				Value: BinaryExpr{
+					Left:  target,
+					Op:    TOKEN_PIPE,
+					Right: value,
+				},
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
+			}
+
+		default:
+			LangErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"invalid |= target",
+			)
+		}
+
+	case TOKEN_CARET_ASSIGN:
+		p.advance()
+
+		value := p.parseExpression()
+
+		p.consumeTerminator()
+
+		switch target := left.(type) {
+		case IdentExpr:
+			return AssignStmt{
+				Name: target.Name,
+				Value: BinaryExpr{
+					Left:  IdentExpr{Name: target.Name},
+					Op:    TOKEN_CARET,
+					Right: value,
+				},
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
+			}
+
+		case PropertyExpr:
+			return PropertyAssignStmt{
+				Object: target.Object,
+				Name:   target.Name,
+				Value: BinaryExpr{
+					Left:  target,
+					Op:    TOKEN_CARET,
+					Right: value,
+				},
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
+			}
+
+		default:
+			LangErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"invalid ^= target",
+			)
+		}
+
+	case TOKEN_LSHIFT_ASSIGN:
+		p.advance()
+
+		value := p.parseExpression()
+
+		p.consumeTerminator()
+
+		switch target := left.(type) {
+		case IdentExpr:
+			return AssignStmt{
+				Name: target.Name,
+				Value: BinaryExpr{
+					Left:  IdentExpr{Name: target.Name},
+					Op:    TOKEN_LSHIFT,
+					Right: value,
+				},
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
+			}
+
+		case PropertyExpr:
+			return PropertyAssignStmt{
+				Object: target.Object,
+				Name:   target.Name,
+				Value: BinaryExpr{
+					Left:  target,
+					Op:    TOKEN_LSHIFT,
+					Right: value,
+				},
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
+			}
+
+		default:
+			LangErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"invalid <<= target",
+			)
+		}
+
+	case TOKEN_RSHIFT_ASSIGN:
+		p.advance()
+
+		value := p.parseExpression()
+
+		p.consumeTerminator()
+
+		switch target := left.(type) {
+		case IdentExpr:
+			return AssignStmt{
+				Name: target.Name,
+				Value: BinaryExpr{
+					Left:  IdentExpr{Name: target.Name},
+					Op:    TOKEN_RSHIFT,
+					Right: value,
+				},
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
+			}
+
+		case PropertyExpr:
+			return PropertyAssignStmt{
+				Object: target.Object,
+				Name:   target.Name,
+				Value: BinaryExpr{
+					Left:  target,
+					Op:    TOKEN_RSHIFT,
+					Right: value,
+				},
+				Line:   p.current.Line,
+				Column: p.current.Column,
+				File:   p.current.File,
+			}
+
+		default:
+			LangErrorAt(
+				ErrorSyntax,
+				p.current.File,
+				p.current.Line,
+				p.current.Column,
+				"invalid >>= target",
+			)
+		}
 	}
 
 	p.consumeTerminator()
@@ -838,29 +1091,20 @@ func (p *Parser) parseMatchStatement() Stmt {
 			continue
 		}
 
-		caseValue := p.parseExpression()
+		caseValues, guard, bindName := p.parseMatchPattern()
 
 		for p.current.Type == TOKEN_SEMI {
 			p.advance()
 		}
 
-		for _, c := range cases {
-			if c.Value == caseValue {
-				LangErrorAt(
-					ErrorSyntax,
-					p.current.File,
-					p.current.Line,
-					p.current.Column,
-					"duplicate case value in match",
-				)
-			}
-		}
-
 		body := p.parseBlock()
 
 		cases = append(cases, MatchCase{
-			Value: caseValue,
-			Body:  body,
+			Values:   caseValues,
+			Value:    caseValues[0],
+			Guard:    guard,
+			BindName: bindName,
+			Body:     body,
 		})
 	}
 
@@ -874,6 +1118,58 @@ func (p *Parser) parseMatchStatement() Stmt {
 		Line:    line,
 		Column:  column,
 	}
+}
+
+func (p *Parser) parseMatchPattern() ([]Expr, Expr, string) {
+	bindName := ""
+
+	// Check for binding pattern: `name if ...` where name is an identifier
+	// that isn't a keyword or literal expression start
+	if p.current.Type == TOKEN_IDENT {
+		// Peek ahead: if the next token is `if`, this is a binding pattern
+		if p.next.Type == TOKEN_IF {
+			bindName = p.current.Literal
+			p.advance()
+			p.expect(TOKEN_IF)
+			guard := p.parseExpression()
+			return []Expr{nil}, guard, bindName
+		}
+	}
+
+	// Check for parenthesized union pattern: (expr | expr | expr)
+	if p.current.Type == TOKEN_LPAREN {
+		p.advance() // consume '('
+
+		values := []Expr{p.parseExpression()}
+
+		for p.current.Type == TOKEN_PIPE {
+			p.advance() // consume '|'
+			values = append(values, p.parseExpression())
+		}
+
+		p.expect(TOKEN_RPAREN) // expect ')'
+
+		// Check for guard after union: (a | b | c) if guard
+		var guard Expr
+		if p.current.Type == TOKEN_IF {
+			p.advance()
+			guard = p.parseExpression()
+		}
+
+		return values, guard, ""
+	}
+
+	// Parse a single expression (could be a guard pattern)
+	firstExpr := p.parseExpression()
+
+	// Check for guard after single expression: expr if guard
+	var guard Expr
+	if p.current.Type == TOKEN_IF {
+		p.advance()
+		guard = p.parseExpression()
+	}
+
+	return []Expr{firstExpr}, guard, ""
 }
 
 func (p *Parser) parseExportStatement() Stmt {
@@ -1127,7 +1423,7 @@ func (p *Parser) parseForUpdateStatement() Stmt {
 			return AssignStmt{
 				Name: target.Name,
 				Value: BinaryExpr{
-					Left:  IdentExpr{Name: target.Name},
+					Left:  IdentExpr{Name: target.Name, Line: target.Line, Column: target.Column},
 					Op:    TOKEN_PLUS,
 					Right: value,
 				},
@@ -1170,7 +1466,7 @@ func (p *Parser) parseForUpdateStatement() Stmt {
 			return AssignStmt{
 				Name: target.Name,
 				Value: BinaryExpr{
-					Left:  IdentExpr{Name: target.Name},
+					Left:  IdentExpr{Name: target.Name, Line: target.Line, Column: target.Column},
 					Op:    TOKEN_PLUS,
 					Right: NumberExpr{Value: 1, File: p.current.File, Line: p.current.Line, Column: p.current.Column},
 				},
@@ -1210,7 +1506,7 @@ func (p *Parser) parseForUpdateStatement() Stmt {
 			return AssignStmt{
 				Name: target.Name,
 				Value: BinaryExpr{
-					Left:  IdentExpr{Name: target.Name},
+					Left:  IdentExpr{Name: target.Name, Line: target.Line, Column: target.Column},
 					Op:    TOKEN_MINUS,
 					Right: NumberExpr{Value: 1, File: p.current.File, Line: p.current.Line, Column: p.current.Column},
 				},
@@ -1830,6 +2126,21 @@ func (p *Parser) parseLetStatement() Stmt {
 	column := p.current.Column
 	p.expect(TOKEN_LET)
 
+	if p.current.Type == TOKEN_LBRACE || p.current.Type == TOKEN_LBRACKET {
+		pattern := p.parseDestructurePattern()
+		p.expect(TOKEN_ASSIGN)
+		value := p.parseExpression()
+		p.consumeTerminator()
+		return DestructureStmt{
+			Target:   pattern,
+			Value:    value,
+			Constant: false,
+			File:     file,
+			Line:     line,
+			Column:   column,
+		}
+	}
+
 	if p.current.Type != TOKEN_IDENT {
 		LangErrorAt(
 			ErrorSyntax,
@@ -2016,6 +2327,21 @@ func (p *Parser) parseConstStatement() Stmt {
 	column := p.current.Column
 	p.expect(TOKEN_CONST)
 
+	if p.current.Type == TOKEN_LBRACE || p.current.Type == TOKEN_LBRACKET {
+		pattern := p.parseDestructurePattern()
+		p.expect(TOKEN_ASSIGN)
+		value := p.parseExpression()
+		p.consumeTerminator()
+		return DestructureStmt{
+			Target:   pattern,
+			Value:    value,
+			Constant: true,
+			File:     file,
+			Line:     line,
+			Column:   column,
+		}
+	}
+
 	if p.current.Type != TOKEN_IDENT {
 		LangErrorAt(
 			ErrorSyntax,
@@ -2046,6 +2372,122 @@ func (p *Parser) parseConstStatement() Stmt {
 		Column:   column,
 		File:     file,
 	}
+}
+
+func (p *Parser) parseDestructurePattern() DestructurePattern {
+	if p.current.Type == TOKEN_LBRACE {
+		return p.parseObjectDestructurePattern()
+	}
+	return p.parseArrayDestructurePattern()
+}
+
+func (p *Parser) parseObjectDestructurePattern() ObjectDestructurePattern {
+	p.expect(TOKEN_LBRACE)
+
+	pattern := ObjectDestructurePattern{}
+
+	for p.current.Type != TOKEN_RBRACE && p.current.Type != TOKEN_EOF {
+		if p.current.Type == TOKEN_DOT_DOT_DOT {
+			p.advance()
+			if p.current.Type != TOKEN_IDENT {
+				LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "expected variable name after ... in object destructuring")
+			}
+			pattern.Spread = p.current.Literal
+			pattern.HasSpread = true
+			p.advance()
+			if p.current.Type == TOKEN_COMMA {
+				p.advance()
+			}
+			break
+		}
+
+		if p.current.Type != TOKEN_IDENT && p.current.Type != TOKEN_STRING {
+			LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "expected property name in object destructuring")
+		}
+
+		key := p.current.Literal
+		p.advance()
+
+		field := ObjectDestructureField{Key: key}
+
+		if p.current.Type == TOKEN_COLON {
+			p.advance()
+			if p.current.Type == TOKEN_LBRACE || p.current.Type == TOKEN_LBRACKET {
+				field.Pattern = p.parseDestructurePattern()
+				field.HasNested = true
+				field.Alias = ""
+				field.AliasIsRenamed = false
+			} else if p.current.Type == TOKEN_IDENT {
+				field.Alias = p.current.Literal
+				field.AliasIsRenamed = true
+				p.advance()
+			} else {
+				LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "expected variable name or nested pattern after ':' in object destructuring")
+			}
+		} else {
+			field.Alias = key
+			field.AliasIsRenamed = false
+		}
+
+		if p.current.Type == TOKEN_ASSIGN {
+			p.advance()
+			field.Default = p.parseExpression()
+			field.HasDefault = true
+		}
+
+		pattern.Fields = append(pattern.Fields, field)
+
+		if p.current.Type == TOKEN_COMMA {
+			p.advance()
+		}
+	}
+
+	p.expect(TOKEN_RBRACE)
+	return pattern
+}
+
+func (p *Parser) parseArrayDestructurePattern() ArrayDestructurePattern {
+	p.expect(TOKEN_LBRACKET)
+
+	pattern := ArrayDestructurePattern{}
+
+	for p.current.Type != TOKEN_RBRACKET && p.current.Type != TOKEN_EOF {
+		if p.current.Type == TOKEN_DOT_DOT_DOT {
+			p.advance()
+			if p.current.Type != TOKEN_IDENT {
+				LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "expected variable name after ... in array destructuring")
+			}
+			pattern.Elements = append(pattern.Elements, ArrayDestructureElement{
+				Name:    p.current.Literal,
+				IsSpread: true,
+			})
+			p.advance()
+			if p.current.Type == TOKEN_COMMA {
+				p.advance()
+			}
+			break
+		}
+
+		if p.current.Type == TOKEN_LBRACE || p.current.Type == TOKEN_LBRACKET {
+			elem := ArrayDestructureElement{HasNested: true}
+			elem.Pattern = p.parseDestructurePattern()
+			pattern.Elements = append(pattern.Elements, elem)
+		} else if p.current.Type == TOKEN_IDENT {
+			pattern.Elements = append(pattern.Elements, ArrayDestructureElement{
+				Name: p.current.Literal,
+			})
+			p.advance()
+		} else {
+			LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "expected variable name, nested pattern, or '...' in array destructuring")
+		}
+
+		if p.current.Type == TOKEN_COMMA {
+			p.advance()
+		}
+	}
+
+	p.expect(TOKEN_RBRACKET)
+	return pattern
 }
 
 func (p *Parser) parseNativeFunctionStatement() Stmt {
@@ -2536,7 +2978,7 @@ func (p *Parser) parseAnd() Expr {
 }
 
 func (p *Parser) parseComparison() Expr {
-	left := p.parseAddSub()
+	left := p.parseBitwise()
 
 	for p.current.Type == TOKEN_EQ ||
 		p.current.Type == TOKEN_NEQ ||
@@ -2550,7 +2992,7 @@ func (p *Parser) parseComparison() Expr {
 		op := p.current.Type
 		p.advance()
 
-		right := p.parseAddSub()
+		right := p.parseBitwise()
 
 		switch op {
 		case TOKEN_INSTANCEOF:
@@ -2574,6 +3016,30 @@ func (p *Parser) parseComparison() Expr {
 				Op:    op,
 				Right: right,
 			}
+		}
+	}
+
+	return left
+}
+
+func (p *Parser) parseBitwise() Expr {
+	left := p.parseAddSub()
+
+	for p.current.Type == TOKEN_AMP ||
+		p.current.Type == TOKEN_PIPE ||
+		p.current.Type == TOKEN_CARET ||
+		p.current.Type == TOKEN_LSHIFT ||
+		p.current.Type == TOKEN_RSHIFT {
+
+		op := p.current.Type
+		p.advance()
+
+		right := p.parseAddSub()
+
+		left = BinaryExpr{
+			Left:  left,
+			Op:    op,
+			Right: right,
 		}
 	}
 
@@ -2620,6 +3086,7 @@ func (p *Parser) parseMulDiv() Expr {
 
 func (p *Parser) parsePostfix() Expr {
 	expr := p.parsePrimary()
+	safeChain := false
 
 	for {
 		switch p.current.Type {
@@ -2664,6 +3131,9 @@ func (p *Parser) parsePostfix() Expr {
 
 		case TOKEN_DOT, TOKEN_QUESTION_DOT:
 			safe := p.current.Type == TOKEN_QUESTION_DOT
+			if safe {
+				safeChain = true
+			}
 			p.advance()
 
 			if !isIdentifierLikeToken(p.current.Type) {
@@ -2697,7 +3167,7 @@ func (p *Parser) parsePostfix() Expr {
 					Line:   line,
 					Column: column,
 					File:   file,
-					Safe:   safe,
+					Safe:   safe || safeChain,
 				}
 
 				continue
@@ -2709,7 +3179,7 @@ func (p *Parser) parsePostfix() Expr {
 				File:   file,
 				Line:   line,
 				Column: column,
-				Safe:   safe,
+				Safe:   safe || safeChain,
 			}
 
 		case TOKEN_LBRACKET:
@@ -2784,6 +3254,8 @@ func exprSourcePosition(expr Expr) (string, int, int) {
 	case ThisExpr:
 		return e.File, e.Line, e.Column
 	case FunctionExpr:
+		return e.File, e.Line, e.Column
+	case EnumVariantExpr:
 		return e.File, e.Line, e.Column
 	}
 	return "", 0, 0
@@ -3213,6 +3685,51 @@ func (p *Parser) parseEnumStatement() Stmt {
 		name := p.current.Literal
 		p.advance()
 
+		// Check for variant data: EnumVariant(args)
+		if p.current.Type == TOKEN_LPAREN {
+			p.advance()
+			variantParams := []Param{}
+			for p.current.Type != TOKEN_RPAREN && p.current.Type != TOKEN_EOF {
+				if p.current.Type == TOKEN_COMMA {
+					p.advance()
+					continue
+				}
+				if p.current.Type != TOKEN_IDENT {
+					LangErrorAt(
+						ErrorSyntax,
+						p.current.File,
+						p.current.Line,
+						p.current.Column,
+						"expected parameter name",
+					)
+				}
+				paramName := p.current.Literal
+				p.advance()
+				paramType := TypeHint{Name: "any"}
+				if p.current.Type == TOKEN_COLON {
+					p.advance()
+					paramType = TypeHint{Name: p.parseTypeName()}
+				}
+				variantParams = append(variantParams, Param{
+					Name:     paramName,
+					TypeHint: paramType,
+				})
+			}
+			p.expect(TOKEN_RPAREN)
+			members = append(members, EnumField{
+				Name:          name,
+				VariantParams: variantParams,
+				Value:         StringExpr{Value: name},
+			})
+			for p.current.Type == TOKEN_SEMI {
+				p.advance()
+			}
+			if p.current.Type == TOKEN_COMMA {
+				p.advance()
+			}
+			continue
+		}
+
 		if p.current.Type == TOKEN_ASSIGN {
 			p.advance()
 
@@ -3487,7 +4004,7 @@ func (p *Parser) parseClassStatement() Stmt {
 
 func (p *Parser) parseUnary() Expr {
 	switch p.current.Type {
-	case TOKEN_MINUS, TOKEN_BANG:
+	case TOKEN_MINUS, TOKEN_BANG, TOKEN_TILDE:
 		op := p.current.Type
 		p.advance()
 

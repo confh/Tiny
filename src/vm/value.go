@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	webview "github.com/abemedia/go-webview"
 	json "github.com/goccy/go-json"
@@ -79,9 +81,11 @@ type BufferValue struct {
 }
 
 type Cell struct {
-	Value TinyValue
-	Int   int
-	IsInt bool
+	Value    TinyValue
+	Int      int
+	IsInt    bool
+	Constant bool
+	TypeHint TypeHint
 }
 
 type ErrorValue struct {
@@ -113,7 +117,61 @@ type NativeServerValue struct {
 	Workers        *VMPool
 }
 
-type ValidateType = byte
+type NativeTimerType byte
+
+const (
+	Timer NativeTimerType = iota
+	Ticker
+)
+
+func (t NativeTimerType) String() string {
+	if t == Timer {
+		return "timer"
+	}
+	return "ticker"
+}
+
+type NativeTimerValue struct {
+	Type   NativeTimerType
+	Timer  *time.Timer
+	Ticker *time.Ticker
+	Quit   chan bool
+
+	once      sync.Once
+	cancelled atomic.Bool
+}
+
+func (t *NativeTimerValue) Cancel() {
+	if t == nil {
+		return
+	}
+
+	t.once.Do(func() {
+		t.cancelled.Store(true)
+
+		if t.Timer != nil {
+			t.Timer.Stop()
+		}
+
+		if t.Ticker != nil {
+			t.Ticker.Stop()
+		}
+
+		if t.Quit != nil {
+			close(t.Quit)
+		}
+	})
+}
+
+func (t *NativeTimerValue) IsCancelled() bool {
+	if t == nil {
+		return true
+	}
+
+	return t.cancelled.Load()
+}
+
+type ValidateType byte
 
 const (
 	String ValidateType = iota
@@ -453,6 +511,8 @@ func TypeNameStandard(value TinyValue) string {
 		return "schema type"
 	case *NativeServerValue:
 		return "server"
+	case *NativeTimerValue:
+		return "<" + v.Type.String() + ">"
 	case *NativeTcpServerValue:
 		return "tcp server"
 	case *NativeTcpConnectionValue:
@@ -905,6 +965,8 @@ func valueToString(value TinyValue, forPrint ...bool) string {
 		return "<server :" + strconv.Itoa(v.Port) + ">"
 	case *NativeServerValue:
 		return "<server :" + strconv.Itoa(v.Port) + ">"
+	case *NativeTimerValue:
+		return "<" + v.Type.String() + ">"
 	case *NativeTcpServerValue:
 		return "<tcp server :" + strconv.Itoa(v.Port) + ">"
 	case *NativeWebViewValue:

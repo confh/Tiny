@@ -90,6 +90,13 @@ const (
 	OP_AND
 	OP_OR
 
+	OP_AND_BIT
+	OP_OR_BIT
+	OP_XOR
+	OP_LSHIFT
+	OP_RSHIFT
+	OP_NOT_BIT
+
 	OP_JUMP
 	OP_JUMP_IF_FALSE
 	OP_JUMP_IF_TRUE
@@ -432,8 +439,9 @@ type ClassField struct {
 }
 
 type EnumField struct {
-	Name  string
-	Value Expr
+	Name          string
+	Value         Expr
+	VariantParams []Param
 }
 
 type NativeCallInfo struct {

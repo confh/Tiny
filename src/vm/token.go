@@ -71,6 +71,11 @@ const (
 	TOKEN_STAR_ASSIGN    TokenType = "*="
 	TOKEN_SLASH_ASSIGN   TokenType = "/="
 	TOKEN_PERCENT_ASSIGN TokenType = "%="
+	TOKEN_AMP_ASSIGN     TokenType = "&="
+	TOKEN_CARET_ASSIGN   TokenType = "^="
+	TOKEN_PIPE_ASSIGN    TokenType = "|="
+	TOKEN_LSHIFT_ASSIGN  TokenType = "<<="
+	TOKEN_RSHIFT_ASSIGN  TokenType = ">>="
 
 	// Increment/Decrement
 	TOKEN_INCREMENT TokenType = "++"
@@ -83,6 +88,13 @@ const (
 	TOKEN_LTE TokenType = "<="
 	TOKEN_GT  TokenType = ">"
 	TOKEN_GTE TokenType = ">="
+
+	// Bitwise operators
+	TOKEN_AMP     TokenType = "&"
+	TOKEN_CARET   TokenType = "^"
+	TOKEN_TILDE   TokenType = "~"
+	TOKEN_LSHIFT  TokenType = "<<"
+	TOKEN_RSHIFT  TokenType = ">>"
 
 	// Other operators
 	TOKEN_QUESTION          TokenType = "?"

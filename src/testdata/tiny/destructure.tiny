@@ -1,0 +1,31 @@
+import std "io";
+
+// Basic object destructuring
+let person = {name: "Alice", age: 30, city: "NYC"}
+let {name, age, city} = person
+io.println(name)
+io.println(age)
+io.println(city)
+
+// Basic array destructuring
+let items = [10, 20, 30]
+let [first, second, third] = items
+io.println(first)
+io.println(second)
+io.println(third)
+
+// Rename destructuring
+let {name: userName, age: userAge} = person
+io.println(userName)
+io.println(userAge)
+
+// const destructuring
+const {name: cn, age: ca} = person
+io.println(cn)
+io.println(ca)
+
+// Nested object destructuring
+let user = {name: "Bob", address: {city: "LA", zip: "90210"}}
+let {name: n, address: {city: c}} = user
+io.println(n)
+io.println(c)

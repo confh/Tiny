@@ -1,6 +1,7 @@
 package vm
 
 import (
+	"strings"
 	"unicode"
 
 	. "language.com/src/tinyerrors"
@@ -221,6 +222,11 @@ func (l *Lexer) scanToken() Token {
 
 	switch ch {
 	case '|':
+		if l.peek() == '=' {
+			l.pos += 2
+			l.column += 2
+			return l.tokenAt(start, TOKEN_PIPE_ASSIGN, "|=")
+		}
 		tok := Token{
 			Type:    TOKEN_PIPE,
 			Literal: "|",
@@ -305,6 +311,16 @@ func (l *Lexer) scanToken() Token {
 			l.column += 2
 			return l.tokenAt(start, TOKEN_LTE, "<=")
 		}
+		if l.peek() == '<' {
+			if l.pos+2 < len(l.input) && l.input[l.pos+2] == '=' {
+				l.pos += 3
+				l.column += 3
+				return l.tokenAt(start, TOKEN_LSHIFT_ASSIGN, "<<=")
+			}
+			l.pos += 2
+			l.column += 2
+			return l.tokenAt(start, TOKEN_LSHIFT, "<<")
+		}
 		tok := Token{
 			Type:    TOKEN_LT,
 			Literal: "<",
@@ -320,6 +336,16 @@ func (l *Lexer) scanToken() Token {
 			l.pos += 2
 			l.column += 2
 			return l.tokenAt(start, TOKEN_GTE, ">=")
+		}
+		if l.peek() == '>' {
+			if l.pos+2 < len(l.input) && l.input[l.pos+2] == '=' {
+				l.pos += 3
+				l.column += 3
+				return l.tokenAt(start, TOKEN_RSHIFT_ASSIGN, ">>=")
+			}
+			l.pos += 2
+			l.column += 2
+			return l.tokenAt(start, TOKEN_RSHIFT, ">>")
 		}
 		tok := Token{
 			Type:    TOKEN_GT,
@@ -510,6 +536,46 @@ func (l *Lexer) scanToken() Token {
 		}
 		l.advance()
 		return tok
+	case '&':
+		if l.peek() == '=' {
+			l.pos += 2
+			l.column += 2
+			return l.tokenAt(start, TOKEN_AMP_ASSIGN, "&=")
+		}
+		tok := Token{
+			Type:    TOKEN_AMP,
+			Literal: "&",
+			File:    l.file,
+			Line:    l.line,
+			Column:  l.column,
+		}
+		l.advance()
+		return tok
+	case '^':
+		if l.peek() == '=' {
+			l.pos += 2
+			l.column += 2
+			return l.tokenAt(start, TOKEN_CARET_ASSIGN, "^=")
+		}
+		tok := Token{
+			Type:    TOKEN_CARET,
+			Literal: "^",
+			File:    l.file,
+			Line:    l.line,
+			Column:  l.column,
+		}
+		l.advance()
+		return tok
+	case '~':
+		tok := Token{
+			Type:    TOKEN_TILDE,
+			Literal: "~",
+			File:    l.file,
+			Line:    l.line,
+			Column:  l.column,
+		}
+		l.advance()
+		return tok
 	default:
 		line, column := l.lineColumnAt(start)
 		LangErrorAt(ErrorSyntax, l.file, line, column, "unknown character: %q", ch)
@@ -612,6 +678,14 @@ func (l *Lexer) readNumber() string {
 			continue
 		}
 
+		if ch == '_' {
+			if l.pos+1 < len(l.input) && unicode.IsDigit(l.input[l.pos+1]) {
+				l.advance()
+				continue
+			}
+			break
+		}
+
 		if ch == '.' && !hasDot {
 			// Only treat "." as part of a number if the next char is a digit.
 			if l.pos+1 < len(l.input) && unicode.IsDigit(l.input[l.pos+1]) {
@@ -624,7 +698,8 @@ func (l *Lexer) readNumber() string {
 		break
 	}
 
-	return string(l.input[start:l.pos])
+	raw := string(l.input[start:l.pos])
+	return strings.ReplaceAll(raw, "_", "")
 }
 
 func (l *Lexer) readString() string {

@@ -27,7 +27,6 @@ func init() {
 		"command": appCommand,
 		"run":     appRun,
 	}
-	// registerNativeType(appNativeMetadata)
 }
 
 func (vm *VM) callNativeAppMethod(app *NativeAppValue, method string, args []TinyValue) {

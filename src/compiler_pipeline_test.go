@@ -184,6 +184,15 @@ func TestTinyPipelineArithmeticAndStrings(t *testing.T) {
 	}
 }
 
+func TestTinyPipelineDestructure(t *testing.T) {
+	out := requireTinySuccess(t, runTinyFile(t, fixturePath("destructure.tiny")))
+
+	const want = "Alice\n30\nNYC\n10\n20\n30\nAlice\n30\nAlice\n30\nBob\nLA\n"
+	if out != want {
+		t.Fatalf("unexpected output:\nwant:\n%q\ngot:\n%q", want, out)
+	}
+}
+
 func TestTinyPipelineControlFlow(t *testing.T) {
 	out := requireTinySuccess(t, runTinyFile(t, fixturePath("control_flow.tiny")))
 
@@ -1534,6 +1543,138 @@ func TestTinyPipelineJitForInObjectAggregation(t *testing.T) {
 // 	}
 
 // }
+
+func TestJitStringJoin(t *testing.T) {
+	tests := []struct {
+		name string
+		code string
+		want string
+	}{
+		{
+			name: "interpolation 2 parts",
+			code: `
+import std "io"
+fn greet(name: string): string {
+    return "hello " + name + "!"
+}
+io.println(greet("world"))
+io.println(greet("jit"))
+`,
+			want: "hello world!\nhello jit!\n",
+		},
+		{
+			name: "interpolation 3 parts",
+			code: `
+import std "io"
+fn fmt(a: string, b: string, c: string): string {
+    return a + b + c
+}
+io.println(fmt("[", "test", "]"))
+`,
+			want: "[test]\n",
+		},
+		{
+			name: "interpolation 4 parts",
+			code: `
+import std "io"
+fn fmt(a: string, b: string, c: string, d: string): string {
+    return a + b + c + d
+}
+io.println(fmt("a", "b", "c", "d"))
+`,
+			want: "abcd\n",
+		},
+		{
+			name: "string + number",
+			code: `
+import std "io"
+fn show(n: number): string {
+    return "count=" + n
+}
+io.println(show(42))
+io.println(show(0))
+`,
+			want: "count=42\ncount=0\n",
+		},
+		{
+			name: "string in loop",
+			code: `
+import std "io"
+fn build(n: number): string {
+    let result = ""
+    let i = 0
+    while i < n {
+        result = result + "x"
+        i = i + 1
+    }
+    return result
+}
+io.println(build(5))
+io.println(build(0))
+io.println(build(1))
+`,
+			want: "xxxxx\n\nx\n",
+		},
+		{
+			name: "string concat with bool",
+			code: `
+import std "io"
+fn showFlag(b: bool): string {
+    return "flag=" + b
+}
+io.println(showFlag(true))
+io.println(showFlag(false))
+`,
+			want: "flag=true\nflag=false\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			mainPath := filepath.Join(dir, "main.tiny")
+			if err := os.WriteFile(mainPath, []byte(tt.code), 0644); err != nil {
+				t.Fatalf("failed to write main.tiny: %v", err)
+			}
+			out := requireTinySuccess(t, runTinyFile(t, mainPath))
+			if out != tt.want {
+				t.Fatalf("unexpected output:\n  want: %q\n  got:  %q", tt.want, out)
+			}
+		})
+	}
+}
+
+func TestJitStringJoinLoopCarried(t *testing.T) {
+	code := `
+import std "io"
+fn joinWords(words: array): string {
+    let result = ""
+    let i = 0
+    while i < words.length {
+        result = result + words[i]
+        if i < words.length - 1 {
+            result = result + " "
+        }
+        i = i + 1
+    }
+    return result
+}
+	let words = ["hello", "world", "!"]
+	io.println(joinWords(words))
+	let empty = ["a", "b", "c"]
+	io.println(joinWords(empty))
+`
+	dir := t.TempDir()
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(code), 0644); err != nil {
+		t.Fatalf("failed to write main.tiny: %v", err)
+	}
+	out := requireTinySuccess(t, runTinyFile(t, mainPath))
+	const want = "hello world !\na b c\n"
+	if out != want {
+		t.Fatalf("unexpected output:\n  want: %q\n  got:  %q", want, out)
+	}
+}
 
 func TestJitDefaultParameters(t *testing.T) {
 	content := `

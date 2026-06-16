@@ -11,4 +11,4 @@ export fn notEqual(actual: any, expected: any, message: string): null {}
 export fn run(name: string, func: function): null {}
 
 // Measures and returns the execution duration of a function in milliseconds.
-export fn measureMs(func: function): number {}
+export fn measureMs(func: function()): number {}
