@@ -168,8 +168,8 @@ The `match` block provides branch dispatching with support for literal values, v
 import std "io";
 
 enum Result {
-    Ok(value: any),
-    Error(message: string)
+    Ok(value),
+    Error(message)
 }
 
 fn process(res: Result) {
