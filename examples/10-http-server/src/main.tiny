@@ -12,11 +12,7 @@ server.get("/", fn(req) {
 })
 
 server.get("/echo", fn(req) {
-    let text = "missing text query"
-
-    if typeof req.query["text"] != "null" {
-        text = req.query["text"]
-    }
+    let text = req.query?.text ?? "missing text query"
 
     return http.json({
         path: req.path,
@@ -27,7 +23,7 @@ server.get("/echo", fn(req) {
 
 
 server.get("/test/:id", fn(req) {
-    const id: string= req.params["id"]
+    const id: string = req.params?.id
 
     return http.json({
         id: id
