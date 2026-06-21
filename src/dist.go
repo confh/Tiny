@@ -58,7 +58,7 @@ func DistCommand(args []string) {
 	if entryFile == "" {
 		config, ok := loadTinyConfig()
 		if !ok {
-			LangError(ErrorRuntime, "usage: tiny dist <file.tiny> -o <output> [--target windows-amd64|linux-amd64] [--plugin <path>]")
+			LangError(ErrorRuntime, "usage: tiny dist <file.tiny> -o <output> [--target windows-amd64|linux-amd64|linux-arm64] [--plugin <path>]")
 		}
 
 		entryFile = config.Entry
@@ -229,7 +229,7 @@ func packProgramToOutput(program Program, outFile string, target string, windowe
 		LangError(ErrorRuntime, "failed to write packed executable: %v", err)
 	}
 
-	if target == "linux-amd64" {
+	if target == "linux-amd64" || target == "linux-arm64" {
 		err = os.Chmod(outFile, 0755)
 		if err != nil {
 			LangError(ErrorRuntime, "failed to chmod linux executable: %v", err)

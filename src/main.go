@@ -112,7 +112,7 @@ func helpCommand(args []string) {
 			fmt.Println("usage: tiny pack <file.tiny> -o <output>")
 			fmt.Println("Builds a packed executable from a Tiny source file.")
 		case "dist":
-			fmt.Println("usage: tiny dist <file.tiny> -o <output> [--target windows-amd64|linux-amd64] [--plugin <path>]")
+			fmt.Println("usage: tiny dist <file.tiny> -o <output> [--target windows-amd64|linux-amd64|linux-arm64] [--plugin <path>]")
 			fmt.Println("Builds a distributable executable for a target platform.")
 		case "init":
 			fmt.Println("usage: tiny init")

@@ -40,6 +40,10 @@ func assetNameForCurrentPlatform() (string, error) {
 		if runtime.GOARCH == "amd64" {
 			return "tiny_linux_amd64", nil
 		}
+
+		if runtime.GOARCH == "arm64" {
+			return "tiny_linux_arm64", nil
+		}
 	case "darwin":
 		if runtime.GOARCH == "arm64" {
 			return "tiny_darwin_arm64", nil

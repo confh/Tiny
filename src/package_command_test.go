@@ -130,6 +130,19 @@ func TestConfiguredPluginPathsFilterNativePluginEntriesByTarget(t *testing.T) {
 		t.Fatalf("expected linux plugin paths to keep non-native support files, got %#v", linuxPaths)
 	}
 
+	linuxPaths := configuredPluginPaths("linux-arm64")
+	if !stringSliceContains(linuxPaths, filepath.Clean(filepath.Join("plugins", "tiny_sqlite.so"))) {
+		t.Fatalf("expected linux plugin paths to include .so, got %#v", linuxPaths)
+	}
+	if stringSliceContains(linuxPaths, filepath.Clean(filepath.Join("plugins", "tiny_sqlite.dll"))) ||
+		stringSliceContains(linuxPaths, filepath.Clean(filepath.Join("plugins", "tiny_sqlite.dylib"))) ||
+		stringSliceContains(linuxPaths, filepath.Clean(filepath.Join("plugins", "helper.dll"))) {
+		t.Fatalf("expected linux plugin paths to exclude non-linux native plugins, got %#v", linuxPaths)
+	}
+	if !stringSliceContains(linuxPaths, filepath.Clean(filepath.Join("plugins", "metadata.dat"))) {
+		t.Fatalf("expected linux plugin paths to keep non-native support files, got %#v", linuxPaths)
+	}
+
 	windowsPaths := configuredPluginPaths("windows-amd64")
 	if !stringSliceContains(windowsPaths, filepath.Clean(filepath.Join("plugins", "tiny_sqlite.dll"))) {
 		t.Fatalf("expected windows plugin paths to include .dll, got %#v", windowsPaths)
@@ -285,6 +298,14 @@ func TestInstalledDependencyCacheChecksPluginTarget(t *testing.T) {
 		t.Fatalf("expected plugin dependency for another target not to be reused")
 	}
 	if !installedDependencyExists("owner", "plugin", "v1", "linux-amd64") {
+		t.Fatalf("expected plugin dependency for matching target to be reused")
+	}
+
+	writeInstalledDependencyMetadata(pluginRoot, "linux-arm64")
+	if installedDependencyExists("owner", "plugin", "v1", "windows-amd64") {
+		t.Fatalf("expected plugin dependency for another target not to be reused")
+	}
+	if !installedDependencyExists("owner", "plugin", "v1", "linux-arm64") {
 		t.Fatalf("expected plugin dependency for matching target to be reused")
 	}
 }

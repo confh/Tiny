@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"runtime"
 	"path/filepath"
 
 	. "language.com/src/tinyerrors"
@@ -66,7 +67,7 @@ func defaultProjectTarget() string {
 		return "windows-amd64"
 	}
 
-	return "linux-amd64"
+	return "linux-" + runtime.GOARCH
 }
 
 func isWindows() bool {

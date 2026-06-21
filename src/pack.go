@@ -19,6 +19,9 @@ var embeddedRuntimeWindowsAMD64 []byte
 //go:embed embedded/tiny_runtime_linux_amd64
 var embeddedRuntimeLinuxAMD64 []byte
 
+//go:embed embedded/tiny_runtime_linux_arm64
+var embeddedRuntimeLinuxARM64 []byte
+
 //go:embed embedded/tiny_runtime_darwin_arm64
 var embeddedRuntimeDarwinARM64 []byte
 
@@ -28,6 +31,8 @@ func getEmbeddedRuntimeForTarget(target string) []byte {
 		return embeddedRuntimeWindowsAMD64
 	case "linux-amd64":
 		return embeddedRuntimeLinuxAMD64
+	case "linux-arm64":
+		return embeddedRuntimeLinuxARM64
 	case "darwin-arm64":
 		return embeddedRuntimeDarwinARM64
 	default:
@@ -47,7 +52,7 @@ func normalizePluginPathForTarget(path string, target string) string {
 	case "windows-amd64":
 		return path + ".dll"
 
-	case "linux-amd64":
+	case "linux-amd64", "linux-arm64":
 		return path + ".so"
 
 	case "darwin-arm64":
@@ -76,7 +81,7 @@ func pluginExtensionForTarget(target string) string {
 	switch target {
 	case "windows-amd64":
 		return ".dll"
-	case "linux-amd64":
+	case "linux-amd64", "linux-arm64":
 		return ".so"
 	case "darwin-arm64":
 		return ".dylib"
@@ -91,6 +96,8 @@ func normalizeTarget(target string) string {
 			return "windows-amd64"
 		} else if runtime.GOOS == "linux" && runtime.GOARCH == "amd64" {
 			return "linux-amd64"
+		} else if runtime.GOOS == "linux" && runtime.GOARCH == "arm64" {
+			return "linux-arm64"
 		} else if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
 			return "darwin-arm64"
 		}
