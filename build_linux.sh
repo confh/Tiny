@@ -23,7 +23,7 @@ go build -ldflags "-s -w" -o src/embedded/tiny_runtime_darwin_arm64 ./src/cmd/ti
 echo "Building Tiny compiler..."
 export CGO_ENABLED=0
 export GOOS=linux
-export GOARCH=$(go env GOARCH)
+export GOARCH=$(go env GOHOSTARCH)
 go build -ldflags "-s -w" -o tiny_linux ./src || exit 1
 
 echo "Done."

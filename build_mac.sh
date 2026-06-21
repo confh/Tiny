@@ -23,7 +23,7 @@ go build -ldflags "-s -w" -o src/embedded/tiny_runtime_windows_amd64.exe ./src/c
 echo "Building Tiny compiler..."
 export CGO_ENABLED=0
 export GOOS=darwin
-export GOARCH=$(go env GOARCH)
+export GOARCH=$(go env GOHOSTARCH)
 go build -ldflags "-s -w" -o tiny_darwin ./src || exit 1
 
 echo "Done."

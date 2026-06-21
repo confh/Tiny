@@ -20,5 +20,6 @@ test/
 tiny.exe~
 tiny_linux
 tiny_darwin
+tiny_linux_arm64
 ttt/
 jit-tests/
