@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	. "language.com/src/bytecode"
 	. "language.com/src/tinyerrors"
@@ -58,7 +59,7 @@ func DistCommand(args []string) {
 	if entryFile == "" {
 		config, ok := loadTinyConfig()
 		if !ok {
-			LangError(ErrorRuntime, "usage: tiny dist <file.tiny> -o <output> [--target windows-amd64|linux-amd64] [--plugin <path>]")
+			LangError(ErrorRuntime, "usage: tiny dist <file.tiny> -o <output> [--target windows-amd64|linux-amd64|linux-arm64|darwin-arm64] [--plugin <path>]")
 		}
 
 		entryFile = config.Entry
@@ -214,7 +215,7 @@ func packProgramToOutput(program Program, outFile string, target string, windowe
 
 	bytecodeBytes := SaveBytecodeToBytes(mainInstructions, functions, classes, interfaces, globalIndex, false)
 
-	runtimeBytes := getEmbeddedRuntimeForTarget(target)
+	runtimeBytes := getRuntimeBytesForTarget(target)
 
 	if windowed && target == "windows-amd64" {
 		mutableRuntime := make([]byte, len(runtimeBytes))
@@ -229,7 +230,7 @@ func packProgramToOutput(program Program, outFile string, target string, windowe
 		LangError(ErrorRuntime, "failed to write packed executable: %v", err)
 	}
 
-	if target == "linux-amd64" {
+	if strings.HasPrefix(target, "linux-") {
 		err = os.Chmod(outFile, 0755)
 		if err != nil {
 			LangError(ErrorRuntime, "failed to chmod linux executable: %v", err)

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	. "language.com/src/tinyerrors"
 )
@@ -63,10 +64,10 @@ func defaultTinyConfig(projectName string) TinyProjectConfig {
 
 func defaultProjectTarget() string {
 	if isWindows() {
-		return "windows-amd64"
+		return "windows-" + runtime.GOARCH
 	}
 
-	return "linux-amd64"
+	return "linux-" + runtime.GOARCH
 }
 
 func isWindows() bool {

@@ -10,8 +10,7 @@ release notes
 !src/testdata/tiny/imports/*.tiny
 !test.tiny
 *.exe
-tiny_runtime_linux_amd64
-tiny_runtime_darwin_arm64
+tiny_runtime_*
 *.syso
 *.tbc
 *.txt

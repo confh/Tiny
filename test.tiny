@@ -1,0 +1,87 @@
+import std "io"
+import std "time"
+
+fn numericCrunch(n: number, seed: number): number {
+    let total: number = seed
+    let a: number = 1 + seed
+    let b: number = 2
+
+    for let i: number = 0; i < n; i++ {
+        a = a + 3
+        b = b + a * 0.25
+        total = total + (a * b) - (i * 0.5)
+
+        if total > 1000000000 {
+            total = total * 0.000001
+        }
+    }
+
+    return total + a + b
+}
+
+fn makeRows(n: number, seed: number): array {
+    let rows = []
+
+    for let i: number = 0; i < n; i++ {
+        const v: number = i + seed
+        rows.push({
+            x: v,
+            y: v * 2,
+            z: v * 3
+        })
+    }
+
+    return rows
+}
+
+fn recordCrunch(rows: array, rounds: number): number {
+    let total: number = 0
+    const count: number = rows.length()
+
+    for let r: number = 0; r < rounds; r++ {
+        for let i: number = 0; i < count; i++ {
+            const row = rows[i]
+            total = total + row.x + row.y * 0.5 + row.z * 0.25
+        }
+    }
+
+    return total
+}
+
+fn benchNumeric(n: number, seed: number): number {
+    const start = time.nowNs()
+    const result = numericCrunch(n, seed)
+    const elapsed = time.nowNs() - start
+
+    io.println(`numeric_result=${result}`)
+    io.println(`numeric_ns=${elapsed}`)
+
+    return elapsed
+}
+
+fn benchRecords(rows: array, rounds: number): number {
+    const start = time.nowNs()
+    const result = recordCrunch(rows, rounds)
+    const elapsed = time.nowNs() - start
+
+    io.println(`record_result=${result}`)
+    io.println(`record_ns=${elapsed}`)
+
+    return elapsed
+}
+
+const numericN = 12000000
+const rowCount = 200000
+const recordRounds = 8
+
+io.println("warmup")
+numericCrunch(500000, 1)
+numericCrunch(500000, 2)
+recordCrunch(makeRows(20000, 1), 2)
+recordCrunch(makeRows(20000, 2), 2)
+
+const rows = makeRows(rowCount, 10)
+
+io.println("measured")
+benchNumeric(numericN, 3)
+benchRecords(rows, recordRounds)

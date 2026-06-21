@@ -3,37 +3,116 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 
 	. "language.com/src/tinyerrors"
-
-	_ "embed"
 )
 
-//go:embed embedded/tiny_runtime_windows_amd64.exe
-var embeddedRuntimeWindowsAMD64 []byte
-
-//go:embed embedded/tiny_runtime_linux_amd64
-var embeddedRuntimeLinuxAMD64 []byte
-
-//go:embed embedded/tiny_runtime_darwin_arm64
-var embeddedRuntimeDarwinARM64 []byte
-
-func getEmbeddedRuntimeForTarget(target string) []byte {
+func runtimeFilenameForTarget(target string) (string, error) {
 	switch target {
 	case "windows-amd64":
-		return embeddedRuntimeWindowsAMD64
+		return "tiny_runtime_windows_amd64.exe", nil
 	case "linux-amd64":
-		return embeddedRuntimeLinuxAMD64
+		return "tiny_runtime_linux_amd64", nil
+	case "linux-arm64":
+		return "tiny_runtime_linux_arm64", nil
 	case "darwin-arm64":
-		return embeddedRuntimeDarwinARM64
+		return "tiny_runtime_darwin_arm64", nil
 	default:
-		LangError(ErrorRuntime, "unsupported target: %s", target)
+		return "", fmt.Errorf("unsupported target: %s", target)
+	}
+}
+
+func downloadRuntimeFile(url string, destPath string) error {
+	resp, err := http.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download failed with status: %s", resp.Status)
+	}
+
+	dir := filepath.Dir(destPath)
+	err = os.MkdirAll(dir, 0755)
+	if err != nil {
+		return err
+	}
+
+	tmpPath := destPath + ".tmp"
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		f.Close()
+		_ = os.Remove(tmpPath)
+	}()
+
+	_, err = io.Copy(f, resp.Body)
+	if err != nil {
+		return err
+	}
+
+	err = f.Close()
+	if err != nil {
+		return err
+	}
+
+	if !strings.HasSuffix(destPath, ".exe") {
+		err = os.Chmod(tmpPath, 0755)
+		if err != nil {
+			return err
+		}
+	}
+
+	err = os.Rename(tmpPath, destPath)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func getRuntimeBytesForTarget(target string) []byte {
+	filename, err := runtimeFilenameForTarget(target)
+	if err != nil {
+		LangError(ErrorRuntime, "%v", err)
 		return nil
 	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		LangError(ErrorRuntime, "failed to locate home directory: %v", err)
+		return nil
+	}
+
+	runtimesDir := filepath.Join(homeDir, ".tiny", "runtimes")
+	localPath := filepath.Join(runtimesDir, filename)
+
+	if _, err := os.Stat(localPath); os.IsNotExist(err) {
+		fmt.Printf("Downloading runtime %s...\n", filename)
+		url := fmt.Sprintf("https://github.com/confh/Tiny/releases/download/v%s/%s", TinyVersion, filename)
+		err = downloadRuntimeFile(url, localPath)
+		if err != nil {
+			LangError(ErrorRuntime, "failed to download runtime for target %s: %v", target, err)
+			return nil
+		}
+	}
+
+	bytes, err := os.ReadFile(localPath)
+	if err != nil {
+		LangError(ErrorRuntime, "failed to read runtime file %s: %v", localPath, err)
+		return nil
+	}
+
+	return bytes
 }
 
 func normalizePluginPathForTarget(path string, target string) string {
@@ -47,7 +126,7 @@ func normalizePluginPathForTarget(path string, target string) string {
 	case "windows-amd64":
 		return path + ".dll"
 
-	case "linux-amd64":
+	case "linux-amd64", "linux-arm64":
 		return path + ".so"
 
 	case "darwin-arm64":
@@ -76,7 +155,7 @@ func pluginExtensionForTarget(target string) string {
 	switch target {
 	case "windows-amd64":
 		return ".dll"
-	case "linux-amd64":
+	case "linux-amd64", "linux-arm64":
 		return ".so"
 	case "darwin-arm64":
 		return ".dylib"
@@ -91,6 +170,8 @@ func normalizeTarget(target string) string {
 			return "windows-amd64"
 		} else if runtime.GOOS == "linux" && runtime.GOARCH == "amd64" {
 			return "linux-amd64"
+		} else if runtime.GOOS == "linux" && runtime.GOARCH == "arm64" {
+			return "linux-arm64"
 		} else if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
 			return "darwin-arm64"
 		}
