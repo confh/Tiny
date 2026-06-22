@@ -13,7 +13,7 @@ jobs:
       - run: chmod +x build_linux.sh
       - run: ./build_linux.sh --compiler
       - run: go test ./src/...
-      - run: ./tiny_linux test.tiny
+      - run: ./tiny_linux_amd64 test.tiny
 
   test-windows:
     runs-on: windows-latest
