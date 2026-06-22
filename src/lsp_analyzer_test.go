@@ -640,6 +640,49 @@ func TestLSPInlayHintsInlineFunctionParameterTypesFromExpectedFunctionType(t *te
 	}
 }
 
+func TestLSPInlayHintsHideInternalTypePrefixes(t *testing.T) {
+	text := strings.Join([]string{
+		`interface Request {`,
+		`    path: string`,
+		`}`,
+		`class User {`,
+		`}`,
+		`fn use(callback: function(Request)) {`,
+		`}`,
+		`const user = User();`,
+		`use(fn(req) {`,
+		`    req;`,
+		`});`,
+	}, "\n")
+
+	hints := getInlayHints("file:///inlay_prefixes.tiny", text, LSPRange{
+		Start: Position{Line: 0, Character: 0},
+		End:   Position{Line: 10, Character: len(`});`)},
+	})
+
+	labels := []string{}
+	for _, hint := range hints {
+		labels = append(labels, hint.Label)
+	}
+
+	hasUser := false
+	hasRequest := false
+	for _, label := range labels {
+		if label == ": User" {
+			hasUser = true
+		}
+		if label == ": Request" {
+			hasRequest = true
+		}
+		if strings.Contains(label, "class:") || strings.Contains(label, "interface:") {
+			t.Fatalf("expected no internal type prefixes in inlay hints, got %#v", labels)
+		}
+	}
+	if !hasUser || !hasRequest {
+		t.Fatalf("expected class and interface type hints without prefixes, got %#v", labels)
+	}
+}
+
 func TestLSPMultilineNamespaceCallAssignmentInference(t *testing.T) {
 	text := strings.Join([]string{
 		`namespace newJwt {`,
@@ -1618,6 +1661,54 @@ func TestLSPStdAutoImportCompletion(t *testing.T) {
 	}
 	if len(item.AdditionalTextEdits) != 1 || item.AdditionalTextEdits[0].NewText != "import std \"io\";\n" {
 		t.Fatalf("expected io completion to add std import, got %#v", item)
+	}
+}
+
+func TestLSPStdPrivateReturnTypeCompletion(t *testing.T) {
+	text := strings.Join([]string{
+		"import std \"http\";",
+		"",
+		"const server = http.server(3000)",
+		"",
+		"server.",
+	}, "\n")
+
+	items := getCompletions("file:///std_http_server.tiny", text, Position{
+		Line:      4,
+		Character: len("server."),
+	})
+
+	if !completionLabelsContain(items, "get") || !completionLabelsContain(items, "post") || !completionLabelsContain(items, "start") {
+		t.Fatalf("expected http server method completions, got %#v", completionLabels(items))
+	}
+
+	namespaceItems := getCompletions("file:///std_http_server.tiny", text+"\nhttp.", Position{
+		Line:      5,
+		Character: len("http."),
+	})
+
+	if completionLabelsContain(namespaceItems, "Server") {
+		t.Fatalf("expected private Server type to stay hidden, got %#v", completionLabels(namespaceItems))
+	}
+}
+
+func TestLSPStdHttpRouteHandlerRequestCompletion(t *testing.T) {
+	text := strings.Join([]string{
+		"import std \"http\";",
+		"",
+		"const server = http.server(3000)",
+		"server.get(\"/\", fn(req) {",
+		"    req.",
+		"})",
+	}, "\n")
+
+	items := getCompletions("file:///std_http_route_handler.tiny", text, Position{
+		Line:      4,
+		Character: len("    req."),
+	})
+
+	if !completionLabelsContain(items, "path") || !completionLabelsContain(items, "method") || !completionLabelsContain(items, "headers") {
+		t.Fatalf("expected RequestObject completions for route handler req, got %#v", completionLabels(items))
 	}
 }
 

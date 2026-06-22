@@ -6,22 +6,22 @@ export interface MemoryStats {
 }
 
 // Locks the current OS thread to the active goroutine/execution state.
-export fn lockThread(): null {}
+export fn lockThread(): null
 
 // Unlocks the current OS thread from the active goroutine/execution state.
-export fn unlockThread(): null {}
+export fn unlockThread(): null
 
 // Registers a callback to run when a fatal runtime error occurs.
-export fn onFatal(callback: function): null {}
+export fn onFatal(callback: function): null
 
 // Clears the registered fatal runtime error callback handler.
-export fn clearFatalHandler(): null {}
+export fn clearFatalHandler(): null
 
 // Returns an object containing memory allocation statistics.
-export fn memoryStats(): MemoryStats {}
+export fn memoryStats(): MemoryStats
 
 // Triggers a garbage collection run to reclaim unused memory.
-export fn gc(): null {}
+export fn gc(): null
 
 // Returns whether or not the running app was packed by `tiny pack`
-export fn isPacked(): bool {}
+export fn isPacked(): bool

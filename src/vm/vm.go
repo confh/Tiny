@@ -3560,12 +3560,6 @@ func (vm *VM) execute(targetDepth int) bool {
 				vm.fatalError(ErrorType, "defer expects function, got %s", TypeName(value))
 			}
 
-			for _, handler := range vm.deferHandlers {
-				if handler.FrameDepth == len(vm.frames) {
-					vm.fatalError(ErrorRuntime, "multiple defer statements are not permitted within the same function scope")
-				}
-			}
-
 			vm.deferHandlers = append(vm.deferHandlers, DeferHandler{
 				Function:   fn,
 				FrameDepth: len(vm.frames),
@@ -3820,15 +3814,17 @@ func (vm *VM) execute(targetDepth int) bool {
 				break
 			}
 
-			if ok, reason := vm.checkTypeHint(value, info.TypeHint); !ok {
-				vm.fatalError(
-					ErrorType,
-					"variable %s expected %s, got %s%s",
-					info.Name,
-					info.TypeHint.Name,
-					TypeName(value),
-					reason,
-				)
+			if !info.Uninitialized {
+				if ok, reason := vm.checkTypeHint(value, info.TypeHint); !ok {
+					vm.fatalError(
+						ErrorType,
+						"variable %s expected %s, got %s%s",
+						info.Name,
+						info.TypeHint.Name,
+						TypeName(value),
+						reason,
+					)
+				}
 			}
 
 			vm.mu.Lock()
@@ -3924,7 +3920,7 @@ func (vm *VM) execute(targetDepth int) bool {
 				vm.fatalError(ErrorInternal, "local slot out of range: %d", info.Slot)
 			}
 
-			if !info.TypeHint.IsEmpty() {
+			if !info.TypeHint.IsEmpty() && !info.Uninitialized {
 				if ok, reason := vm.checkTypeHint(value, info.TypeHint); !ok {
 					vm.fatalError(
 						ErrorType,

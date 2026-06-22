@@ -1,6 +1,6 @@
 // Allocates a new buffer of the specified size, filled with the given number.
-export fn alloc(size: number, fill: number): buffer {}
+export fn alloc(size: number, fill: number): buffer
 // Creates a new buffer from the specified string representation.
-export fn fromString(text: string): buffer {}
+export fn fromString(text: string): buffer
 // Creates a new buffer from the specified array.
-export fn fromArray(bytes: array:number): buffer {}
+export fn fromArray(bytes: array:number): buffer

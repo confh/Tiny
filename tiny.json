@@ -9,6 +9,7 @@
     "test": "tiny test/src/main.tiny"
   },
   "dependencies": {},
+  "ignore": null,
   "plugins": null,
   "compilerOptions": {
     "bytecodeCache": false

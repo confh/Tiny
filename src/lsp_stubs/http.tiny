@@ -75,72 +75,72 @@ export interface FullRequestOptions {
 // Represents an HTTP server instance.
 class Server {
     // Registers a GET request handler for the specified path.
-    fn get(path: string, handler: string | function) {}
+    fn get(path: string, handler: string | function(RequestObject))
     // Registers a POST request handler for the specified path.
-    fn post(path: string, handler: string | function) {}
+    fn post(path: string, handler: string | function(RequestObject))
     // Registers a PUT request handler for the specified path.
-    fn put(path: string, handler: string | function) {}
+    fn put(path: string, handler: string | function(RequestObject))
     // Registers a PATCH request handler for the specified path.
-    fn patch(path: string, handler: string | function) {}
+    fn patch(path: string, handler: string | function(RequestObject))
     // Registers a DELETE request handler for the specified path.
-    fn delete(path: string, handler: string | function) {}
+    fn delete(path: string, handler: string | function(RequestObject))
     // Registers a generic request handler for all incoming requests.
-    fn onRequest(handler: string | function) {}
+    fn onRequest(handler: string | function(RequestObject))
     // Serves static files from dir under prefix.
-    fn static(prefix: string, dir: string) {}
+    fn static(prefix: string, dir: string)
     // Stops the HTTP server.
-    fn stop() {}
+    fn stop()
     // Starts the HTTP server, optionally in asynchronous mode.
-    fn start(isAsync?: bool) {}
+    fn start(isAsync?: bool)
 }
 
 // Creates a new Server instance from a port or options object.
-export fn server(port: number | ServerOptions): Server {}
+export fn server(port: number | ServerOptions): Server
 
 // Performs a fully configurable HTTP client request.
-export fn request(options: FullRequestOptions): HttpResponse {}
+export fn request(options: FullRequestOptions): HttpResponse
 
 // Performs an HTTP GET request to the specified URL.
-export fn get(url: string, options?: RequestOptions): HttpResponse {}
+export fn get(url: string, options?: RequestOptions): HttpResponse
 
 // Performs an HTTP POST request to the specified URL with a body.
-export fn post(url: string, body: any, options?: RequestOptions): HttpResponse {}
+export fn post(url: string, body: any, options?: RequestOptions): HttpResponse
 
 // Performs an HTTP PUT request to the specified URL with a body.
-export fn put(url: string, body: any, options?: RequestOptions): HttpResponse {}
+export fn put(url: string, body: any, options?: RequestOptions): HttpResponse
 
 // Performs an HTTP PATCH request to the specified URL with a body.
-export fn patch(url: string, body: any, options?: RequestOptions): HttpResponse {}
+export fn patch(url: string, body: any, options?: RequestOptions): HttpResponse
 
 // Performs an HTTP DELETE request to the specified URL.
-export fn delete(url: string, options?: RequestOptions): HttpResponse {}
+export fn delete(url: string, options?: RequestOptions): HttpResponse
 
 // Downloads a file from the specified URL and saves it to filePath.
-export fn downloadFile(filePath: string, url: string): any {}
+export fn downloadFile(filePath: string, url: string): any
 
 // Helper function to return a JSON response object.
-export fn json(data: object): any {}
+export fn json(data: object): any
 
 // Helper function to return a plain text response object.
-export fn text(data: string): any {}
+export fn text(data: string): any
 
 // Helper function to return an HTML response object.
-export fn html(data: string): any {}
+export fn html(data: string): any
 
 // Creates a response with a status code and body.
-export fn status(code: number, body: any): any {}
+export fn status(code: number, body: any): any
 
 // Creates a response with status, body, and headers.
-export fn response(status: number, body: any, headers?: object): any {}
+export fn response(status: number, body: any, headers?: object): any
 
 // Creates an HTTP redirect response.
-export fn redirect(url: string, status?: number): any {}
+export fn redirect(url: string, status?: number): any
 
 // Creates a 204 No Content response.
-export fn noContent(): any {}
+export fn noContent(): any
 
 // Sends a file as the response body.
-export fn file(path: string): any {}
+export fn file(path: string): any
 
 // Sends a file as an attachment.
-export fn download(path: string, filename?: string): any {}
+export fn download(path: string, filename?: string): any

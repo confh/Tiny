@@ -1,5 +1,3 @@
-// lsp.go
-
 package main
 
 import (
@@ -453,7 +451,6 @@ func callContextAtPosition(text string, pos Position) (CallContext, bool) {
 
 	argIndex := countTopLevelCommas(text[open+1 : cursor])
 
-	// member call: io.println(
 	if dot := strings.LastIndex(callee, "."); dot != -1 {
 		receiver := strings.TrimSpace(callee[:dot])
 		receiver = strings.TrimSuffix(receiver, "?")
@@ -467,7 +464,6 @@ func callContextAtPosition(text string, pos Position) (CallContext, bool) {
 		}, true
 	}
 
-	// normal call: fib(
 	name := callee
 
 	if name == "" {
@@ -881,7 +877,7 @@ func getSignatureHelp(uri string, text string, pos Position) any {
 
 		if sym.Kind == SymbolNamespace {
 			member, ok := sym.Members[ctx.Method]
-			if !ok {
+			if !ok || isPrivateImportMember(member) {
 				return nil
 			}
 
@@ -1395,7 +1391,7 @@ func callbackParameterTypeInlayHintsForText(uri string, text string, rng LSPRang
 
 				hints = append(hints, InlayHint{
 					Position:    pos,
-					Label:       ": " + typ,
+					Label:       ": " + inlayTypeLabel(typ),
 					Kind:        1,
 					PaddingLeft: false,
 				})
@@ -1489,11 +1485,9 @@ func variableTypeInlayHintsForText(uri string, text string, rng LSPRange) []Inla
 			continue
 		}
 
-		typ = strings.TrimPrefix(strings.TrimPrefix(typ, "class:"), "interface:")
-
 		hints = append(hints, InlayHint{
 			Position:    Position{Line: lineIndex, Character: match[3]},
-			Label:       ": " + typ,
+			Label:       ": " + inlayTypeLabel(typ),
 			Kind:        1,
 			PaddingLeft: false,
 		})
@@ -1501,6 +1495,40 @@ func variableTypeInlayHintsForText(uri string, text string, rng LSPRange) []Inla
 	}
 
 	return hints
+}
+
+func inlayTypeLabel(typ string) string {
+	typ = strings.TrimSpace(typ)
+	if typ == "" {
+		return typ
+	}
+	if strings.Contains(typ, "|") {
+		parts := splitUnionType(typ)
+		for i, part := range parts {
+			parts[i] = inlayTypeLabel(part)
+		}
+		return strings.Join(parts, " | ")
+	}
+	if strings.HasPrefix(typ, "array:") {
+		return "array:" + inlayTypeLabel(strings.TrimPrefix(typ, "array:"))
+	}
+	if strings.HasPrefix(typ, "task:") {
+		return "task:" + inlayTypeLabel(strings.TrimPrefix(typ, "task:"))
+	}
+	if strings.HasPrefix(typ, "function(") {
+		params, ok := callableFunctionParamTypes(typ)
+		if !ok {
+			return typ
+		}
+		for i, param := range params {
+			params[i] = inlayTypeLabel(param)
+		}
+		return "function(" + strings.Join(params, ", ") + ")"
+	}
+	for _, prefix := range []string{"class:", "interface:", "enum:"} {
+		typ = strings.TrimPrefix(typ, prefix)
+	}
+	return typ
 }
 
 func parameterInlayHintsForText(uri string, text string, rng LSPRange) []InlayHint {
@@ -1621,6 +1649,9 @@ func paramsForCallName(scope *Scope, text string, pos Position, name string) []S
 		}
 		if sym.Kind == SymbolNamespace {
 			if memberSym, ok := sym.Members[member]; ok {
+				if isPrivateImportMember(memberSym) {
+					return nil
+				}
 				if memberSym.Kind == SymbolClass {
 					return constructorSymbolFromClass(memberSym, memberSym.Name).Params
 				}
@@ -2516,56 +2547,46 @@ func documentSymbolsFromScope(uri string, text string, scope *Scope) []DocumentS
 }
 
 func documentSymbolFromLine(rawLine string, line string, lineIndex int) (DocumentSymbol, bool) {
-	// fn name(...)
 	if match := regexp.MustCompile(`^fn\s+([A-Za-z_][A-Za-z0-9_]*)`).FindStringSubmatch(line); match != nil {
 		return makeDocumentSymbol(rawLine, lineIndex, match[1], "function", 12), true
 	}
 
-	// export fn name(...)
 	if match := regexp.MustCompile(`^export\s+fn\s+([A-Za-z_][A-Za-z0-9_]*)`).FindStringSubmatch(line); match != nil {
 		return makeDocumentSymbol(rawLine, lineIndex, match[1], "export function", 12), true
 	}
 
-	// interface Name
 	if match := regexp.MustCompile(`^interface\s+([A-Za-z_][A-Za-z0-9_]*)`).FindStringSubmatch(line); match != nil {
 		return makeDocumentSymbol(rawLine, lineIndex, match[1], "interface", 11), true
 	}
 
-	// export interface Name
 	if match := regexp.MustCompile(`^export\s+interface\s+([A-Za-z_][A-Za-z0-9_]*)`).FindStringSubmatch(line); match != nil {
 		return makeDocumentSymbol(rawLine, lineIndex, match[1], "export interface", 11), true
 	}
 
-	// class Name
 	if match := regexp.MustCompile(`^class\s+([A-Za-z_][A-Za-z0-9_]*)`).FindStringSubmatch(line); match != nil {
 		return makeDocumentSymbol(rawLine, lineIndex, match[1], "class", 5), true
 	}
 
-	// export class Name
 	if match := regexp.MustCompile(`^export\s+class\s+([A-Za-z_][A-Za-z0-9_]*)`).FindStringSubmatch(line); match != nil {
 		return makeDocumentSymbol(rawLine, lineIndex, match[1], "export class", 5), true
 	}
 
-	// const/let name =
 	if match := regexp.MustCompile(`^(?:let|const)\s+([A-Za-z_][A-Za-z0-9_]*)`).FindStringSubmatch(line); match != nil {
 		return makeDocumentSymbol(rawLine, lineIndex, match[1], "variable", 13), true
 	}
 
-	// export const/let name =
 	if match := regexp.MustCompile(`^export\s+(?:let|const)\s+([A-Za-z_][A-Za-z0-9_]*)`).FindStringSubmatch(line); match != nil {
 		return makeDocumentSymbol(rawLine, lineIndex, match[1], "export variable", 13), true
 	}
 
-	// embedStr / embedBin "path" const/let name
 	if match := regexp.MustCompile(`^(embedStr|embedBin)\s+"[^"]+"\s+(?:let|const)\s+([A-Za-z_][A-Za-z0-9_]*)`).FindStringSubmatch(line); match != nil {
-		kind := match[1] // "embedStr" or "embedBin"
+		kind := match[1]
 		name := match[2]
 		return makeDocumentSymbol(rawLine, lineIndex, name, kind, 13), true
 	}
 
-	// export embedStr / export embedBin "path" const/let name
 	if match := regexp.MustCompile(`^export\s+(embedStr|embedBin)\s+"[^"]+"\s+(?:let|const)\s+([A-Za-z_][A-Za-z0-9_]*)`).FindStringSubmatch(line); match != nil {
-		kind := match[1] // "embedStr" or "embedBin"
+		kind := match[1]
 		name := match[2]
 		return makeDocumentSymbol(rawLine, lineIndex, name, "export "+kind, 13), true
 	}
@@ -2662,7 +2683,7 @@ func documentSymbolFromSymbol(sym SymbolInfo, text string) DocumentSymbol {
 
 		for _, memberName := range memberNames {
 			member := sym.Members[memberName]
-			if strings.TrimSpace(member.Name) == "" {
+			if strings.TrimSpace(member.Name) == "" || isPrivateImportMember(member) {
 				continue
 			}
 			children = append(children, documentSymbolFromSymbol(member, text))
@@ -3166,22 +3187,6 @@ type TinySymbols struct {
 }
 
 var lspLogFile *os.File
-
-// func initLSPLogger() {
-// 	file, err := os.OpenFile("tiny-lsp.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-// 	if err == nil {
-// 		lspLogFile = file
-// 	}
-// }
-
-// func lspDebug(format string, args ...any) {
-// 	if lspLogFile == nil {
-// 		return
-// 	}
-
-// 	fmt.Fprintf(lspLogFile, "[tiny-lsp] "+format+"\n", args...)
-// 	lspLogFile.Sync()
-// }
 
 func classBlockAtLine(text string, lineIndex int) *blockInfo {
 	offset := offsetAtLine(text, lineIndex+1)
@@ -4668,6 +4673,20 @@ func completionItemsForClass(classSym SymbolInfo, receiver string, hasParens boo
 }
 
 func staticTypeOfSymbol(receiver string, sym SymbolInfo) string {
+	if !sym.TypeRef.IsZero() {
+		switch sym.TypeRef.Kind {
+		case LSPTypeClass, LSPTypeInterface, LSPTypeEnum:
+			if strings.Contains(receiver, ".") {
+				ref := sym.TypeRef
+				ref.Name = receiver
+				return ref.String()
+			}
+		}
+		if text := sym.TypeRef.String(); text != "" {
+			return text
+		}
+	}
+
 	switch sym.Kind {
 	case SymbolClass:
 		if strings.Contains(receiver, ".") {
@@ -4763,7 +4782,6 @@ func splitReceiverPath(receiver string) []string {
 			continue
 		}
 
-		// Check for ?. or .
 		if parenDepth == 0 && bracketDepth == 0 {
 			if strings.HasPrefix(receiver[i:], "?.") {
 				if current.Len() > 0 {
@@ -4821,6 +4839,9 @@ func resolveMemberFromStaticType(scope *Scope, typ string, member string) (Symbo
 		ns, ok := scope.Resolve(nsName)
 		if ok && ns.Kind == SymbolNamespace {
 			if memberSym, ok := ns.Members[member]; ok {
+				if isPrivateImportMember(memberSym) {
+					return SymbolInfo{}, "unknown", false
+				}
 				return memberSym, staticTypeOfSymbol(nsName+"."+member, memberSym), true
 			}
 		}
@@ -4998,7 +5019,7 @@ func resolveReceiverPath(scope *Scope, text string, pos Position, receiver strin
 
 		if sym.Kind == SymbolNamespace {
 			memberSym, exists := sym.Members[cleanMember]
-			if !exists {
+			if !exists || isPrivateImportMember(memberSym) {
 				return SymbolInfo{}, "unknown", false
 			}
 			nsName := strings.TrimPrefix(typ, "namespace:")
@@ -5295,9 +5316,6 @@ func completionItemsForReceiver(scope *Scope, text string, pos Position, receive
 
 	items = dedupeCompletionItems(items)
 
-	// Post-process after every completion source has run. This includes global
-	// methods like toString, so nullable receivers turn every completion into a
-	// safe-access completion consistently.
 	if isNullableLSPType(typ) {
 		if edit, ok := nullableReceiverTextEdit(text, pos); ok {
 			items = addAdditionalTextEditToCompletions(items, edit)
@@ -5431,7 +5449,6 @@ func getCompletions(uri string, text string, pos Position) []CompletionItem {
 	}
 
 	before := line[:pos.Character]
-	// Strip trailing identifier characters to support autocomplete while typing a member name
 	i := len(before) - 1
 	for i >= 0 && isIdentChar(before[i]) {
 		i--
@@ -5479,6 +5496,9 @@ func completionItemsFromMembers(members map[string]SymbolInfo, hasParens bool) [
 
 	for _, name := range names {
 		member := members[name]
+		if isPrivateImportMember(member) {
+			continue
+		}
 		detail := symbolDetail(member)
 		if member.Kind == SymbolFunction {
 			detail = formatFunctionSignature(member.Name, member.Params, member.Returns)
@@ -5629,29 +5649,74 @@ func receiverBeforeDot(text string) string {
 func parseStdImports(text string) map[string]string {
 	result := map[string]string{}
 
-	// import std "io";
-	// import std "json" as j;
-	re := regexp.MustCompile(`^\s*import\s+std\s+"([^"]+)"(?:\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?`)
+	statements, diagnostics := parseTinyForLSP("", text)
+	if statements != nil && len(diagnostics) == 0 {
+		for _, raw := range statements {
+			stmt, _ := unwrapExport(raw)
+			importStmt, ok := stmt.(ImportStmt)
+			if !ok || !importStmt.Std {
+				continue
+			}
+
+			module := importStmt.Path
+			alias := module
+			if importStmt.Alias != "" {
+				alias = importStmt.Alias
+			}
+
+			result[alias] = module
+		}
+		return result
+	}
 
 	cleanedText := stripNativeGoBlocks(text)
 	for _, rawLine := range strings.Split(cleanedText, "\n") {
-		line := stripTrailingLineComment(rawLine)
-		match := re.FindStringSubmatch(line)
-		if match == nil {
-			continue
+		module, alias, ok := parseStdImportLineWithoutRegex(stripTrailingLineComment(rawLine))
+		if ok {
+			result[alias] = module
 		}
-
-		module := match[1]
-		alias := module
-
-		if len(match) > 2 && match[2] != "" {
-			alias = match[2]
-		}
-
-		result[alias] = module
 	}
 
 	return result
+}
+
+func parseStdImportLineWithoutRegex(line string) (module string, alias string, ok bool) {
+	line = strings.TrimSpace(strings.TrimSuffix(line, ";"))
+	if !strings.HasPrefix(line, "import ") {
+		return "", "", false
+	}
+
+	rest := strings.TrimSpace(strings.TrimPrefix(line, "import "))
+	if !strings.HasPrefix(rest, "std ") {
+		return "", "", false
+	}
+
+	rest = strings.TrimSpace(strings.TrimPrefix(rest, "std "))
+	if !strings.HasPrefix(rest, "\"") {
+		return "", "", false
+	}
+
+	rest = rest[1:]
+	end := strings.IndexByte(rest, '"')
+	if end < 0 {
+		return "", "", false
+	}
+
+	module = rest[:end]
+	if module == "" {
+		return "", "", false
+	}
+
+	alias = module
+	rest = strings.TrimSpace(rest[end+1:])
+	if rest != "" {
+		parts := strings.Fields(rest)
+		if len(parts) == 2 && parts[0] == "as" && isSimpleIdentifier(parts[1]) {
+			alias = parts[1]
+		}
+	}
+
+	return module, alias, true
 }
 
 func symbolKindToCompletionKind(kind SymbolKind) int {

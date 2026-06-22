@@ -13,7 +13,7 @@ import (
 )
 
 func DistCommand(args []string) {
-	target := normalizeTarget("")
+	target := ""
 	entryFile := ""
 	outFile := ""
 	extraPlugins := []string{}
@@ -63,7 +63,13 @@ func DistCommand(args []string) {
 		}
 
 		entryFile = config.Entry
-		target = normalizeTarget(config.Target)
+		if target == "" {
+			target = normalizeTarget(config.Target)
+		}
+	} else {
+		if target == "" {
+			target = normalizeTarget("")
+		}
 	}
 
 	if outFile == "" {

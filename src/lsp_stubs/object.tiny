@@ -1,35 +1,35 @@
 // Retrieves the value associated with the specified key from an object.
-export fn get(object: object, key: string): any {}
+export fn get(object: object, key: string): any
 
 // Sets the value associated with the specified key on an object.
-export fn set(object: object, key: string, value: any): null {}
+export fn set(object: object, key: string, value: any): null
 
 // Checks if the specified key exists in an object.
-export fn has(object: object, key: string): bool {}
+export fn has(object: object, key: string): bool
 
 // Deletes the specified key from an object. Returns true if the key existed.
-export fn delete(object: object, key: string): bool {}
+export fn delete(object: object, key: string): bool
 
 // Returns an array containing all key names of the specified object.
-export fn keys(object: object): array:string {}
+export fn keys(object: object): array:string
 
 // Returns an array containing all property values of the specified object.
-export fn values(object: object): array {}
+export fn values(object: object): array
 
 // Returns an array of key-value pair arrays representing the object's entries.
-export fn enteries(object: object): array {}
+export fn enteries(object: object): array
 
 // Returns the number of properties defined on the specified object.
-export fn length(object: object): number {}
+export fn length(object: object): number
 
 // Removes all properties from the specified object.
-export fn clear(object: object): null {}
+export fn clear(object: object): null
 
 // Calls a function for each entry and value in the object.
-export fn forEach(object: object, callback: function(any, any)): null {}
+export fn forEach(object: object, callback: function(any, any)): null
 
 // Returns a new object containing only the specified keys from the object.
-export fn pick(object: object, keys: array): null {}
+export fn pick(object: object, keys: array): null
 
 // Returns a new object excluding the specified keys from the object.
-export fn omit(object: object, keys: array): null {}
+export fn omit(object: object, keys: array): null

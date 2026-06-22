@@ -1,17 +1,17 @@
 // Clears the console screen.
-export fn clear() {}
+export fn clear()
 
 // Prints the given values to standard output. Returns true if successful.
-export fn print(...values: any): bool {}
+export fn print(...values: any): bool
 
 // Prints the given values followed by a newline to standard output. Returns true if successful.
-export fn println(...values: any): bool {}
+export fn println(...values: any): bool
 
 // Prompts the user with the specified text and reads a line of input from stdin.
-export fn input(prompt?: string): string {}
+export fn input(prompt?: string): string
 
 // Reads a single line of input from standard input.
-export fn readLine(): string {}
+export fn readLine(): string
 
 // Reads a single keypress from standard input.
-export fn readKey(): string {}
+export fn readKey(): string

@@ -359,12 +359,11 @@ func checkSingleTypeHintWithGlobals(value TinyValue, hint string, interfaces map
 		if globalNames != nil && globals != nil {
 			if idx, exists := globalNames[hint]; exists && idx < len(globals) {
 				if enumObj, ok := globals[idx].Value.(ObjectValue); ok {
-					return true, ""
-					if obj, ok := value.Value.(ObjectValue); ok {
+					if obj, ok := tinyValueAsInterfaceObject(value); ok {
 						enumTag, ok := obj["_enum"]
 						if ok {
 							enumTagStr, ok := enumTag.Value.(string)
-							if ok && enumTagStr == hint {
+							if ok && (enumTagStr == hint || strings.HasSuffix(enumTagStr, "."+hint)) {
 								return true, ""
 							}
 						}
@@ -381,12 +380,11 @@ func checkSingleTypeHintWithGlobals(value TinyValue, hint string, interfaces map
 				for name, idx := range globalNames {
 					if (strings.HasSuffix(name, "."+hint) || name == hint) && idx < len(globals) {
 						if enumObj, ok := globals[idx].Value.(ObjectValue); ok {
-							return true, ""
-							if obj, ok := value.Value.(ObjectValue); ok {
+							if obj, ok := tinyValueAsInterfaceObject(value); ok {
 								enumTag, ok := obj["_enum"]
 								if ok {
 									enumTagStr, ok := enumTag.Value.(string)
-									if ok && enumTagStr == hint {
+									if ok && (enumTagStr == name || enumTagStr == hint || strings.HasSuffix(enumTagStr, "."+hint)) {
 										return true, ""
 									}
 								}

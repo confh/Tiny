@@ -10,7 +10,7 @@
 // let encoded = url.encode("hello world & x=1")
 // // "hello+world+%26+x%3D1"
 // ```
-export fn encode(str: string): string {}
+export fn encode(str: string): string
 
 // Decodes a URL query-encoded string back into normal text.
 //
@@ -22,4 +22,4 @@ export fn encode(str: string): string {}
 // let decoded = url.decode("hello+world+%26+x%3D1")
 // // "hello world & x=1"
 // ```
-export fn decode(str: string): string {}
+export fn decode(str: string): string

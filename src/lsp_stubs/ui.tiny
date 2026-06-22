@@ -1,18 +1,18 @@
 // Represents an HTML-based user interface window (WebView).
 class WebView {
   // Sets the title window of the WebView.
-  fn setTitle(title: string): null {}
+  fn setTitle(title: string): null
   // Sets the width and height dimensions of the WebView window.
-  fn setSize(width: number, height: number): null {}
+  fn setSize(width: number, height: number): null
   // Sets the HTML content to render in the WebView.
-  fn setHtml(html: string): null {}
+  fn setHtml(html: string): null
   // Navigates the WebView to the specified URL.
-  fn navigate(url: string): null {}
+  fn navigate(url: string): null
   // Starts the WebView window event loop.
-  fn run(): null {}
+  fn run(): null
   // Binds a JavaScript callback function available in the WebView context.
-  fn callback(name: string, func: function): null {}
+  fn callback(name: string, func: function): null
 }
 
 // Creates a new WebView instance, optionally with debugging enabled.
-export fn new(debug?: bool): WebView {}
+export fn new(debug?: bool): WebView

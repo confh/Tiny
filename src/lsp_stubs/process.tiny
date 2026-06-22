@@ -9,19 +9,19 @@ export enum Signal {
 // Represents a running subprocess instance.
 class Process {
     // Returns the process ID (PID) of the subprocess.
-    fn pid(): number {}
+    fn pid(): number
     // Waits for the subprocess to finish executing.
-    fn wait(): null {}
+    fn wait(): null
     // Kills the subprocess.
-    fn kill(): null {}
+    fn kill(): null
     // Kills the subprocess and all of its child processes.
-    fn killTree(): null {}
+    fn killTree(): null
     // Sends an interrupt signal to the subprocess.
-    fn interrupt(): null {}
+    fn interrupt(): null
     // Checks if the subprocess is currently running.
-    fn isRunning(): bool {}
+    fn isRunning(): bool
     // Sends a specified signal string to the subprocess.
-    fn signal(signal: string): null {}
+    fn signal(signal: string): null
 }
 
 // Options for configuring a spawned subprocess.
@@ -47,34 +47,34 @@ export interface ProcessResult {
 }
 
 // Returns the command-line arguments passed to the current process.
-export fn args(): array:string {}
+export fn args(): array:string
 
 // Exits the current process with the specified exit code.
-export fn exit(code: number): null {}
+export fn exit(code: number): null
 
 // Closes the standard input stream of the current process.
-export fn close(): null {}
+export fn close(): null
 
 // Returns the current working directory of the process.
-export fn cwd(): string {}
+export fn cwd(): string
 
 // Retrieves the value of the specified environment variable.
-export fn getEnv(key: string): string {}
+export fn getEnv(key: string): string
 
 // Sets the value of the specified environment variable.
-export fn setEnv(key: string, value: string): null {}
+export fn setEnv(key: string, value: string): null
 
 // Unsets (deletes) the specified environment variable.
-export fn unsetEnv(key: string): null {}
+export fn unsetEnv(key: string): null
 
 // Halts execution of the current process immediately.
-export fn halt(): null {}
+export fn halt(): null
 
 // Runs a command synchronously with arguments and options, blocking until complete.
-export fn run(command: string, args?: array:string, options?: ProcessOptions): ProcessResult {}
+export fn run(command: string, args?: array:string, options?: ProcessOptions): ProcessResult
 
 // Runs a command synchronously in a system shell, blocking until complete.
-export fn shell(command: string, options?: ProcessOptions): ProcessResult {}
+export fn shell(command: string, options?: ProcessOptions): ProcessResult
 
 // Starts a subprocess asynchronously and returns its Process control handle.
-export fn start(command: string, args?: array:string, options?: ProcessOptions): Process {}
+export fn start(command: string, args?: array:string, options?: ProcessOptions): Process

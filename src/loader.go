@@ -94,7 +94,7 @@ func (l *Loader) loadFile(path string) []Stmt {
 				continue
 			}
 
-			result = append(result, importedStatements...)
+			result = append(result, exportedStatementsForImport(importedStatements)...)
 		default:
 			result = append(result, stmt)
 		}
@@ -104,6 +104,16 @@ func (l *Loader) loadFile(path string) []Stmt {
 	l.states[absPath] = ImportLoaded
 	l.cache[absPath] = result
 
+	return result
+}
+
+func exportedStatementsForImport(statements []Stmt) []Stmt {
+	result := []Stmt{}
+	for _, stmt := range statements {
+		if _, exported := unwrapExport(stmt); exported {
+			result = append(result, stmt)
+		}
+	}
 	return result
 }
 

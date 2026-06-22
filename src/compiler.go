@@ -781,7 +781,36 @@ func (c *Compiler) compileScopedBlock(body []Stmt) {
 	c.endScope()
 }
 
+func abortOnCompilerSemanticErrors(statements []Stmt) {
+	diagnostics := CheckProgramSemantics("", "", statements, false)
+	for _, diagnostic := range diagnostics {
+		if intFromAny(diagnostic["severity"]) != 1 {
+			continue
+		}
+
+		message, _ := diagnostic["message"].(string)
+		if strings.HasPrefix(message, "cannot pass type ") {
+			continue
+		}
+		line := 0
+		column := 0
+		if rangeValue, ok := diagnostic["range"].(map[string]any); ok {
+			if startValue, ok := rangeValue["start"].(map[string]any); ok {
+				line = intFromAny(startValue["line"]) + 1
+				column = intFromAny(startValue["character"]) + 1
+			}
+		}
+		kind := ErrorType
+		if strings.HasPrefix(message, "undefined variable: ") {
+			kind = ErrorName
+		}
+		LangErrorAt(kind, "", line, column, "%s", message)
+	}
+}
+
 func (c *Compiler) CompileProgram(program Program) ([]Instruction, map[string]Function, map[string]Class, map[string]Interface, map[string]int) {
+	abortOnCompilerSemanticErrors(program.Statements)
+
 	c.virtualObjects = map[VarNodeKey]map[string]int{}
 	c.predeclareStdImportsForJitRegions(program.Statements)
 
@@ -1492,91 +1521,91 @@ func (c *Compiler) compileMatchStatement(stmt MatchStmt) {
 				c.patchJump(j)
 			}
 
-		// Now check guard if present
-		if matchCase.Guard != nil {
-			if matchCase.BindName != "" {
-				c.compileMatchBindName(matchCase.BindName, tempBinding)
+			// Now check guard if present
+			if matchCase.Guard != nil {
+				if matchCase.BindName != "" {
+					c.compileMatchBindName(matchCase.BindName, tempBinding)
+				}
+
+				c.compileExpr(matchCase.Guard)
+				guardFailJump := c.emitJump(OP_JUMP_IF_FALSE)
+
+				c.compileScopedBlock(matchCase.Body)
+				endJumps = append(endJumps, c.emitJump(OP_JUMP))
+
+				c.patchJump(guardFailJump)
+			} else {
+				if matchCase.BindName != "" {
+					c.compileMatchBindName(matchCase.BindName, tempBinding)
+				}
+
+				c.compileScopedBlock(matchCase.Body)
+				endJumps = append(endJumps, c.emitJump(OP_JUMP))
 			}
-
-			c.compileExpr(matchCase.Guard)
-			guardFailJump := c.emitJump(OP_JUMP_IF_FALSE)
-
-			c.compileScopedBlock(matchCase.Body)
-			endJumps = append(endJumps, c.emitJump(OP_JUMP))
-
-			c.patchJump(guardFailJump)
-		} else {
-			if matchCase.BindName != "" {
-				c.compileMatchBindName(matchCase.BindName, tempBinding)
-			}
-
-			c.compileScopedBlock(matchCase.Body)
-			endJumps = append(endJumps, c.emitJump(OP_JUMP))
-		}
-
-		c.patchJump(jumpToNext)
-	} else if matchCase.BindName != "" && matchCase.Values[0] == nil {
-		// Bind-only pattern: always matches, just binds the value
-		c.compileMatchBindName(matchCase.BindName, tempBinding)
-
-		if matchCase.Guard != nil {
-			c.compileExpr(matchCase.Guard)
-			guardFailJump := c.emitJump(OP_JUMP_IF_FALSE)
-
-			c.compileScopedBlock(matchCase.Body)
-			endJumps = append(endJumps, c.emitJump(OP_JUMP))
-
-			c.patchJump(guardFailJump)
-		} else {
-			c.compileScopedBlock(matchCase.Body)
-			endJumps = append(endJumps, c.emitJump(OP_JUMP))
-		}
-	} else {
-		// Single value pattern
-		// load temp
-		if tempBinding.Kind == BindingLocal {
-			c.emit(OP_LOAD_LOCAL, tempBinding.Slot)
-		} else {
-			c.emit(OP_LOAD_GLOBAL, VariableInfo{
-				Name: tempBinding.Name,
-				Slot: tempBinding.Slot,
-			})
-		}
-
-		// load case value
-		c.compileExpr(matchCase.Values[0])
-
-		// compare
-		c.emit(OP_EQ, nil)
-
-		// if false, jump to next case
-		jumpToNext := c.emitJump(OP_JUMP_IF_FALSE)
-
-		// Check guard if present
-		if matchCase.Guard != nil {
-			if matchCase.BindName != "" {
-				c.compileMatchBindName(matchCase.BindName, tempBinding)
-			}
-
-			c.compileExpr(matchCase.Guard)
-			guardFailJump := c.emitJump(OP_JUMP_IF_FALSE)
-
-			c.compileScopedBlock(matchCase.Body)
-			endJumps = append(endJumps, c.emitJump(OP_JUMP))
-
-			c.patchJump(guardFailJump)
-			c.patchJump(jumpToNext)
-		} else {
-			if matchCase.BindName != "" {
-				c.compileMatchBindName(matchCase.BindName, tempBinding)
-			}
-
-			c.compileScopedBlock(matchCase.Body)
-			endJumps = append(endJumps, c.emitJump(OP_JUMP))
 
 			c.patchJump(jumpToNext)
+		} else if matchCase.BindName != "" && matchCase.Values[0] == nil {
+			// Bind-only pattern: always matches, just binds the value
+			c.compileMatchBindName(matchCase.BindName, tempBinding)
+
+			if matchCase.Guard != nil {
+				c.compileExpr(matchCase.Guard)
+				guardFailJump := c.emitJump(OP_JUMP_IF_FALSE)
+
+				c.compileScopedBlock(matchCase.Body)
+				endJumps = append(endJumps, c.emitJump(OP_JUMP))
+
+				c.patchJump(guardFailJump)
+			} else {
+				c.compileScopedBlock(matchCase.Body)
+				endJumps = append(endJumps, c.emitJump(OP_JUMP))
+			}
+		} else {
+			// Single value pattern
+			// load temp
+			if tempBinding.Kind == BindingLocal {
+				c.emit(OP_LOAD_LOCAL, tempBinding.Slot)
+			} else {
+				c.emit(OP_LOAD_GLOBAL, VariableInfo{
+					Name: tempBinding.Name,
+					Slot: tempBinding.Slot,
+				})
+			}
+
+			// load case value
+			c.compileExpr(matchCase.Values[0])
+
+			// compare
+			c.emit(OP_EQ, nil)
+
+			// if false, jump to next case
+			jumpToNext := c.emitJump(OP_JUMP_IF_FALSE)
+
+			// Check guard if present
+			if matchCase.Guard != nil {
+				if matchCase.BindName != "" {
+					c.compileMatchBindName(matchCase.BindName, tempBinding)
+				}
+
+				c.compileExpr(matchCase.Guard)
+				guardFailJump := c.emitJump(OP_JUMP_IF_FALSE)
+
+				c.compileScopedBlock(matchCase.Body)
+				endJumps = append(endJumps, c.emitJump(OP_JUMP))
+
+				c.patchJump(guardFailJump)
+				c.patchJump(jumpToNext)
+			} else {
+				if matchCase.BindName != "" {
+					c.compileMatchBindName(matchCase.BindName, tempBinding)
+				}
+
+				c.compileScopedBlock(matchCase.Body)
+				endJumps = append(endJumps, c.emitJump(OP_JUMP))
+
+				c.patchJump(jumpToNext)
+			}
 		}
-	}
 
 		// End bind name scope
 		if matchCase.BindName != "" {
@@ -1652,6 +1681,12 @@ func (c *Compiler) compileEnumMatchCase(matchCase MatchCase, tempBinding Binding
 			c.emit(OP_LOAD_GLOBAL, VariableInfo{Name: tempBinding.Name, Slot: tempBinding.Slot})
 		}
 	}
+
+	loadTemp()
+	c.emit(OP_TYPEOF, nil)
+	c.emit(OP_CONST, "object")
+	c.emit(OP_EQ, nil)
+	failJumps = append(failJumps, c.emitJump(OP_JUMP_IF_FALSE))
 
 	loadTemp()
 	c.emit(OP_GET_PROPERTY, "_enum")
@@ -2007,17 +2042,19 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 
 		if binding.Kind == BindingLocal && binding.Slot >= 0 {
 			c.emit(OP_STORE_LOCAL, VariableInfo{
-				Name:     s.Name,
-				Slot:     binding.Slot,
-				Constant: s.Constant,
-				TypeHint: c.eraseTypeHint(s.TypeHint),
+				Name:          s.Name,
+				Slot:          binding.Slot,
+				Constant:      s.Constant,
+				TypeHint:      c.eraseTypeHint(s.TypeHint),
+				Uninitialized: isImplicitNullInitializer(s.Value),
 			})
 		} else {
 			c.emit(OP_STORE_GLOBAL, VariableInfo{
-				Name:     binding.Name,
-				Constant: s.Constant,
-				TypeHint: c.eraseTypeHint(s.TypeHint),
-				Slot:     binding.Slot,
+				Name:          binding.Name,
+				Constant:      s.Constant,
+				TypeHint:      c.eraseTypeHint(s.TypeHint),
+				Slot:          binding.Slot,
+				Uninitialized: isImplicitNullInitializer(s.Value),
 			})
 		}
 
@@ -2749,10 +2786,11 @@ func (c *Compiler) compileClass(stmt ClassStmt) {
 	}
 
 	for _, field := range stmt.Fields {
+		fieldValue := c.evalConstantExpr(field.Value, "class field default must be constant.")
 		classField := ClassField{
 			Constant: field.Constant,
 			Name:     field.Name,
-			Value:    c.evalConstantExpr(field.Value, "class field default must be constant."),
+			Value:    fieldValue,
 			TypeHint: c.eraseTypeHint(field.TypeHint),
 			Private:  field.Private,
 		}
@@ -2767,15 +2805,15 @@ func (c *Compiler) compileClass(stmt ClassStmt) {
 			}
 		}
 
-		if !isGenericParam {
-			if ok, _ := CheckTypeHint(c.evalConstantExpr(field.Value, "class field default must be constant."), field.TypeHint, c.interfaces); !ok {
+		if !isGenericParam && !isImplicitNullInitializer(field.Value) {
+			if ok, _ := CheckTypeHint(fieldValue, field.TypeHint, c.interfaces); !ok {
 				c.fatalError(
 					ErrorType,
 					"field %s in class '%s' expected %s, got %s",
 					field.Name,
 					stmt.Name,
 					field.TypeHint.Name,
-					TypeName(c.evalConstantExpr(field.Value, "class field default must be constant.")),
+					TypeName(fieldValue),
 				)
 			}
 		}
@@ -2981,6 +3019,11 @@ func (c *Compiler) compileIfStatement(stmt IfStmt) {
 	} else {
 		c.patchJump(jumpIfFalseIndex)
 	}
+}
+
+func isImplicitNullInitializer(expr Expr) bool {
+	_, ok := expr.(NullExpr)
+	return ok
 }
 
 func (c *Compiler) compileFunction(stmt FunctionStmt) {

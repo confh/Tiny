@@ -9,58 +9,58 @@ export interface Matrix {
 }
 
 // Converts the given value to a floating-point number.
-export fn toFloat(value: any): number {}
+export fn toFloat(value: any): number
 
 // Converts the given value to an integer.
-export fn toInt(value: any): number {}
+export fn toInt(value: any): number
 
 // Returns the absolute value of the specified number.
-export fn abs(value: number): number {}
+export fn abs(value: number): number
 
 // Returns base raised to the power of exponent.
-export fn pow(base: number, exponent: number): number {}
+export fn pow(base: number, exponent: number): number
 
 // Returns the square root of the specified number.
-export fn sqrt(value: number): number {}
+export fn sqrt(value: number): number
 
 // Rounds the specified number upwards to the nearest integer.
-export fn ceil(value: number): number {}
+export fn ceil(value: number): number
 
 // Rounds the specified number downwards to the nearest integer.
-export fn floor(value: number): number {}
+export fn floor(value: number): number
 
 // Rounds the specified number to the nearest integer.
-export fn round(value: number): number {}
+export fn round(value: number): number
 
 // Clamps the given value between a minimum and maximum limit.
-export fn clamp(value: number, min: number, max: number): number {}
+export fn clamp(value: number, min: number, max: number): number
 
 // Returns the sine of the specified angle in radians.
-export fn sin(value: number): number {}
+export fn sin(value: number): number
 
 // Returns the cosine of the specified angle in radians.
-export fn cos(value: number): number {}
+export fn cos(value: number): number
 
 // Returns the tangent of the specified angle in radians.
-export fn tan(value: number): number {}
+export fn tan(value: number): number
 
 // Converts an angle from radians to degrees.
-export fn radToDeg(radians: number): number {}
+export fn radToDeg(radians: number): number
 
 // Converts an angle from degrees to radians.
-export fn degToRad(degrees: number): number {}
+export fn degToRad(degrees: number): number
 
 // Returns the angle atan2 of y/x in radians.
-export fn atan2(y: number, x: number): number {}
+export fn atan2(y: number, x: number): number
 
 // Returns the sum of all numeric values in the specified array.
-export fn sum(values: array): number {}
+export fn sum(values: array): number
 
 // Performs matrix multiplication of matrix a and matrix b.
-export fn matMul(a: Matrix, b: Matrix): Matrix {}
+export fn matMul(a: Matrix, b: Matrix): Matrix
 
 // Transposes the specified matrix.
-export fn matTranspose(matrix: Matrix): Matrix {}
+export fn matTranspose(matrix: Matrix): Matrix
 
 // Multiplies all elements of the specified matrix by a scalar.
-export fn matScale(matrix: Matrix, scalar: number): Matrix {}
+export fn matScale(matrix: Matrix, scalar: number): Matrix

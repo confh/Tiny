@@ -1,5 +1,5 @@
 // Returns the name of the operating system (e.g., "windows", "linux", "darwin").
-export fn name(): string {}
+export fn name(): string
 
 // Returns the architecture of the operating system (e.g., "amd64", "arm64").
-export fn arch(): string {}
+export fn arch(): string

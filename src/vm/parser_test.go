@@ -248,6 +248,34 @@ class Service {
 	}
 }
 
+func TestParserUninitializedVariableAndField(t *testing.T) {
+	program := parseSourceForTest(t, `
+let count: number
+class User {
+    field name: string
+}
+`)
+
+	variable, ok := program.Statements[0].(VariableStmt)
+	if !ok {
+		t.Fatalf("statement 0 type = %T, want VariableStmt", program.Statements[0])
+	}
+	if _, ok := variable.Value.(NullExpr); !ok {
+		t.Fatalf("variable value type = %T, want NullExpr", variable.Value)
+	}
+
+	classStmt, ok := program.Statements[1].(ClassStmt)
+	if !ok {
+		t.Fatalf("statement 1 type = %T, want ClassStmt", program.Statements[1])
+	}
+	if len(classStmt.Fields) != 1 {
+		t.Fatalf("field count = %d, want 1", len(classStmt.Fields))
+	}
+	if _, ok := classStmt.Fields[0].Value.(NullExpr); !ok {
+		t.Fatalf("field value type = %T, want NullExpr", classStmt.Fields[0].Value)
+	}
+}
+
 func TestParserAllowsKeywordFunctionNames(t *testing.T) {
 	program := parseSourceForTest(t, `
 export fn enum(values: array:string): array:string {

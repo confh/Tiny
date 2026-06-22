@@ -90,14 +90,14 @@ export class Conn {
     // ```tiny
     // conn.send("hello")
     // ```
-    fn send(data: string) {}
+    fn send(data: string)
     // Sends a text message.
     //
     // Example:
     // ```tiny
     // conn.sendText("hello")
     // ```
-    fn sendText(data: string) {}
+    fn sendText(data: string)
 
     // Encodes a value as JSON and sends it as a text message.
     //
@@ -108,7 +108,7 @@ export class Conn {
     //     d: null
     // })
     // ```
-    fn sendJson(data: object) {}
+    fn sendJson(data: object)
 
     // Sends a binary message.
     //
@@ -118,7 +118,7 @@ export class Conn {
     // ```tiny
     // conn.sendBytes(buffer)
     // ```
-    fn sendBytes(data: buffer) {}
+    fn sendBytes(data: buffer)
 
     // Reads one message from the connection.
     //
@@ -132,7 +132,7 @@ export class Conn {
     //     io.println(msg.data)
     // }
     // ```
-    fn read(): Message {}
+    fn read(): Message
 
     // Reads one text message from the connection.
     //
@@ -143,7 +143,7 @@ export class Conn {
     // const text = conn.readText()
     // io.println(text)
     // ```
-    fn readText(): string {}
+    fn readText(): string
 
     // Reads one text message and parses it as JSON.
     //
@@ -154,7 +154,7 @@ export class Conn {
     // const payload = conn.readJson()
     // io.println(payload.op)
     // ```
-    fn readJson(): object {}
+    fn readJson(): object
 
     // Registers a handler that runs when a message is received.
     //
@@ -166,7 +166,7 @@ export class Conn {
     //     io.println(msg.data)
     // })
     // ```
-    fn onMessage(handler: function(Conn, Message)) {}
+    fn onMessage(handler: function(Conn, Message))
 
     // Registers a handler that runs when the connection closes.
     //
@@ -176,7 +176,7 @@ export class Conn {
     //     io.println("closed: " + event.reason)
     // })
     // ```
-    fn onClose(handler: function(CloseEvent)) {}
+    fn onClose(handler: function(CloseEvent))
 
     // Registers a handler that runs when a WebSocket error happens.
     //
@@ -186,7 +186,7 @@ export class Conn {
     //     io.println(err)
     // })
     // ```
-    fn onError(handler: function) {}
+    fn onError(handler: function)
 
     // Sends a WebSocket ping frame.
     //
@@ -199,7 +199,7 @@ export class Conn {
     // ```tiny
     // conn.ping("heartbeat")
     // ```
-    fn ping(data = "") {}
+    fn ping(data = "")
 
     // Sends a WebSocket pong frame.
     //
@@ -209,7 +209,7 @@ export class Conn {
     // ```tiny
     // conn.pong()
     // ```
-    fn pong(data = "") {}
+    fn pong(data = "")
 
     // Closes the connection.
     //
@@ -224,7 +224,7 @@ export class Conn {
     // ```tiny
     // conn.close(1000, "done")
     // ```
-    fn close(code = 1000, reason = "") {}
+    fn close(code = 1000, reason = "")
 
     // Returns true if the connection is still open.
     //
@@ -234,7 +234,7 @@ export class Conn {
     //     conn.sendText("still connected")
     // }
     // ```
-    fn isOpen(): bool {}
+    fn isOpen(): bool
 
     // Returns the remote network address if available.
     //
@@ -242,7 +242,7 @@ export class Conn {
     // ```tiny
     // io.println(conn.remoteAddr())
     // ```
-    fn remoteAddr(): string {}
+    fn remoteAddr(): string
 
     // Returns request headers associated with the connection.
     //
@@ -253,7 +253,7 @@ export class Conn {
     // const headers = conn.headers()
     // io.println(headers["User-Agent"])
     // ```
-    fn headers(): object {}
+    fn headers(): object
 
 }
 
@@ -281,7 +281,7 @@ export class Server {
     //     conn.sendText("welcome")
     // })
     // ```
-    fn onConnection(handler: function(Conn)) {}
+    fn onConnection(handler: function(Conn))
 
     // Registers a global message handler for all connected clients.
     //
@@ -293,7 +293,7 @@ export class Server {
     //     conn.sendText("echo: " + msg.data)
     // })
     // ```
-    fn onMessage(handler: function(Conn, Message)) {}
+    fn onMessage(handler: function(Conn, Message))
 
     // Registers a global close handler for all connected clients.
     //
@@ -303,7 +303,7 @@ export class Server {
     //     io.println("client disconnected")
     // })
     // ```
-    fn onClose(handler: function(Conn, CloseEvent)) {}
+    fn onClose(handler: function(Conn, CloseEvent))
 
     // Registers a global error handler.
     //
@@ -313,7 +313,7 @@ export class Server {
     //     io.println(err)
     // })
     // ```
-    fn onError(handler: function) {}
+    fn onError(handler: function)
 
     // Starts the WebSocket server.
     //
@@ -328,7 +328,7 @@ export class Server {
     // ```tiny
     // server.start(true)
     // ```
-    fn start(isAsync = false) {}
+    fn start(isAsync = false)
 
     // Stops the WebSocket server and closes the listening socket.
     //
@@ -336,7 +336,7 @@ export class Server {
     // ```tiny
     // server.stop()
     // ```
-    fn stop() {}
+    fn stop()
 
     // Returns true if the server is running.
     //
@@ -346,7 +346,7 @@ export class Server {
     //     io.println("server is running")
     // }
     // ```
-    fn isRunning(): bool {}
+    fn isRunning(): bool
 
     // Sends a text message to every connected client.
     //
@@ -354,7 +354,7 @@ export class Server {
     // ```tiny
     // server.broadcastText("hello everyone")
     // ```
-    fn broadcastText(data: string) {}
+    fn broadcastText(data: string)
 
     // Encodes a value as JSON and sends it to every connected client.
     //
@@ -364,7 +364,7 @@ export class Server {
     //     type: "reload"
     // })
     // ```
-    fn broadcastJson(data: object) {}
+    fn broadcastJson(data: object)
 
     // Closes all connected clients without stopping the server.
     //
@@ -377,7 +377,7 @@ export class Server {
     // ```tiny
     // server.closeAll(1000, "server restarting")
     // ```
-    fn closeAll(code = 1000, reason = "") {}
+    fn closeAll(code = 1000, reason = "")
 
 }
 
@@ -399,7 +399,7 @@ export class Server {
 //     }
 // })
 // ```
-export fn connect(url: string, options?: ClientOptions): Conn {}
+export fn connect(url: string, options?: ClientOptions): Conn
 
 // Creates a WebSocket server.
 //
@@ -419,7 +419,7 @@ export fn connect(url: string, options?: ClientOptions): Conn {}
 //
 // server.start()
 // ```
-export fn server(port: number | ServerOptions): Server {}
+export fn server(port: number | ServerOptions): Server
 
 // Creates a text message object.
 //
@@ -427,7 +427,7 @@ export fn server(port: number | ServerOptions): Server {}
 // ```tiny
 // const msg = websocket.text("hello")
 // ```
-export fn text(data: string): Message {}
+export fn text(data: string): Message
 
 // Creates a JSON text message object.
 //
@@ -440,7 +440,7 @@ export fn text(data: string): Message {}
 //     d: null
 // })
 // ```
-export fn json(data: object): Message {}
+export fn json(data: object): Message
 
 // Creates a binary message object.
 //
@@ -448,7 +448,7 @@ export fn json(data: object): Message {}
 // ```tiny
 // const msg = websocket.binary(buffer)
 // ```
-export fn binary(data: buffer): Message {}
+export fn binary(data: buffer): Message
 
 // Returns true if the message is a text message.
 //
@@ -458,7 +458,7 @@ export fn binary(data: buffer): Message {}
 //     io.println(msg.data)
 // }
 // ```
-export fn isText(message: Message): bool {}
+export fn isText(message: Message): bool
 
 // Returns true if the message is a binary message.
 //
@@ -468,7 +468,7 @@ export fn isText(message: Message): bool {}
 //     io.println("binary message")
 // }
 // ```
-export fn isBinary(message: Message): bool {}
+export fn isBinary(message: Message): bool
 
 // Returns true if the message is a close message.
 //
@@ -478,7 +478,7 @@ export fn isBinary(message: Message): bool {}
 //     io.println("connection closed")
 // }
 // ```
-export fn isClose(message: Message): bool {}
+export fn isClose(message: Message): bool
 
 // Parses a text WebSocket message as JSON.
 //
@@ -488,4 +488,4 @@ export fn isClose(message: Message): bool {}
 // const data = websocket.parseJson(msg)
 // io.println(data.op)
 // ```
-export fn parseJson(message: Message): object {}
+export fn parseJson(message: Message): object

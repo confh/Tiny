@@ -245,10 +245,11 @@ type BuiltinCallInfo struct {
 }
 
 type VariableInfo struct {
-	Name     string
-	Slot     int
-	Constant bool
-	TypeHint TypeHint `json:"typeHint"`
+	Name          string
+	Slot          int
+	Constant      bool
+	TypeHint      TypeHint `json:"typeHint"`
+	Uninitialized bool     `json:"uninitialized,omitempty"`
 }
 
 type ObjectFieldsInfo struct {

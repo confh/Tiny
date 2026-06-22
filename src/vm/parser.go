@@ -2102,9 +2102,19 @@ func (p *Parser) parseFieldStatement() Stmt {
 		typeHint.Types = append(typeHint.Types, "null")
 	}
 
-	p.expect(TOKEN_ASSIGN)
-
-	value := p.parseExpression()
+	value := Expr(NullExpr{})
+	if p.current.Type == TOKEN_ASSIGN {
+		p.advance()
+		value = p.parseExpression()
+	} else if constant {
+		LangErrorAt(
+			ErrorSyntax,
+			p.current.File,
+			p.current.Line,
+			p.current.Column,
+			"expected initializer for const field",
+		)
+	}
 
 	p.consumeTerminator()
 
@@ -2156,9 +2166,11 @@ func (p *Parser) parseLetStatement() Stmt {
 
 	typeHint := p.parseOptionalTypeHint()
 
-	p.expect(TOKEN_ASSIGN)
-
-	value := p.parseExpression()
+	value := Expr(NullExpr{})
+	if p.current.Type == TOKEN_ASSIGN {
+		p.advance()
+		value = p.parseExpression()
+	}
 
 	p.consumeTerminator()
 
@@ -2458,7 +2470,7 @@ func (p *Parser) parseArrayDestructurePattern() ArrayDestructurePattern {
 				LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "expected variable name after ... in array destructuring")
 			}
 			pattern.Elements = append(pattern.Elements, ArrayDestructureElement{
-				Name:    p.current.Literal,
+				Name:     p.current.Literal,
 				IsSpread: true,
 			})
 			p.advance()
@@ -3509,6 +3521,10 @@ func (p *Parser) parseFunctionSignatureAndBody() ([]Param, TypeHint, []Stmt) {
 		returnType = p.parseTypeHint(false)
 	}
 
+	if p.current.Type == TOKEN_SEMI {
+		return params, returnType, []Stmt{}
+	}
+
 	body := p.parseBlock()
 
 	return params, returnType, body
@@ -4039,15 +4055,6 @@ func (p *Parser) parseUnary() Expr {
 
 		if len(p.deferCountStack) > 0 {
 			p.deferCountStack[len(p.deferCountStack)-1]++
-			if p.deferCountStack[len(p.deferCountStack)-1] > 1 {
-				LangErrorAt(
-					ErrorSyntax,
-					p.current.File,
-					p.current.Line,
-					p.current.Column,
-					"multiple defer statements are not permitted within the same function scope",
-				)
-			}
 		}
 
 		fn := p.parseUnary()

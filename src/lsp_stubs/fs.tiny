@@ -7,31 +7,31 @@ class File {
 }
 
 // Opens a file at the specified path for reading and returns a File instance.
-export fn open(path: string): File {}
+export fn open(path: string): File
 
 // Reads the entire contents of a file and returns it as a string.
-export fn readFile(fileName: string): string {}
+export fn readFile(fileName: string): string
 
 // Writes the specified string data to a file. Returns true if successful.
-export fn writeFile(fileName: string, data: string): bool {}
+export fn writeFile(fileName: string, data: string): bool
 
 // Writes the binary data in a buffer to a file. Returns true if successful.
-export fn writeBytes(fileName: string, buffer: buffer): bool {}
+export fn writeBytes(fileName: string, buffer: buffer): bool
 
 // Checks if a file or directory exists at the specified path.
-export fn exists(fileName: string): bool {}
+export fn exists(fileName: string): bool
 
 // Reads the contents of a directory and returns an array of file/directory names.
-export fn readDir(dirName: string): array {}
+export fn readDir(dirName: string): array
 
 // Creates a new directory at the specified path.
-export fn mkDir(dirName: string): null {}
+export fn mkDir(dirName: string): null
 
 // Returns metadata information about the file or directory at the path.
-export fn stat(path: string): object {}
+export fn stat(path: string): object
 
 // Copies a file from the source path to the destination path.
-export fn copy(src: string, dst: string): null {}
+export fn copy(src: string, dst: string): null
 
 // Removes the file or directory at the specified path.
-export fn remove(path: string): null {}
+export fn remove(path: string): null

@@ -1,0 +1,179 @@
+import std "io";
+
+io.println("=== 1. Arithmetic & Precedence & Types ===");
+let a = 10 + 5 * 2 - (4 / 2);
+io.println(a); // 18
+io.println(typeof a); // number
+io.println(typeof "hello"); // string
+io.println(typeof true); // bool
+
+io.println("=== 2. Control Flow ===");
+let cond = true;
+io.println(cond ? "yes" : "no"); // yes
+
+let sum = 0;
+for let i = 1; i <= 5; i = i + 1 {
+    if (i == 3) {
+        continue;
+    }
+    sum = sum + i;
+}
+io.println(sum); // 12
+
+let w = 0;
+while (w < 10) {
+    w = w + 1;
+    if (w == 4) {
+        break;
+    }
+}
+io.println(w); // 4
+
+let arr = [10, 20, 30];
+let loopSum = 0;
+for val in arr {
+    loopSum = loopSum + val;
+}
+io.println(loopSum); // 60
+
+io.println("=== 3. Functions & Closures ===");
+fn greet(name: string = "Guest", prefix: string = "Hello") {
+    io.println(`${prefix}, ${name}!`);
+}
+greet(); // Hello, Guest!
+greet("Alice"); // Hello, Alice!
+greet("Bob", "Hi"); // Hi, Bob!
+
+fn sumAll(first: number, rest: array) {
+    let total = first;
+    for x in rest {
+        total = total + x;
+    }
+    return total;
+}
+io.println(sumAll(1, [2, 3, 4])); // 10
+
+fn makeCounter(start: number) {
+    let count = start;
+    return fn() {
+        count = count + 1;
+        return count;
+    };
+}
+let counter = makeCounter(5);
+io.println(counter()); // 6
+io.println(counter()); // 7
+
+fn fib(n: number): number {
+    if (n <= 1) {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+io.println(fib(6)); // 8
+
+io.println("=== 4. Destructuring ===");
+let [d1, d2] = [100, 200];
+io.println(d1); // 100
+io.println(d2); // 200
+
+let obj = { x: 10, y: 20, name: "Point" };
+let { x, name: pointName } = obj;
+io.println(x); // 10
+io.println(pointName); // Point
+
+io.println("=== 5. Classes & Interfaces & Composition ===");
+interface Printer {
+    printInfo: function
+}
+
+class BaseLogger {
+    fn log(msg: string) {
+        io.println(`[LOG] ${msg}`);
+    }
+}
+
+class UserInfo {
+    embed logger;
+    field username: string = "";
+    field id: number = 0;
+
+    fn init(name: string, uid: number) {
+        this.logger = BaseLogger();
+        this.username = name;
+        this.id = uid;
+    }
+
+    fn printInfo() {
+        this.log(`${this.username} (${this.id})`);
+    }
+}
+
+let user: Printer = UserInfo("confis", 1337);
+user.printInfo(); // [LOG] confis (1337)
+io.println(user instanceof UserInfo); // true
+
+io.println("=== 6. Enums & Pattern Matching ===");
+enum Option {
+    Some(val),
+    None
+}
+
+fn describeOption(opt: Option) {
+    match opt {
+        Option.Some(v) if v > 100 {
+            io.println(`Large value: ${v}`);
+        }
+        Option.Some(v) {
+            io.println(`Small value: ${v}`);
+        }
+        Option.None {
+            io.println("No value present");
+        }
+        _ {
+            io.println("Fallback case");
+        }
+    }
+}
+
+describeOption(Option.Some(150)); // Large value: 150
+describeOption(Option.Some(42));  // Small value: 42
+describeOption(Option.None);      // No value present
+
+io.println("=== 7. Defer & Try-Catch ===");
+fn runDeferAndTry() {
+    defer fn() {
+        io.println("Defer 1");
+    }
+
+    try {
+        io.println("In try");
+        throw "Exception triggered";
+        io.println("Post throw"); // Should not execute
+    } catch err {
+        io.println(`Caught: ${err}`);
+    } finally {
+        io.println("In finally");
+    }
+}
+runDeferAndTry();
+
+io.println("=== 8. Generics ===");
+class Holder:T {
+    field value: T = null;
+    fn init(val: T) {
+        this.value = val;
+    }
+    fn getVal(): T {
+        return this.value;
+    }
+}
+
+fn wrapValue:T(v: T): Holder:T {
+    return Holder:T(v);
+}
+
+let hNum = wrapValue(999);
+io.println(hNum.getVal()); // 999
+let hStr = wrapValue("generic-text");
+io.println(hStr.getVal()); // generic-text

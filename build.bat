@@ -1,6 +1,8 @@
 @echo off
 setlocal
 
+if "%1"=="--compiler" goto BUILD_COMPILER
+
 echo Building Tiny Windows runtime...
 set GOOS=windows
 set GOARCH=amd64
@@ -28,6 +30,7 @@ set GOARCH=arm64
 go build -ldflags "-s -w" -o src\embedded\tiny_runtime_darwin_arm64 .\src\cmd\tiny_runtime
 if errorlevel 1 exit /b 1
 
+:BUILD_COMPILER
 echo Building Tiny compiler...
 set CGO_ENABLED=0
 set GOOS=windows

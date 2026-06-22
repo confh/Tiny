@@ -185,7 +185,7 @@ func normalizeTarget(target string) string {
 func packCommand(args []string) {
 	entryFile := ""
 	outFile := ""
-	target := normalizeTarget("")
+	target := ""
 	windowed := false
 
 	start := 0
@@ -233,10 +233,19 @@ func packCommand(args []string) {
 			name = "app"
 		}
 
-		outFile = filepath.Join(config.OutDir, name)
-		target = config.Target
-	} else if outFile == "" {
-		outFile = defaultPackOutputName(entryFile, target)
+		if outFile == "" {
+			outFile = filepath.Join(config.OutDir, name)
+		}
+		if target == "" {
+			target = normalizeTarget(config.Target)
+		}
+	} else {
+		if target == "" {
+			target = normalizeTarget("")
+		}
+		if outFile == "" {
+			outFile = defaultPackOutputName(entryFile, target)
+		}
 	}
 
 	outFile = addExtensionForTarget(outFile, target)

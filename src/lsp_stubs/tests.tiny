@@ -1,14 +1,14 @@
 // Asserts that the specified condition is true; otherwise, fails the test.
-export fn assert(condition: bool, message: string): null {}
+export fn assert(condition: bool, message: string): null
 
 // Asserts that actual and expected values are equal; otherwise, fails the test.
-export fn equal(actual: any, expected: any, message: string): null {}
+export fn equal(actual: any, expected: any, message: string): null
 
 // Asserts that actual and expected values are not equal; otherwise, fails the test.
-export fn notEqual(actual: any, expected: any, message: string): null {}
+export fn notEqual(actual: any, expected: any, message: string): null
 
 // Runs a named test function.
-export fn run(name: string, func: function): null {}
+export fn run(name: string, func: function): null
 
 // Measures and returns the execution duration of a function in milliseconds.
-export fn measureMs(func: function()): number {}
+export fn measureMs(func: function()): number

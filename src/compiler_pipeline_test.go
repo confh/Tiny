@@ -283,6 +283,30 @@ func TestTinyPipelineInterfaceReturnObjectLiteral(t *testing.T) {
 	}
 }
 
+func TestTinyPipelineUninitializedVariablesAndFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.tiny")
+	source := strings.Join([]string{
+		`import std "io"`,
+		`let count: number`,
+		`class User {`,
+		`    field name: string`,
+		`}`,
+		`let user = User()`,
+		`io.println(count == null)`,
+		`io.println(user.name == null)`,
+	}, "\n")
+	if err := os.WriteFile(path, []byte(source), 0644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	out := requireTinySuccess(t, runTinyFile(t, path))
+	const want = "true\ntrue\n"
+	if out != want {
+		t.Fatalf("unexpected output:\nwant:\n%q\ngot:\n%q", want, out)
+	}
+}
+
 func TestTinyPipelineNamespaceMethodReturnsInterfaceObjectLiteral(t *testing.T) {
 	program := vm.Program{
 		Statements: []vm.Stmt{

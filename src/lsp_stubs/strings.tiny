@@ -1,16 +1,16 @@
 // Efficiently builds a string by appending multiple string segments.
 class StringBuilder {
     // Appends the specified string to the builder.
-    fn writeString(str: string): null {}
+    fn writeString(str: string): null
     // Returns the fully built string.
-    fn stringify(): string {}
+    fn stringify(): string
 }
 
 // Creates and returns a new StringBuilder instance.
-export fn newBuilder(): StringBuilder {}
+export fn newBuilder(): StringBuilder
 
 // Checks if the specified input string contains only numeric digits.
-export fn isDigit(input: string): bool {}
+export fn isDigit(input: string): bool
 
 // Generates a random alphanumeric string of the specified length.
-export fn random(length: number): string {}
+export fn random(length: number): string

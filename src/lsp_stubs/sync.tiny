@@ -1,10 +1,10 @@
 // Represents a mutual exclusion lock for synchronization.
 class Mutex {
     // Acquires the lock, blocking if the lock is already held.
-    fn lock(): null {}
+    fn lock(): null
     // Releases the lock.
-    fn unlock(): null {}
+    fn unlock(): null
 }
 
 // Creates and returns a new Mutex instance.
-export fn mutex(): Mutex {}
+export fn mutex(): Mutex

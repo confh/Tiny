@@ -4,26 +4,26 @@ export enum TimerType {
 }
 
 export class Timer {
-    fn cancel(): null {}
-    fn reset(ms: number): null {}
-    fn type(): TimerType {}
+    fn cancel(): null
+    fn reset(ms: number): null
+    fn type(): TimerType
 }
 
 // Suspends execution of the current thread for the specified milliseconds.
-export fn sleep(ms: number): null {}
+export fn sleep(ms: number): null
 
 // Returns the current Unix timestamp in nanoseconds.
-export fn nowNs(): number {}
+export fn nowNs(): number
 
 // Returns the current Unix timestamp in milliseconds.
-export fn nowMs(): number {}
+export fn nowMs(): number
 
 // Returns the current Unix timestamp in seconds.
-export fn nowSec(): number {}
+export fn nowSec(): number
 
 // Returns the elapsed CPU execution time in seconds.
-export fn clock(): number {}
+export fn clock(): number
 
-export fn timeout(ms: number, func: function): Timer {}
+export fn timeout(ms: number, func: function): Timer
 
-export fn interval(ms: number, func: function): Timer {}
+export fn interval(ms: number, func: function): Timer
