@@ -41,6 +41,36 @@ func requireParserError(t *testing.T, source string, kind tinyerrors.ErrorKind, 
 	parseSourceForTest(t, source)
 }
 
+func TestParserPeekDoesNotAdvance(t *testing.T) {
+	lexer := NewLexer(`let value = 1;`, "test.tiny")
+	parser := NewParser(lexer)
+
+	if parser.peek(0).Type != TOKEN_LET {
+		t.Fatalf("peek(0) = %s, want LET", parser.peek(0).Type)
+	}
+	if parser.peek(1).Type != TOKEN_IDENT || parser.peek(1).Literal != "value" {
+		t.Fatalf("peek(1) = %#v, want identifier value", parser.peek(1))
+	}
+	if parser.peek(2).Type != TOKEN_ASSIGN {
+		t.Fatalf("peek(2) = %s, want ASSIGN", parser.peek(2).Type)
+	}
+
+	if parser.current.Type != TOKEN_LET {
+		t.Fatalf("current changed after peek: %s", parser.current.Type)
+	}
+	if parser.next.Type != TOKEN_IDENT || parser.next.Literal != "value" {
+		t.Fatalf("next changed after peek: %#v", parser.next)
+	}
+
+	parser.advance()
+	if parser.current.Type != TOKEN_IDENT || parser.current.Literal != "value" {
+		t.Fatalf("advance after peek current = %#v, want identifier value", parser.current)
+	}
+	if parser.next.Type != TOKEN_ASSIGN {
+		t.Fatalf("advance after peek next = %s, want ASSIGN", parser.next.Type)
+	}
+}
+
 func TestParserTypeHintsAndUnionTypes(t *testing.T) {
 	program := parseSourceForTest(t, `
 let value: string | null = null;
@@ -295,6 +325,41 @@ export fn enum(values: array:string): array:string {
 
 	if fn.Name != "enum" {
 		t.Fatalf("expected function name enum, got %q", fn.Name)
+	}
+}
+
+func TestParserExportExternalDeclarations(t *testing.T) {
+	program := parseSourceForTest(t, `
+export external fn hostCall(input: string): number
+export external const hostValue: string
+`)
+
+	if len(program.Statements) != 2 {
+		t.Fatalf("expected 2 statements, got %d", len(program.Statements))
+	}
+
+	fnExport, ok := program.Statements[0].(ExportStmt)
+	if !ok {
+		t.Fatalf("expected exported external function, got %T", program.Statements[0])
+	}
+	fn, ok := fnExport.Inner.(ExternalFnStmt)
+	if !ok {
+		t.Fatalf("expected external function inner statement, got %T", fnExport.Inner)
+	}
+	if fn.Name != "hostCall" || fn.ReturnType.String() != "number" {
+		t.Fatalf("unexpected external function: %#v", fn)
+	}
+
+	globalExport, ok := program.Statements[1].(ExportStmt)
+	if !ok {
+		t.Fatalf("expected exported external global, got %T", program.Statements[1])
+	}
+	global, ok := globalExport.Inner.(ExternalGlobalStmt)
+	if !ok {
+		t.Fatalf("expected external global inner statement, got %T", globalExport.Inner)
+	}
+	if global.Name != "hostValue" || global.Type.String() != "string" {
+		t.Fatalf("unexpected external global: %#v", global)
 	}
 }
 

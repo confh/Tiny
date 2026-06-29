@@ -1,9 +1,6 @@
 package vm
 
 import (
-	webview "github.com/abemedia/go-webview"
-
-	_ "github.com/abemedia/go-webview/embedded"
 	. "language.com/src/tinyerrors"
 )
 
@@ -38,13 +35,41 @@ func uiNew(vm *VM, args []TinyValue) {
 	expectArgsRange(vm, "ui.new", args, 0, 1)
 
 	debug := false
+	hidden := false
+	frameless := false
+	width := 800
+	height := 600
 
 	if len(args) > 0 {
-		debug = argBool(vm, "ui.new", args, 0)
+		if _, ok := args[0].Value.(bool); ok {
+			debug = argBool(vm, "ui.new", args, 0)
+		} else if options, ok := vm.valueAsObjectForRead(args[0]); ok {
+			debug = objectBool(options, "debug", false)
+			hidden = objectBool(options, "hidden", false)
+			frameless = objectBool(options, "frameless", false)
+			width = objectInt(vm, options, "width", 800)
+			height = objectInt(vm, options, "height", 600)
+		} else {
+			vm.runtimeError(ErrorType, "ui.new expects a bool or object")
+			return
+		}
 	}
 
 	webv := &NativeWebViewValue{
-		w: webview.New(debug),
+		hidden:           true,
+		userWantedHidden: hidden,
+		width:            width,
+		height:           height,
+	}
+
+	webv.w = createPlatformWebView(webv, debug, true, frameless)
+
+	webv.applyExecutableIcon()
+	if frameless {
+		webv.setFrameless(true)
+	}
+	if hidden {
+		webv.hide()
 	}
 	vm.push(NewNative(webv))
 }

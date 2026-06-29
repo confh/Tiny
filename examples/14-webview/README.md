@@ -1,9 +1,9 @@
 # 14 WebView
 
-This example shows how to build a desktop GUI application using the `ui` module and `embeddir`. 
+This example shows how to build a desktop GUI application using the `ui` module and `embedfolder`. 
 
 - **Desktop Window:** Uses `ui.new()` to create a native WebView window.
-- **Asset Embedding:** Uses `embeddir` to bundle the entire `ui/` folder (HTML and CSS) into the executable.
+- **Asset Embedding:** Uses `embedfolder` to bundle the entire `ui/` folder (HTML and CSS) into the executable.
 - **JS-to-Tiny Callbacks:** Uses `w.callback()` to expose Tiny functions to JavaScript.
 
 ```bash

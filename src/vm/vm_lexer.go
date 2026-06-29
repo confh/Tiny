@@ -160,6 +160,8 @@ func (l *Lexer) scanToken() Token {
 			tok.Type = TOKEN_NULL
 		case "class":
 			tok.Type = TOKEN_CLASS
+		case "implements":
+			tok.Type = TOKEN_IMPLEMENTS
 		case "enum":
 			tok.Type = TOKEN_ENUM
 		case "export":
@@ -190,14 +192,16 @@ func (l *Lexer) scanToken() Token {
 			tok.Type = TOKEN_AWAIT
 		case "interface":
 			tok.Type = TOKEN_INTERFACE
-		case "embedstr":
-			tok.Type = TOKEN_EMBED_STR
-		case "embedbin":
-			tok.Type = TOKEN_EMBED_BIN
-		case "embeddir":
-			tok.Type = TOKEN_EMBED_DIR
+		case "embedtext":
+			tok.Type = TOKEN_EMBED_TEXT
+		case "embedbytes":
+			tok.Type = TOKEN_EMBED_BYTES
+		case "embedfolder":
+			tok.Type = TOKEN_EMBED_FOLDER
 		case "native":
 			tok.Type = TOKEN_NATIVE
+		case "external":
+			tok.Type = TOKEN_EXTERNAL
 		default:
 			tok.Type = TOKEN_IDENT
 		}

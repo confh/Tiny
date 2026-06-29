@@ -486,7 +486,7 @@ let next = makeCounter(10)</code></pre>
       </section>
 
       <section class="doc-section" id="modules"
-        data-search="modules import export std alias namespace private file plugin">
+        data-search="modules import export std alias external private file plugin library">
         <div class="section-heading">
           <p class="eyebrow">08</p>
           <h2>Modules</h2>
@@ -519,6 +519,18 @@ export fn sum(values): number {
     }
     return total
 }</code></pre>
+          </article>
+          <article>
+            <h3>Libraries</h3>
+            <pre><code>import lib "owner/repo" as MyLib
+import library "owner/repo" as OtherLib</code></pre>
+            <p>GitHub-backed libraries resolve through `tiny.json`, downloaded dependency folders, and lock metadata.</p>
+          </article>
+          <article>
+            <h3>External bindings</h3>
+            <pre><code>export external const hostName: string
+export external fn hostLog(message: string): string</code></pre>
+            <p>Child VMs can bind host-provided values and functions to these declarations before running Tiny code.</p>
           </article>
           <article>
             <h3>Plugin imports</h3>
@@ -763,7 +775,7 @@ fn calculate(n: number): number {
       </section>
 
       <section class="doc-section" id="embedding"
-        data-search="embedding embedstr embedbin embeddir assets binary string webview config">
+        data-search="embedding embedtext embedbytes embedfolder assets binary string webview config">
         <div class="section-heading">
           <p class="eyebrow">14</p>
           <h2>Embedding Assets</h2>
@@ -774,17 +786,17 @@ fn calculate(n: number): number {
         <div class="reference-grid">
           <article>
             <h3>Text</h3>
-            <pre><code>embedstr "./data.json" const data
+            <pre><code>embedtext "./data.json" const data
 io.println(data)</code></pre>
           </article>
           <article>
             <h3>Binary</h3>
-            <pre><code>embedbin "./icon.png" const iconBytes
+            <pre><code>embedbytes "./icon.png" const iconBytes
 fs.writeBytes("icon-copy.png", iconBytes)</code></pre>
           </article>
           <article>
             <h3>Directory</h3>
-            <pre><code>embeddir "./ui" const assets
+            <pre><code>embedfolder "./ui" const assets
 const html = assets["index.html"]</code></pre>
           </article>
           <article>
@@ -825,7 +837,7 @@ const html = assets["index.html"]</code></pre>
       </section>
 
       <section class="doc-section" id="stdlib"
-        data-search="standard library std validate url io json fs http array math process regex runtime sync time ui desktop net object path buffer tests app error strings">
+        data-search="standard library std validate url io json fs http array math process regex runtime sync time ui desktop net object path buffer tests app error strings websocket observer tray os metadata">
         <div class="section-heading">
           <p class="eyebrow">16</p>
           <h2>Standard Library</h2>
@@ -851,17 +863,33 @@ const html = assets["index.html"]</code></pre>
             <span role="cell">Parse, stringify, pretty-print, read JSON files, and write JSON files.</span>
           </div>
           <div role="row">
+            <strong role="cell">`strings`</strong>
+            <span role="cell">String helpers for case conversion, trimming, splitting, replacing, containment checks, and builders.</span>
+          </div>
+          <div role="row">
             <strong role="cell">`fs`</strong>
             <span role="cell">Read/write files, bytes, directories, stat paths, copy, remove, and create
               directories.</span>
+          </div>
+          <div role="row">
+            <strong role="cell">`os`</strong>
+            <span role="cell">Operating-system information and environment-facing helpers for portable scripts.</span>
           </div>
           <div role="row">
             <strong role="cell">`http`</strong>
             <span role="cell">HTTP client helpers and a route-based server with JSON/text responses.</span>
           </div>
           <div role="row">
+            <strong role="cell">`websocket`</strong>
+            <span role="cell">WebSocket client and server support for real-time message workflows.</span>
+          </div>
+          <div role="row">
             <strong role="cell">`array`</strong>
             <span role="cell">Helpers such as `range`, `from`, and native operations: `reduce`, `sort`, `flat`, `map`, `filter`.</span>
+          </div>
+          <div role="row">
+            <strong role="cell">`buffer`</strong>
+            <span role="cell">Byte buffers with length, hex conversion, indexed `u8` reads/writes, and string conversion.</span>
           </div>
           <div role="row">
             <strong role="cell">`math`</strong>
@@ -881,7 +909,7 @@ const html = assets["index.html"]</code></pre>
           </div>
           <div role="row">
             <strong role="cell">`ui`</strong>
-            <span role="cell">Native WebView windows, HTML content, navigation, and JS-to-Tiny callbacks.</span>
+            <span role="cell">Native WebView windows, window controls (frameless, minimize, maximize, drag/resize), HTML content, navigation, and JS-to-Tiny callbacks.</span>
           </div>
           <div role="row">
             <strong role="cell">`desktop`</strong>
@@ -906,7 +934,23 @@ const html = assets["index.html"]</code></pre>
           </div>
           <div role="row">
             <strong role="cell">`runtime`</strong>
-            <span role="cell">Thread locking, fatal handlers, memory stats, and manual GC.</span>
+            <span role="cell">Thread locking, fatal handlers, memory stats, manual GC, child VMs, and source/bytecode compilation.</span>
+          </div>
+          <div role="row">
+            <strong role="cell">`observer`</strong>
+            <span role="cell">Live process telemetry, status, messages, events, commands, exposed functions, and shutdown hooks.</span>
+          </div>
+          <div role="row">
+            <strong role="cell">`app`</strong>
+            <span role="cell">Register command callbacks and run lightweight command-style apps.</span>
+          </div>
+          <div role="row">
+            <strong role="cell">`tray`</strong>
+            <span role="cell">Native tray menu support where the platform backend is available.</span>
+          </div>
+          <div role="row">
+            <strong role="cell">`error`</strong>
+            <span role="cell">Create structured error objects for `throw`, `try`, and `catch` flows.</span>
           </div>
           <div role="row">
             <strong role="cell">`tests`</strong>
@@ -937,7 +981,7 @@ const html = assets["index.html"]</code></pre>
             rel="noopener noreferrer"><strong>04 Arrays & Objects</strong><span>Methods, nested objects, bracket
               access.</span></a>
           <a href="https://github.com/confh/Tiny/tree/master/examples/05-modules" target="_blank"
-            rel="noopener noreferrer"><strong>05 Modules</strong><span>Imports, aliases, namespaces, explicit
+            rel="noopener noreferrer"><strong>05 Modules</strong><span>Imports, aliases, file modules, explicit
               exports.</span></a>
           <a href="https://github.com/confh/Tiny/tree/master/examples/06-classes" target="_blank"
             rel="noopener noreferrer"><strong>06 Classes</strong><span>Constructors, methods, embeds,
@@ -957,7 +1001,7 @@ const html = assets["index.html"]</code></pre>
           <a href="https://github.com/confh/Tiny/tree/master/examples/11-defer" target="_blank"
             rel="noopener noreferrer"><strong>11 Defer</strong><span>Cleanup work before function return.</span></a>
           <a href="https://github.com/confh/Tiny/tree/master/examples/12-embed" target="_blank"
-            rel="noopener noreferrer"><strong>12 Embed</strong><span>`embedstr`, `embedbin`, bundled static
+            rel="noopener noreferrer"><strong>12 Embed</strong><span>`embedtext`, `embedbytes`, `embedfolder`, bundled static
               data.</span></a>
           <a href="https://github.com/confh/Tiny/tree/master/examples/13-native-functions" target="_blank"
             rel="noopener noreferrer"><strong>13 Native Functions</strong><span>Go snippets compiled with
@@ -965,6 +1009,12 @@ const html = assets["index.html"]</code></pre>
           <a href="https://github.com/confh/Tiny/tree/master/examples/14-webview" target="_blank"
             rel="noopener noreferrer"><strong>14 WebView</strong><span>Desktop UI with embedded HTML and
               callbacks.</span></a>
+          <a href="https://github.com/confh/Tiny/tree/master/examples/15-runtime-vm" target="_blank"
+            rel="noopener noreferrer"><strong>15 Runtime VM</strong><span>Child VMs, runtime compilation, exported calls,
+              and host-bound external values.</span></a>
+          <a href="https://github.com/confh/Tiny/tree/master/examples/16-observer" target="_blank"
+            rel="noopener noreferrer"><strong>16 Observer</strong><span>Live runtime inspection, commands, events,
+              messages, and shutdown hooks.</span></a>
         </div>
       </section>
 
@@ -1207,6 +1257,16 @@ export fn hash(text: string, method: string): HashResult {
             <p>`native fn` compiles Go snippets through TinyGo/WASM, while plugins communicate with the VM through a
               JSON-compatible ABI.</p>
           </article>
+          <article>
+            <h3>Child VMs</h3>
+            <p>The `runtime` module can create isolated VMs, load source or bytecode into them, call exported functions,
+              and share selected host values through explicit external bindings.</p>
+          </article>
+          <article>
+            <h3>Runtime compilation</h3>
+            <p>Tiny programs can compile source strings or files to bytecode at runtime, then load that bytecode into a
+              child VM for plugin-like scripting workflows.</p>
+          </article>
         </div>
       </section>
 
@@ -1277,8 +1337,34 @@ export fn hash(text: string, method: string): HashResult {
           </article>
           <article>
             <h3>Windowed apps</h3>
-            <pre><code>tiny dist --windowed</code></pre>
-            <p>Use this for GUI apps on Windows when you do not want a console window.</p>
+            <pre><code>tiny dist src/main.tiny -o dist/app.exe --windowed --icon assets/app.ico</code></pre>
+            <p>Use `--windowed` for GUI apps on Windows when you do not want a console window. Use `--icon` with an
+              `.ico` file to set the Windows executable icon.</p>
+          </article>
+          <article>
+            <h3>Project scaffolding</h3>
+            <pre><code>tiny init my-app
+tiny task
+tiny task dist</code></pre>
+            <p>`init` creates `tiny.json`, a starter entry file, plugin/dist folders, and default scripts. `task` runs
+              named scripts from `tiny.json` and forwards extra arguments.</p>
+          </article>
+          <article>
+            <h3>Dependency lifecycle</h3>
+            <pre><code>tiny add github:owner/repo@v1.0.0
+tiny install --target linux-amd64
+tiny remove owner/repo
+tiny deps</code></pre>
+            <p>Dependencies are GitHub-backed packages. Tiny records resolved versions in `tiny.lock` and downloads
+              target-specific plugin assets from releases when packages declare them.</p>
+          </article>
+          <article>
+            <h3>Developer loop</h3>
+            <pre><code>tiny watch src/main.tiny
+tiny update
+tiny version</code></pre>
+            <p>`watch` restarts when the entry or imported files change. `update` replaces the Tiny binary with the
+              latest release asset for the current platform.</p>
           </article>
         </div>
       </section>

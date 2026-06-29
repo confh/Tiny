@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -52,6 +53,16 @@ func compileTinyFile(t *testing.T, path string) ([]vm.Instruction, map[string]vm
 	}
 
 	return mainInstructions, functions, classes, interfaces, globalIndex
+}
+
+func writeTinyBytecodeFile(t *testing.T, sourcePath string, outPath string) {
+	t.Helper()
+
+	mainInstructions, functions, classes, interfaces, globalIndex := compileTinyFile(t, sourcePath)
+	bytecodeBytes := bytecode.SaveBytecodeToBytes(mainInstructions, functions, classes, interfaces, globalIndex, false, false)
+	if err := os.WriteFile(outPath, bytecodeBytes, 0644); err != nil {
+		t.Fatalf("write bytecode: %v", err)
+	}
 }
 
 func runTinyBytecode(
@@ -136,6 +147,215 @@ func runTinyBytecode(
 		Stdout: stdoutOutput.String(),
 		Stderr: stderrOutput.String(),
 		Panic:  panicValue,
+	}
+}
+
+func TestRuntimeNewVMLoadBytecodeAndCall(t *testing.T) {
+	dir := t.TempDir()
+	childPath := filepath.Join(dir, "child.tiny")
+	childBytecodePath := filepath.Join(dir, "child.tbc")
+	parentPath := filepath.Join(dir, "parent.tiny")
+
+	if err := os.WriteFile(childPath, []byte(strings.Join([]string{
+		`export fn add(a: number, b: number): number {`,
+		`    return a + b`,
+		`}`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+	writeTinyBytecodeFile(t, childPath, childBytecodePath)
+
+	if err := os.WriteFile(parentPath, []byte(strings.Join([]string{
+		`import std "runtime" as runtime`,
+		`embedbytes "child.tbc" const childBytes`,
+		`const child = runtime.newVM({`,
+		`    isolated: true,`,
+		`    allowedStdlib: {}`,
+		`})`,
+		`child.loadBytecode(childBytes)`,
+		`const result = child.call("add", [20, 22])`,
+		`if result != 42 {`,
+		`    throw "bad result"`,
+		`}`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+
+	result := runTinyFile(t, parentPath)
+	if result.Panic != nil {
+		t.Fatalf("unexpected panic: %#v", result.Panic)
+	}
+}
+
+func TestRuntimeNewVMLoadSource(t *testing.T) {
+	dir := t.TempDir()
+	parentPath := filepath.Join(dir, "parent.tiny")
+
+	if err := os.WriteFile(parentPath, []byte(strings.Join([]string{
+		`import std "runtime" as runtime`,
+		`const child = runtime.newVM({`,
+		`    isolated: true,`,
+		`    allowedStdlib: { io: true },`,
+		`    runMainOnLoad: true`,
+		`})`,
+		`child.loadSource("import std \"io\" as io\nio.println('hey')")`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+
+	result := runTinyFile(t, parentPath)
+	if result.Panic != nil {
+		t.Fatalf("unexpected panic: %#v", result.Panic)
+	}
+	if strings.TrimSpace(result.Stdout) != "hey" {
+		t.Fatalf("expected stdout hey, got %q", result.Stdout)
+	}
+}
+
+func TestRuntimeNewVMLoadSourcePreservesCallableFunctions(t *testing.T) {
+	dir := t.TempDir()
+	parentPath := filepath.Join(dir, "parent.tiny")
+
+	if err := os.WriteFile(parentPath, []byte(strings.Join([]string{
+		`import std "runtime" as runtime`,
+		`const child = runtime.newVM({`,
+		`    isolated: true,`,
+		`    allowedStdlib: { io: true },`,
+		`    runMainOnLoad: true`,
+		`})`,
+		"child.loadSource(`import std \"io\"",
+		"fn test() {",
+		"    io.println(\"hey\")",
+		"}",
+		"`)",
+		`child.call("test")`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+
+	result := runTinyFile(t, parentPath)
+	if result.Panic != nil {
+		t.Fatalf("unexpected panic: %#v", result.Panic)
+	}
+	if strings.TrimSpace(result.Stdout) != "hey" {
+		t.Fatalf("expected stdout hey, got %q", result.Stdout)
+	}
+}
+
+func TestRuntimeNewVMLoadBytecodeStringSourceCompatibility(t *testing.T) {
+	dir := t.TempDir()
+	parentPath := filepath.Join(dir, "parent.tiny")
+
+	if err := os.WriteFile(parentPath, []byte(strings.Join([]string{
+		`import std "runtime" as runtime`,
+		`const child = runtime.newVM({`,
+		`    isolated: true,`,
+		`    allowedStdlib: { io: true },`,
+		`    runMainOnLoad: true`,
+		`})`,
+		`child.loadBytecode("import std \"io\" as io\nio.println('hey')")`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+
+	result := runTinyFile(t, parentPath)
+	if result.Panic != nil {
+		t.Fatalf("unexpected panic: %#v", result.Panic)
+	}
+	if strings.TrimSpace(result.Stdout) != "hey" {
+		t.Fatalf("expected stdout hey, got %q", result.Stdout)
+	}
+}
+
+func TestRuntimeNewVMIsolatedStdlibGate(t *testing.T) {
+	dir := t.TempDir()
+	childPath := filepath.Join(dir, "child.tiny")
+	childBytecodePath := filepath.Join(dir, "child.tbc")
+	parentPath := filepath.Join(dir, "parent.tiny")
+
+	if err := os.WriteFile(childPath, []byte(strings.Join([]string{
+		`import std "fs" as fs`,
+		`export fn touchFs(): bool {`,
+		`    return fs.exists("nope.txt")`,
+		`}`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+	writeTinyBytecodeFile(t, childPath, childBytecodePath)
+
+	if err := os.WriteFile(parentPath, []byte(strings.Join([]string{
+		`import std "runtime" as runtime`,
+		`embedbytes "child.tbc" const childBytes`,
+		`const child = runtime.newVM({ isolated: true })`,
+		`child.loadBytecode(childBytes)`,
+		`child.run()`,
+		`child.call("touchFs", [])`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+
+	result := runTinyFile(t, parentPath)
+	if result.Panic == nil {
+		t.Fatalf("expected denied stdlib panic")
+	}
+	langErr, ok := result.Panic.(tinyerrors.LangErrorType)
+	if !ok {
+		t.Fatalf("expected LangErrorType, got %#v", result.Panic)
+	}
+	if !strings.Contains(langErr.Message, "standard module 'fs' is not allowed") {
+		t.Fatalf("expected stdlib denial, got %q", langErr.Message)
+	}
+}
+
+func TestRuntimeNewVMCrashHandling(t *testing.T) {
+	dir := t.TempDir()
+	parentPath := filepath.Join(dir, "parent.tiny")
+
+	if err := os.WriteFile(parentPath, []byte(strings.Join([]string{
+		`import std "runtime" as runtime`,
+		`import std "io" as io`,
+		`const child = runtime.newVM({ isolated: true, runMainOnLoad: true })`,
+		`try {`,
+		`    child.loadSource("throw 'child error'")`,
+		`} catch e {`,
+		`    io.println("parent caught: " + e.message)`,
+		`}`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+
+	result := runTinyFile(t, parentPath)
+	if result.Panic != nil {
+		t.Fatalf("unexpected panic: %#v", result.Panic)
+	}
+	if !strings.Contains(result.Stdout, "parent caught: child error") || !strings.Contains(result.Stdout, "<runtime>:1:1") {
+		t.Fatalf("expected stdout to contain 'parent caught: child error' and '<runtime>:1:1', got %q", result.Stdout)
+	}
+}
+
+func TestRuntimeNewVMStdlibRestrictions(t *testing.T) {
+	dir := t.TempDir()
+	parentPath := filepath.Join(dir, "parent.tiny")
+
+	if err := os.WriteFile(parentPath, []byte(strings.Join([]string{
+		`import std "runtime" as runtime`,
+		`import std "io" as io`,
+		`const child = runtime.newVM({ isolated: true, allowedStdlib: {}, runMainOnLoad: true })`,
+		`try {`,
+		`    child.loadSource("import std \"io\" as io\nfn calc() { io.println('hi'); }")`,
+		`} catch e {`,
+		`    io.println("parent caught: " + e.message)`,
+		`}`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+
+	result := runTinyFile(t, parentPath)
+	if result.Panic != nil {
+		t.Fatalf("unexpected panic: %#v", result.Panic)
+	}
+	if !strings.Contains(result.Stdout, "parent caught:") || !strings.Contains(result.Stdout, "standard module 'io' is not allowed") {
+		t.Fatalf("expected stdout to show stdlib denial error, got %q", result.Stdout)
 	}
 }
 
@@ -477,7 +697,7 @@ func TestTinyPipelineNamespacedLibraryImportsCollision(t *testing.T) {
 func TestTinyPipelineBytecodeRoundTrip(t *testing.T) {
 	mainInstructions, functions, classes, interfaces, globalIndex := compileTinyFile(t, fixturePath("arithmetic.tiny"))
 
-	data := bytecode.SaveBytecodeToBytes(mainInstructions, functions, classes, interfaces, globalIndex, false)
+	data := bytecode.SaveBytecodeToBytes(mainInstructions, functions, classes, interfaces, globalIndex, false, false)
 	loadedMain, loadedFunctions, loadedClasses, loadedInterfaces, _ := bytecode.LoadBytecodeFromBytes(data)
 
 	out := requireTinySuccess(t, runTinyBytecode(t, loadedMain, loadedFunctions, loadedClasses, loadedInterfaces, globalIndex))
@@ -1739,5 +1959,91 @@ func TestJitDefaultParameters(t *testing.T) {
 	jitFn := jitFuncs.MapIndex(reflect.ValueOf("interpNumeric"))
 	if !jitFn.IsValid() || jitFn.IsNil() {
 		t.Fatalf("expected interpNumeric to be JIT-compiled but it was not")
+	}
+}
+
+func TestRuntimeCompileSourceAndFile(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Helper source file that compileFile will load
+	helperFile := filepath.Join(tmpDir, "helper.tiny")
+	helperContent := `
+	export fn helperVal() {
+		return 42;
+	}
+	`
+	if err := os.WriteFile(helperFile, []byte(helperContent), 0644); err != nil {
+		t.Fatalf("failed to write helper file: %v", err)
+	}
+
+	escapedHelperPath := strings.ReplaceAll(helperFile, "\\", "\\\\")
+
+	// Main test file
+	mainContent := fmt.Sprintf(`
+	import std "runtime" as runtime
+	import std "io" as io
+
+	// 1. Test compileSource
+	const source1 = "import std \"io\"\nfn hello() { return 'hello world'; }"
+	const bytecode1 = runtime.compileSource(source1)
+
+	const child1 = runtime.newVM()
+	child1.loadBytecode(bytecode1)
+	const result1 = child1.call("hello")
+	io.println(result1)
+
+	// 2. Test compileSource compilation error
+	try {
+		runtime.compileSource("fn bad() { return x; }") // undefined variable x
+		io.println("no compilation error")
+	} catch err {
+		io.println("caught: " + err.message)
+	}
+
+	// 3. Test compileFile
+	const bytecode2 = runtime.compileFile("%s")
+	const child2 = runtime.newVM()
+	child2.loadBytecode(bytecode2)
+	const result2 = child2.call("helperVal")
+	io.println(result2)
+
+	// 4. Test compileFile sandbox restriction (disallowed fs)
+	const child3 = runtime.newVM({
+		isolated: true,
+		allowedStdlib: { fs: false },
+		runMainOnLoad: true
+	})
+
+	try {
+		child3.loadSource("import std \"runtime\" as runtime\nfn test(path) { runtime.compileFile(path); }")
+		child3.call("test", ["%s"])
+		io.println("no sandbox error")
+	} catch err {
+		io.println("sandbox caught: " + err.message)
+	}
+	`, escapedHelperPath, escapedHelperPath)
+
+	mainFile := filepath.Join(tmpDir, "main.tiny")
+	if err := os.WriteFile(mainFile, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main file: %v", err)
+	}
+
+	res := runTinyFile(t, mainFile)
+	if res.Panic != nil {
+		t.Fatalf("unexpected panic during test run: %v", res.Panic)
+	}
+
+	stdout := res.Stdout
+	if !strings.Contains(stdout, "hello world") {
+		t.Errorf("expected stdout to contain 'hello world', got: %q", stdout)
+	}
+	if !strings.Contains(stdout, "caught:") {
+		t.Errorf("expected stdout to contain 'caught:', got: %q", stdout)
+	}
+	if !strings.Contains(stdout, "42") {
+		t.Errorf("expected stdout to contain '42', got: %q", stdout)
+	}
+	if !strings.Contains(stdout, "sandbox caught:") || !strings.Contains(stdout, "fs") {
+		t.Errorf("expected stdout to contain 'sandbox caught:' with 'fs' module message, got: %q", stdout)
 	}
 }

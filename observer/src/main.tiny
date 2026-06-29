@@ -1,0 +1,336 @@
+import std "io"
+import std "http"
+import std "json"
+import std "ui"
+import std "url"
+
+embedfolder "./ui" const assets
+
+const combinedHtml = `<!doctype html>
+<html>
+<head>
+  <style>
+    :root {
+      --bg: #09090b;
+      --border: rgba(255, 255, 255, 0.08);
+      --accent: #2dd4bf;
+      --text: #f4f4f5;
+      --text-muted: #a1a1aa;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { background: transparent !important; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, sans-serif;
+      height: 100vh;
+      overflow: hidden;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+    }
+    #splashContainer {
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+      background: var(--bg);
+      border-radius: 12px;
+    }
+    #splashContainer .window-bar {
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 38px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+    #splashContainer .window-title {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+    .splash-logo {
+      position: relative;
+      width: 80px; height: 80px;
+      margin-bottom: 24px;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .splash-spinner {
+      position: absolute;
+      width: 100%; height: 100%;
+      border: 3px solid rgba(45, 212, 191, 0.1);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+    .splash-letter {
+      font-size: 32px; font-weight: 800; color: var(--accent);
+      text-shadow: 0 0 15px rgba(45, 212, 191, 0.3);
+    }
+    .splash-title {
+      font-size: 20px; font-weight: 700; margin-bottom: 8px; letter-spacing: -0.02em;
+    }
+    .splash-status {
+      font-size: 13px; color: var(--text-muted); animation: pulse 1.5s ease-in-out infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes pulse { 0%, 100% { opacity: 0.6; } 50% { opacity: 1; } }
+    
+    #mainContainer {
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      opacity: 0;
+      transition: opacity 0.5s ease;
+      display: none;
+    }
+    .resize-handle { position: fixed; z-index: 10000; pointer-events: auto; }
+    .resize-top, .resize-bottom { left: 8px; right: 8px; height: 8px; }
+    .resize-left, .resize-right { top: 8px; bottom: 8px; width: 8px; }
+    .resize-top { top: 0; cursor: ns-resize; }
+    .resize-right { right: 0; cursor: ew-resize; }
+    .resize-bottom { bottom: 0; cursor: ns-resize; }
+    .resize-left { left: 0; cursor: ew-resize; }
+    .resize-top-left, .resize-top-right, .resize-bottom-left, .resize-bottom-right { width: 12px; height: 12px; }
+    .resize-top-left { top: 0; left: 0; cursor: nwse-resize; }
+    .resize-top-right { top: 0; right: 0; cursor: nesw-resize; }
+    .resize-bottom-left { bottom: 0; left: 0; cursor: nesw-resize; }
+    .resize-bottom-right { right: 0; bottom: 0; cursor: nwse-resize; }
+  </style>
+  <style>
+${assets["style.css"]}
+  </style>
+</head>
+<body onmousedown="if (!event.target.closest('button, input, textarea, select') && (event.target.closest('.window-bar') || event.target === document.body || event.target.id === 'splashContainer')) window.observerWindowAction('drag')">
+  <div class="resize-handle resize-top" data-window-resize="top"></div>
+  <div class="resize-handle resize-right" data-window-resize="right"></div>
+  <div class="resize-handle resize-bottom" data-window-resize="bottom"></div>
+  <div class="resize-handle resize-left" data-window-resize="left"></div>
+  <div class="resize-handle resize-top-left" data-window-resize="top-left"></div>
+  <div class="resize-handle resize-top-right" data-window-resize="top-right"></div>
+  <div class="resize-handle resize-bottom-left" data-window-resize="bottom-left"></div>
+  <div class="resize-handle resize-bottom-right" data-window-resize="bottom-right"></div>
+  <div id="splashContainer">
+    <div class="window-bar">
+      <div class="window-title">Tiny Observer</div>
+    </div>
+    <div class="splash-logo">
+      <div class="splash-spinner"></div>
+      <span class="splash-letter">T</span>
+    </div>
+    <h2 class="splash-title">Tiny Observer</h2>
+    <p class="splash-status" id="splashStatus">Connecting to runtime...</p>
+  </div>
+  
+  <div id="mainContainer">
+    <script>window.__OBSERVER_DEFAULT_ENDPOINT__ = "http://127.0.0.1:4040";</script>
+    <script>window.__OBSERVER_DEFAULT_PASSWORD__ = "tiny";</script>
+    ${assets["index.html"]}
+  </div>
+
+  <script>
+    const steps = [
+      "Connecting to compiler runtime...",
+      "Retrieving active environment...",
+      "Parsing bytecode symbols...",
+      "Syncing memory mapping..."
+    ];
+    let stepIndex = 0;
+    const interval = setInterval(() => {
+      if (stepIndex < steps.length) {
+        document.getElementById("splashStatus").innerText = steps[stepIndex];
+        stepIndex++;
+      } else {
+        clearInterval(interval);
+        
+        window.observerWindowAction("load_main");
+        
+        const splash = document.getElementById("splashContainer");
+        const main = document.getElementById("mainContainer");
+        splash.style.transition = "opacity 0.4s cubic-bezier(0.4, 0, 0.2, 1)";
+        splash.style.opacity = "0";
+        setTimeout(() => {
+          splash.style.display = "none";
+          main.style.display = "block";
+          setTimeout(() => {
+            main.style.opacity = "1";
+          }, 50);
+        }, 400);
+      }
+    }, 400);
+
+    window.addEventListener("load", () => {
+      setTimeout(() => {
+        window.observerWindowAction("ready");
+      }, 100);
+    });
+  </script>
+  <script>
+${assets["app.js"]}
+  </script>
+</body>
+</html>`
+
+const splash = ui.new({
+    frameless: true,
+    width: 1040,
+    height: 720
+})
+splash.setTitle("Tiny Observer - Loading")
+
+fn normalizeEndpoint(value: string): string {
+    let endpoint = value
+    if endpoint == "" {
+        endpoint = "http://127.0.0.1:4040"
+    }
+    if endpoint.endsWith("/snapshot") {
+        endpoint = endpoint.slice(0, endpoint.length() - 9)
+    }
+    if endpoint.endsWith("/") {
+        endpoint = endpoint.slice(0, endpoint.length() - 1)
+    }
+    return endpoint
+}
+
+fn observerRequestCallback(requestText: string): string {
+    let action = requestText
+    let endpoint = "http://127.0.0.1:4040"
+    let password = "tiny"
+
+    if requestText.startsWith("{") {
+        const request = json.parse(requestText)
+        action = `${request.action}`
+        endpoint = normalizeEndpoint(`${request.endpoint}`)
+        password = `${request.password}`
+    }
+
+    const headers = {}
+    if password != "" {
+        headers["X-Observer-Password"] = password
+    }
+
+    let path = "/snapshot"
+    if action == "connect" {
+        path = "/snapshot"
+    } else {
+        let val = action
+        if val.startsWith("action:") {
+            path = `/action?name=${url.encode(val.slice(7, val.length()))}`
+        }
+
+        if val == "gc" {
+            path = "/gc"
+        }
+
+        if val == "shutdown" {
+            path = "/shutdown"
+        }
+
+        if val.startsWith("gomaxprocs:") {
+            path = `/control/gomaxprocs?value=${url.encode(val.slice(11, val.length()))}`
+        }
+
+        if val.startsWith("gcPercent:") {
+            path = `/control/gc-percent?value=${url.encode(val.slice(10, val.length()))}`
+        }
+
+        if val.startsWith("global:") {
+            const parts = val.slice(7, val.length()).split("\n")
+            if parts.length() >= 3 {
+                path = `/control/global?name=${parts[0]}&type=${parts[1]}&value=${parts[2]}`
+            }
+        }
+
+        if val.startsWith("command:") {
+            const parts = val.slice(8, val.length()).split("\n")
+            if parts.length() >= 2 {
+                path = `/command?name=${url.encode(parts[0])}&payload=${url.encode(parts[1])}`
+            }
+        }
+
+        if val.startsWith("call:") {
+            const parts = val.slice(5, val.length()).split("\n")
+            if parts.length() >= 2 {
+                path = `/call?name=${url.encode(parts[0])}&payload=${url.encode(parts[1])}`
+            }
+        }
+
+        if val.startsWith("message:") {
+            path = `/message?from=ui&text=${url.encode(action.slice(8, action.length()))}`
+        }
+    }
+
+    try {
+        const res = http.get(`${endpoint}${path}`, {
+            headers: headers
+        })
+
+        return json.stringify({
+            status: res.status,
+            body: res.body
+        })
+    } catch err {
+        return json.stringify({
+            status: 503,
+            body: err.message
+        })
+    }
+}
+
+splash.callback("observerWindowAction", fn(action: string) {
+    match action {
+        "ready" {
+            splash.show()
+        }
+        "load_main" {
+            splash.setTitle("Tiny Observer")
+        }
+        "drag" {
+            splash.startDrag()
+        }
+        "resize:left" {
+            splash.startResize("left")
+        }
+        "resize:right" {
+            splash.startResize("right")
+        }
+        "resize:top" {
+            splash.startResize("top")
+        }
+        "resize:bottom" {
+            splash.startResize("bottom")
+        }
+        "resize:top-left" {
+            splash.startResize("top-left")
+        }
+        "resize:top-right" {
+            splash.startResize("top-right")
+        }
+        "resize:bottom-left" {
+            splash.startResize("bottom-left")
+        }
+        "resize:bottom-right" {
+            splash.startResize("bottom-right")
+        }
+        "minimize" {
+            splash.minimize()
+        }
+        "maximize" {
+            splash.toggleMaximize()
+        }
+        "close" {
+            splash.close()
+        }
+    }
+    return "ok"
+})
+
+splash.callback("observerRequest", observerRequestCallback)
+splash.setHtml(combinedHtml)
+
+io.println("Tiny Observer ready")
+splash.run()

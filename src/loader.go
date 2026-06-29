@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	. "language.com/src/tinyerrors"
@@ -14,6 +15,7 @@ type Loader struct {
 	stack        []string
 	cache        map[string][]Stmt
 	dependencies map[string]TinyDependencyConfig
+	files        map[string]bool
 }
 
 func (l *Loader) loadFile(path string) []Stmt {
@@ -23,6 +25,9 @@ func (l *Loader) loadFile(path string) []Stmt {
 	}
 
 	absPath = filepath.Clean(absPath)
+	if l.files != nil {
+		l.files[absPath] = true
+	}
 
 	state := l.states[absPath]
 
@@ -201,6 +206,11 @@ func (l *Loader) formatImportCycle(repeatedPath string) string {
 }
 
 func LoadProgram(path string) Program {
+	program, _ := LoadProgramWithFiles(path)
+	return program
+}
+
+func LoadProgramWithFiles(path string) (Program, []string) {
 	config, _ := loadTinyConfig()
 
 	loader := &Loader{
@@ -208,9 +218,16 @@ func LoadProgram(path string) Program {
 		stack:        []string{},
 		cache:        map[string][]Stmt{},
 		dependencies: config.Dependencies,
+		files:        map[string]bool{},
 	}
 
 	statements := loader.loadFile(path)
 
-	return Program{Statements: statements}
+	files := make([]string, 0, len(loader.files))
+	for file := range loader.files {
+		files = append(files, file)
+	}
+	sort.Strings(files)
+
+	return Program{Statements: statements}, files
 }

@@ -1,0 +1,123 @@
+import std "io"
+import std "observer"
+import std "process"
+import std "time"
+
+// These globals are intentionally simple so the Observer UI can show and edit
+// live program state while the target keeps running.
+let mode = "idle"
+let ordersProcessed = 0
+let queueDepth = 4
+let shutdownRequested = false
+
+// Commands registered with observer.command can be triggered from the Observer
+// UI. The payload comes from the UI text field and can be plain text or JSON.
+fn processOrder(payload) {
+    ordersProcessed = ordersProcessed + 1
+    if queueDepth > 0 {
+        queueDepth = queueDepth - 1
+    }
+
+    observer.status(`processing:${mode}`)
+    observer.event("order.processed", `processed order ${ordersProcessed}`, {
+        payload: payload,
+        ordersProcessed: ordersProcessed,
+        queueDepth: queueDepth
+    })
+
+    return {
+        ok: true,
+        ordersProcessed: ordersProcessed,
+        queueDepth: queueDepth
+    }
+}
+
+// This command demonstrates mutating process state from the Observer UI.
+fn setMode(payload) {
+    mode = `${payload}`
+    observer.status(`mode:${mode}`)
+    observer.message("example", `mode changed to ${mode}`)
+    return mode
+}
+
+// This command gives the background worker more simulated work to consume.
+fn addWork(payload) {
+    queueDepth = queueDepth + 1
+    observer.event("queue.added", `queue depth is ${queueDepth}`, {
+        payload: payload,
+        queueDepth: queueDepth
+    })
+    return queueDepth
+}
+
+// A normal Tiny task can publish observer status, messages, and events while it
+// runs. The Observer UI polls the server and renders these updates live.
+fn backgroundWorker() {
+    spawn () fn() {
+        while !shutdownRequested {
+            if queueDepth > 0 {
+                processOrder("background")
+            } else {
+                observer.status(`waiting:${mode}`)
+                observer.message("worker", "queue is empty")
+            }
+
+            time.sleep(1500)
+        }
+    }
+}
+
+// Start the observer HTTP server. The Observer UI defaults to this URL and
+// password, so you can launch the UI without extra arguments.
+const server = observer.start({
+    host: "127.0.0.1",
+    port: 4040,
+    password: "tiny"
+})
+
+// Status is a compact target state string shown near the top of the UI.
+observer.status("ready")
+
+// Messages are lightweight logs. Events are structured records with kind,
+// message, time, and optional metadata.
+observer.message("example", "observer example started")
+
+// Commands are listed in the Commands tab and are meant for imperative actions.
+observer.command("processOrder", processOrder)
+observer.command("setMode", setMode)
+observer.command("addWork", addWork)
+
+// Exposed functions are callable read-style endpoints. They can still receive a
+// payload, but this example uses one to return a summary object.
+observer.expose("summary", fn(payload) {
+    return {
+        mode: mode,
+        ordersProcessed: ordersProcessed,
+        queueDepth: queueDepth,
+        payload: payload
+    }
+})
+
+// The Observer UI can request shutdown. This callback lets the target clean up
+// and leave the main loop naturally.
+observer.onShutdown(fn(reason) {
+    observer.event("shutdown", `requested by ${reason}`)
+    shutdownRequested = true
+})
+
+backgroundWorker()
+
+io.println(`Observer example target: ${server.url}/snapshot`)
+io.println("Observer password: tiny")
+io.println("Open observer UI with: tiny ./observer/src/main.tiny")
+
+// Keep the target process alive and publish heartbeat messages so the UI has
+// changing data even when no commands are being run.
+while !shutdownRequested {
+    observer.message("heartbeat", `mode=${mode}, queue=${queueDepth}, processed=${ordersProcessed}`)
+    time.sleep(3000)
+}
+
+observer.status("stopping")
+io.println("Observer example shutting down")
+process.exit(0)

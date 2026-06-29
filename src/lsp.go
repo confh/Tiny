@@ -249,20 +249,22 @@ var tinyKeywords = map[string]bool{
 	"await":  true,
 	"async":  true,
 
-	"fn":        true,
-	"let":       true,
-	"const":     true,
-	"class":     true,
-	"embed":     true,
-	"native":    true,
-	"field":     true,
-	"private":   true,
-	"public":    true,
-	"enum":      true,
-	"iota":      true,
-	"interface": true,
-	"embedstr":  true,
-	"embedbin":  true,
+	"fn":          true,
+	"let":         true,
+	"const":       true,
+	"class":       true,
+	"embed":       true,
+	"native":      true,
+	"external":    true,
+	"field":       true,
+	"private":     true,
+	"public":      true,
+	"enum":        true,
+	"iota":        true,
+	"interface":   true,
+	"embedtext":   true,
+	"embedbytes":  true,
+	"embedfolder": true,
 
 	"if":    true,
 	"else":  true,
@@ -291,6 +293,7 @@ var tinyKeywords = map[string]bool{
 	"or":         true,
 	"not":        true,
 	"instanceof": true,
+	"implements": true,
 }
 
 var lspDocs = map[string]string{}
@@ -670,7 +673,14 @@ func runLSP() {
 			return
 		}
 
-		handleLSPMessage(msg)
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Fprintf(os.Stderr, "[tiny-lsp] recovered from request panic: %v\n", r)
+				}
+			}()
+			handleLSPMessage(msg)
+		}()
 	}
 }
 
@@ -1024,7 +1034,8 @@ func getDefinition(uri string, text string, pos Position) any {
 	if loc, ok := importLocationAtPosition(uri, line, pos); ok {
 		return loc
 	}
-	if isPositionInStringOrComment(line, pos.Character) {
+	posOffset := offsetAtLine(text, pos.Line+1) + pos.Character
+	if isOffsetInStringOrComment(text, posOffset) {
 		return nil
 	}
 
@@ -1183,8 +1194,8 @@ func getReferences(uri string, text string, pos Position, includeDeclaration boo
 			}
 
 			matchPos := Position{Line: rng.Line, Character: rng.Start}
-			line := getLine(docText, matchPos.Line)
-			if isPositionInStringOrComment(line, matchPos.Character) || isObjectLiteralKeyReferencePosition(docText, matchPos, name) {
+			matchOffset := offsetAtLine(docText, matchPos.Line+1) + matchPos.Character
+			if isOffsetInStringOrComment(docText, matchOffset) || isObjectLiteralKeyReferencePosition(docText, matchPos, name) {
 				continue
 			}
 			matchScope := scopeAtPosition(docURI, docText, matchPos)
@@ -1365,6 +1376,9 @@ func callbackParameterTypeInlayHintsForText(uri string, text string, rng LSPRang
 			scope := scopeAtPosition(uri, text, bytePositionAtOffset(text, fnOffset))
 			inferredTypes := expectedInlineFunctionParamTypes(scope, text, bytePositionAtOffset(text, fnOffset), fnOffset)
 			if len(inferredTypes) == 0 {
+				inferredTypes = expectedInlineFunctionParamTypesFromObject(scope, text, fnOffset)
+			}
+			if len(inferredTypes) == 0 {
 				continue
 			}
 
@@ -1448,7 +1462,6 @@ func callbackParamNameBounds(part string) (string, int, int, bool) {
 
 func variableTypeInlayHintsForText(uri string, text string, rng LSPRange) []InlayHint {
 	lines := strings.Split(text, "\n")
-	startRegex := regexp.MustCompile(`^\s*(?:export\s+)?(?:let|const)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*(` + unionTypePattern + `))?\s*=\s*`)
 	hints := []InlayHint{}
 
 	for lineIndex, line := range lines {
@@ -1459,21 +1472,18 @@ func variableTypeInlayHintsForText(uri string, text string, rng LSPRange) []Inla
 			continue
 		}
 
-		code := stripLineComment(line)
-		match := startRegex.FindStringSubmatchIndex(code)
-		if match == nil || match[4] >= 0 {
+		decl, ok := lexerVariableDeclarationOnLine(text, lineIndex)
+		if !ok || decl.HasTypeHint {
 			continue
 		}
 
-		name := code[match[2]:match[3]]
-		exprStart := offsetAtLine(text, lineIndex+1) + match[1]
-		exprEnd := variableInitializerEnd(text, exprStart)
-		if exprEnd < exprStart {
+		exprEnd := variableInitializerEnd(text, decl.ExprStart)
+		if exprEnd < decl.ExprStart {
 			continue
 		}
 
 		scope := scopeAtPosition(uri, text, Position{Line: lineIndex, Character: len(line)})
-		expr := strings.TrimSpace(text[exprStart:exprEnd])
+		expr := strings.TrimSpace(text[decl.ExprStart:exprEnd])
 		typ := inferExprTypeFromText(scope, expr)
 		if (typ == "" || typ == "any" || typ == "unknown") && expr != "" {
 			if fallback, ok := inferNamespaceFunctionReturnFromText(scope, text, expr); ok {
@@ -1486,12 +1496,11 @@ func variableTypeInlayHintsForText(uri string, text string, rng LSPRange) []Inla
 		}
 
 		hints = append(hints, InlayHint{
-			Position:    Position{Line: lineIndex, Character: match[3]},
+			Position:    Position{Line: lineIndex, Character: decl.NameEnd},
 			Label:       ": " + inlayTypeLabel(typ),
 			Kind:        1,
 			PaddingLeft: false,
 		})
-		_ = name
 	}
 
 	return hints
@@ -1525,36 +1534,39 @@ func inlayTypeLabel(typ string) string {
 		}
 		return "function(" + strings.Join(params, ", ") + ")"
 	}
-	for _, prefix := range []string{"class:", "interface:", "enum:"} {
-		typ = strings.TrimPrefix(typ, prefix)
+
+	parts := strings.Split(typ, ":")
+	newParts := []string{}
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "class" || part == "interface" || part == "enum" || part == "namespace" {
+			continue
+		}
+		if idx := strings.LastIndex(part, "."); idx >= 0 {
+			part = part[idx+1:]
+		}
+		if part != "" {
+			newParts = append(newParts, part)
+		}
 	}
-	return typ
+	return strings.Join(newParts, ":")
 }
 
 func parameterInlayHintsForText(uri string, text string, rng LSPRange) []InlayHint {
 	hints := []InlayHint{}
-	callRegex := regexp.MustCompile(`([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s*\(`)
-	matches := callRegex.FindAllStringSubmatchIndex(text, -1)
-	for _, match := range matches {
-		name := text[match[2]:match[3]]
+	for _, call := range lexerCallSites(text) {
+		name := call.Name
 		if tinyKeywords[name] {
 			continue
 		}
 
-		open := match[1] - 1
+		open := call.OpenOffset
 		close := findMatching(text, open, '(', ')')
 		if close < 0 {
 			continue
 		}
 
-		callPos := bytePositionAtOffset(text, match[2])
-		line := getLine(text, callPos.Line)
-		if isPositionInStringOrComment(line, callPos.Character) {
-			continue
-		}
-		if isFunctionDeclarationNameAt(line, callPos.Character) {
-			continue
-		}
+		callPos := bytePositionAtOffset(text, call.NameOffset)
 
 		scope := scopeAtPosition(uri, text, callPos)
 		params := paramsForCallName(scope, text, callPos, name)
@@ -1596,6 +1608,144 @@ func isFunctionDeclarationNameAt(line string, nameStart int) bool {
 		strings.HasSuffix(before, "export fn") ||
 		strings.HasSuffix(before, "native fn") ||
 		strings.HasSuffix(before, "export native fn")
+}
+
+type lexerVariableDeclaration struct {
+	Name        string
+	NameEnd     int
+	ExprStart   int
+	HasTypeHint bool
+	TypeHint    string
+}
+
+func lexerVariableDeclarationOnLine(text string, lineIndex int) (lexerVariableDeclaration, bool) {
+	defer func() {
+		_ = recover()
+	}()
+	line := getLine(text, lineIndex)
+	lineOffset := offsetAtLine(text, lineIndex+1)
+	lexer := NewLexer(line, "")
+	lexer.EnableASI = false
+
+	tok := lexer.NextToken()
+	if tok.Type == TOKEN_EXPORT {
+		tok = lexer.NextToken()
+	}
+	if tok.Type != TOKEN_LET && tok.Type != TOKEN_CONST {
+		return lexerVariableDeclaration{}, false
+	}
+
+	nameTok := lexer.NextToken()
+	if nameTok.Type != TOKEN_IDENT {
+		return lexerVariableDeclaration{}, false
+	}
+
+	if isOffsetInStringOrComment(text, lineOffset+nameTok.Column-1) {
+		return lexerVariableDeclaration{}, false
+	}
+
+	hasTypeHint := false
+	typeStart := -1
+	typeEnd := -1
+	for {
+		tok = lexer.NextToken()
+		if tok.Type == TOKEN_EOF || tok.Type == TOKEN_SEMI {
+			return lexerVariableDeclaration{}, false
+		}
+		if tok.Type == TOKEN_COLON {
+			if !hasTypeHint {
+				hasTypeHint = true
+				typeStart = lineOffset + tok.Column
+			}
+			continue
+		}
+		if tok.Type == TOKEN_ASSIGN {
+			if hasTypeHint {
+				typeEnd = lineOffset + tok.Column - 1
+			}
+			exprStart := lineOffset + tok.Column
+			for exprStart < len(text) && (text[exprStart] == ' ' || text[exprStart] == '\t') {
+				exprStart++
+			}
+			typeHint := ""
+			if typeStart >= 0 && typeEnd >= typeStart && typeEnd <= len(text) {
+				typeHint = strings.TrimSpace(text[typeStart:typeEnd])
+			}
+			return lexerVariableDeclaration{
+				Name:        nameTok.Literal,
+				NameEnd:     nameTok.Column - 1 + len(nameTok.Literal),
+				ExprStart:   exprStart,
+				HasTypeHint: hasTypeHint,
+				TypeHint:    typeHint,
+			}, true
+		}
+	}
+}
+
+type lexerCallSite struct {
+	Name       string
+	NameOffset int
+	OpenOffset int
+}
+
+type lspLexedToken struct {
+	Token  Token
+	Offset int
+}
+
+func lexedTokensForText(text string) []lspLexedToken {
+	defer func() {
+		_ = recover()
+	}()
+	lexer := NewLexer(text, "")
+	lexer.EnableASI = false
+	tokens := []lspLexedToken{}
+	for {
+		tok := lexer.NextToken()
+		offset := offsetFromLineCol(text, tok.Line, tok.Column)
+		tokens = append(tokens, lspLexedToken{Token: tok, Offset: offset})
+		if tok.Type == TOKEN_EOF {
+			break
+		}
+	}
+	return tokens
+}
+
+func lexerCallSites(text string) []lexerCallSite {
+	defer func() {
+		_ = recover()
+	}()
+	tokens := lexedTokensForText(text)
+	calls := []lexerCallSite{}
+	for i := 0; i < len(tokens); i++ {
+		tok := tokens[i].Token
+		if tok.Type != TOKEN_IDENT {
+			continue
+		}
+		if i > 0 && tokens[i-1].Token.Type == TOKEN_DOT {
+			continue
+		}
+		if i > 0 && tokens[i-1].Token.Type == TOKEN_FN {
+			continue
+		}
+
+		parts := []string{tok.Literal}
+		nameOffset := tokens[i].Offset
+		j := i + 1
+		for j+1 < len(tokens) && tokens[j].Token.Type == TOKEN_DOT && tokens[j+1].Token.Type == TOKEN_IDENT {
+			parts = append(parts, tokens[j+1].Token.Literal)
+			j += 2
+		}
+		if j >= len(tokens) || tokens[j].Token.Type != TOKEN_LPAREN {
+			continue
+		}
+		calls = append(calls, lexerCallSite{
+			Name:       strings.Join(parts, "."),
+			NameOffset: nameOffset,
+			OpenOffset: tokens[j].Offset,
+		})
+	}
+	return calls
 }
 
 func bytePositionAtOffset(text string, offset int) Position {
@@ -1792,17 +1942,24 @@ func getCodeActions(uri string, text string, params CodeActionParams) []CodeActi
 	if action, ok := implementMissingMethodsAction(uri, text, params.Range.Start); ok {
 		actions = append(actions, action)
 	}
+	if action, ok := ifElseToMatchAction(uri, text, params.Range.Start); ok {
+		actions = append(actions, action)
+	}
 
 	return actions
 }
 
 func inferredTypeHintAction(uri string, text string, line string, lineIndex int) (CodeAction, bool) {
-	match := variableLineRegex.FindStringSubmatchIndex(line)
-	if match == nil || match[4] >= 0 {
+	decl, ok := lexerVariableDeclarationOnLine(text, lineIndex)
+	if !ok || decl.HasTypeHint {
 		return CodeAction{}, false
 	}
 	scope := scopeAtPosition(uri, text, Position{Line: lineIndex, Character: len(line)})
-	typ := inferExprTypeFromText(scope, strings.TrimSpace(line[match[6]:match[7]]))
+	exprEnd := variableInitializerEnd(text, decl.ExprStart)
+	if exprEnd < decl.ExprStart {
+		return CodeAction{}, false
+	}
+	typ := inferExprTypeFromText(scope, strings.TrimSpace(text[decl.ExprStart:exprEnd]))
 	typ = normalizeLSPType(scope, typ)
 	if typ == "" || typ == "any" || typ == "unknown" {
 		return CodeAction{}, false
@@ -1811,7 +1968,7 @@ func inferredTypeHintAction(uri string, text string, line string, lineIndex int)
 		Title: "Add inferred type hint",
 		Kind:  "quickfix",
 		Edit: WorkspaceEdit{Changes: map[string][]TextEdit{uri: {{
-			Range:   lspRangeFromByteColumns(text, lineIndex, match[3], match[3]),
+			Range:   lspRangeFromByteColumns(text, lineIndex, decl.NameEnd, decl.NameEnd),
 			NewText: ": " + typ,
 		}}}},
 	}, true
@@ -1901,6 +2058,387 @@ func organizeImportsEdit(uri string, text string) (TextEdit, bool) {
 	}, true
 }
 
+const minIfElseToMatchArms = 5
+
+type ifElseMatchCase struct {
+	Pattern string
+	Body    string
+}
+
+type ifElseMatchCandidate struct {
+	Subject string
+	Cases   []ifElseMatchCase
+	Default string
+	Start   int
+	End     int
+}
+
+func ifElseToMatchAction(uri string, text string, pos Position) (CodeAction, bool) {
+	candidate, ok := findIfElseMatchCandidateAt(text, pos)
+	if !ok {
+		return CodeAction{}, false
+	}
+	newText := renderMatchCandidate(text, candidate)
+	if strings.TrimSpace(newText) == "" {
+		return CodeAction{}, false
+	}
+	return CodeAction{
+		Title: "Convert if/else chain to match",
+		Kind:  "refactor.rewrite",
+		Edit: WorkspaceEdit{Changes: map[string][]TextEdit{uri: {{
+			Range:   lspRangeFromOffsets(text, candidate.Start, candidate.End),
+			NewText: newText,
+		}}}},
+	}, true
+}
+
+func findIfElseMatchCandidateAt(text string, pos Position) (ifElseMatchCandidate, bool) {
+	defer func() {
+		_ = recover()
+	}()
+	cursor := offsetAtLine(text, pos.Line+1) + pos.Character
+	lexer := NewLexer(text, "")
+	lexer.EnableASI = false
+	for {
+		tok := lexer.NextToken()
+		if tok.Type == TOKEN_EOF {
+			break
+		}
+		if tok.Type != TOKEN_IF {
+			continue
+		}
+		start := offsetFromLineCol(text, tok.Line, tok.Column)
+		candidate, ok := parseIfElseMatchCandidate(text, start)
+		if !ok {
+			continue
+		}
+		if cursor >= candidate.Start && cursor <= candidate.End {
+			return candidate, true
+		}
+	}
+	return ifElseMatchCandidate{}, false
+}
+
+func parseIfElseMatchCandidate(text string, start int) (ifElseMatchCandidate, bool) {
+	i := start
+	subject := ""
+	cases := []ifElseMatchCase{}
+	defaultBody := ""
+
+	for {
+		if !keywordAt(text, i, "if") {
+			return ifElseMatchCandidate{}, false
+		}
+		conditionStart := skipSpaces(text, i+len("if"))
+		openBrace := findTopLevelByte(text, conditionStart, '{')
+		if openBrace < 0 {
+			return ifElseMatchCandidate{}, false
+		}
+		condition := strings.TrimSpace(text[conditionStart:openBrace])
+		caseSubject, pattern, ok := splitMatchableEquality(condition)
+		if !ok {
+			return ifElseMatchCandidate{}, false
+		}
+		if subject == "" {
+			subject = caseSubject
+		} else if caseSubject != subject {
+			return ifElseMatchCandidate{}, false
+		}
+
+		closeBrace := findMatching(text, openBrace, '{', '}')
+		if closeBrace < 0 {
+			return ifElseMatchCandidate{}, false
+		}
+		cases = append(cases, ifElseMatchCase{
+			Pattern: pattern,
+			Body:    text[openBrace+1 : closeBrace],
+		})
+
+		i = skipSpacesAndSemis(text, closeBrace+1)
+		if !keywordAt(text, i, "else") {
+			return makeIfElseMatchCandidate(subject, cases, defaultBody, start, closeBrace+1)
+		}
+		i = skipSpaces(text, i+len("else"))
+		if keywordAt(text, i, "if") {
+			continue
+		}
+		if i >= len(text) || text[i] != '{' {
+			return ifElseMatchCandidate{}, false
+		}
+		defaultClose := findMatching(text, i, '{', '}')
+		if defaultClose < 0 {
+			return ifElseMatchCandidate{}, false
+		}
+		defaultBody = text[i+1 : defaultClose]
+		return makeIfElseMatchCandidate(subject, cases, defaultBody, start, defaultClose+1)
+	}
+}
+
+func makeIfElseMatchCandidate(subject string, cases []ifElseMatchCase, defaultBody string, start int, end int) (ifElseMatchCandidate, bool) {
+	armCount := len(cases)
+	if strings.TrimSpace(defaultBody) != "" {
+		armCount++
+	}
+	if subject == "" || len(cases) == 0 || armCount < minIfElseToMatchArms {
+		return ifElseMatchCandidate{}, false
+	}
+	return ifElseMatchCandidate{Subject: subject, Cases: cases, Default: defaultBody, Start: start, End: end}, true
+}
+
+func splitMatchableEquality(condition string) (string, string, bool) {
+	idx := findTopLevelOperator(condition, "==")
+	if idx < 0 {
+		return "", "", false
+	}
+	left := strings.TrimSpace(condition[:idx])
+	right := strings.TrimSpace(condition[idx+2:])
+	if left == "" || right == "" || strings.Contains(condition, "!=") {
+		return "", "", false
+	}
+	if isMatchSubjectExpr(left) && !isMatchSubjectExpr(right) {
+		return left, right, true
+	}
+	if isMatchSubjectExpr(right) && !isMatchSubjectExpr(left) {
+		return right, left, true
+	}
+	return "", "", false
+}
+
+func isMatchSubjectExpr(expr string) bool {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return false
+	}
+	if expr[0] == '"' || expr[0] == '\'' || expr[0] == '`' {
+		return false
+	}
+	if expr[0] >= '0' && expr[0] <= '9' {
+		return false
+	}
+	if expr == "true" || expr == "false" || expr == "null" {
+		return false
+	}
+	return true
+}
+
+func findTopLevelOperator(text string, op string) int {
+	depthParen, depthBrace, depthBracket := 0, 0, 0
+	inString := byte(0)
+	escaped := false
+	for i := 0; i < len(text); i++ {
+		ch := text[i]
+		if inString != 0 {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == inString {
+				inString = 0
+			}
+			continue
+		}
+		if ch == '"' || ch == '\'' || ch == '`' {
+			inString = ch
+			continue
+		}
+		switch ch {
+		case '(':
+			depthParen++
+		case ')':
+			if depthParen > 0 {
+				depthParen--
+			}
+		case '{':
+			depthBrace++
+		case '}':
+			if depthBrace > 0 {
+				depthBrace--
+			}
+		case '[':
+			depthBracket++
+		case ']':
+			if depthBracket > 0 {
+				depthBracket--
+			}
+		}
+		if depthParen == 0 && depthBrace == 0 && depthBracket == 0 && strings.HasPrefix(text[i:], op) {
+			return i
+		}
+	}
+	return -1
+}
+
+func findTopLevelByte(text string, start int, target byte) int {
+	depthParen, depthBrace, depthBracket := 0, 0, 0
+	inString := byte(0)
+	escaped := false
+	for i := start; i < len(text); i++ {
+		ch := text[i]
+		if inString != 0 {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == inString {
+				inString = 0
+			}
+			continue
+		}
+		if ch == '"' || ch == '\'' || ch == '`' {
+			inString = ch
+			continue
+		}
+		if depthParen == 0 && depthBrace == 0 && depthBracket == 0 && ch == target {
+			return i
+		}
+		switch ch {
+		case '(':
+			depthParen++
+		case ')':
+			if depthParen > 0 {
+				depthParen--
+			}
+		case '{':
+			depthBrace++
+		case '}':
+			if depthBrace > 0 {
+				depthBrace--
+			}
+		case '[':
+			depthBracket++
+		case ']':
+			if depthBracket > 0 {
+				depthBracket--
+			}
+		}
+	}
+	return -1
+}
+
+func skipSpacesAndSemis(text string, i int) int {
+	for i < len(text) && (text[i] == ' ' || text[i] == '\t' || text[i] == '\r' || text[i] == '\n' || text[i] == ';') {
+		i++
+	}
+	return i
+}
+
+func keywordAt(text string, offset int, keyword string) bool {
+	if offset < 0 || offset+len(keyword) > len(text) || text[offset:offset+len(keyword)] != keyword {
+		return false
+	}
+	return isSpaceAroundKeyword(text, offset, keyword)
+}
+
+func renderMatchCandidate(text string, candidate ifElseMatchCandidate) string {
+	baseIndent := lineIndentAtOffset(text, candidate.Start)
+	indentUnit := indentUnitForText(text)
+	bodyIndent := baseIndent + indentUnit
+	out := strings.Builder{}
+	out.WriteString(baseIndent)
+	out.WriteString("match ")
+	out.WriteString(candidate.Subject)
+	out.WriteString(" {\n")
+	for _, c := range candidate.Cases {
+		out.WriteString(bodyIndent)
+		out.WriteString(c.Pattern)
+		out.WriteString(" {")
+		out.WriteString(renderMatchBody(c.Body, bodyIndent))
+		out.WriteString("\n")
+		out.WriteString(bodyIndent)
+		out.WriteString("}\n")
+	}
+	if strings.TrimSpace(candidate.Default) != "" {
+		out.WriteString(bodyIndent)
+		out.WriteString("_ {")
+		out.WriteString(renderMatchBody(candidate.Default, bodyIndent))
+		out.WriteString("\n")
+		out.WriteString(bodyIndent)
+		out.WriteString("}\n")
+	}
+	out.WriteString(baseIndent)
+	out.WriteString("}")
+	return out.String()
+}
+
+func indentUnitForText(text string) string {
+	lines := strings.Split(text, "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "\t") {
+			return "\t"
+		}
+		if strings.HasPrefix(line, "    ") {
+			return "    "
+		}
+	}
+	return "\t"
+}
+
+func renderMatchBody(body string, armIndent string) string {
+	trimmed := strings.Trim(body, " \t\r\n")
+	if strings.TrimSpace(trimmed) == "" {
+		return "\n"
+	}
+	indentUnit := indentUnitForText(body)
+	lines := strings.Split(trimmed, "\n")
+	minIndent := minNonBlankIndent(lines)
+	out := strings.Builder{}
+	for _, line := range lines {
+		out.WriteString("\n")
+		out.WriteString(armIndent)
+		out.WriteString(indentUnit)
+		if len(line) >= minIndent {
+			out.WriteString(line[minIndent:])
+		} else {
+			out.WriteString(strings.TrimLeft(line, " \t"))
+		}
+	}
+	return out.String()
+}
+
+func minNonBlankIndent(lines []string) int {
+	minIndent := -1
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		indent := len(line) - len(strings.TrimLeft(line, " \t"))
+		if minIndent == -1 || indent < minIndent {
+			minIndent = indent
+		}
+	}
+	if minIndent < 0 {
+		return 0
+	}
+	return minIndent
+}
+
+func lineIndentAtOffset(text string, offset int) string {
+	lineStart := offset
+	for lineStart > 0 && text[lineStart-1] != '\n' {
+		lineStart--
+	}
+	i := lineStart
+	for i < len(text) && (text[i] == ' ' || text[i] == '\t') {
+		i++
+	}
+	return text[lineStart:i]
+}
+
+func lspRangeFromOffsets(text string, start int, end int) LSPRange {
+	return LSPRange{
+		Start: bytePositionAtOffset(text, start),
+		End:   bytePositionAtOffset(text, end),
+	}
+}
+
 func topImportBlock(lines []string) []lspImportLine {
 	imports := []lspImportLine{}
 	inBlock := false
@@ -1932,18 +2470,45 @@ func topImportBlock(lines []string) []lspImportLine {
 }
 
 func parseLSPImportLine(line string, lineIndex int) (lspImportLine, bool) {
-	re := regexp.MustCompile(`^\s*import\s+(?:(std|plugin|library|lib)\s+)?"([^"]+)"(?:\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?\s*;?\s*$`)
-	match := re.FindStringSubmatch(line)
-	if match == nil {
+	defer func() {
+		_ = recover()
+	}()
+	lexer := NewLexer(line, "")
+	lexer.EnableASI = false
+	tok := lexer.NextToken()
+	if tok.Type != TOKEN_IMPORT {
 		return lspImportLine{}, false
 	}
 
-	kind := match[1]
-	if kind == "" {
-		kind = "file"
+	kind := "file"
+	tok = lexer.NextToken()
+	if tok.Type == TOKEN_IDENT {
+		switch tok.Literal {
+		case "std", "plugin", "library", "lib":
+			kind = tok.Literal
+			tok = lexer.NextToken()
+		}
 	}
-	path := match[2]
-	alias := match[3]
+	if tok.Type != TOKEN_STRING {
+		return lspImportLine{}, false
+	}
+	path := tok.Literal
+	alias := ""
+	tok = lexer.NextToken()
+	if tok.Type == TOKEN_IDENT && tok.Literal == "as" {
+		aliasTok := lexer.NextToken()
+		if aliasTok.Type != TOKEN_IDENT {
+			return lspImportLine{}, false
+		}
+		alias = aliasTok.Literal
+		tok = lexer.NextToken()
+	}
+	if tok.Type == TOKEN_SEMI {
+		tok = lexer.NextToken()
+	}
+	if tok.Type != TOKEN_EOF {
+		return lspImportLine{}, false
+	}
 	if alias == "" {
 		switch kind {
 		case "std":
@@ -2105,7 +2670,7 @@ func implementMissingMethodsAction(uri string, text string, pos Position) (CodeA
 
 	var targetBlock *blockInfo
 	for _, block := range findBlocks(text, "class") {
-		if offset >= block.Start && offset < block.End {
+		if offset >= block.Start && offset <= block.End {
 			targetBlock = &block
 			break
 		}
@@ -2547,51 +3112,101 @@ func documentSymbolsFromScope(uri string, text string, scope *Scope) []DocumentS
 }
 
 func documentSymbolFromLine(rawLine string, line string, lineIndex int) (DocumentSymbol, bool) {
-	if match := regexp.MustCompile(`^fn\s+([A-Za-z_][A-Za-z0-9_]*)`).FindStringSubmatch(line); match != nil {
-		return makeDocumentSymbol(rawLine, lineIndex, match[1], "function", 12), true
+	_ = line
+
+	lexer := NewLexer(rawLine, "")
+	next := func() Token {
+		return lexer.NextToken()
 	}
 
-	if match := regexp.MustCompile(`^export\s+fn\s+([A-Za-z_][A-Za-z0-9_]*)`).FindStringSubmatch(line); match != nil {
-		return makeDocumentSymbol(rawLine, lineIndex, match[1], "export function", 12), true
+	tok := next()
+	exported := false
+	if tok.Type == TOKEN_EXPORT {
+		exported = true
+		tok = next()
 	}
 
-	if match := regexp.MustCompile(`^interface\s+([A-Za-z_][A-Za-z0-9_]*)`).FindStringSubmatch(line); match != nil {
-		return makeDocumentSymbol(rawLine, lineIndex, match[1], "interface", 11), true
+	detailPrefix := ""
+	if exported {
+		detailPrefix = "export "
 	}
 
-	if match := regexp.MustCompile(`^export\s+interface\s+([A-Za-z_][A-Za-z0-9_]*)`).FindStringSubmatch(line); match != nil {
-		return makeDocumentSymbol(rawLine, lineIndex, match[1], "export interface", 11), true
-	}
+	switch tok.Type {
+	case TOKEN_FN:
+		name := next()
+		if !isDocumentSymbolNameToken(name) {
+			return DocumentSymbol{}, false
+		}
+		return makeDocumentSymbol(rawLine, lineIndex, name.Literal, detailPrefix+"function", 12), true
 
-	if match := regexp.MustCompile(`^class\s+([A-Za-z_][A-Za-z0-9_]*)`).FindStringSubmatch(line); match != nil {
-		return makeDocumentSymbol(rawLine, lineIndex, match[1], "class", 5), true
-	}
+	case TOKEN_INTERFACE:
+		name := next()
+		if name.Type != TOKEN_IDENT {
+			return DocumentSymbol{}, false
+		}
+		return makeDocumentSymbol(rawLine, lineIndex, name.Literal, detailPrefix+"interface", 11), true
 
-	if match := regexp.MustCompile(`^export\s+class\s+([A-Za-z_][A-Za-z0-9_]*)`).FindStringSubmatch(line); match != nil {
-		return makeDocumentSymbol(rawLine, lineIndex, match[1], "export class", 5), true
-	}
+	case TOKEN_CLASS:
+		name := next()
+		if name.Type != TOKEN_IDENT {
+			return DocumentSymbol{}, false
+		}
+		return makeDocumentSymbol(rawLine, lineIndex, name.Literal, detailPrefix+"class", 5), true
 
-	if match := regexp.MustCompile(`^(?:let|const)\s+([A-Za-z_][A-Za-z0-9_]*)`).FindStringSubmatch(line); match != nil {
-		return makeDocumentSymbol(rawLine, lineIndex, match[1], "variable", 13), true
-	}
+	case TOKEN_LET, TOKEN_CONST:
+		name := next()
+		if name.Type != TOKEN_IDENT {
+			return DocumentSymbol{}, false
+		}
+		return makeDocumentSymbol(rawLine, lineIndex, name.Literal, detailPrefix+"variable", 13), true
 
-	if match := regexp.MustCompile(`^export\s+(?:let|const)\s+([A-Za-z_][A-Za-z0-9_]*)`).FindStringSubmatch(line); match != nil {
-		return makeDocumentSymbol(rawLine, lineIndex, match[1], "export variable", 13), true
-	}
+	case TOKEN_EXTERNAL:
+		kind := next()
+		name := next()
+		if !isDocumentSymbolNameToken(name) {
+			return DocumentSymbol{}, false
+		}
+		switch kind.Type {
+		case TOKEN_FN:
+			return makeDocumentSymbol(rawLine, lineIndex, name.Literal, detailPrefix+"external function", 12), true
+		case TOKEN_CONST:
+			if name.Type != TOKEN_IDENT {
+				return DocumentSymbol{}, false
+			}
+			return makeDocumentSymbol(rawLine, lineIndex, name.Literal, detailPrefix+"external global", 13), true
+		}
 
-	if match := regexp.MustCompile(`^(embedStr|embedBin)\s+"[^"]+"\s+(?:let|const)\s+([A-Za-z_][A-Za-z0-9_]*)`).FindStringSubmatch(line); match != nil {
-		kind := match[1]
-		name := match[2]
-		return makeDocumentSymbol(rawLine, lineIndex, name, kind, 13), true
-	}
-
-	if match := regexp.MustCompile(`^export\s+(embedStr|embedBin)\s+"[^"]+"\s+(?:let|const)\s+([A-Za-z_][A-Za-z0-9_]*)`).FindStringSubmatch(line); match != nil {
-		kind := match[1]
-		name := match[2]
-		return makeDocumentSymbol(rawLine, lineIndex, name, "export "+kind, 13), true
+	case TOKEN_EMBED_TEXT, TOKEN_EMBED_BYTES, TOKEN_EMBED_FOLDER:
+		path := next()
+		storage := next()
+		name := next()
+		if path.Type != TOKEN_STRING || (storage.Type != TOKEN_LET && storage.Type != TOKEN_CONST) || name.Type != TOKEN_IDENT {
+			return DocumentSymbol{}, false
+		}
+		return makeDocumentSymbol(rawLine, lineIndex, name.Literal, detailPrefix+tok.Literal, 13), true
 	}
 
 	return DocumentSymbol{}, false
+}
+
+func isDocumentSymbolNameToken(tok Token) bool {
+	if tok.Type == TOKEN_EOF || tok.Literal == "" {
+		return false
+	}
+
+	first := tok.Literal[0]
+	if !(first == '_' || first >= 'A' && first <= 'Z' || first >= 'a' && first <= 'z') {
+		return false
+	}
+
+	for i := 1; i < len(tok.Literal); i++ {
+		ch := tok.Literal[i]
+		if !(ch == '_' || ch >= 'A' && ch <= 'Z' || ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9') {
+			return false
+		}
+	}
+
+	return true
 }
 
 func makeDocumentSymbol(rawLine string, lineIndex int, name string, detail string, kind int) DocumentSymbol {
@@ -3192,7 +3807,7 @@ func classBlockAtLine(text string, lineIndex int) *blockInfo {
 	offset := offsetAtLine(text, lineIndex+1)
 
 	for _, block := range findBlocks(text, "class") {
-		if offset >= block.Start && offset < block.End {
+		if offset >= block.Start && offset <= block.End {
 			return &block
 		}
 	}
@@ -3206,7 +3821,7 @@ func functionBlockAtLine(text string, lineIndex int) *blockInfo {
 	var best *blockInfo
 
 	for _, block := range findBlocks(text, "fn") {
-		if offset >= block.Start && offset < block.End {
+		if offset >= block.Start && offset <= block.End {
 			copy := block
 
 			if best == nil || copy.Start > best.Start {
@@ -3280,6 +3895,101 @@ func getSemanticTokens(uri string, text string) map[string]any {
 	return map[string]any{"data": data}
 }
 
+type stringInterval struct {
+	start int
+	end   int
+}
+
+type lspParserState struct {
+	kind       int // 0: normal, 1: string, 2: template
+	quoteChar  byte
+	braceDepth int
+}
+
+func getStringIntervals(text string) []stringInterval {
+	var states []lspParserState
+	states = append(states, lspParserState{kind: 0})
+
+	var intervals []stringInterval
+	currentStringStart := -1
+
+	for i := 0; i < len(text); i++ {
+		ch := text[i]
+		currentState := &states[len(states)-1]
+
+		switch currentState.kind {
+		case 0:
+			if ch == '"' || ch == '\'' {
+				states = append(states, lspParserState{kind: 1, quoteChar: ch})
+				currentStringStart = i
+			} else if ch == '`' {
+				states = append(states, lspParserState{kind: 2})
+				currentStringStart = i
+			} else if ch == '{' {
+				if len(states) > 1 {
+					currentState.braceDepth++
+				}
+			} else if ch == '}' {
+				if len(states) > 1 {
+					currentState.braceDepth--
+					if currentState.braceDepth == 0 {
+						states = states[:len(states)-1]
+						currentStringStart = i + 1
+					}
+				}
+			} else if ch == '/' && i+1 < len(text) && text[i+1] == '/' {
+				for i < len(text) && text[i] != '\n' {
+					i++
+				}
+			} else if ch == '/' && i+1 < len(text) && text[i+1] == '*' {
+				i += 2
+				for i+1 < len(text) && !(text[i] == '*' && text[i+1] == '/') {
+					i++
+				}
+				i++
+			}
+
+		case 1:
+			if ch == '\\' {
+				i++
+			} else if ch == currentState.quoteChar {
+				intervals = append(intervals, stringInterval{start: currentStringStart, end: i + 1})
+				states = states[:len(states)-1]
+				currentStringStart = -1
+			}
+
+		case 2:
+			if ch == '\\' {
+				i++
+			} else if ch == '`' {
+				intervals = append(intervals, stringInterval{start: currentStringStart, end: i + 1})
+				states = states[:len(states)-1]
+				currentStringStart = -1
+			} else if ch == '$' && i+1 < len(text) && text[i+1] == '{' {
+				intervals = append(intervals, stringInterval{start: currentStringStart, end: i})
+				states = append(states, lspParserState{kind: 0, braceDepth: 1})
+				i++
+				currentStringStart = -1
+			}
+		}
+	}
+
+	if currentStringStart != -1 {
+		intervals = append(intervals, stringInterval{start: currentStringStart, end: len(text)})
+	}
+
+	return intervals
+}
+
+func isInsideString(intervals []stringInterval, start int, end int) bool {
+	for _, interval := range intervals {
+		if start >= interval.start && end <= interval.end {
+			return true
+		}
+	}
+	return false
+}
+
 func collectSemanticTokens(uri string, text string) []semanticTokenCandidate {
 	tokens := []semanticTokenCandidate{}
 	scope := fileBaseScope(uri, text)
@@ -3287,13 +3997,27 @@ func collectSemanticTokens(uri string, text string) []semanticTokenCandidate {
 	identRe := regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*`)
 	numberRe := regexp.MustCompile(`\b[0-9]+(?:\.[0-9]+)?\b`)
 
+	intervals := getStringIntervals(text)
+
+	lineOffsets := make([]int, len(lines))
+	currentOffset := 0
+	for lineIndex, line := range lines {
+		lineOffsets[lineIndex] = currentOffset
+		currentOffset += len(line) + 1
+	}
+
 	for lineIndex, rawLine := range lines {
 		code := stripLineComment(rawLine)
-		tokens = append(tokens, collectStringSemanticTokens(rawLine, lineIndex)...)
 
 		for _, match := range numberRe.FindAllStringIndex(code, -1) {
 			start := match[0]
 			end := match[1]
+			tokenStart := lineOffsets[lineIndex] + start
+			tokenEnd := lineOffsets[lineIndex] + end
+			if isInsideString(intervals, tokenStart, tokenEnd) {
+				continue
+			}
+
 			if isIdentifierBoundary(code, start-1) && isIdentifierBoundary(code, end) {
 				tokens = append(tokens, semanticTokenCandidate{Line: lineIndex, Start: start, End: end, Type: "number"})
 			}
@@ -3302,6 +4026,12 @@ func collectSemanticTokens(uri string, text string) []semanticTokenCandidate {
 		for _, match := range identRe.FindAllStringIndex(code, -1) {
 			start := match[0]
 			end := match[1]
+			tokenStart := lineOffsets[lineIndex] + start
+			tokenEnd := lineOffsets[lineIndex] + end
+			if isInsideString(intervals, tokenStart, tokenEnd) {
+				continue
+			}
+
 			name := code[start:end]
 			tokenType := semanticTypeForIdentifier(scope, code, name, start, end)
 			if tokenType == "" {
@@ -3309,48 +4039,6 @@ func collectSemanticTokens(uri string, text string) []semanticTokenCandidate {
 			}
 			tokens = append(tokens, semanticTokenCandidate{Line: lineIndex, Start: start, End: end, Type: tokenType})
 		}
-	}
-
-	return tokens
-}
-
-func collectStringSemanticTokens(line string, lineIndex int) []semanticTokenCandidate {
-	tokens := []semanticTokenCandidate{}
-	inString := byte(0)
-	escaped := false
-	start := -1
-
-	for i := 0; i < len(line); i++ {
-		ch := line[i]
-		if inString != 0 {
-			if escaped {
-				escaped = false
-				continue
-			}
-			if ch == '\\' {
-				escaped = true
-				continue
-			}
-			if ch == inString {
-				tokens = append(tokens, semanticTokenCandidate{Line: lineIndex, Start: start, End: i + 1, Type: "string"})
-				inString = 0
-				start = -1
-			}
-			continue
-		}
-
-		if ch == '/' && i+1 < len(line) && line[i+1] == '/' {
-			break
-		}
-
-		if ch == '"' || ch == '\'' || ch == '`' {
-			inString = ch
-			start = i
-		}
-	}
-
-	if inString != 0 && start >= 0 {
-		tokens = append(tokens, semanticTokenCandidate{Line: lineIndex, Start: start, End: len(line), Type: "string"})
 	}
 
 	return tokens
@@ -3625,32 +4313,37 @@ func publishProjectDiagnostics() {
 
 func importDiagnostics(uri string, text string) []map[string]any {
 	diagnostics := []map[string]any{}
-	cleanedText := stripNativeGoBlocks(text)
+	if statements, parseDiagnostics := parseTinyForLSP(URIToPath(uri), text); len(parseDiagnostics) == 0 && statements != nil {
+		for _, raw := range statements {
+			stmt, _ := unwrapExport(raw)
+			imp, ok := stmt.(ImportStmt)
+			if !ok || imp.Std {
+				continue
+			}
+			message := importDiagnosticMessage(uri, imp)
+			if message == "" {
+				continue
+			}
+			start := imp.Column - 1
+			if start < 0 {
+				start = 0
+			}
+			diagnostics = append(diagnostics, map[string]any{
+				"range":    lspRangeFromByteColumns(text, imp.Line-1, start, start+len(imp.Path)),
+				"severity": 1,
+				"message":  message,
+				"source":   "tiny",
+			})
+		}
+		return diagnostics
+	}
+
+	cleanedText := stripStringsAndCommentsForImportScan(stripNativeGoBlocks(text))
 	lines := strings.Split(cleanedText, "\n")
 	for lineIndex, line := range lines {
 		code := stripTrailingLineComment(line)
 		for _, imp := range importPathsInLine(code) {
-			resolved := ""
-			message := ""
-			switch {
-			case imp.Kind == "library":
-				resolved = resolveLibraryImportPath(imp.Path, uri)
-				if resolved == imp.Path {
-					message = "library is not installed: " + imp.Path
-				} else if _, err := os.Stat(resolved); err != nil {
-					message = "library entry file not found: " + imp.Path
-				}
-			case imp.Kind == "file":
-				resolved = resolveImportPath(uri, imp.Path)
-				if _, err := os.Stat(resolved); err != nil {
-					message = "import file not found: " + imp.Path
-				}
-			case imp.Kind == "plugin":
-				resolved = resolveImportPath(uri, imp.Path)
-				if _, err := os.Stat(resolved); err != nil {
-					message = "plugin file not found: " + imp.Path
-				}
-			}
+			message := importPathDiagnosticMessage(uri, imp.Kind, imp.Path)
 			if message == "" {
 				continue
 			}
@@ -3663,6 +4356,127 @@ func importDiagnostics(uri string, text string) []map[string]any {
 		}
 	}
 	return diagnostics
+}
+
+func importDiagnosticMessage(uri string, imp ImportStmt) string {
+	kind := "file"
+	if imp.Library {
+		kind = "library"
+	} else if imp.Plugin {
+		kind = "plugin"
+	}
+	return importPathDiagnosticMessage(uri, kind, imp.Path)
+}
+
+func importPathDiagnosticMessage(uri string, kind string, path string) string {
+	switch kind {
+	case "library":
+		if !isCompleteLibraryImportPath(path) {
+			return ""
+		}
+		if !libraryImportRootExists(path, uri) {
+			return "library is not installed: " + path
+		}
+		resolved := resolveLibraryImportPath(path, uri)
+		if _, err := os.Stat(resolved); err != nil {
+			return "library entry file not found: " + path
+		}
+	case "file":
+		resolved := resolveImportPath(uri, path)
+		if _, err := os.Stat(resolved); err != nil {
+			return "import file not found: " + path
+		}
+	case "plugin":
+		resolved := resolveImportPath(uri, path)
+		if _, err := os.Stat(resolved); err != nil {
+			return "plugin file not found: " + path
+		}
+	}
+	return ""
+}
+
+func stripStringsAndCommentsForImportScan(text string) string {
+	out := []byte(text)
+	inString := byte(0)
+	escaped := false
+	inLineComment := false
+	inBlockComment := false
+
+	for i := 0; i < len(out); i++ {
+		ch := out[i]
+
+		if inLineComment {
+			if ch == '\n' {
+				inLineComment = false
+			} else {
+				out[i] = ' '
+			}
+			continue
+		}
+
+		if inBlockComment {
+			if ch == '\n' {
+				continue
+			}
+			if ch == '*' && i+1 < len(out) && out[i+1] == '/' {
+				out[i] = ' '
+				out[i+1] = ' '
+				i++
+				inBlockComment = false
+				continue
+			}
+			out[i] = ' '
+			continue
+		}
+
+		if inString != 0 {
+			if ch == '\n' {
+				if inString != '`' {
+					inString = 0
+					escaped = false
+				}
+				continue
+			}
+			out[i] = ' '
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == inString {
+				inString = 0
+			}
+			continue
+		}
+
+		if ch == '/' && i+1 < len(out) && out[i+1] == '/' {
+			out[i] = ' '
+			out[i+1] = ' '
+			i++
+			inLineComment = true
+			continue
+		}
+
+		if ch == '/' && i+1 < len(out) && out[i+1] == '*' {
+			out[i] = ' '
+			out[i+1] = ' '
+			i++
+			inBlockComment = true
+			continue
+		}
+
+		if ch == '"' || ch == '\'' || ch == '`' {
+			out[i] = ' '
+			inString = ch
+			escaped = false
+			continue
+		}
+	}
+
+	return string(out)
 }
 
 type importPathInLine struct {
@@ -3691,6 +4505,11 @@ func importPathsInLine(line string) []importPathInLine {
 		})
 	}
 	return result
+}
+
+func isCompleteLibraryImportPath(path string) bool {
+	lib, ok := parseLibraryImportPath(path)
+	return ok && lib.Owner != "" && lib.Repo != ""
 }
 
 func publishDiagnosticsForImportDependents(changedURI string) {
@@ -4102,9 +4921,9 @@ func scopeCompletions(scope *Scope, uri string, text string, hasParens bool) []C
 		snippetCompletion("spawn", "spawn task", "spawn () fn() {\n    $0\n}"),
 		snippetCompletion("defer", "defer statement", "defer fn() {\n    $0\n}"),
 		snippetCompletion("lock", "lock statement", "lock ${0:mutex} {\n\t $1\n}"),
-		snippetCompletion("embedstr", "embedstr statement", "embedstr \"$0\" const $1"),
-		snippetCompletion("embedbin", "embedbin statement", "embedbin \"$0\" const $1"),
-		snippetCompletion("embeddir", "embeddir statement", "embeddir \"$0\" const $1"),
+		snippetCompletion("embedtext", "embedtext statement", "embedtext \"$0\" const $1"),
+		snippetCompletion("embedbytes", "embedbytes statement", "embedbytes \"$0\" const $1"),
+		snippetCompletion("embedfolder", "embedfolder statement", "embedfolder \"$0\" const $1"),
 		snippetCompletion("native fn", "native fn statement", "native fn ${0:Name}(): null {\n\tgo {\n$1\n\t}\n}"),
 		{Label: "await ", Kind: 14, Detail: "await statement"},
 		{Label: "typeof", Kind: 14, Detail: "type operator"},
@@ -4618,25 +5437,12 @@ func completionRank(item CompletionItem) string {
 }
 
 func classNameAtPosition(text string, pos Position) string {
-	block := classBlockAtLine(text, pos.Line)
-	if block != nil && block.Name != "" {
-		return block.Name
-	}
-
-	lines := strings.Split(text, "\n")
-	currentLine := pos.Line
-	if currentLine >= len(lines) {
-		currentLine = len(lines) - 1
-	}
-
-	for i := currentLine; i >= 0; i-- {
-		line := cleanLine(lines[i])
-		match := classLineRegex.FindStringSubmatch(line)
-		if match != nil {
-			return match[1]
+	offset := offsetFromLineCol(text, pos.Line+1, pos.Character+1)
+	for _, b := range findBlocks(text, "class") {
+		if offset >= b.Start && offset <= b.End {
+			return b.Name
 		}
 	}
-
 	return ""
 }
 
@@ -5055,7 +5861,6 @@ func resolveReceiverPath(scope *Scope, text string, pos Position, receiver strin
 }
 
 func currentClassSymbolAtPosition(scope *Scope, text string, pos Position, className string) (SymbolInfo, bool) {
-	lines := strings.Split(text, "\n")
 	classLine := -1
 	body := ""
 	bodyBaseLine := 1
@@ -5065,57 +5870,83 @@ func currentClassSymbolAtPosition(scope *Scope, text string, pos Position, class
 		body = block.Body
 		bodyBaseLine = block.Line
 	} else {
-		for i := pos.Line; i >= 0 && i < len(lines); i-- {
-			if classLineRegex.FindStringSubmatch(cleanLine(lines[i])) != nil {
-				classLine = i
+		var found bool
+		for _, b := range findBlocks(text, "class") {
+			if b.Name == className {
+				classLine = b.Line - 1
+				body = b.Body
+				bodyBaseLine = b.Line
+				found = true
 				break
 			}
 		}
 
-		if classLine < 0 {
+		if !found {
 			return resolveClassSymbol(scope, className)
 		}
-
-		endLine := pos.Line
-		if endLine >= len(lines) {
-			endLine = len(lines) - 1
-		}
-		if endLine < classLine {
-			endLine = classLine
-		}
-
-		bodyStartLine := classLine + 1
-		if bodyStartLine > endLine {
-			bodyStartLine = endLine
-		}
-
-		body = strings.Join(lines[bodyStartLine:endLine+1], "\n")
-		bodyBaseLine = bodyStartLine + 1
 	}
 
 	fields := scanClassFields(scope, body, "", bodyBaseLine)
 	methods := map[string]SymbolInfo{}
 	collectEmbeddedSymbolsFromBody(scope, body, fields, methods, "", bodyBaseLine)
-	for name, method := range scanClassMethodHeaders(scope, className, body, bodyBaseLine) {
-		methods[name] = method
+
+	var classBlock *blockInfo
+	for _, b := range findBlocks(text, "class") {
+		if b.Name == className {
+			classBlock = &b
+			break
+		}
 	}
 
-	for _, methodBlock := range findBlocks(body, "fn") {
-		params := normalizeStdArgs(scope, parseFunctionParams(methodBlock.ParamsText))
-		returnType := inferReturnTypeFromBody(scope, methodBlock.Body, methodBlock.ReturnType)
-		detail := "method " + className + "." + methodBlock.Name
-		if isPrivateFunctionAt(body, methodBlock.Start) {
-			detail = "private " + detail
-		}
-		methods[methodBlock.Name] = SymbolInfo{
-			Name:    methodBlock.Name,
-			Kind:    SymbolFunction,
-			Type:    "function",
-			Detail:  detail,
-			Line:    bodyBaseLine + methodBlock.Line,
-			Column:  methodBlock.Column,
-			Params:  params,
-			Returns: returnType,
+	if classBlock != nil {
+		for _, b := range findBlocks(text, "fn") {
+			if b.Start > classBlock.Start && b.Start < classBlock.End {
+				params := normalizeStdArgs(scope, parseFunctionParams(b.ParamsText))
+
+				nestedScope := NewScope(scope)
+				for _, p := range params {
+					nestedScope.Define(SymbolInfo{
+						Name: p.Name,
+						Kind: SymbolVariable,
+						Type: p.Type,
+					})
+				}
+				if classSym, exists := resolveClassSymbol(scope, className); exists {
+					nestedScope.Define(SymbolInfo{
+						Name:    "this",
+						Kind:    SymbolVariable,
+						Type:    "class:" + className,
+						Fields:  classSym.Fields,
+						Methods: classSym.Methods,
+					})
+				}
+
+				returnType := inferReturnTypeFromBody(nestedScope, b.Body, b.ReturnType)
+				if b.IsAsync {
+					returnType = "task:" + returnType
+				}
+
+				detail := "method " + className + "." + b.Name
+				lines := strings.Split(text, "\n")
+				if b.Line-1 >= 0 && b.Line-1 < len(lines) {
+					line := lines[b.Line-1]
+					fnIdx := strings.Index(line, "fn")
+					if fnIdx > 0 && strings.Contains(line[:fnIdx], "private") {
+						detail = "private " + detail
+					}
+				}
+
+				methods[b.Name] = SymbolInfo{
+					Name:    b.Name,
+					Kind:    SymbolFunction,
+					Type:    "function",
+					Detail:  detail,
+					Line:    b.Line,
+					Column:  b.Column,
+					Params:  params,
+					Returns: returnType,
+				}
+			}
 		}
 	}
 
@@ -5148,48 +5979,6 @@ func currentClassSymbolAtPosition(scope *Scope, text string, pos Position, class
 	}
 
 	return classSym, true
-}
-
-func scanClassMethodHeaders(scope *Scope, className string, body string, bodyBaseLine int) map[string]SymbolInfo {
-	methods := map[string]SymbolInfo{}
-	lines := strings.Split(body, "\n")
-
-	for i, raw := range lines {
-		line := cleanLine(raw)
-		match := functionLineRegex.FindStringSubmatch(line)
-		if match == nil {
-			continue
-		}
-
-		name := match[1]
-		if name == "" {
-			continue
-		}
-
-		detail := "method " + className + "." + name
-		fnIndex := strings.Index(line, "fn")
-		if fnIndex > 0 && strings.Contains(line[:fnIndex], "private") {
-			detail = "private " + detail
-		}
-
-		returnType := "null"
-		if len(match) > 3 && strings.TrimSpace(match[3]) != "" {
-			returnType = normalizeLSPType(scope, match[3])
-		}
-
-		methods[name] = SymbolInfo{
-			Name:    name,
-			Kind:    SymbolFunction,
-			Type:    "function",
-			Detail:  detail,
-			Line:    bodyBaseLine + i,
-			Column:  indexColumn(raw, name),
-			Params:  normalizeStdArgs(scope, parseFunctionParams(match[2])),
-			Returns: returnType,
-		}
-	}
-
-	return methods
 }
 
 func isNullableLSPType(typ string) bool {

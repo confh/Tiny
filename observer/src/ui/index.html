@@ -1,0 +1,181 @@
+<header class="window-bar" data-window-drag>
+  <div class="window-title">
+    <span class="window-mark">T</span>
+    <span>Tiny Observer</span>
+  </div>
+  <div class="window-controls">
+    <button class="window-button minimize" data-window-action="minimize" aria-label="Minimize"></button>
+    <button class="window-button maximize" data-window-action="maximize" aria-label="Maximize"></button>
+    <button class="window-button close" data-window-action="close" aria-label="Close"></button>
+  </div>
+</header>
+
+<main class="app-shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <h1>Tiny Observer</h1>
+      <p id="status">Connecting</p>
+    </div>
+    <nav class="tabs">
+      <button class="tab active" data-tab="overview">Overview</button>
+      <button class="tab" data-tab="runtime">Runtime</button>
+      <button class="tab" data-tab="memory">Memory</button>
+      <button class="tab" data-tab="functions">Functions</button>
+      <button class="tab" data-tab="globals">Globals</button>
+      <button class="tab" data-tab="commands">Commands</button>
+      <button class="tab" data-tab="messages">Messages</button>
+      <button class="tab" data-tab="events">Events</button>
+      <button class="tab" data-tab="controls">Controls</button>
+    </nav>
+  </aside>
+
+  <section class="workspace">
+    <header class="topbar">
+      <div>
+        <strong id="targetName">Target</strong>
+        <span id="targetMeta">Waiting for snapshot</span>
+      </div>
+      <div class="actions">
+        <button id="pause">Pause</button>
+        <button id="forceGc">GC</button>
+        <button id="refresh">Refresh</button>
+      </div>
+    </header>
+
+    <section class="connection-bar" aria-label="Observer connection">
+      <label>
+        <span>Endpoint</span>
+        <input id="connectionEndpoint" autocomplete="off" spellcheck="false">
+      </label>
+      <label>
+        <span>Password</span>
+        <input id="connectionPassword" type="password" autocomplete="current-password">
+      </label>
+      <button id="connectButton">Connect</button>
+      <span id="connectionStatus">Default target</span>
+    </section>
+
+    <section class="metrics">
+      <article class="metric"><span>Memory</span><strong id="alloc">0 B</strong><small id="sys">0 B sys</small>
+      </article>
+      <article class="metric"><span>Goroutines</span><strong id="goroutines">0</strong><small id="procs">0 procs</small>
+      </article>
+      <article class="metric"><span>Tasks</span><strong id="tasks">0</strong><small id="taskIdle">0 done</small>
+      </article>
+      <article class="metric"><span>Status</span><strong id="targetStatus">unknown</strong><small id="gcRuns">0 GC
+          runs</small></article>
+    </section>
+
+    <section class="page active" data-page="overview">
+      <article class="panel wide">
+        <h2>Live Runtime</h2>
+        <canvas id="chart" width="1100" height="260"></canvas>
+        <div class="legend">
+          <span><b class="mem"></b>Memory</span>
+          <span><b class="go"></b>Goroutines</span>
+          <span><b class="task"></b>Tasks</span>
+        </div>
+      </article>
+      <article class="panel wide">
+        <h2>Target</h2>
+        <dl id="target"></dl>
+      </article>
+      <article class="panel wide">
+        <h2>Program</h2>
+        <dl id="program"></dl>
+      </article>
+    </section>
+
+    <section class="page" data-page="runtime">
+      <article class="panel">
+        <h2>Observer</h2>
+        <dl id="observer"></dl>
+      </article>
+      <article class="panel">
+        <h2>Runtime</h2>
+        <dl id="runtime"></dl>
+      </article>
+    </section>
+
+    <section class="page" data-page="memory">
+      <article class="panel wide">
+        <h2>Heap</h2>
+        <div class="bars">
+          <div><span>Alloc</span><i><b id="barAlloc"></b></i></div>
+          <div><span>Heap</span><i><b id="barHeap"></b></i></div>
+          <div><span>Next GC</span><i><b id="barNextGC"></b></i></div>
+        </div>
+      </article>
+    </section>
+
+    <section class="page" data-page="functions">
+      <article class="panel wide">
+        <div class="panel-head">
+          <h2>Function Calls</h2><input id="functionFilter" placeholder="Filter functions">
+        </div>
+        <div id="functionsTable" class="table"></div>
+      </article>
+    </section>
+
+    <section class="page" data-page="globals">
+      <article class="panel wide">
+        <div class="panel-head">
+          <h2>Globals</h2><input id="globalFilter" placeholder="Filter globals">
+        </div>
+        <div id="globalsTable" class="table"></div>
+      </article>
+    </section>
+
+    <section class="page" data-page="commands">
+      <article class="panel">
+        <h2>Commands</h2>
+        <div id="commandsTable" class="table"></div>
+      </article>
+      <article class="panel">
+        <h2>Exposed Functions</h2>
+        <div id="exposedTable" class="table"></div>
+      </article>
+      <article class="panel wide">
+        <h2>Result</h2>
+        <pre id="commandResult"></pre>
+      </article>
+    </section>
+
+    <section class="page" data-page="messages">
+      <article class="panel wide">
+        <h2>Send Message</h2>
+        <div class="inline-form"><input id="messageInput" placeholder="Message to target log"><button
+            id="sendMessage">Send</button></div>
+      </article>
+      <article class="panel wide">
+        <h2>Messages</h2>
+        <div id="messagesTable" class="table"></div>
+      </article>
+    </section>
+
+    <section class="page" data-page="events">
+      <article class="panel wide">
+        <div class="panel-head">
+          <h2>Events</h2><input id="eventFilter" placeholder="Filter events">
+        </div>
+        <div id="eventsTable" class="table"></div>
+      </article>
+    </section>
+
+    <section class="page" data-page="controls">
+      <article class="panel wide">
+        <h2>Runtime Controls</h2>
+        <div class="control-grid">
+          <label><span>GOMAXPROCS</span><input id="gomaxprocsInput" type="number" min="1" step="1"><button
+              id="setGomaxprocs">Apply</button></label>
+          <label><span>GC Percent</span><input id="gcPercentInput" type="number" min="-1" step="1"><button
+              id="setGcPercent">Apply</button></label>
+        </div>
+      </article>
+      <article class="panel wide danger-zone">
+        <h2>Shutdown</h2>
+        <button id="shutdownTarget">Request Shutdown</button>
+      </article>
+    </section>
+  </section>
+</main>

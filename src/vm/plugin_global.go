@@ -19,6 +19,7 @@ var AvailablePlugins = []string{
 	"net",
 	"path",
 	"object",
+	"observer",
 	"desktop",
 	"sync",
 	"tests",

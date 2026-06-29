@@ -1,7 +1,7 @@
 import std "io";
 
-embedstr "./data.json" const data
-embedbin "./data.json" const dataBin
+embedtext "./data.json" const data
+embedbytes "./data.json" const dataBin
 
 io.println(data)
 io.println(dataBin)

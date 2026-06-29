@@ -1,0 +1,113 @@
+export interface ObserverMemoryStats {
+    alloc: number,
+    totalAlloc: number,
+    sys: number,
+    heapAlloc: number,
+    heapSys: number,
+    heapObjects: number,
+    numGC: number,
+    nextGC: number,
+    pauseTotal: number
+}
+
+export interface ObserverTaskPoolStats {
+    active: number,
+    idle: number,
+    limit: number,
+    maxActive: number,
+    maxIdle: number
+}
+
+export interface ObserverTaskStats {
+    started: number,
+    active: number,
+    completed: number,
+    failed: number,
+    calls: number
+}
+
+export interface ObserverFunctionCall {
+    name: string,
+    calls: number
+}
+
+export interface ObserverControlStats {
+    gomaxprocs: number,
+    gcPercent: number
+}
+
+export interface ObserverNamedItem {
+    name: string
+}
+
+export interface ObserverEvent {
+    time: string,
+    kind: string,
+    message: string,
+    data?: any
+}
+
+export interface ObserverMessage {
+    time: string,
+    from: string,
+    text: string,
+    data?: any
+}
+
+export interface ObserverSnapshot {
+    uptimeMs: number,
+    pid: number,
+    executable: string,
+    cwd: string,
+    goos: string,
+    goarch: string,
+    goroutines: number,
+    gomaxprocs: number,
+    functionCount: number,
+    classCount: number,
+    interfaceCount: number,
+    globalCount: number,
+    globalNames: array:string,
+    functionNames: array:string,
+    functionCalls: array:ObserverFunctionCall,
+    classNames: array:string,
+    stackDepth: number,
+    frameDepth: number,
+    taskPool: ObserverTaskPoolStats,
+    tasks: ObserverTaskStats,
+    controls: ObserverControlStats,
+    status: string,
+    commands: array:ObserverNamedItem,
+    exposed: array:ObserverNamedItem,
+    events: array:ObserverEvent,
+    messages: array:ObserverMessage,
+    memory: ObserverMemoryStats
+}
+
+export interface ObserverServer {
+    host: string,
+    port: number,
+    url: string
+}
+
+export interface ObserverServerOptions {
+    host?: string,
+    port?: number,
+    password?: string
+}
+
+export fn snapshot(): ObserverSnapshot
+
+export fn start(options?: number | ObserverServerOptions): ObserverServer
+
+export fn status(value: string): null
+
+export fn event(kind: string, message: string, data?: any): null
+
+export fn message(from: string, text: string, data?: any): null
+
+export fn command(name: string, callback: function): null
+
+export fn expose(name: string, callback: function): null
+
+export fn onShutdown(callback: function): null

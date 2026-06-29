@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"strconv"
 
-	json "github.com/goccy/go-json"
 	"github.com/gorilla/websocket"
 	. "language.com/src/tinyerrors"
 )

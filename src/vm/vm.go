@@ -18,9 +18,34 @@ import (
 	"github.com/tetratelabs/wazero/api"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 
-	json "github.com/goccy/go-json"
+	stdjson "encoding/json"
+	"io"
 	. "language.com/src/tinyerrors"
 )
+
+type stdJSONWrapper struct{}
+
+func (stdJSONWrapper) Marshal(v any) ([]byte, error) {
+	return stdjson.Marshal(v)
+}
+
+func (stdJSONWrapper) Unmarshal(data []byte, v any) error {
+	return stdjson.Unmarshal(data, v)
+}
+
+func (stdJSONWrapper) MarshalIndent(v any, prefix, indent string) ([]byte, error) {
+	return stdjson.MarshalIndent(v, prefix, indent)
+}
+
+func (stdJSONWrapper) NewDecoder(r io.Reader) *stdjson.Decoder {
+	return stdjson.NewDecoder(r)
+}
+
+func (stdJSONWrapper) NewEncoder(w io.Writer) *stdjson.Encoder {
+	return stdjson.NewEncoder(w)
+}
+
+var json stdJSONWrapper
 
 type NativeCallFrame struct {
 	Name   string
@@ -76,6 +101,8 @@ type VMInfo struct {
 	Interfaces       map[string]Interface
 	Packed           bool
 	JITDisabled      bool
+	Isolated         bool
+	AllowedStdlib    map[string]bool
 }
 
 type VM struct {
@@ -89,9 +116,14 @@ type VM struct {
 
 	taskPool *VMPool
 
+	observerStats *ObserverRuntimeStats
+
 	packed bool
 
 	jitDisabled bool
+	isolated    bool
+
+	allowedStdlib map[string]bool
 
 	jitFunctions map[string]*JitFunction
 
@@ -250,8 +282,11 @@ func NewVM(info VMInfo) *VM {
 		mu:                   &sync.RWMutex{},
 		cliArgs:              []string{},
 		globalTypes:          map[string]TypeHint{},
+		observerStats:        newObserverRuntimeStats(),
 		packed:               packed,
 		jitDisabled:          jitDisabled,
+		isolated:             info.Isolated,
+		allowedStdlib:        cloneStringBoolMap(info.AllowedStdlib),
 		top:                  0,
 		stack:                make([]TinyValue, 1024),
 		framePool:            make([]*Frame, 0, 1024),
@@ -278,6 +313,17 @@ func NewVM(info VMInfo) *VM {
 	})
 
 	return vm
+}
+
+func cloneStringBoolMap(src map[string]bool) map[string]bool {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]bool, len(src))
+	for key, value := range src {
+		dst[key] = value
+	}
+	return dst
 }
 
 func (vm *VM) RegisterJitString(s string) float64 {
@@ -659,11 +705,14 @@ func (vm *VM) ensureJitReadyFor(name string) {
 
 func (vm *VM) CloneForTask() *VM {
 	task := &VM{
+		start:            vm.start,
 		mainInstructions: vm.mainInstructions,
 		functions:        vm.functions,
 		classes:          vm.classes,
 		interfaces:       vm.interfaces,
 		functionList:     vm.functionList,
+		observerStats:    vm.observerStats,
+		taskPool:         vm.taskPool,
 
 		stack:       make([]TinyValue, 256),
 		framePool:   make([]*Frame, 0, 256),
@@ -2590,6 +2639,10 @@ func makeErrorObject(value TinyValue) ObjectValue {
 }
 
 func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []TinyValue) {
+	if vm.observerStats != nil {
+		vm.observerStats.FunctionCalled(fnValue.Name)
+	}
+
 	fn, ok := vm.functions[fnValue.Name]
 	if ok {
 		vm.ensureJitReadyFor(fn.Name)
@@ -2792,6 +2845,10 @@ func (vm *VM) callFunctionDirectInterpreted(fn Function, args []TinyValue) {
 }
 
 func (vm *VM) callFunctionDirect(fn Function, args []TinyValue) {
+	if vm.observerStats != nil {
+		vm.observerStats.FunctionCalled(fn.Name)
+	}
+
 	expected := len(fn.Params)
 	isVariadic := expected > 0 && fn.Params[expected-1].Variadic
 
@@ -3421,10 +3478,12 @@ func (vm *VM) execute(targetDepth int) bool {
 				}
 
 				taskVM := vm.CloneForTask()
+				vm.observerStats.TaskStarted()
 
 				go func() {
 					defer func() {
 						if r := recover(); r != nil {
+							vm.observerStats.TaskFailed()
 							task.Done <- TaskResult{
 								Error: r,
 							}
@@ -3432,6 +3491,7 @@ func (vm *VM) execute(targetDepth int) bool {
 					}()
 
 					result := taskVM.runFunctionToCompletion(fn, args)
+					vm.observerStats.TaskCompleted()
 
 					task.Done <- TaskResult{
 						Value: result,
@@ -3580,11 +3640,17 @@ func (vm *VM) execute(targetDepth int) bool {
 				Done: make(chan TaskResult, 1),
 			}
 
+			if vm.taskPool == nil {
+				vm.fatalError(ErrorRuntime, "spawn is not available in this VM context")
+			}
+
+			vm.observerStats.TaskStarted()
 			go func() {
 				taskVM := vm.taskPool.Get()
 				defer vm.taskPool.Put(taskVM)
 				defer func() {
 					if r := recover(); r != nil {
+						vm.observerStats.TaskFailed()
 						task.Done <- TaskResult{
 							Error: r,
 						}
@@ -3592,6 +3658,7 @@ func (vm *VM) execute(targetDepth int) bool {
 				}()
 
 				result := taskVM.callFunctionValue(fn, args)
+				vm.observerStats.TaskCompleted()
 
 				task.Done <- TaskResult{
 					Value: result,
@@ -4816,6 +4883,10 @@ func (vm *VM) execute(targetDepth int) bool {
 				result := vm.callFunctionValue(*v, args)
 				vm.push(result)
 
+			case *HostFunctionValue:
+				result := v.VM.callFunctionValue(v.Function, args)
+				vm.push(result)
+
 			case Class:
 				vm.callClassByName(v.Name, args)
 
@@ -4843,6 +4914,8 @@ func (vm *VM) execute(targetDepth int) bool {
 				result = vm.callFunctionValue(v, array.Elements)
 			case *FunctionValue:
 				result = vm.callFunctionValue(*v, array.Elements)
+			case *HostFunctionValue:
+				result = v.VM.callFunctionValue(v.Function, array.Elements)
 			default:
 				vm.fatalError(ErrorType, "expected function in spread call, got %s", TypeName(callee))
 			}
@@ -5359,10 +5432,9 @@ func writeServerResponse(w http.ResponseWriter, r *http.Request, response Native
 	switch response.Type {
 	case HttpJson:
 		w.Header().Set("Content-Type", "application/json")
-		jsonValue := valueToJSONCompatible(ToValue(response.Value))
-		bytes, _ := json.Marshal(jsonValue)
+		jsonStr := stringifyTinyJSONFast(ToValue(response.Value))
 		w.WriteHeader(status)
-		fmt.Fprint(w, string(bytes))
+		io.WriteString(w, jsonStr)
 
 	case HttpText:
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -5844,6 +5916,10 @@ func (vm *VM) callMethodResolved(method string, objectValue TinyValue, args []Ti
 		vm.callProcessMethod(val, method, args)
 		return
 
+	case *NativeVMValue:
+		vm.callRuntimeVMMethod(val, method, args)
+		return
+
 	case *NativeStringBuilderValue:
 		vm.callStringBuilderMethod(val, method, args)
 		return
@@ -6106,6 +6182,10 @@ func (vm *VM) setIP(value int) {
 }
 
 func (vm *VM) callFunction(name string, argCount int) {
+	if vm.observerStats != nil {
+		vm.observerStats.FunctionCalled(name)
+	}
+
 	fn, exists := vm.functions[name]
 	if !exists {
 		vm.fatalError(ErrorName, "undefined function: %s", name)

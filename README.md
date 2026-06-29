@@ -215,6 +215,37 @@ fn processFile(path: string) {
 processFile("README.md");
 ```
 
+### Modules and External Declarations
+
+Tiny supports standard modules, local file modules, GitHub-backed library imports, plugin imports, and explicit exports. Runtime child VMs can also bind host-provided constants and functions through `external` declarations.
+
+```ts
+import std "io";
+import "math_helpers.tiny" as Math;
+import lib "confh/TinyJWT" as Jwt;
+
+export external const hostName: string
+export external fn hostLog(message: string): string
+
+io.println(hostName);
+hostLog("called from Tiny");
+```
+
+### Asset Embedding
+
+Compile-time embeds let source files, packaged tools, and desktop apps carry static assets without relying on loose runtime files.
+
+```ts
+import std "io";
+
+embedtext "./data.json" const dataText
+embedbytes "./data.json" const dataBytes
+embedfolder "./ui" const assets
+
+io.println(dataText);
+io.println(assets["index.html"]);
+```
+
 ***
 
 ## Concurrency Model
@@ -313,6 +344,8 @@ io.println(`SHA256: ${calculateSha256(text)}`);
 
 ## Standard Library Reference
 
+Tiny ships with modules for command-line tools, servers, desktop apps, automation, testing, networking, data validation, and runtime embedding.
+
 ### `validate` (Schema Validation)
 A chainable API for defining and enforcing data schemas. Supports objects, arrays, unions, and transformations.
 
@@ -337,6 +370,9 @@ if result.success {
 ### `url` (URL Encoding & Decoding)
 Encode & Decode URL
 
+### `io`, `json`, `fs`, `path`, and `os`
+Core scripting modules for console IO, JSON parsing/formatting, file and directory operations, path helpers, and operating-system metadata.
+
 ### `time` (Timers and Measurement)
 Support for execution delays, performance measurement, and managed timers.
 
@@ -357,6 +393,9 @@ timer.cancel();
 
 ### `array` (Native Operations)
 Native operations for array manipulation, including `find`, `filter`, `map`, `reduce`, `sort`, `flat`, and `findIndex`.
+
+### `strings`, Native Strings, and `buffer`
+String helpers cover case conversion, trimming, replacement, splitting, containment checks, slicing, and string builders. The `buffer` module and native buffer values support byte-oriented data, hex conversion, indexed `u8` access, and string conversion.
 
 ---
 
@@ -379,6 +418,9 @@ server.get("/users/:id", fn(req: http.RequestObject) {
 io.println("Web server listening on port 8080");
 server.start();
 ```
+
+### `websocket`, `net`, and `process`
+Network modules include WebSocket clients/servers and TCP servers/connections. The process module exposes CLI args, working directory helpers, environment variables, foreground/background process execution, and signals.
 
 ---
 
@@ -413,15 +455,53 @@ desktop.click();
 desktop.type("Tiny Automation");
 ```
 
+### `app`, `tray`, `observer`, `sync`, `runtime`, and `tests`
+Tiny includes app-command wiring, native tray support, live process telemetry, mutexes, runtime memory/GC/fatal-handler tools, child VM creation, source/bytecode compilation at runtime, and a small test assertion module. The desktop application interface for process telemetry can be downloaded from the [Observer Tool Release](https://github.com/confh/Tiny/releases/tag/observer-tool).
+
 ***
 
 ## Tooling and Ecosystem
 
 ### Command Line Interface (CLI)
-- **`tiny run <file>`**: Compiles and runs scripts. Utilizes a bytecode cache to skip recompilation of unchanged files.
+- **`tiny <file.tiny>`**: Compiles and runs a source file directly.
+- **`tiny`**: Runs the `entry` from `tiny.json` when a project config exists.
+- **`tiny build <file> -o <file.tbc>`**: Compiles source to bytecode.
+- **`tiny run <file.tbc>`**: Runs compiled bytecode.
+- **`tiny watch <file>`** or **`tiny --watch <file>`**: Restarts when the entry or imported files change.
 - **`tiny pack <file> -o <binary>`**: Bundles bytecode and the VM runtime into a single standalone native executable (~13MB).
-- **`tiny dist <file> -o <dir>`**: Packages the application with its compiled plugins and assets.
+- **`tiny dist <file> -o <dir>`**: Packages the application with plugins, assets, and target-specific output.
+- **`tiny init [dir]`**: Creates a project with `tiny.json`, `src/main.tiny`, `plugins`, and `dist`.
+- **`tiny add/install/remove/deps`**: Manages GitHub-backed Tiny dependencies and lock metadata.
+- **`tiny task [name]`**: Runs scripts from `tiny.json`.
+- **`tiny update`**: Updates the Tiny binary from the latest GitHub release.
 - **`tiny lsp`**: Starts the Language Server.
+
+Windows packs can use `--icon <icon.ico>` to set the executable icon. The icon must be an `.ico` file and currently applies only to `windows-amd64` targets.
+
+```bash
+tiny pack src/main.tiny -o dist/observer.exe --windowed --icon assets/observer.ico
+tiny dist src/main.tiny -o dist/observer.exe --windowed --icon assets/observer.ico
+```
+
+### Project Configuration and Package Management
+Projects are described by `tiny.json`, including the entry file, output directory, target, scripts, dependencies, ignored package paths, native plugin assets, and compiler options such as bytecode caching. Dependencies can pin a GitHub ref and are recorded in `tiny.lock`.
+
+```json
+{
+  "entry": "src/main.tiny",
+  "target": "windows-amd64",
+  "scripts": {
+    "start": "tiny",
+    "dist": "tiny dist"
+  },
+  "dependencies": {
+    "jwt": {
+      "source": "github:confh/TinyJWT",
+      "version": "v1.0.0"
+    }
+  }
+}
+```
 
 ### [Built-in Language Server (LSP)](https://marketplace.visualstudio.com/items?itemName=Confis.tiny)
 Run `tiny lsp` for integration with editors like VS Code. Features include:
@@ -429,4 +509,3 @@ Run `tiny lsp` for integration with editors like VS Code. Features include:
 - **Semantic Recovery**: Diagnostics that persist even during syntax errors.
 - **Type Narrowing**: Flow-based type inference (e.g., after `null` checks).
 - **Refactoring Safety**: Correct symbol resolution for object keys and variable identifiers.
-

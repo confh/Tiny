@@ -10,8 +10,6 @@ import (
 	"syscall"
 	"unsafe"
 
-	json "github.com/goccy/go-json"
-
 	. "language.com/src/tinyerrors"
 )
 
@@ -37,6 +35,10 @@ func (vm *VM) callPluginModule(method string, argCount int) {
 		}
 
 		name := asString(vm.pop(), vm)
+
+		if vm.allowedStdlib != nil && !vm.allowedStdlib[name] {
+			vm.fatalError(ErrorRuntime, "standard module '%s' is not allowed in this VM", name)
+		}
 
 		if slices.Contains(AvailablePlugins, name) {
 			vm.push(NewNative(&StandardModuleValue{Name: name}))

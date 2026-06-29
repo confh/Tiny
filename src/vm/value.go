@@ -14,11 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	webview "github.com/abemedia/go-webview"
-	json "github.com/goccy/go-json"
 	"github.com/gorilla/websocket"
-
-	_ "github.com/abemedia/go-webview/embedded"
 
 	. "language.com/src/tinyerrors"
 )
@@ -219,7 +215,14 @@ type NativeValidateTop struct {
 }
 
 type NativeWebViewValue struct {
-	w webview.WebView
+	w                PlatformWebView
+	iconBig          uintptr
+	iconSmall        uintptr
+	hidden           bool
+	width            int
+	height           int
+	frameless        bool
+	userWantedHidden bool
 }
 
 type NativeTcpServerValue struct {
@@ -302,6 +305,29 @@ type NativeStringBuilderValue struct {
 type NativeProcessValue struct {
 	Cmd     *exec.Cmd
 	Running bool
+}
+
+type NativeVMValue struct {
+	VM             *VM
+	Isolated       bool
+	RunMainOnLoad  bool
+	Loaded         bool
+	AllowedStdlib  map[string]bool
+	InjectedGlobal ObjectValue
+}
+
+func (v *NativeVMValue) TinyTypeName() string {
+	return "runtime.VM"
+}
+
+type HostFunctionValue struct {
+	VM       *VM
+	Function FunctionValue
+	Name     string
+}
+
+func (v *HostFunctionValue) TinyTypeName() string {
+	return "host function"
 }
 
 type NamespaceValue struct {

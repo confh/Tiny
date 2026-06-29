@@ -140,6 +140,25 @@ func (p *Parser) posOfToken(tok Token) int {
 	return len(p.lexer.input)
 }
 
+type ParsedBlockInfo struct {
+	Kind           string
+	Name           string
+	StartLine      int
+	StartCol       int
+	EndLine        int
+	EndCol         int
+	LparenLine     int
+	LparenCol      int
+	RparenLine     int
+	RparenCol      int
+	LbraceLine     int
+	LbraceCol      int
+	RbraceLine     int
+	RbraceCol      int
+	IsAsync        bool
+	TypeParameters []string
+}
+
 type Parser struct {
 	lexer *Lexer
 
@@ -148,6 +167,11 @@ type Parser struct {
 
 	deferCountStack []int
 	inTernaryThen   bool
+
+	ErrorTolerant   bool
+	Diagnostics     []LangErrorType
+	Blocks          []ParsedBlockInfo
+	lastRbraceToken Token
 }
 
 func NewParser(lexer *Lexer) *Parser {
@@ -195,6 +219,32 @@ func (p *Parser) advance() {
 	p.next = p.lexer.NextToken()
 }
 
+func (p *Parser) peek(n int) Token {
+	if n <= 0 {
+		return p.current
+	}
+	if n == 1 {
+		return p.next
+	}
+
+	pos := p.lexer.pos
+	line := p.lexer.line
+	column := p.lexer.column
+	insertSemi := p.lexer.insertSemi
+	defer func() {
+		p.lexer.pos = pos
+		p.lexer.line = line
+		p.lexer.column = column
+		p.lexer.insertSemi = insertSemi
+	}()
+
+	tok := p.next
+	for i := 1; i < n; i++ {
+		tok = p.lexer.NextToken()
+	}
+	return tok
+}
+
 func (p *Parser) ParseProgram() Program {
 	var statements []Stmt
 
@@ -216,6 +266,86 @@ func (p *Parser) ParseProgram() Program {
 	}
 
 	return Program{Statements: statements}
+}
+
+func (p *Parser) ParseProgramTolerant() Program {
+	p.ErrorTolerant = true
+	var statements []Stmt
+
+	for p.current.Type != TOKEN_EOF {
+		stmt := func() Stmt {
+			defer func() {
+				if r := recover(); r != nil {
+					if err, ok := r.(LangErrorType); ok {
+						p.Diagnostics = append(p.Diagnostics, err)
+						p.synchronize()
+					} else {
+						panic(r)
+					}
+				}
+			}()
+
+			if p.current.Type == TOKEN_RBRACE {
+				LangErrorAt(
+					ErrorSyntax,
+					p.current.File,
+					p.current.Line,
+					p.current.Column,
+					"unexpected }",
+				)
+			}
+
+			return p.parseStatement()
+		}()
+
+		if stmt != nil {
+			statements = append(statements, stmt)
+		}
+	}
+
+	return Program{Statements: statements}
+}
+
+func (p *Parser) synchronize() {
+	p.advance()
+
+	for p.current.Type != TOKEN_EOF {
+		if p.current.Type == TOKEN_SEMI {
+			p.advance()
+			return
+		}
+
+		switch p.current.Type {
+		case TOKEN_IMPORT, TOKEN_LET, TOKEN_CONST, TOKEN_NATIVE, TOKEN_EXTERNAL,
+			TOKEN_FN, TOKEN_ASYNC, TOKEN_RETURN, TOKEN_INTERFACE,
+			TOKEN_IF, TOKEN_WHILE, TOKEN_FOR, TOKEN_CLASS, TOKEN_BREAK,
+			TOKEN_CONTINUE, TOKEN_THROW, TOKEN_TRY, TOKEN_ENUM, TOKEN_EXPORT, TOKEN_MATCH:
+			return
+		}
+
+		p.advance()
+	}
+}
+
+func (p *Parser) recordBlock(kind string, name string, startTok Token, endTok Token, isAsync bool, typeParams []string, lparenTok Token, rparenTok Token, lbraceTok Token, rbraceTok Token) {
+	p.Blocks = append(p.Blocks, ParsedBlockInfo{
+		Kind:           kind,
+		Name:           name,
+		StartLine:      startTok.Line,
+		StartCol:       startTok.Column,
+		EndLine:        endTok.Line,
+		EndCol:         endTok.Column + len(endTok.Literal),
+		LparenLine:     lparenTok.Line,
+		LparenCol:      lparenTok.Column,
+		RparenLine:     rparenTok.Line,
+		RparenCol:      rparenTok.Column,
+		LbraceLine:     lbraceTok.Line,
+		LbraceCol:      lbraceTok.Column,
+		RbraceLine:     rbraceTok.Line,
+		RbraceCol:      rbraceTok.Column,
+		IsAsync:        isAsync,
+		TypeParameters: typeParams,
+	})
 }
 
 func (p *Parser) parseTypeName() string {
@@ -372,6 +502,7 @@ func isIdentifierLikeToken(tokenType TokenType) bool {
 		TOKEN_CONST,
 		TOKEN_FIELD,
 		TOKEN_NATIVE,
+		TOKEN_EXTERNAL,
 		TOKEN_FN,
 		TOKEN_RETURN,
 		TOKEN_THROW,
@@ -401,9 +532,9 @@ func isIdentifierLikeToken(tokenType TokenType) bool {
 		TOKEN_ASYNC,
 		TOKEN_AWAIT,
 		TOKEN_EMBED,
-		TOKEN_EMBED_STR,
-		TOKEN_EMBED_BIN,
-		TOKEN_EMBED_DIR:
+		TOKEN_EMBED_TEXT,
+		TOKEN_EMBED_BYTES,
+		TOKEN_EMBED_FOLDER:
 		return true
 	default:
 		return false
@@ -581,7 +712,12 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 			return AssignStmt{
 				Name: target.Name,
 				Value: BinaryExpr{
-					Left:  IdentExpr{Name: target.Name},
+					Left: IdentExpr{
+						Name:   target.Name,
+						Line:   p.current.Line,
+						Column: p.current.Column,
+						File:   p.current.File,
+					},
 					Op:    TOKEN_PLUS,
 					Right: value,
 				},
@@ -626,7 +762,12 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 			return AssignStmt{
 				Name: target.Name,
 				Value: BinaryExpr{
-					Left:  IdentExpr{Name: target.Name},
+					Left: IdentExpr{
+						Name:   target.Name,
+						Line:   p.current.Line,
+						Column: p.current.Column,
+						File:   p.current.File,
+					},
 					Op:    TOKEN_MINUS,
 					Right: value,
 				},
@@ -671,7 +812,12 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 			return AssignStmt{
 				Name: target.Name,
 				Value: BinaryExpr{
-					Left:  IdentExpr{Name: target.Name},
+					Left: IdentExpr{
+						Name:   target.Name,
+						Line:   p.current.Line,
+						Column: p.current.Column,
+						File:   p.current.File,
+					},
 					Op:    TOKEN_STAR,
 					Right: value,
 				},
@@ -716,7 +862,12 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 			return AssignStmt{
 				Name: target.Name,
 				Value: BinaryExpr{
-					Left:  IdentExpr{Name: target.Name},
+					Left: IdentExpr{
+						Name:   target.Name,
+						Line:   p.current.Line,
+						Column: p.current.Column,
+						File:   p.current.File,
+					},
 					Op:    TOKEN_SLASH,
 					Right: value,
 				},
@@ -761,7 +912,12 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 			return AssignStmt{
 				Name: target.Name,
 				Value: BinaryExpr{
-					Left:  IdentExpr{Name: target.Name},
+					Left: IdentExpr{
+						Name:   target.Name,
+						Line:   p.current.Line,
+						Column: p.current.Column,
+						File:   p.current.File,
+					},
 					Op:    TOKEN_AMP,
 					Right: value,
 				},
@@ -806,7 +962,12 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 			return AssignStmt{
 				Name: target.Name,
 				Value: BinaryExpr{
-					Left:  IdentExpr{Name: target.Name},
+					Left: IdentExpr{
+						Name:   target.Name,
+						Line:   p.current.Line,
+						Column: p.current.Column,
+						File:   p.current.File,
+					},
 					Op:    TOKEN_PIPE,
 					Right: value,
 				},
@@ -851,7 +1012,12 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 			return AssignStmt{
 				Name: target.Name,
 				Value: BinaryExpr{
-					Left:  IdentExpr{Name: target.Name},
+					Left: IdentExpr{
+						Name:   target.Name,
+						Line:   p.current.Line,
+						Column: p.current.Column,
+						File:   p.current.File,
+					},
 					Op:    TOKEN_CARET,
 					Right: value,
 				},
@@ -896,7 +1062,12 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 			return AssignStmt{
 				Name: target.Name,
 				Value: BinaryExpr{
-					Left:  IdentExpr{Name: target.Name},
+					Left: IdentExpr{
+						Name:   target.Name,
+						Line:   p.current.Line,
+						Column: p.current.Column,
+						File:   p.current.File,
+					},
 					Op:    TOKEN_LSHIFT,
 					Right: value,
 				},
@@ -941,7 +1112,12 @@ func (p *Parser) parsePossibleAssignmentStatement() Stmt {
 			return AssignStmt{
 				Name: target.Name,
 				Value: BinaryExpr{
-					Left:  IdentExpr{Name: target.Name},
+					Left: IdentExpr{
+						Name:   target.Name,
+						Line:   p.current.Line,
+						Column: p.current.Column,
+						File:   p.current.File,
+					},
 					Op:    TOKEN_RSHIFT,
 					Right: value,
 				},
@@ -1007,6 +1183,18 @@ func (p *Parser) parseStatement() Stmt {
 		return p.parseConstStatement()
 	case TOKEN_NATIVE:
 		return p.parseNativeFunctionStatement()
+	case TOKEN_EXTERNAL:
+		nextToken := p.peek(1).Type
+		switch nextToken {
+		case TOKEN_FN:
+			return p.parseExternalFunctionStatement()
+		case TOKEN_CONST:
+			return p.parseExternalGlobalStatement()
+		default:
+			LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "external keyword expects 'fn' or 'const' after it.")
+			return ExprStmt{}
+		}
+
 	case TOKEN_FN:
 		return p.parseFunctionStatement(false)
 	case TOKEN_ASYNC:
@@ -1015,12 +1203,12 @@ func (p *Parser) parseStatement() Stmt {
 		return p.parseReturnStatement()
 	case TOKEN_INTERFACE:
 		return p.parseInterfaceStatement()
-	case TOKEN_EMBED_STR:
-		return p.parseEmbedStrStatement()
-	case TOKEN_EMBED_BIN:
-		return p.parseEmbedBinStatement()
-	case TOKEN_EMBED_DIR:
-		return p.parseEmbedDirStatement()
+	case TOKEN_EMBED_TEXT:
+		return p.parseEmbedTextStatement()
+	case TOKEN_EMBED_BYTES:
+		return p.parseEmbedBytesStatement()
+	case TOKEN_EMBED_FOLDER:
+		return p.parseEmbedFolderStatement()
 	case TOKEN_IF:
 		return p.parseIfStatement()
 	case TOKEN_WHILE:
@@ -1194,17 +1382,28 @@ func (p *Parser) parseExportStatement() Stmt {
 	case TOKEN_INTERFACE:
 		return ExportStmt{Inner: p.parseInterfaceStatement()}
 
-	case TOKEN_EMBED_STR:
-		return ExportStmt{Inner: p.parseEmbedStrStatement()}
+	case TOKEN_EMBED_TEXT:
+		return ExportStmt{Inner: p.parseEmbedTextStatement()}
 
-	case TOKEN_EMBED_BIN:
-		return ExportStmt{Inner: p.parseEmbedBinStatement()}
+	case TOKEN_EMBED_BYTES:
+		return ExportStmt{Inner: p.parseEmbedBytesStatement()}
 
-	case TOKEN_EMBED_DIR:
-		return ExportStmt{Inner: p.parseEmbedDirStatement()}
+	case TOKEN_EMBED_FOLDER:
+		return ExportStmt{Inner: p.parseEmbedFolderStatement()}
 
 	case TOKEN_NATIVE:
 		return ExportStmt{Inner: p.parseNativeFunctionStatement()}
+
+	case TOKEN_EXTERNAL:
+		nextToken := p.peek(1).Type
+		switch nextToken {
+		case TOKEN_FN:
+			return ExportStmt{Inner: p.parseExternalFunctionStatement()}
+		case TOKEN_CONST:
+			return ExportStmt{Inner: p.parseExternalGlobalStatement()}
+		default:
+			LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "external keyword expects 'fn' or 'const' after it.")
+		}
 
 	default:
 		LangErrorAt(
@@ -1212,7 +1411,7 @@ func (p *Parser) parseExportStatement() Stmt {
 			p.current.File,
 			p.current.Line,
 			p.current.Column,
-			"expected const, let, fn, class, embedbin, embedstr, embeddir, native fn, interface, or enum after export",
+			"expected const, let, fn, class, embedbytes, embedtext, embedfolder, native fn, interface, enum, or external after export",
 		)
 	}
 
@@ -1423,7 +1622,12 @@ func (p *Parser) parseForUpdateStatement() Stmt {
 			return AssignStmt{
 				Name: target.Name,
 				Value: BinaryExpr{
-					Left:  IdentExpr{Name: target.Name, Line: target.Line, Column: target.Column},
+					Left: IdentExpr{
+						Name:   target.Name,
+						Line:   p.current.Line,
+						Column: p.current.Column,
+						File:   p.current.File,
+					},
 					Op:    TOKEN_PLUS,
 					Right: value,
 				},
@@ -1466,7 +1670,12 @@ func (p *Parser) parseForUpdateStatement() Stmt {
 			return AssignStmt{
 				Name: target.Name,
 				Value: BinaryExpr{
-					Left:  IdentExpr{Name: target.Name, Line: target.Line, Column: target.Column},
+					Left: IdentExpr{
+						Name:   target.Name,
+						Line:   p.current.Line,
+						Column: p.current.Column,
+						File:   p.current.File,
+					},
 					Op:    TOKEN_PLUS,
 					Right: NumberExpr{Value: 1, File: p.current.File, Line: p.current.Line, Column: p.current.Column},
 				},
@@ -1506,7 +1715,12 @@ func (p *Parser) parseForUpdateStatement() Stmt {
 			return AssignStmt{
 				Name: target.Name,
 				Value: BinaryExpr{
-					Left:  IdentExpr{Name: target.Name, Line: target.Line, Column: target.Column},
+					Left: IdentExpr{
+						Name:   target.Name,
+						Line:   p.current.Line,
+						Column: p.current.Column,
+						File:   p.current.File,
+					},
 					Op:    TOKEN_MINUS,
 					Right: NumberExpr{Value: 1, File: p.current.File, Line: p.current.Line, Column: p.current.Column},
 				},
@@ -1599,18 +1813,18 @@ func (p *Parser) parseLockStatement() Stmt {
 	}
 }
 
-func (p *Parser) parseEmbedStrStatement() Stmt {
+func (p *Parser) parseEmbedTextStatement() Stmt {
 	file := p.current.File
 	line := p.current.Line
 	column := p.current.Column
 
-	p.expect(TOKEN_EMBED_STR)
+	p.expect(TOKEN_EMBED_TEXT)
 
 	pathExpr := p.parseExpression()
 
 	path, ok := pathExpr.(StringExpr)
 	if !ok {
-		LangErrorAt(ErrorSyntax, file, line, column, "embedstr expected string, got %T", pathExpr)
+		LangErrorAt(ErrorSyntax, file, line, column, "embedtext expected string, got %T", pathExpr)
 	}
 
 	constant := false
@@ -1622,7 +1836,7 @@ func (p *Parser) parseEmbedStrStatement() Stmt {
 	case TOKEN_LET:
 		p.advance()
 	default:
-		LangErrorAt(ErrorSyntax, file, line, column, "embedstr expected const or let after path, got %s", p.current.Type)
+		LangErrorAt(ErrorSyntax, file, line, column, "embedtext expected const or let after path, got %s", p.current.Type)
 	}
 
 	name := p.current.Literal
@@ -1638,7 +1852,7 @@ func (p *Parser) parseEmbedStrStatement() Stmt {
 	}
 
 	return EmbedStmt{
-		Kind:         EmbedStr,
+		Kind:         EmbedText,
 		Name:         name,
 		EmbeddedPath: absPath,
 		Constant:     constant,
@@ -1649,18 +1863,18 @@ func (p *Parser) parseEmbedStrStatement() Stmt {
 	}
 }
 
-func (p *Parser) parseEmbedDirStatement() Stmt {
+func (p *Parser) parseEmbedFolderStatement() Stmt {
 	file := p.current.File
 	line := p.current.Line
 	column := p.current.Column
 
-	p.expect(TOKEN_EMBED_DIR)
+	p.expect(TOKEN_EMBED_FOLDER)
 
 	pathExpr := p.parseExpression()
 
 	path, ok := pathExpr.(StringExpr)
 	if !ok {
-		LangErrorAt(ErrorSyntax, file, line, column, "embeddir expected string, got %T", pathExpr)
+		LangErrorAt(ErrorSyntax, file, line, column, "embedfolder expected string, got %T", pathExpr)
 	}
 
 	constant := false
@@ -1672,7 +1886,7 @@ func (p *Parser) parseEmbedDirStatement() Stmt {
 	case TOKEN_LET:
 		p.advance()
 	default:
-		LangErrorAt(ErrorSyntax, file, line, column, "embeddir expected const or let after path, got %s", p.current.Type)
+		LangErrorAt(ErrorSyntax, file, line, column, "embedfolder expected const or let after path, got %s", p.current.Type)
 	}
 
 	name := p.current.Literal
@@ -1688,11 +1902,11 @@ func (p *Parser) parseEmbedDirStatement() Stmt {
 	}
 
 	if !info.IsDir() {
-		LangErrorAt(ErrorSyntax, file, line, column, "embeddir expected a directory path, but '%s' is a file", filepath.Base(absPath))
+		LangErrorAt(ErrorSyntax, file, line, column, "embedfolder expected a directory path, but '%s' is a file", filepath.Base(absPath))
 	}
 
 	return EmbedStmt{
-		Kind:         EmbedDir,
+		Kind:         EmbedFolder,
 		Name:         name,
 		EmbeddedPath: absPath,
 		Constant:     constant,
@@ -1703,18 +1917,18 @@ func (p *Parser) parseEmbedDirStatement() Stmt {
 	}
 }
 
-func (p *Parser) parseEmbedBinStatement() Stmt {
+func (p *Parser) parseEmbedBytesStatement() Stmt {
 	file := p.current.File
 	line := p.current.Line
 	column := p.current.Column
 
-	p.expect(TOKEN_EMBED_BIN)
+	p.expect(TOKEN_EMBED_BYTES)
 
 	pathExpr := p.parseExpression()
 
 	path, ok := pathExpr.(StringExpr)
 	if !ok {
-		LangErrorAt(ErrorSyntax, file, line, column, "embedbin expected string, got %T", pathExpr)
+		LangErrorAt(ErrorSyntax, file, line, column, "embedbytes expected string, got %T", pathExpr)
 	}
 
 	constant := false
@@ -1726,7 +1940,7 @@ func (p *Parser) parseEmbedBinStatement() Stmt {
 	case TOKEN_LET:
 		p.advance()
 	default:
-		LangErrorAt(ErrorSyntax, file, line, column, "embedbin expected const or let after path, got %s", p.current.Type)
+		LangErrorAt(ErrorSyntax, file, line, column, "embedbytes expected const or let after path, got %s", p.current.Type)
 	}
 
 	name := p.current.Literal
@@ -1742,7 +1956,7 @@ func (p *Parser) parseEmbedBinStatement() Stmt {
 	}
 
 	return EmbedStmt{
-		Kind:         EmbedBin,
+		Kind:         EmbedBytes,
 		Name:         name,
 		EmbeddedPath: absPath,
 		Constant:     constant,
@@ -1754,16 +1968,36 @@ func (p *Parser) parseEmbedBinStatement() Stmt {
 }
 
 func (p *Parser) parseInterfaceStatement() Stmt {
+	startTok := p.current
 	file := p.current.File
 	line := p.current.Line
 	column := p.current.Column
 
 	p.expect(TOKEN_INTERFACE)
 
-	name := p.current.Literal
+	var name string
+	var typeParams []string
+	var lbraceTok Token
+	var rbraceTok Token
+
+	defer func() {
+		if name == "" {
+			return
+		}
+		endTok := rbraceTok
+		if endTok.Line == 0 {
+			endTok = p.current
+		}
+		rbrace := rbraceTok
+		if rbrace.Line == 0 {
+			rbrace = p.current
+		}
+		p.recordBlock("interface", name, startTok, endTok, false, typeParams, Token{}, Token{}, lbraceTok, rbrace)
+	}()
+
+	name = p.current.Literal
 	p.expect(TOKEN_IDENT)
 
-	typeParams := []string{}
 	for p.current.Type == TOKEN_COLON {
 		p.advance()
 		if p.current.Type != TOKEN_IDENT {
@@ -1773,6 +2007,7 @@ func (p *Parser) parseInterfaceStatement() Stmt {
 		p.advance()
 	}
 
+	lbraceTok = p.current
 	p.expect(TOKEN_LBRACE)
 
 	fields := map[string]TypeHint{}
@@ -1795,6 +2030,7 @@ func (p *Parser) parseInterfaceStatement() Stmt {
 		}
 	}
 
+	rbraceTok = p.current
 	p.expect(TOKEN_RBRACE)
 
 	return InterfaceStmt{
@@ -1853,6 +2089,7 @@ func (p *Parser) parseBlock() []Stmt {
 		}
 	}
 
+	p.lastRbraceToken = p.current
 	p.expect(TOKEN_RBRACE)
 
 	return statements
@@ -2578,15 +2815,94 @@ func (p *Parser) parseNativeFunctionStatement() Stmt {
 	}
 }
 
-func (p *Parser) parseFunctionStatement(async bool) Stmt {
+func (p *Parser) parseExternalGlobalStatement() Stmt {
+	file := p.current.File
+	line := p.current.Line
+	column := p.current.Column
+
+	p.expect(TOKEN_EXTERNAL)
+	p.expect(TOKEN_CONST)
+
+	name := p.parseIdentifierLikeName("external global name")
+
+	var typ TypeHint
+
+	if p.current.Type != TOKEN_COLON {
+		typ = stdTypeHint("any")
+		// LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "external global declarations require an explicit type. use \"any\" if it is unknown.")
+	} else {
+		typ = p.parseTypeHint(false)
+	}
+
+	p.consumeTerminator()
+
+	return ExternalGlobalStmt{
+		Name:   name,
+		Type:   typ,
+		File:   file,
+		Line:   line,
+		Column: column,
+	}
+}
+
+func (p *Parser) parseExternalFunctionStatement() Stmt {
+	file := p.current.File
+	line := p.current.Line
+	column := p.current.Column
+
+	p.expect(TOKEN_EXTERNAL)
+	p.expect(TOKEN_FN)
+
+	name := p.parseIdentifierLikeName("external function name")
+
+	p.expect(TOKEN_LPAREN)
+	params := p.parseParameterList(true)
+	p.expect(TOKEN_RPAREN)
+
+	if p.current.Type != TOKEN_COLON {
+		LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "external function declarations require an explicit return type. use \"any\" if it is unknown.")
+	}
+
+	returnType := p.parseTypeHint(false)
+	p.consumeTerminator()
+
+	return ExternalFnStmt{
+		Name:       name,
+		Params:     params,
+		ReturnType: returnType,
+		File:       file,
+		Line:       line,
+		Column:     column,
+	}
+}
+
+func (p *Parser) parseFunctionStatement(async bool, asyncTok ...Token) Stmt {
+	startTok := p.current
+	if async && len(asyncTok) > 0 {
+		startTok = asyncTok[0]
+	}
+
 	file := p.current.File
 	line := p.current.Line
 	column := p.current.Column
 	p.expect(TOKEN_FN)
 
-	name := p.parseIdentifierLikeName("function name")
+	var name string
+	var typeParams []string
+	var lparenTok Token
+	var rparenTok Token
+	var lbraceTok Token
+	var rbraceTok Token
 
-	typeParams := []string{}
+	defer func() {
+		if name == "" {
+			return
+		}
+		p.recordBlock("fn", name, startTok, rbraceTok, async, typeParams, lparenTok, rparenTok, lbraceTok, rbraceTok)
+	}()
+
+	name = p.parseIdentifierLikeName("function name")
+
 	for p.current.Type == TOKEN_COLON {
 		p.advance()
 		if p.current.Type != TOKEN_IDENT {
@@ -2596,7 +2912,24 @@ func (p *Parser) parseFunctionStatement(async bool) Stmt {
 		p.advance()
 	}
 
-	params, returnType, body := p.parseFunctionSignatureAndBody()
+	lparenTok = p.current
+	p.expect(TOKEN_LPAREN)
+	params := p.parseParameterList()
+	rparenTok = p.current
+	p.expect(TOKEN_RPAREN)
+
+	returnType := TypeHint{}
+	if p.current.Type == TOKEN_COLON {
+		returnType = p.parseTypeHint(false)
+	}
+
+	var body []Stmt
+
+	if p.current.Type != TOKEN_SEMI {
+		lbraceTok = p.current
+		body = p.parseBlock()
+		rbraceTok = p.lastRbraceToken
+	}
 
 	return FunctionStmt{
 		Name:           name,
@@ -3503,7 +3836,7 @@ func (p *Parser) parseObjectLiteral() Expr {
 	return ObjectExpr{Fields: fields}
 }
 
-func (p *Parser) parseFunctionSignatureAndBody() ([]Param, TypeHint, []Stmt) {
+func (p *Parser) parseFunctionSignatureAndBody() ([]Param, TypeHint, []Stmt, Token, Token) {
 	p.deferCountStack = append(p.deferCountStack, 0)
 	defer func() {
 		p.deferCountStack = p.deferCountStack[:len(p.deferCountStack)-1]
@@ -3522,12 +3855,14 @@ func (p *Parser) parseFunctionSignatureAndBody() ([]Param, TypeHint, []Stmt) {
 	}
 
 	if p.current.Type == TOKEN_SEMI {
-		return params, returnType, []Stmt{}
+		return params, returnType, []Stmt{}, Token{}, Token{}
 	}
 
+	lbraceTok := p.current
 	body := p.parseBlock()
+	rbraceTok := p.lastRbraceToken
 
-	return params, returnType, body
+	return params, returnType, body, lbraceTok, rbraceTok
 }
 
 func (p *Parser) parsePrimary() Expr {
@@ -3656,7 +3991,19 @@ func (p *Parser) parsePrimary() Expr {
 }
 
 func (p *Parser) parseEnumStatement() Stmt {
+	startTok := p.current
 	p.expect(TOKEN_ENUM)
+
+	var name string
+	var lbraceTok Token
+	var rbraceTok Token
+
+	defer func() {
+		if name == "" {
+			return
+		}
+		p.recordBlock("enum", name, startTok, rbraceTok, false, nil, Token{}, Token{}, lbraceTok, rbraceTok)
+	}()
 
 	if p.current.Type != TOKEN_IDENT {
 		LangErrorAt(
@@ -3671,9 +4018,10 @@ func (p *Parser) parseEnumStatement() Stmt {
 	enumFile := p.current.File
 	enumLine := p.current.Line
 	enumColumn := p.current.Column
-	name := p.current.Literal
+	name = p.current.Literal
 	p.advance()
 
+	lbraceTok = p.current
 	p.expect(TOKEN_LBRACE)
 
 	members := []EnumField{}
@@ -3698,7 +4046,7 @@ func (p *Parser) parseEnumStatement() Stmt {
 			)
 		}
 
-		name := p.current.Literal
+		memberName := p.current.Literal
 		p.advance()
 
 		// Check for variant data: EnumVariant(args)
@@ -3733,9 +4081,9 @@ func (p *Parser) parseEnumStatement() Stmt {
 			}
 			p.expect(TOKEN_RPAREN)
 			members = append(members, EnumField{
-				Name:          name,
+				Name:          memberName,
 				VariantParams: variantParams,
-				Value:         StringExpr{Value: name},
+				Value:         StringExpr{Value: memberName},
 			})
 			for p.current.Type == TOKEN_SEMI {
 				p.advance()
@@ -3755,7 +4103,7 @@ func (p *Parser) parseEnumStatement() Stmt {
 				}
 				iotaEnum = true
 				members = append(members, EnumField{
-					Name:  name,
+					Name:  memberName,
 					Value: NumberExpr{Value: 0},
 				})
 				p.advance()
@@ -3786,7 +4134,7 @@ func (p *Parser) parseEnumStatement() Stmt {
 				}
 
 				members = append(members, EnumField{
-					Name:  name,
+					Name:  memberName,
 					Value: value,
 				})
 			}
@@ -3794,7 +4142,7 @@ func (p *Parser) parseEnumStatement() Stmt {
 			// enforce the same type
 			if !iotaEnum && len(members) > 0 {
 				for _, v := range members {
-					if !p.compareTwoConst(v.Value, StringExpr{Value: name}) {
+					if !p.compareTwoConst(v.Value, StringExpr{Value: memberName}) {
 						LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "all enum members must have the same type.")
 					}
 					break
@@ -3802,8 +4150,8 @@ func (p *Parser) parseEnumStatement() Stmt {
 			}
 
 			members = append(members, EnumField{
-				Name:  name,
-				Value: StringExpr{Value: name},
+				Name:  memberName,
+				Value: StringExpr{Value: memberName},
 			})
 		}
 
@@ -3833,6 +4181,7 @@ func (p *Parser) parseEnumStatement() Stmt {
 		}
 	}
 
+	rbraceTok = p.current
 	p.expect(TOKEN_RBRACE)
 
 	if p.current.Type == TOKEN_SEMI {
@@ -3849,12 +4198,14 @@ func (p *Parser) parseEnumStatement() Stmt {
 }
 
 func (p *Parser) parseAsyncStmt() Stmt {
+	asyncTok := p.current
 	p.expect(TOKEN_ASYNC)
 
-	return p.parseFunctionStatement(true)
+	return p.parseFunctionStatement(true, asyncTok)
 }
 
 func (p *Parser) parseFunctionExpr() Expr {
+	startTok := p.current
 	file := p.current.File
 	line := p.current.Line
 	column := p.current.Column
@@ -3870,7 +4221,16 @@ func (p *Parser) parseFunctionExpr() Expr {
 		)
 	}
 
-	params, returnType, body := p.parseFunctionSignatureAndBody()
+	var lbraceTok Token
+	var rbraceTok Token
+
+	defer func() {
+		p.recordBlock("fn", "", startTok, rbraceTok, false, nil, Token{}, Token{}, lbraceTok, rbraceTok)
+	}()
+
+	params, returnType, body, lbr, rbr := p.parseFunctionSignatureAndBody()
+	lbraceTok = lbr
+	rbraceTok = rbr
 
 	return FunctionExpr{
 		Params:     params,
@@ -3883,10 +4243,23 @@ func (p *Parser) parseFunctionExpr() Expr {
 }
 
 func (p *Parser) parseClassStatement() Stmt {
+	startTok := p.current
 	file := p.current.File
 	line := p.current.Line
 	column := p.current.Column
 	p.expect(TOKEN_CLASS)
+
+	var name string
+	var typeParams []string
+	var lbraceTok Token
+	var rbraceTok Token
+
+	defer func() {
+		if name == "" {
+			return
+		}
+		p.recordBlock("class", name, startTok, rbraceTok, false, typeParams, Token{}, Token{}, lbraceTok, rbraceTok)
+	}()
 
 	if p.current.Type != TOKEN_IDENT {
 		LangErrorAt(
@@ -3898,10 +4271,9 @@ func (p *Parser) parseClassStatement() Stmt {
 		)
 	}
 
-	name := p.current.Literal
+	name = p.current.Literal
 	p.advance()
 
-	typeParams := []string{}
 	for p.current.Type == TOKEN_COLON {
 		p.advance()
 		if p.current.Type != TOKEN_IDENT {
@@ -3911,6 +4283,19 @@ func (p *Parser) parseClassStatement() Stmt {
 		p.advance()
 	}
 
+	implements := []string{}
+	if p.current.Type == TOKEN_IMPLEMENTS {
+		p.advance()
+		for {
+			implements = append(implements, p.parseTypeName())
+			if p.current.Type != TOKEN_COMMA {
+				break
+			}
+			p.advance()
+		}
+	}
+
+	lbraceTok = p.current
 	p.expect(TOKEN_LBRACE)
 
 	var methods []FunctionStmt
@@ -3976,8 +4361,10 @@ func (p *Parser) parseClassStatement() Stmt {
 		}
 
 		async := false
+		var asyncTok Token
 
 		if p.current.Type == TOKEN_ASYNC {
+			asyncTok = p.current
 			p.advance()
 			async = true
 		}
@@ -3986,7 +4373,7 @@ func (p *Parser) parseClassStatement() Stmt {
 			LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "expected declared variable, method or embed in class")
 		}
 
-		method := p.parseFunctionStatement(async)
+		method := p.parseFunctionStatement(async, asyncTok)
 
 		fn, ok := method.(FunctionStmt)
 		if !ok {
@@ -4004,11 +4391,13 @@ func (p *Parser) parseClassStatement() Stmt {
 		methods = append(methods, fn)
 	}
 
+	rbraceTok = p.current
 	p.expect(TOKEN_RBRACE)
 
 	return ClassStmt{
 		Name:           name,
 		TypeParameters: typeParams,
+		Implements:     implements,
 		Methods:        methods,
 		Embeds:         embeds,
 		Fields:         fields,

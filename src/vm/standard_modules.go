@@ -5,6 +5,10 @@ import (
 )
 
 func (vm *VM) callStandardModule(module string, method string, args []TinyValue) {
+	if vm.allowedStdlib != nil && !vm.allowedStdlib[module] {
+		vm.fatalError(ErrorRuntime, "standard module '%s' is not allowed in this VM", module)
+	}
+
 	switch module {
 	case "array":
 		vm.callStdArray(method, args)
@@ -59,6 +63,9 @@ func (vm *VM) callStandardModule(module string, method string, args []TinyValue)
 
 	case "object":
 		vm.callStdObject(method, args)
+
+	case "observer":
+		vm.callStdObserver(method, args)
 
 	case "desktop":
 		vm.callStdDesktop(method, args)

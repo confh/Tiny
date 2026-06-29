@@ -419,6 +419,7 @@ type CallDirectSubConstInfo struct {
 type Class struct {
 	Name           string
 	TypeParameters []string
+	Implements     []string
 	Fields         []ClassField
 	Methods        map[string]string
 	Embeds         []string

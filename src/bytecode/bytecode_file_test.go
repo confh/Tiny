@@ -2,9 +2,8 @@ package bytecode
 
 import (
 	"bytes"
+	"encoding/json"
 	"testing"
-
-	json "github.com/goccy/go-json"
 
 	"language.com/src/vm"
 )
@@ -55,7 +54,7 @@ func TestBytecodeRoundTripPreservesFunctionMetadata(t *testing.T) {
 		},
 	}
 
-	_, loadedFunctions, loadedClasses, loadedInterfaces, _ := LoadBytecodeFromBytes(SaveBytecodeToBytes(main, functions, classes, interfaces, nil, true))
+	_, loadedFunctions, loadedClasses, loadedInterfaces, _ := LoadBytecodeFromBytes(SaveBytecodeToBytes(main, functions, classes, interfaces, nil, true, false))
 
 	// if len(loadedMain) != len(main) || loadedMain[0].File != bytecodeSourceLabel || loadedMain[0].Line != 1 {
 	// 	t.Fatalf("main instructions did not round trip: %#v", loadedMain)
@@ -82,7 +81,7 @@ func TestBytecodeRoundTripPreservesFunctionMetadata(t *testing.T) {
 }
 
 func TestSaveBytecodeToBytesUsesBinaryFormat(t *testing.T) {
-	data := SaveBytecodeToBytes([]vm.Instruction{{Op: vm.OP_HALT}}, nil, nil, nil, nil, false)
+	data := SaveBytecodeToBytes([]vm.Instruction{{Op: vm.OP_HALT}}, nil, nil, nil, nil, false, false)
 
 	if !bytes.HasPrefix(data, bytecodeMagic) {
 		t.Fatalf("bytecode missing binary magic header: %q", data[:min(len(data), len(bytecodeMagic))])
@@ -97,7 +96,7 @@ func TestSaveBytecodeToBytesHidesSourcePaths(t *testing.T) {
 	sourcePath := `C:\Users\confis\Desktop\Programming\Go\compiler\core.tiny`
 	data := SaveBytecodeToBytes([]vm.Instruction{
 		{Op: vm.OP_HALT, File: sourcePath, Line: 12, Column: 3},
-	}, nil, nil, nil, nil, false)
+	}, nil, nil, nil, nil, false, false)
 
 	if bytes.Contains(data, []byte(sourcePath)) {
 		t.Fatal("bytecode leaked absolute source path")
@@ -151,5 +150,122 @@ func TestEncodeDecodeNamespaceValue(t *testing.T) {
 
 	if decoded.Name != original.Name || decoded.Members["count"].AsInt != 3 {
 		t.Fatalf("namespace did not round trip: %#v", decoded)
+	}
+}
+
+func TestBytecodeObfuscation(t *testing.T) {
+	main := []vm.Instruction{
+		{Op: vm.OP_CALL_DIRECT, Value: vm.DirectCallInfo{ID: 1, Name: "myFunction", ArgCount: 1}},
+		{Op: vm.OP_CONST, Value: vm.FunctionValue{ID: 1, Name: "myFunction"}},
+		{Op: vm.OP_CLOSURE, Value: vm.ClosureInfo{Name: "myFunction"}},
+		{Op: vm.OP_HALT},
+	}
+
+	functions := map[string]vm.Function{
+		"myFunction": {
+			ID:   1,
+			Name: "myFunction",
+			Instructions: []vm.Instruction{
+				{Op: vm.OP_LOAD_GLOBAL, Value: vm.VariableInfo{Name: "myGlobal"}},
+				{Op: vm.OP_RETURN},
+			},
+		},
+	}
+
+	classes := map[string]vm.Class{
+		"MyClass": {
+			Name: "MyClass",
+		},
+	}
+
+	interfaces := map[string]vm.Interface{
+		"MyInterface": {
+			Name: "MyInterface",
+		},
+	}
+
+	globalIndex := map[string]int{
+		"myGlobal": 0,
+	}
+
+	// Compile with obfuscation enabled
+	data := SaveBytecodeToBytes(main, functions, classes, interfaces, globalIndex, false, true)
+
+	// Load it back
+	loadedMain, loadedFunctions, loadedClasses, loadedInterfaces, loadedGlobals := LoadBytecodeFromBytes(data)
+
+	// Check main instruction call to myFunction got obfuscated
+	if len(loadedMain) < 1 || loadedMain[0].Op != vm.OP_CALL_DIRECT {
+		t.Fatalf("unexpected main: %#v", loadedMain)
+	}
+	directCall := loadedMain[0].Value.(vm.DirectCallInfo)
+	if directCall.Name == "myFunction" {
+		t.Fatal("direct call name was not obfuscated")
+	}
+
+	// Check function name was obfuscated
+	var foundObfuscatedFunc bool
+	for name, fn := range loadedFunctions {
+		if name == "myFunction" || fn.Name == "myFunction" {
+			t.Fatal("function name was not obfuscated in maps")
+		}
+		if name == directCall.Name && fn.Name == directCall.Name {
+			foundObfuscatedFunc = true
+
+			// Verify instruction inside function referencing myGlobal got renamed
+			if len(fn.Instructions) < 1 || fn.Instructions[0].Op != vm.OP_LOAD_GLOBAL {
+				t.Fatalf("unexpected function instructions: %#v", fn.Instructions)
+			}
+			varInfo := fn.Instructions[0].Value.(vm.VariableInfo)
+			if varInfo.Name == "myGlobal" {
+				t.Fatal("global variable name inside function was not obfuscated")
+			}
+		}
+	}
+	if !foundObfuscatedFunc {
+		t.Fatal("obfuscated function not found in loaded functions")
+	}
+
+	callbackValue, ok := loadedMain[1].Value.(vm.FunctionValue)
+	if !ok {
+		t.Fatalf("expected function value constant, got %T", loadedMain[1].Value)
+	}
+	if callbackValue.Name == "myFunction" {
+		t.Fatal("function value constant name was not obfuscated")
+	}
+	if _, exists := loadedFunctions[callbackValue.Name]; !exists {
+		t.Fatalf("function value points at missing function %q; functions=%v", callbackValue.Name, loadedFunctions)
+	}
+
+	closureValue, ok := loadedMain[2].Value.(vm.ClosureInfo)
+	if !ok {
+		t.Fatalf("expected closure value, got %T", loadedMain[2].Value)
+	}
+	if closureValue.Name == "myFunction" {
+		t.Fatal("closure function name was not obfuscated")
+	}
+	if _, exists := loadedFunctions[closureValue.Name]; !exists {
+		t.Fatalf("closure points at missing function %q; functions=%v", closureValue.Name, loadedFunctions)
+	}
+
+	// Check class name was obfuscated
+	for name, cls := range loadedClasses {
+		if name == "MyClass" || cls.Name == "MyClass" {
+			t.Fatal("class name was not obfuscated")
+		}
+	}
+
+	// Check interface name was obfuscated
+	for name, inter := range loadedInterfaces {
+		if name == "MyInterface" || inter.Name == "MyInterface" {
+			t.Fatal("interface name was not obfuscated")
+		}
+	}
+
+	// Check global index map was obfuscated
+	for name := range loadedGlobals {
+		if name == "myGlobal" {
+			t.Fatal("global variable name was not obfuscated in global index map")
+		}
 	}
 }

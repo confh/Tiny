@@ -246,6 +246,16 @@ func resolveLibraryImportPath(importPath string, currentFilePath string) string 
 	return filepath.Clean(filepath.Join(root, filepath.FromSlash(lib.Rest)))
 }
 
+func libraryImportRootExists(importPath string, currentFilePath string) bool {
+	lib, ok := parseLibraryImportPath(importPath)
+	if !ok {
+		return false
+	}
+	root := resolveLibraryRoot(lib.Owner, lib.Repo, currentFilePath)
+	info, err := os.Stat(root)
+	return err == nil && info.IsDir()
+}
+
 func firstInstalledLibraryRoot(owner string, repo string) string {
 	base := filepath.Join(tinyGlobalDepsDir(), owner, repo)
 	entries, err := os.ReadDir(base)
@@ -317,23 +327,6 @@ func scanInstalledLibraries() []installedLibraryInfo {
 		right := result[j].Owner + "/" + result[j].Repo
 		return left < right
 	})
-	return result
-}
-
-func installedLibraryImportCompletions() []string {
-	root := tinyGlobalDepsDir()
-	if installedLibraryImportCacheRoot == root && installedLibraryImportCache != nil {
-		return append([]string{}, installedLibraryImportCache...)
-	}
-
-	result := []string{}
-	for _, lib := range scanInstalledLibraries() {
-		result = append(result, lib.Owner+"/"+lib.Repo)
-	}
-
-	sort.Strings(result)
-	installedLibraryImportCacheRoot = root
-	installedLibraryImportCache = append([]string{}, result...)
 	return result
 }
 

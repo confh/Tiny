@@ -2,7 +2,7 @@ import std "ui"
 import std "io"
 
 // 1. Embed the entire UI folder as an object
-embeddir "./ui" const assets
+embedfolder "./ui" const assets
 
 let count = 0
 
@@ -19,7 +19,7 @@ w.callback("increment", fn(arg) {
 })
 
 // 4. Set the HTML content from the embedded assets
-// embeddir maps relative paths to keys
+// embedfolder maps relative paths to keys
 const html = assets["index.html"]
 w.setHtml(html)
 

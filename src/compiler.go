@@ -59,9 +59,11 @@ type Compiler struct {
 	mainInstructions       []Instruction
 	functions              map[string]Function
 	nativeFunctions        map[string]string
+	externalFunctions      map[string]Function
 	interfaces             map[string]Interface
 	classes                map[string]Class
 	usedFunctions          map[string]bool
+	preserveAllFunctions   bool
 	loopStack              []LoopContext
 	anonymousFunctionCount int
 	declaredFunctions      map[string]bool
@@ -409,6 +411,7 @@ func NewCompiler() *Compiler {
 		functions:              map[string]Function{},
 		interfaces:             map[string]Interface{},
 		nativeFunctions:        map[string]string{},
+		externalFunctions:      map[string]Function{},
 		classes:                map[string]Class{},
 		usedFunctions:          map[string]bool{},
 		loopStack:              []LoopContext{},
@@ -455,6 +458,24 @@ func (c *Compiler) predeclareNamespaceFunctions(prefix string, ns NamespaceStmt)
 func (c *Compiler) predeclareFunctions(statements []Stmt) {
 	for _, stmt := range statements {
 		switch s := stmt.(type) {
+		case ExportStmt:
+			if fn, ok := s.Inner.(FunctionStmt); ok {
+				c.declaredFunctions[fn.Name] = true
+				c.getFunctionID(fn.Name)
+				c.usedFunctions[fn.Name] = true
+				if c.inlineCandidates != nil {
+					c.inlineCandidates[fn.Name] = fn
+				}
+			} else if fn, ok := s.Inner.(ExternalFnStmt); ok {
+				c.declaredFunctions[fn.Name] = true
+				c.externalFunctions[fn.Name] = Function{
+					ID:         c.getFunctionID(fn.Name),
+					Name:       fn.Name,
+					Params:     fn.Params,
+					ReturnType: fn.ReturnType,
+				}
+			}
+
 		case FunctionStmt:
 			c.declaredFunctions[s.Name] = true
 			c.getFunctionID(s.Name)
@@ -468,6 +489,15 @@ func (c *Compiler) predeclareFunctions(statements []Stmt) {
 		case NativeFnStmt:
 			c.declaredFunctions[s.Name] = true
 			c.nativeFunctions[s.Name] = s.ReturnType.Name
+
+		case ExternalFnStmt:
+			c.declaredFunctions[s.Name] = true
+			c.externalFunctions[s.Name] = Function{
+				ID:         c.getFunctionID(s.Name),
+				Name:       s.Name,
+				Params:     s.Params,
+				ReturnType: s.ReturnType,
+			}
 
 		case NamespaceStmt:
 			for _, nsStmt := range s.Statements {
@@ -842,12 +872,14 @@ func (c *Compiler) CompileProgram(program Program) ([]Instruction, map[string]Fu
 
 	// remove unused functions. Compiler-generated JIT-region helpers are kept
 	// even if an older path forgot to mark them used.
-	for v := range c.functions {
-		if strings.HasPrefix(v, "__jit_region_") {
-			continue
-		}
-		if _, ok := c.usedFunctions[v]; !ok {
-			delete(c.functions, v)
+	if !c.preserveAllFunctions {
+		for v := range c.functions {
+			if strings.HasPrefix(v, "__jit_region_") {
+				continue
+			}
+			if _, ok := c.usedFunctions[v]; !ok {
+				delete(c.functions, v)
+			}
 		}
 	}
 
@@ -1115,6 +1147,8 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		} else if fn, ok := inner.(NativeFnStmt); ok {
 			name = fn.Name
 			isNative = true
+		} else if fn, ok := inner.(ExternalFnStmt); ok {
+			name = fn.Name
 		} else {
 			continue
 		}
@@ -1124,13 +1158,25 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		namespaceFunctions[name] = fullName
 
 		if !hasExplicitExports || exported {
-			members[name] = NewNative(FunctionValue{Name: fullName})
+			if _, ok := inner.(ExternalFnStmt); ok {
+				members[name] = NewNative(NamespaceMemberRef{GlobalName: fullName})
+			} else {
+				members[name] = NewNative(FunctionValue{Name: fullName})
+			}
 		}
 
 		if isNative {
 			fn, _ := inner.(NativeFnStmt)
 			c.declaredFunctions[fullName] = true
 			c.nativeFunctions[fullName] = fn.ReturnType.Name
+		} else if fn, ok := inner.(ExternalFnStmt); ok {
+			c.declaredFunctions[fullName] = true
+			c.externalFunctions[fullName] = Function{
+				ID:         c.getFunctionID(fullName),
+				Name:       fullName,
+				Params:     fn.Params,
+				ReturnType: fn.ReturnType,
+			}
 		} else {
 			fn, _ := inner.(FunctionStmt)
 			c.functions[fullName] = Function{
@@ -1151,6 +1197,8 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		if v, ok := inner.(VariableStmt); ok {
 			name = v.Name
 		} else if s, ok := inner.(EmbedStmt); ok {
+			name = s.Name
+		} else if s, ok := inner.(ExternalGlobalStmt); ok {
 			name = s.Name
 		} else {
 			continue
@@ -1362,7 +1410,29 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 			}
 
 			c.compileEmbedStatement(namespacedEmbed)
+		} else if externalGlobal, ok := inner.(ExternalGlobalStmt); ok {
+			fullName := qualify(externalGlobal.Name)
+			c.setLocation(externalGlobal.File, externalGlobal.Line, externalGlobal.Column)
+			binding := c.declareVariable(fullName, true)
+			binding.TypeHint = externalGlobal.Type.Name
+			c.currentScope()[fullName] = binding
+			c.globalConstants[fullName] = true
 		}
+	}
+
+	for _, raw := range stmt.Statements {
+		inner, _ := unwrapExport(raw)
+
+		externalFn, ok := inner.(ExternalFnStmt)
+		if !ok {
+			continue
+		}
+
+		fullName := qualify(externalFn.Name)
+		c.setLocation(externalFn.File, externalFn.Line, externalFn.Column)
+		binding := c.declareVariable(fullName, false)
+		binding.TypeHint = externalFn.ReturnType.Name
+		c.currentScope()[fullName] = binding
 	}
 
 	// 8. Compile interfaces before classes/functions so namespace-local return
@@ -2270,6 +2340,14 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 
 	case NativeFnStmt:
 
+	case ExternalFnStmt:
+		c.setLocation(s.File, s.Line, s.Column)
+		c.declareVariable(s.Name, false)
+
+	case ExternalGlobalStmt:
+		c.setLocation(s.File, s.Line, s.Column)
+		c.declareVariable(s.Name, true)
+
 	case ReturnStmt:
 		c.setLocation(s.File, s.Line, s.Column)
 
@@ -2824,6 +2902,7 @@ func (c *Compiler) compileClass(stmt ClassStmt) {
 	c.classes[stmt.Name] = Class{
 		Name:           stmt.Name,
 		TypeParameters: stmt.TypeParameters,
+		Implements:     stmt.Implements,
 		Methods:        methods,
 		Embeds:         stmt.Embeds,
 		Fields:         fields,
@@ -2915,7 +2994,7 @@ func (c *Compiler) compileLockStmt(stmt LockStmt) {
 }
 
 func (c *Compiler) compileEmbedStatement(stmt EmbedStmt) {
-	if stmt.Kind == EmbedDir {
+	if stmt.Kind == EmbedFolder {
 		assets := ObjectValue{}
 
 		err := filepath.Walk(stmt.EmbeddedPath, func(path string, info os.FileInfo, err error) error {
@@ -2954,7 +3033,7 @@ func (c *Compiler) compileEmbedStatement(stmt EmbedStmt) {
 			c.fatalError(ErrorImport, "could not embed file '%s': %s", filepath.Base(stmt.EmbeddedPath), err)
 		}
 
-		if stmt.Kind == EmbedStr {
+		if stmt.Kind == EmbedText {
 			c.emit(OP_CONST, string(content))
 		} else {
 			c.emit(OP_CONST, &BufferValue{
@@ -5826,6 +5905,13 @@ func (c *Compiler) compileExpr(expr Expr) {
 		}
 
 		if c.declaredFunctions[e.Name] {
+			if _, ok := c.externalFunctions[e.Name]; ok {
+				c.emit(OP_LOAD_GLOBAL, VariableInfo{
+					Name: e.Name,
+					Slot: c.globalIndexes[e.Name],
+				})
+				return
+			}
 			c.usedFunctions[e.Name] = true
 			c.emit(OP_CONST, FunctionValue{Name: e.Name})
 			return
@@ -5977,6 +6063,25 @@ func (c *Compiler) compileExpr(expr Expr) {
 		}
 
 		if c.declaredFunctions[e.Name] {
+			if fn, ok := c.externalFunctions[e.Name]; ok {
+				c.checkCompileTimeArguments(e.Name, e.Args, fn.Params, e.Line, e.Column)
+
+				c.emit(OP_LOAD_GLOBAL, VariableInfo{
+					Name: e.Name,
+					Slot: c.globalIndexes[e.Name],
+				})
+
+				for _, arg := range e.Args {
+					c.compileExpr(arg)
+				}
+
+				c.setLocation(e.File, e.Line, e.Column)
+				c.emit(OP_CALL_VALUE, CallInfo{
+					ArgCount: len(e.Args),
+				})
+				return
+			}
+
 			if c.tryCompileInlineCall(e.Name, e.Args, e.File, e.Line, e.Column) {
 				return
 			}
@@ -6211,6 +6316,25 @@ func (c *Compiler) compileExpr(expr Expr) {
 					ArgCount: len(e.Args),
 				})
 
+				return
+			}
+
+			if fn, exists := c.externalFunctions[ident.Name]; exists {
+				c.checkCompileTimeArguments(ident.Name, e.Args, fn.Params, e.Line, e.Column)
+
+				c.emit(OP_LOAD_GLOBAL, VariableInfo{
+					Name: ident.Name,
+					Slot: c.globalIndexes[ident.Name],
+				})
+
+				for _, arg := range e.Args {
+					c.compileExpr(arg)
+				}
+
+				c.setLocation(ident.File, ident.Line, ident.Column)
+				c.emit(OP_CALL_VALUE, CallInfo{
+					ArgCount: len(e.Args),
+				})
 				return
 			}
 
@@ -6753,6 +6877,10 @@ func (c *Compiler) compareCompileTimeTypes(got string, expected string) bool {
 			part = "array:any"
 		}
 		if got == part {
+			return true
+		}
+
+		if c.classImplementsInterface(got, part) {
 			return true
 		}
 
@@ -7459,4 +7587,31 @@ func (c *Compiler) performEscapeAnalysis(statements []Stmt) {
 			c.performEscapeAnalysis(s.Body)
 		}
 	}
+}
+
+func (c *Compiler) classImplementsInterface(gotClass string, expectedInterface string) bool {
+	if strings.Contains(gotClass, ":") {
+		gotClass = strings.Split(gotClass, ":")[0]
+	}
+	if strings.Contains(expectedInterface, ":") {
+		expectedInterface = strings.Split(expectedInterface, ":")[0]
+	}
+
+	cls, exists := c.classes[gotClass]
+	if !exists {
+		return false
+	}
+
+	for _, imp := range cls.Implements {
+		if strings.Contains(imp, ":") {
+			imp = strings.Split(imp, ":")[0]
+		}
+		if imp == expectedInterface {
+			return true
+		}
+		if strings.HasSuffix(imp, "."+expectedInterface) || strings.HasSuffix(expectedInterface, "."+imp) {
+			return true
+		}
+	}
+	return false
 }

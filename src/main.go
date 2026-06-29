@@ -2,8 +2,15 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"runtime"
+	goruntime "runtime"
+	"strconv"
+	"time"
 
 	. "language.com/src/bytecode"
 	. "language.com/src/tinyerrors"
@@ -48,6 +55,10 @@ func main() {
 
 		case "run":
 			runBytecodeCommand(os.Args[2:])
+			return
+
+		case "watch", "--watch":
+			watchCommand(os.Args[2:])
 			return
 
 		case "pack":
@@ -108,11 +119,14 @@ func helpCommand(args []string) {
 		case "run":
 			fmt.Println("usage: tiny run <file.tbc>")
 			fmt.Println("Runs a compiled Tiny bytecode file.")
+		case "watch", "--watch":
+			fmt.Println("usage: tiny --watch [file.tiny] [args...]")
+			fmt.Println("Runs a Tiny source file and restarts when it or its imported files change.")
 		case "pack":
-			fmt.Println("usage: tiny pack <file.tiny> -o <output>")
+			fmt.Println("usage: tiny pack <file.tiny> -o <output> [--target windows-amd64|linux-amd64|linux-arm64|darwin-arm64] [--windowed] [--icon <icon.ico>]")
 			fmt.Println("Builds a packed executable from a Tiny source file.")
 		case "dist":
-			fmt.Println("usage: tiny dist <file.tiny> -o <output> [--target windows-amd64|linux-amd64|linux-arm64|darwin-arm64] [--plugin <path>]")
+			fmt.Println("usage: tiny dist <file.tiny> -o <output> [--target windows-amd64|linux-amd64|linux-arm64|darwin-arm64] [--plugin <path>] [--windowed] [--icon <icon.ico>]")
 			fmt.Println("Builds a distributable executable for a target platform.")
 		case "init":
 			fmt.Println("usage: tiny init")
@@ -162,6 +176,7 @@ func printGeneralHelp() {
 	fmt.Println("Commands:")
 	fmt.Println("  build      Compile a Tiny source file to bytecode")
 	fmt.Println("  run        Run a compiled bytecode file")
+	fmt.Println("  watch      Restart a source program when it or its imports change")
 	fmt.Println("  pack       Build a packed executable")
 	fmt.Println("  dist       Build a distributable executable")
 	fmt.Println("  init       Create a tiny.json project file")
@@ -304,7 +319,7 @@ func saveBytecodeFile(entryFile string, outFile string, cache bool) {
 		functions[name] = fn
 	}
 
-	SaveBytecode(outFile, mainBytecode, functions, classes, interfaces, globalIndex, cache)
+	SaveBytecode(outFile, mainBytecode, functions, classes, interfaces, globalIndex, cache, !cache)
 }
 
 func compileAndRun(entryFile string, cliArgs []string, disableJit bool) {
@@ -359,4 +374,195 @@ func runBytecodeCommand(args []string) {
 	}
 
 	runBytecodeFile(args[0], false)
+}
+
+type watchFileState struct {
+	modTime time.Time
+	exists  bool
+}
+
+type watchChild struct {
+	cmd  *exec.Cmd
+	done chan error
+}
+
+func watchCommand(args []string) {
+	entryFile := ""
+	cliArgs := []string{}
+
+	if len(args) > 0 {
+		entryFile = args[0]
+		cliArgs = args[1:]
+	} else {
+		config, ok := loadTinyConfig()
+		if !ok || config.Entry == "" {
+			LangError(ErrorRuntime, "usage: tiny --watch [file.tiny] [args...]")
+		}
+		entryFile = config.Entry
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		LangError(ErrorRuntime, "failed to locate tiny executable: %v", err)
+	}
+
+	childArgs := append([]string{entryFile}, cliArgs...)
+	childEnv := append(os.Environ(), "TINY_DISABLE_CACHE=1")
+
+	fmt.Printf("[watch] watching %s\n", entryFile)
+
+	files := watchedFilesForEntry(entryFile)
+	state := snapshotWatchedFiles(files)
+	child := startWatchChild(exe, childArgs, childEnv)
+	childDone := child.done
+
+	ticker := time.NewTicker(350 * time.Millisecond)
+	defer ticker.Stop()
+
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt)
+	defer signal.Stop(signals)
+
+	for {
+		select {
+		case <-signals:
+			stopWatchChild(child)
+			fmt.Println("[watch] stopped")
+			return
+
+		case err := <-childDone:
+			if err != nil {
+				fmt.Printf("[watch] process exited: %v\n", err)
+			} else {
+				fmt.Println("[watch] process exited")
+			}
+			child = nil
+			childDone = nil
+
+		case <-ticker.C:
+			nextState := snapshotWatchedFiles(files)
+			if changedFile, changed := changedWatchedFile(state, nextState); changed {
+				switch v := runtime.GOOS; v {
+				case "windows":
+					cmd := exec.Command("cmd", "/c", "cls")
+					cmd.Stdout = os.Stdout
+					cmd.Run()
+
+				case "linux":
+					cmd := exec.Command("clear")
+					cmd.Stdout = os.Stdout
+					cmd.Run()
+				}
+				cwd, err := os.Getwd()
+				if err != nil {
+					log.Fatalf("failed to get cwd: %v", err)
+				}
+				relPath, err := filepath.Rel(cwd, changedFile)
+				fmt.Printf("[watch] change detected: %s\n", relPath)
+				stopWatchChild(child)
+				files = watchedFilesForEntry(entryFile)
+				state = snapshotWatchedFiles(files)
+				child = startWatchChild(exe, childArgs, childEnv)
+				childDone = child.done
+			}
+		}
+	}
+}
+
+func watchedFilesForEntry(entryFile string) []string {
+	files := []string{}
+
+	func() {
+		defer func() {
+			if recover() != nil {
+				files = []string{}
+			}
+		}()
+
+		_, files = LoadProgramWithFiles(entryFile)
+	}()
+
+	if len(files) == 0 {
+		abs, err := filepath.Abs(entryFile)
+		if err == nil {
+			files = append(files, filepath.Clean(abs))
+		} else {
+			files = append(files, entryFile)
+		}
+	}
+
+	return files
+}
+
+func snapshotWatchedFiles(files []string) map[string]watchFileState {
+	state := map[string]watchFileState{}
+	for _, file := range files {
+		info, err := os.Stat(file)
+		if err != nil {
+			state[file] = watchFileState{exists: false}
+			continue
+		}
+		state[file] = watchFileState{exists: true, modTime: info.ModTime()}
+	}
+	return state
+}
+
+func changedWatchedFile(previous map[string]watchFileState, next map[string]watchFileState) (string, bool) {
+	for file, previousState := range previous {
+		nextState, exists := next[file]
+		if !exists || previousState.exists != nextState.exists || !previousState.modTime.Equal(nextState.modTime) {
+			return file, true
+		}
+	}
+
+	for file := range next {
+		if _, exists := previous[file]; !exists {
+			return file, true
+		}
+	}
+
+	return "", false
+}
+
+func startWatchChild(exe string, args []string, env []string) *watchChild {
+	cmd := exec.Command(exe, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+	cmd.Env = env
+
+	child := &watchChild{
+		cmd:  cmd,
+		done: make(chan error, 1),
+	}
+
+	fmt.Printf("[watch] starting tiny %s\n", filepath.Base(args[0]))
+	if err := cmd.Start(); err != nil {
+		fmt.Printf("[watch] failed to start: %v\n", err)
+		child.done <- err
+		return child
+	}
+
+	go func() {
+		child.done <- cmd.Wait()
+	}()
+
+	return child
+}
+
+func stopWatchChild(child *watchChild) {
+	if child == nil || child.cmd == nil || child.cmd.Process == nil {
+		return
+	}
+
+	if goruntime.GOOS == "windows" {
+		_ = exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(child.cmd.Process.Pid)).Run()
+	} else {
+		_ = child.cmd.Process.Kill()
+	}
+
+	select {
+	case <-child.done:
+	case <-time.After(2 * time.Second):
+	}
 }

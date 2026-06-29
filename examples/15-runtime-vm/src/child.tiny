@@ -1,0 +1,11 @@
+import std "io";
+
+io.println("[child file] top-level ran");
+
+export fn add(a: number, b: number): number {
+    return a + b;
+}
+
+export fn describe(prefix: string): string {
+    return `${prefix}: child file VM`;
+}

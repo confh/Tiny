@@ -1,0 +1,180 @@
+import std "runtime";
+import std "io";
+import std "fs";
+
+// Small helper so the output is grouped by runtime VM feature.
+fn section(name: string) {
+    io.println("");
+    io.println(`== ${name} ==`);
+}
+
+// A normal Tiny function in the host VM. Later we expose it to a child VM so
+// child code can call back into the host.
+fn hostLog(message: string): string {
+    io.println(`[host callback] ${message}`);
+    return `host saw: ${message}`;
+}
+
+// Fatal hooks let host code observe fatal VM/runtime errors.
+runtime.onFatal(fn(error) {
+    io.println(`[fatal hook] ${error.kind}: ${error.message}`);
+});
+
+// These map to Go's runtime.LockOSThread/UnlockOSThread for code that needs a
+// stable OS thread, such as some UI or native integrations.
+runtime.lockThread();
+runtime.unlockThread();
+
+section("host runtime");
+// Host-level runtime helpers.
+io.println(`packed: ${runtime.isPacked()}`);
+let before = runtime.memoryStats();
+io.println(`memory before gc: alloc=${before.alloc}, numGC=${before.numGC}`);
+runtime.gc();
+let after = runtime.memoryStats();
+io.println(`memory after gc: alloc=${after.alloc}, numGC=${after.numGC}`);
+
+section("load source with runMainOnLoad");
+// This string is a complete Tiny program that will run inside a separate VM.
+const inlineSource = `
+import std "io";
+
+io.println("[inline child] top-level ran");
+
+export fn greet(name: string): string {
+    return "hello " + name;
+}
+`;
+
+// Create an isolated child VM. In isolated mode, stdlib access is denied unless
+// explicitly enabled in allowedStdlib. runtime is always allowed for isolated VMs.
+const sourceVM = runtime.newVM({
+    isolated: true,
+    allowedStdlib: {
+        io: true
+    },
+    cliArgs: ["alpha", "beta"],
+    runMainOnLoad: true,
+    disableJIT: true
+});
+
+// loadSource compiles and loads the source text. runMainOnLoad makes the child
+// execute its top-level statements immediately after loading.
+sourceVM.loadSource(inlineSource, "inline-child.tiny");
+io.println(`source VM info: ${sourceVM.info()}`);
+
+// call invokes an exported function inside the child VM.
+io.println(sourceVM.call("greet", ["from loadSource"]));
+
+section("compile source to bytecode");
+// compileSource returns a bytecode buffer without creating a VM.
+const bytecodeFromSource = runtime.compileSource(`
+export fn multiply(a: number, b: number): number {
+    return a * b;
+}
+`, "multiply-child.tiny");
+
+io.println(`compiled source bytecode bytes: ${bytecodeFromSource.length()}`);
+
+// Load the bytecode buffer into a second isolated VM and call its export.
+const bytecodeVM = runtime.newVM({
+    isolated: true,
+    allowedStdlib: {},
+    disableJIT: true
+});
+
+bytecodeVM.loadBytecode(bytecodeFromSource);
+io.println(`6 * 7 = ${bytecodeVM.call("multiply", [6, 7])}`);
+
+section("compile file to .tbc and load it");
+// compileFile resolves imports from disk and returns bytecode. This example also
+// writes the bytecode to dist/runtime-child.tbc to demonstrate building a .tbc.
+if !fs.exists("dist") {
+    fs.mkDir("dist");
+}
+
+const childBytecode = runtime.compileFile("src/child.tiny");
+fs.writeBytes("dist/runtime-child.tbc", childBytecode);
+io.println(`wrote dist/runtime-child.tbc (${childBytecode.length()} bytes)`);
+
+// This VM has runMainOnLoad disabled, so top-level child code waits until run().
+const fileVM = runtime.newVM({
+    isolated: true,
+    allowedStdlib: {
+        io: true
+    },
+    cliArgs: ["from", "compileFile"],
+    runMainOnLoad: false
+});
+
+fileVM.loadBytecode(childBytecode);
+io.println(`file VM info before run: ${fileVM.info()}`);
+fileVM.run();
+
+// After run(), exported functions can still be called repeatedly.
+io.println(`add(20, 22) = ${fileVM.call("add", [20, 22])}`);
+io.println(fileVM.call("describe", ["loaded bytecode"]));
+
+section("globals and host callbacks");
+// external declarations are placeholders that the host VM can satisfy with
+// globals or exposed functions.
+const bridgeSource = `
+export external const hostName: string
+export external fn hostLog(message: string): string
+
+export fn readHostName(): string {
+    return hostName;
+}
+
+export fn sendToHost(message: string): string {
+    return hostLog(message);
+}
+`;
+
+// globals injects values before loading code. setGlobal can update them later.
+const bridgeVM = runtime.newVM({
+    isolated: true,
+    allowedStdlib: {},
+    globals: {
+        hostName: "Tiny host"
+    }
+});
+
+// exposeFunction makes a host Tiny function callable as an external function in
+// the child VM.
+bridgeVM.exposeFunction("hostLog", hostLog);
+bridgeVM.loadSource(bridgeSource, "bridge-child.tiny");
+io.println(`external global: ${bridgeVM.call("readHostName")}`);
+io.println(`external function: ${bridgeVM.call("sendToHost", ["hello across the VM boundary"])}`);
+
+// reset clears transient execution state, which is useful before reusing a VM
+// after changing globals or between requests.
+bridgeVM.setGlobal("hostName", "Updated host");
+bridgeVM.reset();
+io.println(`after setGlobal + reset: ${bridgeVM.call("readHostName")}`);
+
+section("loadBytecode source shortcut");
+// loadBytecode normally expects bytecode, but it also accepts source text when
+// the string looks like Tiny source. This is handy for small dynamic snippets.
+const shortcutVM = runtime.newVM({
+    isolated: true,
+    allowedStdlib: {
+        io: true
+    },
+    runMainOnLoad: true
+});
+
+shortcutVM.loadBytecode(`
+import std "io";
+io.println("[shortcut] loadBytecode accepted source text");
+export fn ok(): bool {
+    return true;
+}
+`);
+io.println(`shortcut ok: ${shortcutVM.call("ok")}`);
+
+// Remove the fatal hook before exit so future host code is back to default
+// behavior.
+runtime.clearFatalHandler();
+io.println("");
+io.println("runtime VM example complete");

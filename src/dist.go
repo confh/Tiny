@@ -18,6 +18,7 @@ func DistCommand(args []string) {
 	outFile := ""
 	extraPlugins := []string{}
 	windowed := false
+	iconPath := ""
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -47,6 +48,14 @@ func DistCommand(args []string) {
 
 		case "--windowed":
 			windowed = true
+
+		case "--icon":
+			if i+1 >= len(args) {
+				LangError(ErrorRuntime, "expected icon path after --icon")
+			}
+
+			iconPath = args[i+1]
+			i++
 
 		default:
 			if entryFile != "" {
@@ -93,7 +102,7 @@ func DistCommand(args []string) {
 
 	program = rewritePluginPathsForDist(program, target)
 
-	packProgramToOutput(program, outFile, target, windowed)
+	packProgramToOutput(program, outFile, target, windowed, iconPath)
 
 	copyPluginsToOutputDir(pluginPaths, distDir)
 
@@ -124,7 +133,7 @@ func defaultDistOutputName(entryFile string, target string) string {
 	return filepath.Join("dist", name)
 }
 
-func packToOutput(entryFile string, outFile string, target string, windowed bool) {
+func packToOutput(entryFile string, outFile string, target string, windowed bool, iconPath string) {
 	target = normalizeTarget(target)
 
 	program := LoadProgram(entryFile)
@@ -134,7 +143,7 @@ func packToOutput(entryFile string, outFile string, target string, windowed bool
 		program = rewritePluginPathsForDist(program, target)
 	}
 
-	packProgramToOutput(program, outFile, target, windowed)
+	packProgramToOutput(program, outFile, target, windowed, iconPath)
 
 	if len(pluginPaths) > 0 {
 		outDir := filepath.Dir(outFile)
@@ -207,7 +216,7 @@ func copyPluginsToOutputDir(pluginPaths []string, outputDir string) {
 	}
 }
 
-func packProgramToOutput(program Program, outFile string, target string, windowed bool) {
+func packProgramToOutput(program Program, outFile string, target string, windowed bool, iconPath string) {
 	target = normalizeTarget(target)
 
 	compiler := NewCompiler()
@@ -219,7 +228,7 @@ func packProgramToOutput(program Program, outFile string, target string, windowe
 		functions[name] = fn
 	}
 
-	bytecodeBytes := SaveBytecodeToBytes(mainInstructions, functions, classes, interfaces, globalIndex, false)
+	bytecodeBytes := SaveBytecodeToBytes(mainInstructions, functions, classes, interfaces, globalIndex, false, true)
 
 	runtimeBytes := getRuntimeBytesForTarget(target)
 
@@ -229,6 +238,18 @@ func packProgramToOutput(program Program, outFile string, target string, windowe
 
 		PatchPESubsystemToGUI(mutableRuntime)
 		runtimeBytes = mutableRuntime
+	}
+
+	if iconPath != "" {
+		if target != "windows-amd64" {
+			LangError(ErrorRuntime, "--icon is currently supported only for windows-amd64 targets")
+		}
+
+		patchedRuntime, err := applyWindowsIconToPERuntimeBytes(runtimeBytes, iconPath)
+		if err != nil {
+			LangError(ErrorRuntime, "failed to apply icon: %v", err)
+		}
+		runtimeBytes = patchedRuntime
 	}
 
 	err := writePackedExecutable(outFile, runtimeBytes, bytecodeBytes)

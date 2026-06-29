@@ -283,6 +283,56 @@ func installDownloadedUpdate(downloadURL string) error {
 	return replaceCurrentExecutableUnix(newPath)
 }
 
+func updateRuntimes(release Release) error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to locate home directory: %w", err)
+	}
+
+	runtimesDir := filepath.Join(homeDir, ".tiny", "runtimes")
+	files, err := os.ReadDir(runtimesDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to read runtimes directory: %w", err)
+	}
+
+	for _, file := range files {
+		if file.IsDir() {
+			continue
+		}
+
+		name := file.Name()
+		asset, err := findAsset(release, name)
+		if err != nil {
+			continue
+		}
+
+		localPath := filepath.Join(runtimesDir, name)
+		fmt.Printf("Updating runtime %s -> %s...\n", name, release.TagName)
+
+		tmpPath := localPath + ".tmp"
+		if err := downloadFile(asset.URL, tmpPath); err != nil {
+			return fmt.Errorf("failed to download runtime %s: %w", name, err)
+		}
+
+		if !strings.HasSuffix(localPath, ".exe") {
+			if err := os.Chmod(tmpPath, 0755); err != nil {
+				_ = os.Remove(tmpPath)
+				return fmt.Errorf("failed to set permissions on %s: %w", name, err)
+			}
+		}
+
+		if err := os.Rename(tmpPath, localPath); err != nil {
+			_ = os.Remove(tmpPath)
+			return fmt.Errorf("failed to replace runtime %s: %w", name, err)
+		}
+	}
+
+	return nil
+}
+
 func updateCommand() {
 	release, err := latestRelease("confh", "Tiny")
 	if err != nil {
@@ -310,6 +360,11 @@ func updateCommand() {
 	}
 
 	fmt.Printf("Updating Tiny %s -> %s\n", TinyVersion, release.TagName)
+
+	if err := updateRuntimes(release); err != nil {
+		fmt.Printf("Warning: failed to update runtimes: %v\n", err)
+	}
+
 	fmt.Printf("Downloading %s...\n", asset.Name)
 
 	if err := installDownloadedUpdate(asset.URL); err != nil {

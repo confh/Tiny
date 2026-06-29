@@ -2,9 +2,16 @@ package bytecode
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"fmt"
+	"io"
 	"os"
+	"strconv"
+	"strings"
 
-	json "github.com/goccy/go-json"
+	"encoding/json"
 	"github.com/vmihailenco/msgpack/v5"
 
 	. "language.com/src/tinyerrors"
@@ -64,6 +71,7 @@ type SerializableClassField struct {
 
 type SerializableClass struct {
 	Name           string                   `json:"name"`
+	Implements     []string                 `json:"implements"`
 	Fields         []SerializableClassField `json:"fields"`
 	Methods        map[string]string        `json:"methods"`
 	Embeds         []string                 `json:"embeds"`
@@ -144,7 +152,7 @@ func deserializeParams(params []SerializableParam) []Param {
 	return result
 }
 
-func SaveBytecode(path string, main []Instruction, functions map[string]Function, classes map[string]Class, interfaces map[string]Interface, globalIndex map[string]int, cache bool) {
+func SaveBytecode(path string, main []Instruction, functions map[string]Function, classes map[string]Class, interfaces map[string]Interface, globalIndex map[string]int, cache bool, obfuscate bool) {
 	file := BytecodeFile{
 		Version:     BytecodeVersion,
 		Main:        serializeInstructions(main, cache),
@@ -176,6 +184,10 @@ func SaveBytecode(path string, main []Instruction, functions map[string]Function
 			TypeParameters: interfaceData.TypeParameters,
 			Fields:         interfaceData.Fields,
 		}
+	}
+
+	if obfuscate {
+		obfuscateBytecodeFile(&file)
 	}
 
 	err := os.WriteFile(path, encodeBytecodeFile(file), 0644)
@@ -184,7 +196,7 @@ func SaveBytecode(path string, main []Instruction, functions map[string]Function
 	}
 }
 
-func SaveBytecodeToBytes(main []Instruction, functions map[string]Function, classes map[string]Class, interfaces map[string]Interface, globalIndex map[string]int, cache bool) []byte {
+func SaveBytecodeToBytes(main []Instruction, functions map[string]Function, classes map[string]Class, interfaces map[string]Interface, globalIndex map[string]int, cache bool, obfuscate bool) []byte {
 	file := BytecodeFile{
 		Version:     BytecodeVersion,
 		Main:        serializeInstructions(main, cache),
@@ -216,6 +228,10 @@ func SaveBytecodeToBytes(main []Instruction, functions map[string]Function, clas
 			TypeParameters: interfaceData.TypeParameters,
 			Fields:         interfaceData.Fields,
 		}
+	}
+
+	if obfuscate {
+		obfuscateBytecodeFile(&file)
 	}
 
 	return encodeBytecodeFile(file)
@@ -271,21 +287,222 @@ func LoadBytecodeFromBytes(data []byte) ([]Instruction, map[string]Function, map
 	return main, functions, deserializeClasses(file.Classes), interfaces, file.GlobalIndex
 }
 
+func obfuscateBytecodeFile(file *BytecodeFile) {
+	renameMap := make(map[string]string)
+
+	// 1. Collect all functions
+	funcCounter := 1
+	for originalName := range file.Functions {
+		if strings.HasPrefix(originalName, "__jit_region_") {
+			continue
+		}
+		renameMap[originalName] = "f_" + strconv.Itoa(funcCounter)
+		funcCounter++
+	}
+
+	// 2. Collect all classes
+	classCounter := 1
+	for originalName := range file.Classes {
+		renameMap[originalName] = "c_" + strconv.Itoa(classCounter)
+		classCounter++
+	}
+
+	// 3. Collect all interfaces
+	interfaceCounter := 1
+	for originalName := range file.Interfaces {
+		renameMap[originalName] = "i_" + strconv.Itoa(interfaceCounter)
+		interfaceCounter++
+	}
+
+	// 4. Collect all globals
+	globalCounter := 1
+	for originalName := range file.GlobalIndex {
+		renameMap[originalName] = "g_" + strconv.Itoa(globalCounter)
+		globalCounter++
+	}
+
+	// Rename functions
+	newFunctions := make(map[string]SerializableFunction)
+	for originalName, fn := range file.Functions {
+		newName, exists := renameMap[originalName]
+		if exists {
+			fn.Name = newName
+			newFunctions[newName] = fn
+		} else {
+			newFunctions[originalName] = fn
+		}
+	}
+	file.Functions = newFunctions
+
+	// Rename classes
+	newClasses := make(map[string]SerializableClass)
+	for originalName, class := range file.Classes {
+		newName, exists := renameMap[originalName]
+		if exists {
+			class.Name = newName
+			newClasses[newName] = class
+		} else {
+			newClasses[originalName] = class
+		}
+	}
+	file.Classes = newClasses
+
+	// Rename interfaces
+	newInterfaces := make(map[string]SerializableInterface)
+	for originalName, inter := range file.Interfaces {
+		newName, exists := renameMap[originalName]
+		if exists {
+			inter.Name = newName
+			newInterfaces[newName] = inter
+		} else {
+			newInterfaces[originalName] = inter
+		}
+	}
+	file.Interfaces = newInterfaces
+
+	// Rename globals
+	newGlobalIndex := make(map[string]int)
+	for originalName, index := range file.GlobalIndex {
+		newName, exists := renameMap[originalName]
+		if exists {
+			newGlobalIndex[newName] = index
+		} else {
+			newGlobalIndex[originalName] = index
+		}
+	}
+	file.GlobalIndex = newGlobalIndex
+
+	renameFunctionValue := func(value EncodedValue) EncodedValue {
+		if value.Type != "functionValue" {
+			return value
+		}
+
+		fn, ok := value.Data.(FunctionValue)
+		if !ok {
+			return value
+		}
+
+		originalName := string(xor([]byte(fn.Name), 0x5A))
+		if newName, exists := renameMap[originalName]; exists {
+			fn.Name = string(xor([]byte(newName), 0x5A))
+			value.Data = fn
+		}
+		return value
+	}
+
+	// Rename in instructions
+	renameInInstructions := func(instructions []SerializableInstruction) {
+		for i := range instructions {
+			instr := &instructions[i]
+			instr.Value = renameFunctionValue(instr.Value)
+			switch instr.Value.Type {
+			case "directCall":
+				if callInfo, ok := instr.Value.Data.(DirectCallInfo); ok {
+					if newName, exists := renameMap[callInfo.Name]; exists {
+						callInfo.Name = newName
+						instr.Value.Data = callInfo
+					}
+				}
+			case "call":
+				if callInfo, ok := instr.Value.Data.(CallInfo); ok {
+					if newName, exists := renameMap[callInfo.Name]; exists {
+						callInfo.Name = newName
+						instr.Value.Data = callInfo
+					}
+				}
+			case "variable":
+				if varInfo, ok := instr.Value.Data.(VariableInfo); ok {
+					if newName, exists := renameMap[varInfo.Name]; exists {
+						varInfo.Name = newName
+						instr.Value.Data = varInfo
+					}
+				}
+			case "closure":
+				if closureInfo, ok := instr.Value.Data.(ClosureInfo); ok {
+					if newName, exists := renameMap[closureInfo.Name]; exists {
+						closureInfo.Name = newName
+						instr.Value.Data = closureInfo
+					}
+				}
+			}
+		}
+	}
+
+	renameInInstructions(file.Main)
+
+	for name, fn := range file.Functions {
+		renameInInstructions(fn.Instructions)
+		file.Functions[name] = fn
+	}
+}
+
+func getBytecodeKey() []byte {
+	key := make([]byte, 32)
+	for i := 0; i < 32; i++ {
+		key[i] = byte((i * 59) ^ 0xA5 ^ (32 - i))
+	}
+	return key
+}
+
+func encryptBytecodeBytes(plaintext []byte) ([]byte, error) {
+	block, err := aes.NewCipher(getBytecodeKey())
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+	return gcm.Seal(nonce, nonce, plaintext, nil), nil
+}
+
+func decryptBytecodeBytes(ciphertext []byte) ([]byte, error) {
+	block, err := aes.NewCipher(getBytecodeKey())
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonceSize := gcm.NonceSize()
+	if len(ciphertext) < nonceSize {
+		return nil, fmt.Errorf("ciphertext too short")
+	}
+	nonce, encrypted := ciphertext[:nonceSize], ciphertext[nonceSize:]
+	return gcm.Open(nil, nonce, encrypted, nil)
+}
+
 func encodeBytecodeFile(file BytecodeFile) []byte {
 	data, err := msgpack.Marshal(file)
 	if err != nil {
 		LangError(ErrorRuntime, "failed to encode bytecode: %v", err)
 	}
 
-	result := make([]byte, 0, len(bytecodeMagic)+len(data))
+	encrypted, err := encryptBytecodeBytes(data)
+	if err != nil {
+		LangError(ErrorRuntime, "failed to encrypt bytecode: %v", err)
+	}
+
+	result := make([]byte, 0, len(bytecodeMagic)+len(encrypted))
 	result = append(result, bytecodeMagic...)
-	result = append(result, data...)
+	result = append(result, encrypted...)
 	return result
 }
 
 func decodeBytecodeFile(data []byte, file *BytecodeFile) {
 	if bytes.HasPrefix(data, bytecodeMagic) {
-		err := msgpack.Unmarshal(data[len(bytecodeMagic):], file)
+		encrypted := data[len(bytecodeMagic):]
+		decrypted, err := decryptBytecodeBytes(encrypted)
+		if err != nil {
+			LangError(ErrorRuntime, "failed to decrypt bytecode file: %v", err)
+		}
+
+		err = msgpack.Unmarshal(decrypted, file)
 		if err != nil {
 			LangError(ErrorRuntime, "failed to decode bytecode file: %v", err)
 		}
@@ -316,6 +533,7 @@ func serializeClasses(classes map[string]Class) map[string]SerializableClass {
 
 		result[name] = SerializableClass{
 			Name:           class.Name,
+			Implements:     class.Implements,
 			Fields:         fields,
 			Methods:        class.Methods,
 			Embeds:         class.Embeds,
@@ -344,6 +562,7 @@ func deserializeClasses(classes map[string]SerializableClass) map[string]Class {
 
 		result[name] = Class{
 			Name:           class.Name,
+			Implements:     class.Implements,
 			Fields:         fields,
 			Methods:        class.Methods,
 			Embeds:         class.Embeds,

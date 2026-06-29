@@ -187,6 +187,7 @@ func packCommand(args []string) {
 	outFile := ""
 	target := ""
 	windowed := false
+	iconPath := ""
 
 	start := 0
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -214,6 +215,14 @@ func packCommand(args []string) {
 
 		case "--windowed":
 			windowed = true
+
+		case "--icon":
+			if i+1 >= len(args) {
+				LangError(ErrorRuntime, "expected icon path after --icon")
+			}
+
+			iconPath = args[i+1]
+			i++
 
 		default:
 			LangError(ErrorRuntime, "unknown pack argument: %s", args[i])
@@ -250,7 +259,7 @@ func packCommand(args []string) {
 
 	outFile = addExtensionForTarget(outFile, target)
 
-	packToOutput(entryFile, outFile, target, windowed)
+	packToOutput(entryFile, outFile, target, windowed, iconPath)
 
 	fmt.Println("Packed:", outFile)
 }

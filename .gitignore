@@ -1,6 +1,7 @@
 *.tiny
 !counter.tiny
 !main.tiny
+!child.tiny
 release.md
 release notes
 !new_std_module.tiny
@@ -8,6 +9,7 @@ release notes
 !src/lsp_stubs/*.tiny
 !src/testdata/tiny/errors/*.tiny
 !src/testdata/tiny/imports/*.tiny
+!observer/
 !test.tiny
 *.exe
 tiny_runtime_*

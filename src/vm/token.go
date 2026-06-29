@@ -15,22 +15,24 @@ const (
 	TOKEN_NULL            TokenType = "NULL"
 
 	// Declarations and keywords
-	TOKEN_IMPORT    TokenType = "IMPORT"
-	TOKEN_EXPORT    TokenType = "EXPORT"
-	TOKEN_LET       TokenType = "LET"
-	TOKEN_CONST     TokenType = "CONST"
-	TOKEN_FIELD     TokenType = "FIELD"
-	TOKEN_NATIVE    TokenType = "NATIVE"
-	TOKEN_FN        TokenType = "FN"
-	TOKEN_RETURN    TokenType = "RETURN"
-	TOKEN_THROW     TokenType = "THROW"
-	TOKEN_CLASS     TokenType = "CLASS"
-	TOKEN_PRIVATE   TokenType = "PRIVATE"
-	TOKEN_PUBLIC    TokenType = "PUBLIC"
-	TOKEN_INTERFACE TokenType = "INTERFACE"
-	TOKEN_ENUM      TokenType = "ENUM"
-	TOKEN_IOTA      TokenType = "IOTA"
-	TOKEN_DEFER     TokenType = "DEFER"
+	TOKEN_IMPORT     TokenType = "IMPORT"
+	TOKEN_EXPORT     TokenType = "EXPORT"
+	TOKEN_LET        TokenType = "LET"
+	TOKEN_CONST      TokenType = "CONST"
+	TOKEN_FIELD      TokenType = "FIELD"
+	TOKEN_NATIVE     TokenType = "NATIVE"
+	TOKEN_EXTERNAL   TokenType = "EXTERNAL"
+	TOKEN_FN         TokenType = "FN"
+	TOKEN_RETURN     TokenType = "RETURN"
+	TOKEN_THROW      TokenType = "THROW"
+	TOKEN_CLASS      TokenType = "CLASS"
+	TOKEN_IMPLEMENTS TokenType = "IMPLEMENTS"
+	TOKEN_PRIVATE    TokenType = "PRIVATE"
+	TOKEN_PUBLIC     TokenType = "PUBLIC"
+	TOKEN_INTERFACE  TokenType = "INTERFACE"
+	TOKEN_ENUM       TokenType = "ENUM"
+	TOKEN_IOTA       TokenType = "IOTA"
+	TOKEN_DEFER      TokenType = "DEFER"
 
 	// Control flow
 	TOKEN_IF       TokenType = "IF"
@@ -90,11 +92,11 @@ const (
 	TOKEN_GTE TokenType = ">="
 
 	// Bitwise operators
-	TOKEN_AMP     TokenType = "&"
-	TOKEN_CARET   TokenType = "^"
-	TOKEN_TILDE   TokenType = "~"
-	TOKEN_LSHIFT  TokenType = "<<"
-	TOKEN_RSHIFT  TokenType = ">>"
+	TOKEN_AMP    TokenType = "&"
+	TOKEN_CARET  TokenType = "^"
+	TOKEN_TILDE  TokenType = "~"
+	TOKEN_LSHIFT TokenType = "<<"
+	TOKEN_RSHIFT TokenType = ">>"
 
 	// Other operators
 	TOKEN_QUESTION          TokenType = "?"
@@ -116,10 +118,10 @@ const (
 	TOKEN_COLON    TokenType = ":"
 
 	// Special
-	TOKEN_EMBED     TokenType = "EMBED"
-	TOKEN_EMBED_STR TokenType = "EMBEDSTR"
-	TOKEN_EMBED_BIN TokenType = "EMBEDBIN"
-	TOKEN_EMBED_DIR TokenType = "EMBEDDIR"
+	TOKEN_EMBED        TokenType = "EMBED"
+	TOKEN_EMBED_TEXT   TokenType = "EMBEDTEXT"
+	TOKEN_EMBED_BYTES  TokenType = "EMBEDBYTES"
+	TOKEN_EMBED_FOLDER TokenType = "EMBEDFOLDER"
 )
 
 type Token struct {

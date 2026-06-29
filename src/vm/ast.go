@@ -3,9 +3,9 @@ package vm
 type EmbedType = byte
 
 const (
-	EmbedStr EmbedType = iota
-	EmbedBin
-	EmbedDir
+	EmbedText EmbedType = iota
+	EmbedBytes
+	EmbedFolder
 )
 
 type Stmt interface {
@@ -149,6 +149,7 @@ func (s MatchStmt) stmtNode() {}
 type ClassStmt struct {
 	Name           string
 	TypeParameters []string
+	Implements     []string
 	Methods        []FunctionStmt
 	Embeds         []string
 	Locals         []*Cell
@@ -447,6 +448,27 @@ type NativeFnStmt struct {
 
 func (s NativeFnStmt) stmtNode() {}
 
+type ExternalFnStmt struct {
+	Name       string
+	Params     []Param
+	ReturnType TypeHint
+	File       string
+	Line       int
+	Column     int
+}
+
+func (s ExternalFnStmt) stmtNode() {}
+
+type ExternalGlobalStmt struct {
+	Name   string
+	Type   TypeHint
+	File   string
+	Line   int
+	Column int
+}
+
+func (s ExternalGlobalStmt) stmtNode() {}
+
 type TryCatchStmt struct {
 	TryBody     []Stmt
 	ErrorName   string
@@ -575,28 +597,28 @@ type DestructurePattern interface {
 }
 
 type ObjectDestructureField struct {
-	Key       string
-	Alias     string
+	Key            string
+	Alias          string
 	AliasIsRenamed bool
-	Default   Expr
-	HasDefault bool
-	Pattern   DestructurePattern
-	HasNested bool
+	Default        Expr
+	HasDefault     bool
+	Pattern        DestructurePattern
+	HasNested      bool
 }
 
 type ObjectDestructurePattern struct {
-	Fields []ObjectDestructureField
-	Spread string
+	Fields    []ObjectDestructureField
+	Spread    string
 	HasSpread bool
 }
 
 func (o ObjectDestructurePattern) destructureNode() {}
 
 type ArrayDestructureElement struct {
-	Name    string
-	Pattern DestructurePattern
+	Name      string
+	Pattern   DestructurePattern
 	HasNested bool
-	IsSpread bool
+	IsSpread  bool
 }
 
 type ArrayDestructurePattern struct {
@@ -606,12 +628,12 @@ type ArrayDestructurePattern struct {
 func (a ArrayDestructurePattern) destructureNode() {}
 
 type DestructureStmt struct {
-	Target    DestructurePattern
-	Value     Expr
-	Constant  bool
-	File      string
-	Line      int
-	Column    int
+	Target   DestructurePattern
+	Value    Expr
+	Constant bool
+	File     string
+	Line     int
+	Column   int
 }
 
 func (s DestructureStmt) stmtNode() {}

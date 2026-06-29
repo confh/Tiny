@@ -279,24 +279,31 @@ func (vm *VM) invalidateJitArrayMirror(arr *ArrayValue) {
 		return
 	}
 	if vm.jitArrayMirrorCache != nil {
-		delete(vm.jitArrayMirrorCache, arr)
+		if _, cached := vm.jitArrayMirrorCache[arr]; cached {
+			delete(vm.jitArrayMirrorCache, arr)
+			vm.clearJitMemoCaches()
+		}
 	}
-	vm.clearJitMemoCaches()
 }
 
 func (vm *VM) invalidateJitObjectMirror(obj ObjectValue) {
 	if vm == nil || obj == nil {
 		return
 	}
+	hasCache := false
 	if vm.jitObjectMirrorCache != nil {
-		delete(vm.jitObjectMirrorCache, jitObjectIdentity(obj))
+		identity := jitObjectIdentity(obj)
+		if _, cached := vm.jitObjectMirrorCache[identity]; cached {
+			delete(vm.jitObjectMirrorCache, identity)
+			hasCache = true
+		}
 	}
-	// Object fields may also be packed into array-column mirrors. If any object
-	// mutates, drop array mirrors too so a later JIT call rebuilds fresh columns.
-	if vm.jitArrayMirrorCache != nil {
-		vm.jitArrayMirrorCache = map[*ArrayValue]jitArrayMirror{}
+	if hasCache {
+		if vm.jitArrayMirrorCache != nil && len(vm.jitArrayMirrorCache) > 0 {
+			vm.jitArrayMirrorCache = map[*ArrayValue]jitArrayMirror{}
+		}
+		vm.clearJitMemoCaches()
 	}
-	vm.clearJitMemoCaches()
 }
 
 func jitObjectIdentity(obj ObjectValue) uintptr {

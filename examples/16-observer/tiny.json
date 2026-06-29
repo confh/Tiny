@@ -1,0 +1,19 @@
+{
+  "name": "16-observer",
+  "version": "0.1.0",
+  "entry": "src/main.tiny",
+  "outDir": "dist",
+  "target": "windows-amd64",
+  "scripts": {
+    "build": "tiny build",
+    "dist": "tiny dist",
+    "pack": "tiny pack",
+    "start": "tiny"
+  },
+  "plugins": [],
+  "compilerOptions": {
+    "bytecodeCache": false,
+    "stackTraces": true,
+    "strict": false
+  }
+}

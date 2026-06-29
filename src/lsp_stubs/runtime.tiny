@@ -5,6 +5,75 @@ export interface MemoryStats {
     numGC: number
 }
 
+export interface VMStdlibOptions {
+    array: bool,
+    math: bool,
+    strings: bool,
+    json: bool,
+    fs: bool,
+    app: bool,
+    buffer: bool,
+    regex: bool,
+    io: bool,
+    process: bool,
+    time: bool,
+    error: bool,
+    http: bool,
+    os: bool,
+    runtime: bool,
+    net: bool,
+    path: bool,
+    object: bool,
+    observer: bool,
+    desktop: bool,
+    sync: bool,
+    tests: bool,
+    ui: bool,
+    websocket: bool,
+    tray: bool,
+    validate: bool,
+    url: bool
+}
+
+export interface VMOptions {
+    isolated: bool,
+    allowedStdlib: VMStdlibOptions,
+    cliArgs: array,
+    globals: object,
+    disableJIT: bool,
+    runMainOnLoad: bool
+}
+
+// Represents an isolated in-process Tiny VM.
+export class VM {
+    // Loads Tiny bytecode into this VM.
+    fn loadBytecode(bytes: buffer | string): VM { }
+
+    // Compiles and loads Tiny source code into this VM.
+    fn loadSource(source: string, file?: string): VM { }
+
+    // Runs the loaded bytecode top-level program.
+    fn run(): null { }
+
+    // Calls a function in the loaded VM.
+    fn call(name: string, args?: array): any { }
+
+    // Clears transient execution state so the VM can be reused.
+    fn reset(): VM { }
+
+    // Injects or replaces a global value in this VM.
+    fn setGlobal(name: string, value: any): VM { }
+
+    // Exposes a host Tiny function as a callable global inside this VM.
+    fn exposeFunction(name: string, func: function): VM { }
+
+    // Returns information about this VM.
+    fn info(): object { }
+}
+
+// Creates a new in-process Tiny VM.
+export fn newVM(options?: VMOptions): VM
+
 // Locks the current OS thread to the active goroutine/execution state.
 export fn lockThread(): null
 
@@ -25,3 +94,9 @@ export fn gc(): null
 
 // Returns whether or not the running app was packed by `tiny pack`
 export fn isPacked(): bool
+
+// Compiles a string of Tiny source code to a bytecode buffer.
+export fn compileSource(source: string, file?: string): buffer
+
+// Compiles a Tiny file path to a bytecode buffer, resolving its imports.
+export fn compileFile(path: string): buffer

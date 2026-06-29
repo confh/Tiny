@@ -151,6 +151,19 @@ func (p *VMPool) Put(vm *VM) {
 	p.cond.Signal()
 }
 
+func (p *VMPool) Snapshot() ObjectValue {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return ObjectValue{
+		"active":    NewInt(p.active),
+		"idle":      NewInt(len(p.idle)),
+		"limit":     NewInt(p.currentLimitLocked()),
+		"maxActive": NewInt(p.maxActive),
+		"maxIdle":   NewInt(p.maxIdle),
+	}
+}
+
 var serverMethods map[string]NativeModuleFunc[*NativeServerValue]
 
 func init() {
@@ -306,15 +319,19 @@ func serverStart(vm *VM, server *NativeServerValue, args []TinyValue) {
 				Value: NewNative(h),
 			})
 		case FunctionValue:
-			bodyReader := r.Body
-			if server.MaxBodySize > 0 {
-				bodyReader = http.MaxBytesReader(w, r.Body, server.MaxBodySize)
-			}
+			var bodyBytes []byte
+			if r.ContentLength > 0 || r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch {
+				bodyReader := r.Body
+				if server.MaxBodySize > 0 {
+					bodyReader = http.MaxBytesReader(w, r.Body, server.MaxBodySize)
+				}
 
-			bodyBytes, err := io.ReadAll(bodyReader)
-			if err != nil {
-				http.Error(w, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
-				return
+				var err error
+				bodyBytes, err = io.ReadAll(bodyReader)
+				if err != nil {
+					http.Error(w, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
+					return
+				}
 			}
 
 			reqObj := NewNative(requestObjectFromHTTP(r, string(bodyBytes), params))
@@ -427,17 +444,22 @@ func requestObjectFromHTTP(r *http.Request, body string, params ObjectValue) Obj
 		"remoteAddr":    NewNative(r.RemoteAddr),
 	}
 
-	queryMap := make(ObjectValue)
-	for key, values := range r.URL.Query() {
-		if len(values) > 0 {
-			queryMap[key] = NewNative(values[0])
-		} else {
-			queryMap[key] = NewNative("")
+	var queryMap ObjectValue
+	if r.URL.RawQuery != "" {
+		queryMap = make(ObjectValue, 4)
+		for key, values := range r.URL.Query() {
+			if len(values) > 0 {
+				queryMap[key] = NewNative(values[0])
+			} else {
+				queryMap[key] = NewNative("")
+			}
 		}
+	} else {
+		queryMap = make(ObjectValue)
 	}
 	obj["query"] = NewNative(queryMap)
 
-	headers := make(ObjectValue)
+	headers := make(ObjectValue, len(r.Header))
 	for k, v := range r.Header {
 		if len(v) > 0 {
 			headers[k] = NewNative(v[0])

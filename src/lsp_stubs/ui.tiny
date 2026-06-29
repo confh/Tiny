@@ -12,7 +12,33 @@ class WebView {
   fn run(): null
   // Binds a JavaScript callback function available in the WebView context.
   fn callback(name: string, func: function): null
+  // Configures the window to be frameless (without title bar or borders).
+  fn setFrameless(frameless: bool): null
+  // Hides the WebView window.
+  fn hide(): null
+  // Shows the WebView window.
+  fn show(): null
+  // Starts a window drag operation. Typically used with frameless windows when a mouse drag is detected on a custom title bar.
+  fn startDrag(): null
+  // Starts a window resize operation from the specified edge or corner. Supported edge values are "left", "right", "top", "top-left", "top-right", "bottom", "bottom-left", and "bottom-right".
+  fn startResize(edge: string): null
+  // Minimizes the WebView window to the taskbar.
+  fn minimize(): null
+  // Maximizes the WebView window to fill the screen.
+  fn maximize(): null
+  // Restores the WebView window to its original size and position after being minimized or maximized.
+  fn restore(): null
+  // Toggles the WebView window between maximized and restored states.
+  fn toggleMaximize(): null
+  // Closes the WebView window.
+  fn close(): null
+}
+
+interface WebViewOptions {
+    debug?: bool
+    hidden?: bool
+    frameless?: bool
 }
 
 // Creates a new WebView instance, optionally with debugging enabled.
-export fn new(debug?: bool): WebView
+export fn new(options?: bool | WebViewOptions): WebView

@@ -500,6 +500,73 @@ func TestLSPHoverNestedStdFunctionCall(t *testing.T) {
 	}
 }
 
+func TestLSPHoverObjectLiteralFieldsFromInterfaceArgument(t *testing.T) {
+	lines := []string{
+		`import std "runtime";`,
+		``,
+		`const bytecodeVM = runtime.newVM({`,
+		`    isolated: true,`,
+		`    allowedStdlib: {`,
+		`        io: true`,
+		`    },`,
+		`    disableJIT: true`,
+		`});`,
+	}
+	text := strings.Join(lines, "\n")
+
+	cases := []struct {
+		line     int
+		word     string
+		contains []string
+	}{
+		{line: 3, word: "isolated", contains: []string{"VMOptions.isolated", "bool"}},
+		{line: 4, word: "allowedStdlib", contains: []string{"VMOptions.allowedStdlib", "VMStdlibOptions"}},
+		{line: 5, word: "io", contains: []string{"VMStdlibOptions.io", "bool"}},
+		{line: 7, word: "disableJIT", contains: []string{"VMOptions.disableJIT", "bool"}},
+	}
+
+	for _, tc := range cases {
+		result := getHover("file:///runtime_options_hover.tiny", text, Position{
+			Line:      tc.line,
+			Character: strings.Index(lines[tc.line], tc.word) + len(tc.word)/2,
+		})
+		hover, ok := result.(HoverResult)
+		if !ok {
+			t.Fatalf("expected hover for %s, got %#v", tc.word, result)
+		}
+		for _, want := range tc.contains {
+			if !strings.Contains(hover.Contents.Value, want) {
+				t.Fatalf("expected hover for %s to contain %q, got %q", tc.word, want, hover.Contents.Value)
+			}
+		}
+	}
+}
+
+func TestLSPHoverObjectLiteralFieldsFromInterfaceVariable(t *testing.T) {
+	lines := []string{
+		`interface Options {`,
+		`    enabled: bool,`,
+		`}`,
+		``,
+		`const options: Options = {`,
+		`    enabled: true`,
+		`};`,
+	}
+	text := strings.Join(lines, "\n")
+
+	result := getHover("file:///typed_object_hover.tiny", text, Position{
+		Line:      5,
+		Character: strings.Index(lines[5], "enabled") + len("enabled")/2,
+	})
+	hover, ok := result.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover for interface-typed object field, got %#v", result)
+	}
+	if !strings.Contains(hover.Contents.Value, "Options.enabled") || !strings.Contains(hover.Contents.Value, "bool") {
+		t.Fatalf("unexpected hover contents: %q", hover.Contents.Value)
+	}
+}
+
 func TestLSPHoverPrefersInterfaceFieldDeclarationOverFunctionNameCollision(t *testing.T) {
 	line := `    status: number,`
 	text := strings.Join([]string{
@@ -860,6 +927,114 @@ func TestLSPOrganizeImportsActionRemovesDuplicatesAndUnused(t *testing.T) {
 		}
 	}
 	t.Fatalf("expected Organize imports source action, got %#v", actions)
+}
+
+func TestLSPCodeActionConvertsLargeIfElseChainToMatch(t *testing.T) {
+	text := strings.Join([]string{
+		`fn describe(status: string) {`,
+		`    if status == "new" {`,
+		`        return "New";`,
+		`    } else if status == "open" {`,
+		`        return "Open";`,
+		`    } else if status == "done" {`,
+		`        return "Done";`,
+		`    } else if status == "failed" {`,
+		`        return "Failed";`,
+		`    } else {`,
+		`        return "Unknown";`,
+		`    }`,
+		`}`,
+	}, "\n")
+
+	actions := getCodeActions("file:///match_action.tiny", text, CodeActionParams{
+		TextDocument: TextDocumentIdentifier{URI: "file:///match_action.tiny"},
+		Range:        LSPRange{Start: Position{Line: 1, Character: 8}, End: Position{Line: 1, Character: 8}},
+	})
+
+	for _, action := range actions {
+		if action.Title != "Convert if/else chain to match" {
+			continue
+		}
+		if action.Kind != "refactor.rewrite" {
+			t.Fatalf("action kind = %q, want refactor.rewrite", action.Kind)
+		}
+		edits := action.Edit.Changes["file:///match_action.tiny"]
+		if len(edits) != 1 {
+			t.Fatalf("expected one edit, got %#v", edits)
+		}
+		want := strings.Join([]string{
+			`    match status {`,
+			`        "new" {`,
+			`            return "New";`,
+			`        }`,
+			`        "open" {`,
+			`            return "Open";`,
+			`        }`,
+			`        "done" {`,
+			`            return "Done";`,
+			`        }`,
+			`        "failed" {`,
+			`            return "Failed";`,
+			`        }`,
+			`        _ {`,
+			`            return "Unknown";`,
+			`        }`,
+			`    }`,
+		}, "\n")
+		if edits[0].NewText != want {
+			t.Fatalf("unexpected match replacement:\n%s", edits[0].NewText)
+		}
+		return
+	}
+	t.Fatalf("expected Convert if/else chain to match action, got %#v", actions)
+}
+
+func TestLSPCodeActionDoesNotConvertSmallIfElseChainToMatch(t *testing.T) {
+	text := strings.Join([]string{
+		`if status == "new" {`,
+		`    return "New";`,
+		`} else {`,
+		`    return "Other";`,
+		`}`,
+	}, "\n")
+
+	actions := getCodeActions("file:///small_match_action.tiny", text, CodeActionParams{
+		TextDocument: TextDocumentIdentifier{URI: "file:///small_match_action.tiny"},
+		Range:        LSPRange{Start: Position{Line: 0, Character: 1}, End: Position{Line: 0, Character: 1}},
+	})
+
+	for _, action := range actions {
+		if action.Title == "Convert if/else chain to match" {
+			t.Fatalf("did not expect match conversion for small if/else, got %#v", actions)
+		}
+	}
+}
+
+func TestLSPCodeActionDoesNotConvertMixedIfElseChainToMatch(t *testing.T) {
+	text := strings.Join([]string{
+		`if status == "new" {`,
+		`    return "New";`,
+		`} else if kind == "open" {`,
+		`    return "Open";`,
+		`} else if status == "done" {`,
+		`    return "Done";`,
+		`} else if status == "failed" {`,
+		`    return "Failed";`,
+		`} else {`,
+		`    return "Unknown";`,
+		`}`,
+	}, "\n")
+
+	actions := getCodeActions("file:///mixed_match_action.tiny", text, CodeActionParams{
+		TextDocument: TextDocumentIdentifier{URI: "file:///mixed_match_action.tiny"},
+		Range:        LSPRange{Start: Position{Line: 0, Character: 1}, End: Position{Line: 0, Character: 1}},
+	})
+
+	for _, action := range actions {
+		if action.Title == "Convert if/else chain to match" {
+			t.Fatalf("did not expect match conversion for mixed conditions, got %#v", actions)
+		}
+	}
 }
 
 func TestLSPThisCompletionIncludesMethodsDeclaredAfterCursor(t *testing.T) {
@@ -1356,6 +1531,38 @@ func TestLSPImportedClassDiagnosticsRefreshWithOpenDocumentText(t *testing.T) {
 	}
 }
 
+func TestLSPImportedExternalGlobalExport(t *testing.T) {
+	dir := t.TempDir()
+	externalPath := filepath.Join(dir, "external_import_test.tiny")
+	mainPath := filepath.Join(dir, "main.tiny")
+	externalURI := pathToFileURI(externalPath)
+	mainURI := pathToFileURI(mainPath)
+
+	lspDocs[externalURI] = "export external const ss: string\n"
+	defer delete(lspDocs, externalURI)
+
+	text := strings.Join([]string{
+		`import std "io";`,
+		`import "external_import_test.tiny" as test`,
+		``,
+		`io.println(test.ss)`,
+	}, "\n")
+
+	diagnostics := semanticDiagnostics(mainURI, text)
+	if diagnosticsContain(diagnostics, "undefined export: test.ss") {
+		t.Fatalf("expected imported external global export to resolve, got %#v", diagnostics)
+	}
+
+	exports := loadTinyFileExports(externalPath, map[string]bool{})
+	sym, ok := exports["ss"]
+	if !ok {
+		t.Fatalf("expected ss export, got %#v", exports)
+	}
+	if sym.Type != "string" {
+		t.Fatalf("expected ss type string, got %q", sym.Type)
+	}
+}
+
 func TestLSPNamespaceCompletionIncludesExportedEnumsAndClasses(t *testing.T) {
 	dir := t.TempDir()
 	todoPath := filepath.Join(dir, "todo.tiny")
@@ -1827,6 +2034,66 @@ func TestLSPLibraryAutoImportCompletion(t *testing.T) {
 	}
 }
 
+func TestLSPFullLibraryImportPathDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	withWorkingDir(t, dir)
+	t.Setenv("TINY_HOME", filepath.Join(dir, "tiny-home"))
+
+	projRoot := filepath.Join(dir, "project")
+	mainPath := filepath.Join(projRoot, "src", "main.tiny")
+	if err := os.MkdirAll(filepath.Dir(mainPath), 0755); err != nil {
+		t.Fatalf("create project src: %v", err)
+	}
+	writeConfigForTest(t, filepath.Join(projRoot, "tiny.json"), TinyProjectConfig{})
+
+	text := `import lib "confh/TinyColors" as Library`
+	diagnostics := importDiagnostics(pathToFileURI(mainPath), text)
+	if len(diagnostics) != 1 {
+		t.Fatalf("expected one import diagnostic, got %#v", diagnostics)
+	}
+	got, _ := diagnostics[0]["message"].(string)
+	want := "library is not installed: confh/TinyColors"
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+
+	for _, partial := range []string{
+		`import lib "c`,
+		`import lib "co`,
+		`import lib "confh`,
+		`import lib "confh/`,
+	} {
+		if diagnostics := importDiagnostics(pathToFileURI(mainPath), partial); len(diagnostics) != 0 {
+			t.Fatalf("expected no diagnostics for incomplete import %q, got %#v", partial, diagnostics)
+		}
+	}
+}
+
+func TestLSPImportDiagnosticsIgnoreImportsInsideStrings(t *testing.T) {
+	text := strings.Join([]string{
+		`import std "runtime" as runtime`,
+		``,
+		`const vm = runtime.newVM({`,
+		`    isolated: true,`,
+		`    allowedStdlib: { io: true },`,
+		`    runMainOnLoad: true`,
+		`})`,
+		``,
+		"vm.loadSource(`import \"io\"",
+		"",
+		"`)",
+	},
+		"\n",
+	)
+
+	diagnostics := importDiagnostics("file:///runtime_source_string.tiny", text)
+	for _, diagnostic := range diagnostics {
+		if message, _ := diagnostic["message"].(string); strings.Contains(message, "import file not found: io") {
+			t.Fatalf("expected import inside string to be ignored, got %#v", diagnostics)
+		}
+	}
+}
+
 func TestLSPReferencesAndRename(t *testing.T) {
 	text := strings.Join([]string{
 		"const total = 1;",
@@ -2213,6 +2480,36 @@ func TestLSPDocumentSymbolsSkipAnonymousHTTPCallbacks(t *testing.T) {
 	assertDocumentSymbolsHaveNames(t, symbols)
 	if !documentSymbolLabelsContain(symbols, "server") {
 		t.Fatalf("expected document symbols to include server variable, got %#v", documentSymbolLabels(symbols))
+	}
+}
+
+func TestLSPDocumentSymbolFromLineUsesLexerSpacing(t *testing.T) {
+	cases := []struct {
+		line   string
+		name   string
+		detail string
+		kind   int
+	}{
+		{line: "\t export   fn   enum(values: array:string): array:string {", name: "enum", detail: "export function", kind: 12},
+		{line: "  export   external   fn   hostCall(input: string): number", name: "hostCall", detail: "export external function", kind: 12},
+		{line: "export\texternal\tconst\thostValue : string", name: "hostValue", detail: "export external global", kind: 13},
+		{line: "  embedtext   \"data.txt\"   const   embeddedText", name: "embeddedText", detail: "embedtext", kind: 13},
+	}
+
+	for i, tc := range cases {
+		sym, ok := documentSymbolFromLine(tc.line, strings.TrimSpace(tc.line), i)
+		if !ok {
+			t.Fatalf("expected symbol for %q", tc.line)
+		}
+		if sym.Name != tc.name || sym.Detail != tc.detail || sym.Kind != tc.kind {
+			t.Fatalf("symbol for %q = %#v, want name=%q detail=%q kind=%d", tc.line, sym, tc.name, tc.detail, tc.kind)
+		}
+	}
+}
+
+func TestLSPDocumentSymbolFromLineSkipsAnonymousFunction(t *testing.T) {
+	if sym, ok := documentSymbolFromLine("server.get(\"/\", fn(req) {", "server.get(\"/\", fn(req) {", 0); ok {
+		t.Fatalf("expected anonymous callback to be skipped, got %#v", sym)
 	}
 }
 
@@ -4797,4 +5094,323 @@ func TestLSPNestedCallbackParamTypeResolution(t *testing.T) {
 
 	callee := extractCalleeBefore(text, open)
 	t.Logf("callee: %q", callee)
+}
+
+func TestLSPInterfaceImplements(t *testing.T) {
+	// 1. Success case: MyClass implements Reader, defines 'read' method, passes to readAll
+	text1 := strings.Join([]string{
+		`export interface Reader {`,
+		`    read: function(number)`,
+		`}`,
+		``,
+		`export class MyClass implements Reader {`,
+		`    fn read(n: number) {}`,
+		`}`,
+		``,
+		`export fn readAll(r: Reader) {}`,
+		``,
+		`export fn test() {`,
+		`    readAll(new MyClass());`,
+		`}`,
+	}, "\n")
+
+	diagnostics1 := semanticDiagnostics("file:///test1.tiny", text1)
+	if len(diagnostics1) > 0 {
+		t.Fatalf("expected no diagnostics for implements match, got %#v", diagnostics1)
+	}
+
+	// 2. Failure case: MyClass implements Reader but lacks 'read' method
+	text2 := strings.Join([]string{
+		`export interface Reader {`,
+		`    read: function(number)`,
+		`}`,
+		``,
+		`export class MyClass implements Reader {`,
+		`    fn other() {}`,
+		`}`,
+	}, "\n")
+
+	diagnostics2 := semanticDiagnostics("file:///test2.tiny", text2)
+	if !diagnosticsContain(diagnostics2, "class 'MyClass' is missing property 'read' from interface 'Reader'") {
+		t.Fatalf("expected diagnostic for missing interface property, got %#v", diagnostics2)
+	}
+
+	// 3. Object literal case: matches interface type because got is "object"
+	text3 := strings.Join([]string{
+		`export interface Reader {`,
+		`    read: function(number)`,
+		`}`,
+		``,
+		`export fn readAll(r: Reader) {}`,
+		``,
+		`export fn test() {`,
+		`    readAll({`,
+		`        read: fn(n) {}`,
+		`    });`,
+		`}`,
+	}, "\n")
+
+	diagnostics3 := semanticDiagnostics("file:///test3.tiny", text3)
+	if len(diagnostics3) > 0 {
+		t.Fatalf("expected no diagnostics for object literal match, got %#v", diagnostics3)
+	}
+}
+
+func TestLSPClassImplementsAutocomplete(t *testing.T) {
+	text := strings.Join([]string{
+		`export interface Reader {`,
+		`    read: function(number)`,
+		`}`,
+		``,
+		`export class MyClass implements Reader {`,
+		`    `,
+		`}`,
+	}, "\n")
+
+	completions := getCompletions("file:///test_implements_ac.tiny", text, Position{
+		Line:      5,
+		Character: 4,
+	})
+
+	if len(completions) == 0 {
+		t.Fatalf("expected autocomplete items inside MyClass body, got none")
+	}
+
+	if !completionLabelsContain(completions, "fn") {
+		t.Fatalf("expected autocomplete items to contain 'fn', got %#v", completionLabels(completions))
+	}
+}
+
+func TestLSPNestedFunctionReturnDiagnostics(t *testing.T) {
+	text := strings.Join([]string{
+		`export interface Reader {`,
+		`    read: function(number)`,
+		`}`,
+		``,
+		`export fn test(): Reader {`,
+		`    return {`,
+		`        read: fn(i) {`,
+		`            return i + 1`,
+		`        },`,
+		`        ass: "sdfsdf"`,
+		`    }`,
+		`}`,
+	}, "\n")
+
+	diagnostics := semanticDiagnostics("file:///test_nested_return.tiny", text)
+	if len(diagnostics) > 0 {
+		t.Fatalf("expected no diagnostics for nested anonymous function return, got %#v", diagnostics)
+	}
+}
+
+func TestLSPObjectLiteralStructuralDiagnostics(t *testing.T) {
+	// 1. Missing field
+	text1 := strings.Join([]string{
+		`export interface Reader {`,
+		`    read: function(number),`,
+		`    ass: string`,
+		`}`,
+		`export fn test(): Reader {`,
+		`    return {`,
+		`        read: fn(i) {`,
+		`            return i + 1`,
+		`        }`,
+		`    }`,
+		`}`,
+	}, "\n")
+
+	diagnostics1 := semanticDiagnostics("file:///test_ol_missing.tiny", text1)
+	if !diagnosticsContain(diagnostics1, "object literal is missing property 'ass' from 'Reader'") {
+		t.Fatalf("expected diagnostic for missing property, got %#v", diagnostics1)
+	}
+
+	// 2. Type mismatch
+	text2 := strings.Join([]string{
+		`export interface Reader {`,
+		`    read: function(number),`,
+		`    ass: string`,
+		`}`,
+		`export fn test(): Reader {`,
+		`    return {`,
+		`        read: fn(i) {`,
+		`            return i + 1`,
+		`        },`,
+		`        ass: 123`,
+		`    }`,
+		`}`,
+	}, "\n")
+
+	diagnostics2 := semanticDiagnostics("file:///test_ol_mismatch.tiny", text2)
+	if !diagnosticsContain(diagnostics2, "type mismatch for property 'ass': expected 'string', got 'number'") {
+		t.Fatalf("expected diagnostic for type mismatch, got %#v", diagnostics2)
+	}
+}
+
+func TestLSPInlayHintsStripNamespaces(t *testing.T) {
+	text := strings.Join([]string{
+		`namespace io {`,
+		`    export interface Reader {`,
+		`        read: function(number)`,
+		`    }`,
+		`    export fn getReader(): Reader {`,
+		`        return {`,
+		`            read: fn(i) {}`,
+		`        }`,
+		`    }`,
+		`}`,
+		`const r = io.getReader();`,
+	}, "\n")
+
+	hints := getInlayHints("file:///test_inlay_ns.tiny", text, LSPRange{
+		Start: Position{Line: 10, Character: 0},
+		End:   Position{Line: 10, Character: len(`const r = io.getReader();`)},
+	})
+
+	labels := []string{}
+	for _, hint := range hints {
+		labels = append(labels, hint.Label)
+	}
+
+	found := false
+	for _, label := range labels {
+		if label == ": Reader" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected inlay hint for variable r to be ': Reader', got %#v", labels)
+	}
+}
+
+func TestLSPObjectLiteralCallbackParameterTypeInference(t *testing.T) {
+	text := strings.Join([]string{
+		`export interface Reader {`,
+		`    read: function(number)`,
+		`}`,
+		`export fn test(): Reader {`,
+		`    return {`,
+		`        read: fn(i) {`,
+		`            return i + 1`,
+		`        }`,
+		`    }`,
+		`}`,
+	}, "\n")
+
+	pos := Position{Line: 6, Character: 24}
+	innerScope := scopeAtPosition("file:///test_cb_inference.tiny", text, pos)
+	sym, ok := innerScope.Resolve("i")
+	if !ok {
+		t.Fatalf("expected variable i to be defined in scope")
+	}
+	if sym.Type != "number" {
+		t.Fatalf("expected variable i to have type 'number', got %q", sym.Type)
+	}
+}
+
+func TestLSPObjectLiteralAutocompleteInReturn(t *testing.T) {
+	text := strings.Join([]string{
+		`export interface Reader {`,
+		`    read: function(number),`,
+		`    ass: string`,
+		`}`,
+		`export fn test(): Reader {`,
+		`    return {`,
+		`        `,
+		`    }`,
+		`}`,
+	}, "\n")
+
+	pos := Position{Line: 6, Character: 8}
+
+	completions := getCompletions("file:///test_autocomplete_return.tiny", text, pos)
+	labels := completionLabels(completions)
+	expected := []string{"read: ", "ass: "}
+	for _, exp := range expected {
+		if !completionLabelsContain(completions, exp) {
+			t.Fatalf("expected completions to contain %q, got %#v", exp, labels)
+		}
+	}
+}
+
+func TestLSPObjectLiteralFieldHoverInReturn(t *testing.T) {
+	line := `        read: fn(i) {`
+	text := strings.Join([]string{
+		`export interface Reader {`,
+		`    read: function(number),`,
+		`    ass: string`,
+		`}`,
+		`export fn test(): Reader {`,
+		`    return {`,
+		line,
+		`            return i + 1`,
+		`        },`,
+		`        ass: "ok"`,
+		`    }`,
+		`}`,
+	}, "\n")
+
+	result := getHover("file:///test_object_field_hover_return.tiny", text, Position{
+		Line:      6,
+		Character: strings.Index(line, "read") + len("re"),
+	})
+	hover, ok := result.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover for returned object field, got %#v", result)
+	}
+	if !strings.Contains(hover.Contents.Value, "Reader.read") || !strings.Contains(hover.Contents.Value, "function(number)") {
+		t.Fatalf("unexpected hover content: %q", hover.Contents.Value)
+	}
+}
+
+func TestLSPSemanticTokensFilterStrings(t *testing.T) {
+	text := strings.Join([]string{
+		"",
+		"	const source = \"",
+		"	import std \\\"io\\\" as io",
+		"	fn greet(name) {",
+		"		io.println('Hello, ' + name);",
+		"	}",
+		"	\";",
+		"",
+		"	const interpolated = `hello ${name + 42}!`;",
+	}, "\n")
+
+	tokens := collectSemanticTokens("file:///test.tiny", text)
+
+	foundName := false
+	found42 := false
+
+	for _, tok := range tokens {
+		// Tokens inside the multiline double-quoted string (lines 2 to 5) should not be reported
+		if tok.Line >= 2 && tok.Line <= 5 {
+			t.Errorf("Unexpected semantic token inside string at line %d (Start: %d, Type: %s)", tok.Line, tok.Start, tok.Type)
+		}
+
+		// Verify that "name" and "42" inside the template interpolation (line 8) ARE collected
+		if tok.Line == 8 {
+			if tok.Type == "variable" && strings.Contains(text[lineOffsetForTest(text, 8)+tok.Start:lineOffsetForTest(text, 8)+tok.End], "name") {
+				foundName = true
+			}
+			if tok.Type == "number" && strings.Contains(text[lineOffsetForTest(text, 8)+tok.Start:lineOffsetForTest(text, 8)+tok.End], "42") {
+				found42 = true
+			}
+		}
+	}
+
+	if !foundName {
+		t.Errorf("expected to find variable 'name' inside interpolation, but it was not found. Tokens: %#v", tokens)
+	}
+	if !found42 {
+		t.Errorf("expected to find number '42' inside interpolation, but it was not found. Tokens: %#v", tokens)
+	}
+}
+
+func lineOffsetForTest(text string, lineIndex int) int {
+	lines := strings.Split(text, "\n")
+	offset := 0
+	for i := 0; i < lineIndex; i++ {
+		offset += len(lines[i]) + 1
+	}
+	return offset
 }
