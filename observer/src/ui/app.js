@@ -25,7 +25,7 @@ function sendObserverWindowAction(action) {
   if (typeof window.observerWindowAction === "function") {
     try {
       const result = window.observerWindowAction(action);
-      if (result && typeof result.catch === "function") result.catch(() => {});
+      if (result && typeof result.catch === "function") result.catch(() => { });
     } catch (_) {
     }
   }

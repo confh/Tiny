@@ -158,6 +158,10 @@ func TestBytecodeObfuscation(t *testing.T) {
 		{Op: vm.OP_CALL_DIRECT, Value: vm.DirectCallInfo{ID: 1, Name: "myFunction", ArgCount: 1}},
 		{Op: vm.OP_CONST, Value: vm.FunctionValue{ID: 1, Name: "myFunction"}},
 		{Op: vm.OP_CLOSURE, Value: vm.ClosureInfo{Name: "myFunction"}},
+		{Op: vm.OP_CALL_DIRECT_SUB_CONST, Value: vm.CallDirectSubConstInfo{Slot: 0, SubValue: 1, FnID: 1, FnName: "myFunction", ArgCount: 0}},
+		{Op: vm.OP_CONST, Value: vm.NamespaceValue{Name: "Testing", Members: map[string]vm.TinyValue{
+			"ass": vm.NewNative(vm.NamespaceMemberRef{GlobalName: "myGlobal"}),
+		}}},
 		{Op: vm.OP_HALT},
 	}
 
@@ -246,6 +250,27 @@ func TestBytecodeObfuscation(t *testing.T) {
 	}
 	if _, exists := loadedFunctions[closureValue.Name]; !exists {
 		t.Fatalf("closure points at missing function %q; functions=%v", closureValue.Name, loadedFunctions)
+	}
+
+	callSubConst, ok := loadedMain[3].Value.(vm.CallDirectSubConstInfo)
+	if !ok {
+		t.Fatalf("expected CallDirectSubConstInfo, got %T", loadedMain[3].Value)
+	}
+	if callSubConst.FnName == "myFunction" {
+		t.Fatal("callDirectSubConst FnName was not obfuscated")
+	}
+
+	namespaceVal, ok := loadedMain[4].Value.(vm.NamespaceValue)
+	if !ok {
+		t.Fatalf("expected NamespaceValue, got %T", loadedMain[4].Value)
+	}
+	memberTinyVal := namespaceVal.Members["ass"]
+	memberRef, ok := memberTinyVal.Value.(vm.NamespaceMemberRef)
+	if !ok {
+		t.Fatalf("expected NamespaceMemberRef, got %T", memberTinyVal.Value)
+	}
+	if memberRef.GlobalName == "myGlobal" {
+		t.Fatal("namespace member ref globalName was not obfuscated")
 	}
 
 	// Check class name was obfuscated

@@ -390,41 +390,126 @@ func obfuscateBytecodeFile(file *BytecodeFile) {
 		return value
 	}
 
+	var renameEncodedValue func(value EncodedValue) EncodedValue
+	renameEncodedValue = func(value EncodedValue) EncodedValue {
+		value = renameFunctionValue(value)
+
+		switch value.Type {
+		case "directCall":
+			if callInfo, ok := value.Data.(DirectCallInfo); ok {
+				if newName, exists := renameMap[callInfo.Name]; exists {
+					callInfo.Name = newName
+					value.Data = callInfo
+				}
+			} else if callInfoMap, ok := value.Data.(map[string]any); ok {
+				if name, ok := callInfoMap["name"].(string); ok {
+					if newName, exists := renameMap[name]; exists {
+						callInfoMap["name"] = newName
+					}
+				}
+			}
+		case "call":
+			if callInfo, ok := value.Data.(CallInfo); ok {
+				if newName, exists := renameMap[callInfo.Name]; exists {
+					callInfo.Name = newName
+					value.Data = callInfo
+				}
+			} else if callInfoMap, ok := value.Data.(map[string]any); ok {
+				if name, ok := callInfoMap["Name"].(string); ok {
+					if newName, exists := renameMap[name]; exists {
+						callInfoMap["Name"] = newName
+					}
+				}
+			}
+		case "callDirectSubConst":
+			if callInfo, ok := value.Data.(CallDirectSubConstInfo); ok {
+				if newName, exists := renameMap[callInfo.FnName]; exists {
+					callInfo.FnName = newName
+					value.Data = callInfo
+				}
+			} else if callInfoMap, ok := value.Data.(map[string]any); ok {
+				if fnName, ok := callInfoMap["FnName"].(string); ok {
+					if newName, exists := renameMap[fnName]; exists {
+						callInfoMap["FnName"] = newName
+					}
+				}
+			}
+		case "variable":
+			if varInfo, ok := value.Data.(VariableInfo); ok {
+				if newName, exists := renameMap[varInfo.Name]; exists {
+					varInfo.Name = newName
+					value.Data = varInfo
+				}
+			} else if varInfoMap, ok := value.Data.(map[string]any); ok {
+				if name, ok := varInfoMap["Name"].(string); ok {
+					if newName, exists := renameMap[name]; exists {
+						varInfoMap["Name"] = newName
+					}
+				}
+			}
+		case "closure":
+			if closureInfo, ok := value.Data.(ClosureInfo); ok {
+				if newName, exists := renameMap[closureInfo.Name]; exists {
+					closureInfo.Name = newName
+					value.Data = closureInfo
+				}
+			} else if closureInfoMap, ok := value.Data.(map[string]any); ok {
+				if name, ok := closureInfoMap["Name"].(string); ok {
+					if newName, exists := renameMap[name]; exists {
+						closureInfoMap["Name"] = newName
+					}
+				}
+			}
+		case "namespace":
+			if ns, ok := value.Data.(SerializableNamespaceValue); ok {
+				newMembers := map[string]EncodedValue{}
+				for key, val := range ns.Members {
+					newMembers[key] = renameEncodedValue(val)
+				}
+				ns.Members = newMembers
+				value.Data = ns
+			} else if nsMap, ok := value.Data.(map[string]any); ok {
+				if members, ok := nsMap["members"].(map[string]any); ok {
+					for key, val := range members {
+						if encodedValJson, err := json.Marshal(val); err == nil {
+							var encodedVal EncodedValue
+							if json.Unmarshal(encodedValJson, &encodedVal) == nil {
+								members[key] = renameEncodedValue(encodedVal)
+							}
+						}
+					}
+				}
+			}
+		case "namespaceRef":
+			if ref, ok := value.Data.(SerializableNamespaceMemberRef); ok {
+				if newName, exists := renameMap[ref.GlobalName]; exists {
+					ref.GlobalName = newName
+					value.Data = ref
+				}
+			} else if refMap, ok := value.Data.(map[string]any); ok {
+				if globalName, ok := refMap["globalName"].(string); ok {
+					if newName, exists := renameMap[globalName]; exists {
+						refMap["globalName"] = newName
+					}
+				}
+			}
+		case "objectValue":
+			if obj, ok := value.Data.(map[string]EncodedValue); ok {
+				newObj := map[string]EncodedValue{}
+				for key, val := range obj {
+					newObj[key] = renameEncodedValue(val)
+				}
+				value.Data = newObj
+			}
+		}
+		return value
+	}
+
 	// Rename in instructions
 	renameInInstructions := func(instructions []SerializableInstruction) {
 		for i := range instructions {
 			instr := &instructions[i]
-			instr.Value = renameFunctionValue(instr.Value)
-			switch instr.Value.Type {
-			case "directCall":
-				if callInfo, ok := instr.Value.Data.(DirectCallInfo); ok {
-					if newName, exists := renameMap[callInfo.Name]; exists {
-						callInfo.Name = newName
-						instr.Value.Data = callInfo
-					}
-				}
-			case "call":
-				if callInfo, ok := instr.Value.Data.(CallInfo); ok {
-					if newName, exists := renameMap[callInfo.Name]; exists {
-						callInfo.Name = newName
-						instr.Value.Data = callInfo
-					}
-				}
-			case "variable":
-				if varInfo, ok := instr.Value.Data.(VariableInfo); ok {
-					if newName, exists := renameMap[varInfo.Name]; exists {
-						varInfo.Name = newName
-						instr.Value.Data = varInfo
-					}
-				}
-			case "closure":
-				if closureInfo, ok := instr.Value.Data.(ClosureInfo); ok {
-					if newName, exists := renameMap[closureInfo.Name]; exists {
-						closureInfo.Name = newName
-						instr.Value.Data = closureInfo
-					}
-				}
-			}
+			instr.Value = renameEncodedValue(instr.Value)
 		}
 	}
 
