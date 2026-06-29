@@ -7359,17 +7359,21 @@ func (a *astSemanticAnalyzer) addDiagnostic(line int, column int, message string
 	lineText := getLine(a.text, lineIndex)
 	wordLen := wordLengthAtColumn(lineText, colIndex)
 
-	a.diagnostics = append(a.diagnostics, makeRangeDiagnostic(
+	diag := makeRangeDiagnostic(
 		lineIndex,
 		colIndex,
 		colIndex+wordLen,
 		2,
 		message,
-	))
+	)
+	diag["uri"] = a.uri
+	a.diagnostics = append(a.diagnostics, diag)
 }
 
 func (a *astSemanticAnalyzer) addDiagnosticAtRange(r byteIdentifierRange, message string) {
-	a.diagnostics = append(a.diagnostics, makeRangeDiagnosticFromByteRange(r, 2, message))
+	diag := makeRangeDiagnosticFromByteRange(r, 2, message)
+	diag["uri"] = a.uri
+	a.diagnostics = append(a.diagnostics, diag)
 }
 
 func (a *astSemanticAnalyzer) addStatementDiagnostic(stmt Stmt, message string) {
@@ -7396,17 +7400,21 @@ func (a *astSemanticAnalyzer) addStatementDiagnostic(stmt Stmt, message string) 
 		end = colIndex + wordLen
 	}
 
-	a.diagnostics = append(a.diagnostics, makeRangeDiagnostic(
+	diag := makeRangeDiagnostic(
 		lineIndex,
 		start,
 		end,
 		2,
 		message,
-	))
+	)
+	diag["uri"] = a.uri
+	a.diagnostics = append(a.diagnostics, diag)
 }
 
 func (a *astSemanticAnalyzer) addErrorAtRange(r byteIdentifierRange, message string) {
-	a.diagnostics = append(a.diagnostics, makeRangeDiagnosticFromByteRange(r, 1, message))
+	diag := makeRangeDiagnosticFromByteRange(r, 1, message)
+	diag["uri"] = a.uri
+	a.diagnostics = append(a.diagnostics, diag)
 }
 
 func (a *astSemanticAnalyzer) addError(line int, column int, message string) {
@@ -7435,13 +7443,15 @@ func (a *astSemanticAnalyzer) addError(line int, column int, message string) {
 	lineText := getLine(a.text, lineIndex)
 	wordLen := wordLengthAtColumn(lineText, colIndex)
 
-	a.diagnostics = append(a.diagnostics, makeRangeDiagnostic(
+	diag := makeRangeDiagnostic(
 		lineIndex,
 		colIndex,
 		colIndex+wordLen,
 		1,
 		message,
-	))
+	)
+	diag["uri"] = a.uri
+	a.diagnostics = append(a.diagnostics, diag)
 }
 
 type unusedSymbolDecl struct {
@@ -7734,29 +7744,154 @@ func (a *astSemanticAnalyzer) predeclareStatements(stmts []Stmt) {
 
 		case NamespaceStmt:
 			members := map[string]SymbolInfo{}
+			hasExplicitExports := false
+			for _, rawInner := range s.Statements {
+				if _, ok := rawInner.(ExportStmt); ok {
+					hasExplicitExports = true
+					break
+				}
+			}
 			for _, rawInner := range s.Statements {
 				inner, exported := unwrapExport(rawInner)
-				if !exported {
-					_ = exported
-				}
+				isPrivate := hasExplicitExports && !exported
 				switch m := inner.(type) {
 				case NamespaceStmt:
-					members[m.Name] = namespaceSymbolFromStmt(a, m)
+					nsSym := namespaceSymbolFromStmt(a, m)
+					if isPrivate {
+						nsSym.Detail = "private " + nsSym.Detail
+					}
+					members[m.Name] = nsSym
 				case FunctionStmt:
-					members[m.Name] = SymbolInfo{Name: m.Name, Kind: SymbolFunction, Type: "function", Detail: "fn " + m.Name, Line: m.Line, Column: m.Column, SourceURI: a.uri, Params: stdArgsFromParams(a.scope, m.Params), Returns: returnTypeNameScoped(a.root, m.ReturnType)}
+					detail := "fn " + m.Name
+					if isPrivate {
+						detail = "private " + detail
+					}
+					members[m.Name] = SymbolInfo{Name: m.Name, Kind: SymbolFunction, Type: "function", Detail: detail, Line: m.Line, Column: m.Column, SourceURI: a.uri, Params: stdArgsFromParams(a.scope, m.Params), Returns: returnTypeNameScoped(a.root, m.ReturnType)}
 				case VariableStmt:
-					members[m.Name] = SymbolInfo{Name: m.Name, Kind: SymbolVariable, Type: "unknown", Detail: "variable " + m.Name, Line: m.Line, Column: m.Column, SourceURI: a.uri}
+					detail := "variable " + m.Name
+					if isPrivate {
+						detail = "private " + detail
+					}
+					members[m.Name] = SymbolInfo{Name: m.Name, Kind: SymbolVariable, Type: "unknown", Detail: detail, Line: m.Line, Column: m.Column, SourceURI: a.uri}
 				case DestructureStmt:
 					for _, name := range collectDestructuredNames(m.Target) {
-						members[name] = SymbolInfo{Name: name, Kind: SymbolVariable, Type: "unknown", Detail: "variable " + name, Line: m.Line, Column: m.Column, SourceURI: a.uri}
+						detail := "variable " + name
+						if isPrivate {
+							detail = "private " + detail
+						}
+						members[name] = SymbolInfo{Name: name, Kind: SymbolVariable, Type: "unknown", Detail: detail, Line: m.Line, Column: m.Column, SourceURI: a.uri}
 					}
 				case ClassStmt:
-					members[m.Name] = a.classSymbol(m)
+					clsSym := a.classSymbol(m)
+					if isPrivate {
+						clsSym.Detail = "private " + clsSym.Detail
+					}
+					members[m.Name] = clsSym
 				case EnumStmt:
 					enumSym := enumSymbolFromStmt(m, a.uri, a.text)
 					enumSym.Type = "enum:" + s.Name + "." + m.Name
-					enumSym.Detail = "enum " + m.Name
+					detail := "enum " + m.Name
+					if isPrivate {
+						detail = "private " + detail
+					}
+					enumSym.Detail = detail
 					members[m.Name] = enumSym
+				case ImportStmt:
+					alias := m.Alias
+					if alias == "" {
+						if m.Std {
+							alias = m.Path
+						} else if m.Library {
+							alias = defaultLibraryAlias(m.Path)
+						} else {
+							alias = strings.TrimSuffix(filepath.Base(m.Path), filepath.Ext(m.Path))
+						}
+					}
+					if m.Std {
+						resolvedPath := "std:" + m.Path
+						detail := "std module " + m.Path
+						if isPrivate {
+							detail = "private " + detail
+						}
+						members[alias] = SymbolInfo{
+							Name:      alias,
+							Kind:      SymbolNamespace,
+							Type:      "namespace:" + alias,
+							TypeRef:   LSPTypeRef{Kind: LSPTypeNamespace, Name: alias},
+							Detail:    detail,
+							Line:      m.Line,
+							Column:    m.Column,
+							Members:   loadTinyFileExports(resolvedPath, map[string]bool{}),
+							SourceURI: pathToFileURI(resolvedPath),
+						}
+					} else if m.Library {
+						resolvedPath := resolveLibraryImportPath(m.Path, a.uri)
+						detail := "library " + m.Path
+						if isPrivate {
+							detail = "private " + detail
+						}
+						members[alias] = SymbolInfo{
+							Name:      alias,
+							Kind:      SymbolNamespace,
+							Type:      "namespace:" + alias,
+							TypeRef:   LSPTypeRef{Kind: LSPTypeNamespace, Name: alias},
+							Detail:    detail,
+							Line:      m.Line,
+							Column:    m.Column,
+							Members:   loadLibraryFileExportsForLSP(m.Path, a.uri, map[string]bool{}),
+							SourceURI: pathToFileURI(resolvedPath),
+						}
+					} else if m.Plugin {
+						detail := "plugin " + m.Path
+						if isPrivate {
+							detail = "private " + detail
+						}
+						members[alias] = SymbolInfo{
+							Name:      alias,
+							Kind:      SymbolVariable,
+							Type:      "any",
+							Detail:    detail,
+							Line:      m.Line,
+							Column:    m.Column,
+							SourceURI: a.uri,
+						}
+					}
+				case InterfaceStmt:
+					ifaceSym := interfaceSymbolFromStmt(a.root, m, a.uri, a.text)
+					if isPrivate {
+						ifaceSym.Detail = "private " + ifaceSym.Detail
+					}
+					members[m.Name] = ifaceSym
+				case EmbedStmt:
+					detail := "variable " + m.Name
+					if isPrivate {
+						detail = "private " + detail
+					}
+					members[m.Name] = SymbolInfo{Name: m.Name, Kind: SymbolVariable, Type: m.TypeHint.Name, Detail: detail, Line: m.Line, Column: m.Column, SourceURI: a.uri}
+				case ExternalGlobalStmt:
+					detail := "external global " + m.Name
+					if isPrivate {
+						detail = "private " + detail
+					}
+					members[m.Name] = SymbolInfo{Name: m.Name, Kind: SymbolVariable, Type: m.Type.Name, Detail: detail, Line: m.Line, Column: m.Column, SourceURI: a.uri}
+				case ExternalFnStmt:
+					detail := "external fn " + m.Name
+					if isPrivate {
+						detail = "private " + detail
+					}
+					members[m.Name] = SymbolInfo{
+						Name: m.Name, Kind: SymbolFunction, Type: "function", Detail: detail, Line: m.Line, Column: m.Column, SourceURI: a.uri,
+						Params: stdArgsFromParams(a.scope, m.Params), Returns: returnTypeNameScoped(a.root, m.ReturnType),
+					}
+				case NativeFnStmt:
+					detail := "native fn " + m.Name
+					if isPrivate {
+						detail = "private " + detail
+					}
+					members[m.Name] = SymbolInfo{
+						Name: m.Name, Kind: SymbolFunction, Type: "function", Detail: detail, Line: m.Line, Column: m.Column, SourceURI: a.uri,
+						Params: stdArgsFromParams(a.scope, m.Params), Returns: returnTypeNameScoped(a.root, m.ReturnType),
+					}
 				}
 			}
 			a.root.Define(SymbolInfo{Name: s.Name, Kind: SymbolNamespace, Type: "namespace", Detail: "namespace " + s.Name, Line: 1, Column: 1, SourceURI: a.uri, Members: members})
@@ -7766,23 +7901,154 @@ func (a *astSemanticAnalyzer) predeclareStatements(stmts []Stmt) {
 
 func namespaceSymbolFromStmt(a *astSemanticAnalyzer, ns NamespaceStmt) SymbolInfo {
 	members := map[string]SymbolInfo{}
+	hasExplicitExports := false
+	for _, rawInner := range ns.Statements {
+		if _, ok := rawInner.(ExportStmt); ok {
+			hasExplicitExports = true
+			break
+		}
+	}
 	for _, raw := range ns.Statements {
-		inner, _ := unwrapExport(raw)
+		inner, exported := unwrapExport(raw)
+		isPrivate := hasExplicitExports && !exported
 		switch s := inner.(type) {
 		case NamespaceStmt:
-			members[s.Name] = namespaceSymbolFromStmt(a, s)
+			nsSym := namespaceSymbolFromStmt(a, s)
+			if isPrivate {
+				nsSym.Detail = "private " + nsSym.Detail
+			}
+			members[s.Name] = nsSym
 		case FunctionStmt:
-			members[s.Name] = SymbolInfo{Name: s.Name, Kind: SymbolFunction, Type: "function", Detail: "fn " + s.Name, Line: s.Line, Column: s.Column, SourceURI: a.uri, Params: stdArgsFromParams(a.scope, s.Params), Returns: returnTypeNameScoped(a.root, s.ReturnType)}
+			detail := "fn " + s.Name
+			if isPrivate {
+				detail = "private " + detail
+			}
+			members[s.Name] = SymbolInfo{Name: s.Name, Kind: SymbolFunction, Type: "function", Detail: detail, Line: s.Line, Column: s.Column, SourceURI: a.uri, Params: stdArgsFromParams(a.scope, s.Params), Returns: returnTypeNameScoped(a.root, s.ReturnType)}
 		case VariableStmt:
-			members[s.Name] = SymbolInfo{Name: s.Name, Kind: SymbolVariable, Type: "unknown", Detail: "variable " + s.Name, Line: s.Line, Column: s.Column, SourceURI: a.uri}
+			detail := "variable " + s.Name
+			if isPrivate {
+				detail = "private " + detail
+			}
+			members[s.Name] = SymbolInfo{Name: s.Name, Kind: SymbolVariable, Type: "unknown", Detail: detail, Line: s.Line, Column: s.Column, SourceURI: a.uri}
 		case ClassStmt:
-			members[s.Name] = a.classSymbol(s)
+			clsSym := a.classSymbol(s)
+			if isPrivate {
+				clsSym.Detail = "private " + clsSym.Detail
+			}
+			members[s.Name] = clsSym
 		case EnumStmt:
 			enumSym := enumSymbolFromStmt(s, a.uri, a.text)
 			enumSym.Type = "enum:" + ns.Name + "." + s.Name
+			detail := "enum " + s.Name
+			if isPrivate {
+				detail = "private " + detail
+			}
+			enumSym.Detail = detail
 			members[s.Name] = enumSym
 		case InterfaceStmt:
-			members[s.Name] = interfaceSymbolFromStmt(a.root, s, a.uri, a.text)
+			ifaceSym := interfaceSymbolFromStmt(a.root, s, a.uri, a.text)
+			if isPrivate {
+				ifaceSym.Detail = "private " + ifaceSym.Detail
+			}
+			members[s.Name] = ifaceSym
+		case ImportStmt:
+			alias := s.Alias
+			if alias == "" {
+				if s.Std {
+					alias = s.Path
+				} else if s.Library {
+					alias = defaultLibraryAlias(s.Path)
+				} else {
+					alias = strings.TrimSuffix(filepath.Base(s.Path), filepath.Ext(s.Path))
+				}
+			}
+			if s.Std {
+				resolvedPath := "std:" + s.Path
+				detail := "std module " + s.Path
+				if isPrivate {
+					detail = "private " + detail
+				}
+				members[alias] = SymbolInfo{
+					Name:      alias,
+					Kind:      SymbolNamespace,
+					Type:      "namespace:" + alias,
+					TypeRef:   LSPTypeRef{Kind: LSPTypeNamespace, Name: alias},
+					Detail:    detail,
+					Line:      s.Line,
+					Column:    s.Column,
+					Members:   loadTinyFileExports(resolvedPath, map[string]bool{}),
+					SourceURI: pathToFileURI(resolvedPath),
+				}
+			} else if s.Library {
+				resolvedPath := resolveLibraryImportPath(s.Path, a.uri)
+				detail := "library " + s.Path
+				if isPrivate {
+					detail = "private " + detail
+				}
+				members[alias] = SymbolInfo{
+					Name:      alias,
+					Kind:      SymbolNamespace,
+					Type:      "namespace:" + alias,
+					TypeRef:   LSPTypeRef{Kind: LSPTypeNamespace, Name: alias},
+					Detail:    detail,
+					Line:      s.Line,
+					Column:    s.Column,
+					Members:   loadLibraryFileExportsForLSP(s.Path, a.uri, map[string]bool{}),
+					SourceURI: pathToFileURI(resolvedPath),
+				}
+			} else if s.Plugin {
+				detail := "plugin " + s.Path
+				if isPrivate {
+					detail = "private " + detail
+				}
+				members[alias] = SymbolInfo{
+					Name:      alias,
+					Kind:      SymbolVariable,
+					Type:      "any",
+					Detail:    detail,
+					Line:      s.Line,
+					Column:    s.Column,
+					SourceURI: a.uri,
+				}
+			}
+		case EmbedStmt:
+			detail := "variable " + s.Name
+			if isPrivate {
+				detail = "private " + detail
+			}
+			members[s.Name] = SymbolInfo{Name: s.Name, Kind: SymbolVariable, Type: s.TypeHint.Name, Detail: detail, Line: s.Line, Column: s.Column, SourceURI: a.uri}
+		case ExternalGlobalStmt:
+			detail := "external global " + s.Name
+			if isPrivate {
+				detail = "private " + detail
+			}
+			members[s.Name] = SymbolInfo{Name: s.Name, Kind: SymbolVariable, Type: s.Type.Name, Detail: detail, Line: s.Line, Column: s.Column, SourceURI: a.uri}
+		case ExternalFnStmt:
+			detail := "external fn " + s.Name
+			if isPrivate {
+				detail = "private " + detail
+			}
+			members[s.Name] = SymbolInfo{
+				Name: s.Name, Kind: SymbolFunction, Type: "function", Detail: detail, Line: s.Line, Column: s.Column, SourceURI: a.uri,
+				Params: stdArgsFromParams(a.scope, s.Params), Returns: returnTypeNameScoped(a.root, s.ReturnType),
+			}
+		case NativeFnStmt:
+			detail := "native fn " + s.Name
+			if isPrivate {
+				detail = "private " + detail
+			}
+			members[s.Name] = SymbolInfo{
+				Name: s.Name, Kind: SymbolFunction, Type: "function", Detail: detail, Line: s.Line, Column: s.Column, SourceURI: a.uri,
+				Params: stdArgsFromParams(a.scope, s.Params), Returns: returnTypeNameScoped(a.root, s.ReturnType),
+			}
+		case DestructureStmt:
+			for _, name := range collectDestructuredNames(s.Target) {
+				detail := "variable " + name
+				if isPrivate {
+					detail = "private " + detail
+				}
+				members[name] = SymbolInfo{Name: name, Kind: SymbolVariable, Type: "unknown", Detail: detail, Line: s.Line, Column: s.Column, SourceURI: a.uri}
+			}
 		}
 	}
 	return SymbolInfo{Name: ns.Name, Kind: SymbolNamespace, Type: "namespace:" + ns.Name, TypeRef: LSPTypeRef{Kind: LSPTypeNamespace, Name: ns.Name}, Detail: "namespace " + ns.Name, Line: ns.Line, Column: ns.Column, SourceURI: a.uri, Members: members}
@@ -9126,9 +9392,9 @@ func (a *astSemanticAnalyzer) inferExprType(expr Expr) string {
 				if !ok || isPrivateImportMember(memberSym) {
 					msg := "undefined export: " + ident.Name + "." + e.Name
 					if r, ok := byteRangeForExpr(a.text, e); ok {
-						a.addDiagnosticAtRange(r, msg)
+						a.addErrorAtRange(r, msg)
 					} else {
-						a.addDiagnostic(e.Line, e.Column, msg)
+						a.addError(e.Line, e.Column, msg)
 					}
 					return "unknown"
 				}
@@ -9268,9 +9534,9 @@ func (a *astSemanticAnalyzer) inferExprType(expr Expr) string {
 				if !ok || isPrivateImportMember(memberSym) {
 					msg := "undefined export: " + ident.Name + "." + e.Method
 					if r, ok := byteRangeForExpr(a.text, e); ok {
-						a.addDiagnosticAtRange(r, msg)
+						a.addErrorAtRange(r, msg)
 					} else {
-						a.addDiagnostic(e.Line, e.Column, msg)
+						a.addError(e.Line, e.Column, msg)
 					}
 					return "unknown"
 				}

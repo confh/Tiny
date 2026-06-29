@@ -79,6 +79,7 @@ type Compiler struct {
 	stdImportModules map[string]string
 
 	isCompilingNamespace bool
+	currentNamespaceName string
 
 	currentFile   string
 	currentLine   int
@@ -716,6 +717,10 @@ func (c *Compiler) declareVariable(name string, constant bool) Binding {
 		LangErrorAt(ErrorName, c.currentFile, c.currentLine, c.currentColumn, "variable already declared in this scope: %s", name)
 	}
 
+	if c.isCompilingNamespace && !c.isInsideFunction() && !strings.HasPrefix(name, c.currentNamespaceName+".") {
+		name = c.currentNamespaceName + "." + name
+	}
+
 	if c.isInsideFunction() {
 		slot := c.localCount
 		c.localCount++
@@ -811,8 +816,16 @@ func (c *Compiler) compileScopedBlock(body []Stmt) {
 	c.endScope()
 }
 
-func abortOnCompilerSemanticErrors(statements []Stmt) {
-	diagnostics := CheckProgramSemantics("", "", statements, false)
+func abortOnCompilerSemanticErrors(file string, statements []Stmt) {
+	if file == "" && len(statements) > 0 {
+		for _, s := range statements {
+			if f := getStatementFile(s); f != "" {
+				file = f
+				break
+			}
+		}
+	}
+	diagnostics := CheckProgramSemantics(file, "", statements, false)
 	for _, diagnostic := range diagnostics {
 		if intFromAny(diagnostic["severity"]) != 1 {
 			continue
@@ -822,6 +835,7 @@ func abortOnCompilerSemanticErrors(statements []Stmt) {
 		if strings.HasPrefix(message, "cannot pass type ") {
 			continue
 		}
+
 		line := 0
 		column := 0
 		if rangeValue, ok := diagnostic["range"].(map[string]any); ok {
@@ -830,16 +844,66 @@ func abortOnCompilerSemanticErrors(statements []Stmt) {
 				column = intFromAny(startValue["character"]) + 1
 			}
 		}
+
+		diagFile, _ := diagnostic["uri"].(string)
+		if diagFile == "" {
+			diagFile = file
+		}
+		diagFile = uriToPath(diagFile)
+
 		kind := ErrorType
-		if strings.HasPrefix(message, "undefined variable: ") {
+		if strings.HasPrefix(message, "undefined variable: ") || strings.HasPrefix(message, "undefined export: ") {
 			kind = ErrorName
 		}
-		LangErrorAt(kind, "", line, column, "%s", message)
+		LangErrorAt(kind, diagFile, line, column, "%s", message)
 	}
 }
 
+func uriToPath(uri string) string {
+	if strings.HasPrefix(uri, "file:///") {
+		path := strings.TrimPrefix(uri, "file:///")
+		return filepath.FromSlash(path)
+	}
+	return uri
+}
+
+func getStatementFile(stmt Stmt) string {
+	if stmt == nil {
+		return ""
+	}
+	switch s := stmt.(type) {
+	case ExportStmt:
+		return getStatementFile(s.Inner)
+	case NamespaceStmt:
+		return s.File
+	case FunctionStmt:
+		return s.File
+	case VariableStmt:
+		return s.File
+	case DestructureStmt:
+		return s.File
+	case ClassStmt:
+		return s.File
+	case EnumStmt:
+		return s.File
+	case InterfaceStmt:
+		return s.File
+	case ImportStmt:
+		return s.File
+	case EmbedStmt:
+		return s.File
+	case ExternalGlobalStmt:
+		return s.File
+	case ExternalFnStmt:
+		return s.File
+	case NativeFnStmt:
+		return s.File
+	}
+	return ""
+}
+
 func (c *Compiler) CompileProgram(program Program) ([]Instruction, map[string]Function, map[string]Class, map[string]Interface, map[string]int) {
-	abortOnCompilerSemanticErrors(program.Statements)
+	abortOnCompilerSemanticErrors(c.currentFile, program.Statements)
 
 	c.virtualObjects = map[VarNodeKey]map[string]int{}
 	c.predeclareStdImportsForJitRegions(program.Statements)
@@ -1082,6 +1146,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 	oldNamespaceEnums := c.currentNamespaceEnums
 	oldNamespaceInterfaces := c.currentNamespaceInterfaces
 	oldIsCompilingNamespace := c.isCompilingNamespace
+	oldNamespaceName := c.currentNamespaceName
 
 	namespaceFunctions := map[string]string{}
 	namespaceVariables := map[string]string{}
@@ -1200,6 +1265,15 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 			name = s.Name
 		} else if s, ok := inner.(ExternalGlobalStmt); ok {
 			name = s.Name
+		} else if destructureStmt, ok := inner.(DestructureStmt); ok {
+			for _, name := range collectDestructuredNames(destructureStmt.Target) {
+				fullName := qualify(name)
+				namespaceVariables[name] = fullName
+				if !hasExplicitExports || exported {
+					members[name] = NewNative(NamespaceMemberRef{GlobalName: fullName})
+				}
+			}
+			continue
 		} else {
 			continue
 		}
@@ -1333,6 +1407,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 	c.currentNamespaceEnums = namespaceEnums
 	c.currentNamespaceInterfaces = namespaceInterfaces
 	c.isCompilingNamespace = true
+	c.currentNamespaceName = stmt.Name
 
 	// 6. Compile enums as hidden globals FIRST.
 	for _, raw := range stmt.Statements {
@@ -1417,6 +1492,8 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 			binding.TypeHint = externalGlobal.Type.Name
 			c.currentScope()[fullName] = binding
 			c.globalConstants[fullName] = true
+		} else if destructureStmt, ok := inner.(DestructureStmt); ok {
+			c.compileDestructureStmt(destructureStmt)
 		}
 	}
 
@@ -1493,6 +1570,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 	c.currentNamespaceEnums = oldNamespaceEnums
 	c.currentNamespaceInterfaces = oldNamespaceInterfaces
 	c.isCompilingNamespace = oldIsCompilingNamespace
+	c.currentNamespaceName = oldNamespaceName
 
 	// 10. Create namespace object.
 	c.emit(OP_CONST, NamespaceValue{
@@ -7176,7 +7254,11 @@ func (c *Compiler) collectNativeFnStmts(stmts []Stmt, prefix string, out *[]Nati
 			*out = append(*out, s)
 
 		case NamespaceStmt:
-			c.collectNativeFnStmts(s.Statements, s.Name, out)
+			nextPrefix := s.Name
+			if prefix != "" {
+				nextPrefix = prefix + "." + s.Name
+			}
+			c.collectNativeFnStmts(s.Statements, nextPrefix, out)
 		}
 	}
 }
