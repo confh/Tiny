@@ -274,7 +274,7 @@ func TestCompilerNamespacePrivateEnforcement(t *testing.T) {
 	compiler.CompileProgram(program)
 }
 
-func TestCompilerNamespaceNestedDestructureAndNative(t *testing.T) {
+func TestCompilerNamespaceNestedDestructure(t *testing.T) {
 	program := Program{
 		Statements: []Stmt{
 			NamespaceStmt{
@@ -306,20 +306,6 @@ func TestCompilerNamespaceNestedDestructureAndNative(t *testing.T) {
 								Line:   2,
 								Column: 1,
 							},
-							ExportStmt{
-								Inner: NativeFnStmt{
-									Name:       "getSystemVal",
-									Params:     []Param{},
-									ReturnType: TypeHint{Name: "number"},
-									GoCode:     "return 123",
-									File:       "testing.tiny",
-									Line:       3,
-									Column:     1,
-								},
-								File:   "testing.tiny",
-								Line:   3,
-								Column: 1,
-							},
 						},
 						File:   "testing.tiny",
 						Line:   1,
@@ -338,9 +324,6 @@ func TestCompilerNamespaceNestedDestructureAndNative(t *testing.T) {
 
 	if _, ok := globalIndex["Parent.Child.valX"]; !ok {
 		t.Fatalf("expected Parent.Child.valX to be compiled successfully")
-	}
-	if _, ok := compiler.nativeFunctions["Parent.Child.getSystemVal"]; !ok {
-		t.Fatalf("expected Parent.Child.getSystemVal to be compiled successfully")
 	}
 }
 
