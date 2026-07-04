@@ -98,3 +98,7 @@ export fn query:T(schema: Schema:T): Schema:T
 
 // Validates the request params property using the provided schema.
 export fn params:T(schema: Schema:T): Schema:T
+
+// Validates whether or not the value matches against an interface
+export fn interfaceOf(value: any, inter: string | any): bool
+

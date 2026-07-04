@@ -3,3 +3,21 @@ export fn name(): string
 
 // Returns the architecture of the operating system (e.g., "amd64", "arm64").
 export fn arch(): string
+
+// Returns the path to the system's temporary directory.
+export fn tempDir(): string
+
+// Returns the path to the current user's home directory.
+export fn homeDir(): string
+
+// Returns the path to the current user's configuration directory.
+export fn configDir(): string
+
+// Returns the number of logical CPUs.
+export fn cpus(): number
+
+// Returns the hostname of the system.
+export fn hostName(): string
+
+// Returns the system uptime in milliseconds.
+export fn uptime(): number

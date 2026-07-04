@@ -1,0 +1,48 @@
+import std "fs" as fs
+import std "json" as json
+import std "io" as io
+import std "buffer" as buffer
+import std "runtime" as runtime
+import "./parser.tiny" as parser
+
+// 1. Write the Python source program to compile
+
+const pySource = `
+def sum(a, b):
+    return a + b
+    
+print(sum(1, 2))`
+
+io.println("--- Python Source Code ---");
+io.println(pySource);
+io.println("--------------------------\n");
+
+io.println("Compiling Python code to Tiny bytecode...");
+
+// 2. Instantiate Parser and Compile
+let p = parser.Parser(pySource);
+p.compile();
+
+// 3. Construct Bytecode Object
+let bytecode = {
+    "version": 1,
+    "main": p.instructions,
+    "functions": p.functions,
+    "classes": {},
+    "interfaces": {},
+    "globalIndex": p.globalIndex
+};
+
+let jsonText = json.stringify(bytecode);
+
+io.println("\nExecuting bytecode dynamically in nested Tiny VM...");
+
+// 4. Load and execute bytecode inside a sub-VM
+let testVM = runtime.newVM({
+    disableJIT: true,
+    runMainOnLoad: true
+});
+
+testVM.loadBytecode(buffer.fromString(jsonText));
+
+io.println("\nNested execution finished successfully!");

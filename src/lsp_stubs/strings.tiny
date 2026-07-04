@@ -1,5 +1,5 @@
 // Efficiently builds a string by appending multiple string segments.
-class StringBuilder {
+export class StringBuilder {
     // Appends the specified string to the builder.
     fn writeString(str: string): null
     // Returns the fully built string.

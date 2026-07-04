@@ -1,4 +1,5 @@
 import std "io";
+import std "object";
 
 let items = [1, 2, 3];
 items.push(4);
@@ -23,3 +24,11 @@ let doubled = items.map(fn(index, value) {
 });
 
 io.println(doubled.join(","));
+
+let trimmed = object.omit(user, ["score"]);
+
+io.println(trimmed.name);
+io.println(object.get(trimmed, "score"));
+io.println(user.score);
+io.println(object.entries(trimmed).length());
+io.println(object.enteries(trimmed).length());

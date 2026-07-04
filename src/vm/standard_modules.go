@@ -91,6 +91,12 @@ func (vm *VM) callStandardModule(module string, method string, args []TinyValue)
 	case "url":
 		vm.callStdUrl(method, args)
 
+	case "crypto":
+		vm.callStdCrypto(method, args)
+
+	case "sqlite":
+		vm.callStdSqlite(method, args)
+
 	default:
 		vm.fatalError(ErrorName, "unknown standard module: %s", module)
 	}

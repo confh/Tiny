@@ -28,4 +28,6 @@ var AvailablePlugins = []string{
 	"tray",
 	"validate",
 	"url",
+	"crypto",
+	"sqlite",
 }

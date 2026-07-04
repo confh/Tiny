@@ -1,0 +1,84 @@
+// Test hex, binary, and octal number literals
+println("=== 1. Number Literals ===")
+
+let hexVal = 0xFF
+println(hexVal)
+
+let binVal = 0b1010
+println(binVal)
+
+let octVal = 0o77
+println(octVal)
+
+let hexUpper = 0X1A
+println(hexUpper)
+
+let hexUnderscore = 0x1_000
+println(hexUnderscore)
+
+let mixed = 0xFF + 0b1010 + 0o77
+println(mixed)
+
+// Test arrow functions (lambda shorthand)
+println("=== 2. Arrow Functions ===")
+
+let add = (a, b) => a + b
+println(add(3, 4))
+
+let square = x => x * x
+println(square(5))
+
+let greet = () => "hello"
+println(greet())
+
+let double = (n) => n * 2
+println(double(7))
+
+// Arrow function with closures
+let makeAdder = (x) => (y) => x + y
+let addTen = makeAdder(10)
+println(addTen(5))
+
+// Arrow function passed to higher-order functions
+let nums = [1, 2, 3, 4, 5]
+let doubled = nums.map(x => x * 2)
+println(doubled)
+
+let sum = nums.reduce((acc, x) => acc + x, 0)
+println(sum)
+
+// Arrow function with type hints
+let multiply = (x: number, y: number): number => x * y
+println(multiply(3, 4))
+
+// Test structural typing
+println("=== 3. Structural Types ===")
+
+fn printName(person: {name: string, age: number}) {
+    println(person.name)
+    println(person.age)
+}
+
+printName({name: "Alice", age: 30})
+printName({name: "Bob", age: 25})
+
+fn processData(data: {id: number, value: string}) {
+    println(data.id)
+    println(data.value)
+}
+
+processData({id: 1, value: "test"})
+
+// Arrow function with structural type parameter
+let getAge = (person: {name: string, age: number}) => person.age
+println(getAge({name: "Charlie", age: 35}))
+
+// Structural type with optional fields
+fn greetUser(user: {name: string, email?: string}) {
+    println(user.name)
+}
+
+greetUser({name: "Dave"})
+greetUser({name: "Eve", email: "eve@example.com"})
+
+println("=== All tests passed! ===")

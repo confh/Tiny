@@ -1,0 +1,23 @@
+import std "io"
+
+let add = (a, b) => a + b
+io.println(add(3, 4))
+
+let square = x => x * x
+io.println(square(5))
+
+let greet = () => "hello"
+io.println(greet())
+
+let double = (n) => n * 2
+io.println(double(7))
+
+let makeAdder = (x) => (y) => x + y
+let addTen = makeAdder(10)
+io.println(addTen(5))
+
+let sum = [1, 2, 3, 4, 5].reduce((acc, x) => acc + x, 0)
+io.println(sum)
+
+let multiply = (x: number, y: number) => x * y
+io.println(multiply(3, 4))

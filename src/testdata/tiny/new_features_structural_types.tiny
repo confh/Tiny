@@ -1,0 +1,19 @@
+import std "io"
+
+fn printName(person: {name: string, age: number}) {
+    io.println(person.name)
+    io.println(person.age)
+}
+
+printName({name: "Alice", age: 30})
+printName({name: "Bob", age: 25})
+
+fn processData(data: {id: number, value: string}) {
+    io.println(data.id)
+    io.println(data.value)
+}
+
+processData({id: 1, value: "test"})
+
+let getAge = (person: {name: string, age: number}) => person.age
+io.println(getAge({name: "Charlie", age: 35}))

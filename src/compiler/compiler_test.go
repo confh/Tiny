@@ -1,4 +1,4 @@
-package main
+package compiler
 
 import (
 	"os"
@@ -45,6 +45,65 @@ export external const hostValue: string
 	}
 	if _, ok := globalIndex["hostValue"]; !ok {
 		t.Fatalf("expected exported external global")
+	}
+}
+
+func TestCompilerNamedSpreadCall(t *testing.T) {
+	source := `
+fn collect(...values) {
+    return values;
+}
+
+let values = [1, 2, 3];
+collect("prefix", ...values);
+`
+	parser := NewParser(NewLexer(source, "test.tiny"))
+	program := parser.ParseProgram()
+
+	compiler := NewCompiler()
+	mainInstructions, _, _, _, _ := compiler.CompileProgram(program)
+
+	found := false
+	for _, instr := range mainInstructions {
+		if instr.Op == OP_CALL_VALUE_SPREAD {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Fatalf("expected named spread call to emit OP_CALL_VALUE_SPREAD, got %#v", mainInstructions)
+	}
+}
+
+func TestCompilerStdPrintSpreadCall(t *testing.T) {
+	source := "import std \"io\";\n\n" +
+		"fn log(workerName: string, ...r: any) {\n" +
+		"    io.println(`[FROM: ${workerName}]`, ...r);\n" +
+		"}\n\n" +
+		"log(\"worker\", \"hello\", \"world\");\n"
+	parser := NewParser(NewLexer(source, "test.tiny"))
+	program := parser.ParseProgram()
+
+	compiler := NewCompiler()
+	_, functions, _, _, _ := compiler.CompileProgram(program)
+
+	logFn, ok := functions["log"]
+	if !ok {
+		t.Fatalf("expected log function to compile")
+	}
+
+	found := false
+	for _, instr := range logFn.Instructions {
+		info, ok := instr.Value.(PrintInfo)
+		if instr.Op == OP_PRINT && ok && len(info.SpreadArgs) == 2 && !info.SpreadArgs[0] && info.SpreadArgs[1] {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Fatalf("expected io.println spread call to emit OP_PRINT with spread metadata, got %#v", logFn.Instructions)
 	}
 }
 
@@ -326,7 +385,3 @@ func TestCompilerNamespaceNestedDestructure(t *testing.T) {
 		t.Fatalf("expected Parent.Child.valX to be compiled successfully")
 	}
 }
-
-
-
-

@@ -1,4 +1,4 @@
-package main
+package loader
 
 import (
 	"os"
@@ -11,11 +11,12 @@ import (
 )
 
 type Loader struct {
-	states       map[string]ImportState
-	stack        []string
-	cache        map[string][]Stmt
-	dependencies map[string]TinyDependencyConfig
-	files        map[string]bool
+	states           map[string]ImportState
+	stack            []string
+	cache            map[string][]Stmt
+	dependencies     map[string]TinyDependencyConfig
+	files            map[string]bool
+	namespaceAliases map[string]string
 }
 
 func (l *Loader) loadFile(path string) []Stmt {
@@ -89,6 +90,28 @@ func (l *Loader) loadFile(path string) []Stmt {
 			}
 
 			importPath := l.resolveSourceImportPath(dir, s.Path)
+			if s.TypeOnly {
+				if s.Alias == "" {
+					LangErrorAt(ErrorImport, s.File, s.Line, s.Column, "import type requires an alias")
+				}
+				absImportPath, err := filepath.Abs(importPath)
+				if err != nil {
+					LangError(ErrorImport, "%v", err)
+				}
+				absImportPath = filepath.Clean(absImportPath)
+				s.Path = absImportPath
+				s.TypeNamespace = l.namespaceAliases[absImportPath]
+				if s.TypeNamespace == "" {
+					s.TypeNamespace = s.Alias
+				}
+				result = append(result, s)
+				continue
+			}
+
+			absImportPath, err := filepath.Abs(importPath)
+			if err == nil && s.Alias != "" {
+				l.namespaceAliases[filepath.Clean(absImportPath)] = s.Alias
+			}
 			importedStatements := l.loadFile(importPath)
 
 			if s.Alias != "" {
@@ -214,11 +237,12 @@ func LoadProgramWithFiles(path string) (Program, []string) {
 	config, _ := loadTinyConfig()
 
 	loader := &Loader{
-		states:       map[string]ImportState{},
-		stack:        []string{},
-		cache:        map[string][]Stmt{},
-		dependencies: config.Dependencies,
-		files:        map[string]bool{},
+		states:           map[string]ImportState{},
+		stack:            []string{},
+		cache:            map[string][]Stmt{},
+		dependencies:     config.Dependencies,
+		files:            map[string]bool{},
+		namespaceAliases: map[string]string{},
 	}
 
 	statements := loader.loadFile(path)

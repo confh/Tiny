@@ -17,6 +17,8 @@ import (
 	"sync"
 	"unicode/utf16"
 
+	tinycompiler "language.com/src/compiler"
+	tinyerrors "language.com/src/tinyerrors"
 	. "language.com/src/vm"
 )
 
@@ -58,6 +60,17 @@ type InlayHint struct {
 	PaddingLeft  bool     `json:"paddingLeft,omitempty"`
 	PaddingRight bool     `json:"paddingRight,omitempty"`
 }
+
+type lspInlayHintCacheEntry struct {
+	hints []InlayHint
+}
+
+type lspSemanticTokensCacheEntry struct {
+	result map[string]any
+}
+
+var lspInlayHintCache = map[string]lspInlayHintCacheEntry{}
+var lspSemanticTokensCache = map[string]lspSemanticTokensCacheEntry{}
 
 type Location struct {
 	URI   string   `json:"uri"`
@@ -169,11 +182,13 @@ type CompletionItem struct {
 	Label               string     `json:"label"`
 	Kind                int        `json:"kind,omitempty"`
 	Detail              string     `json:"detail,omitempty"`
+	FilterText          string     `json:"filterText,omitempty"`
 	InsertText          string     `json:"insertText,omitempty"`
 	InsertTextFormat    int        `json:"insertTextFormat,omitempty"`
 	SortText            string     `json:"sortText,omitempty"`
 	AdditionalTextEdits []TextEdit `json:"additionalTextEdits,omitempty"`
 	TextEdit            *TextEdit  `json:"textEdit,omitempty"`
+	Command             *Command   `json:"command,omitempty"`
 }
 
 type MarkupContent struct {
@@ -241,6 +256,8 @@ type CallHierarchyOutgoingCall struct {
 //go:embed lsp_stubs/*
 var lspStubs embed.FS
 
+const stdlibVirtualScheme = "tiny-stdlib"
+
 var tinyKeywords = map[string]bool{
 	"import": true,
 	"std":    true,
@@ -294,6 +311,27 @@ var tinyKeywords = map[string]bool{
 	"not":        true,
 	"instanceof": true,
 	"implements": true,
+	"extends":    true,
+}
+
+func isHardTinyKeyword(name string) bool {
+	return tinyKeywords[name] && !tinySoftKeywords[name]
+}
+
+var tinySoftKeywords = map[string]bool{
+	"embed":       true,
+	"match":       true,
+	"field":       true,
+	"native":      true,
+	"external":    true,
+	"private":     true,
+	"public":      true,
+	"implements":  true,
+	"extends":     true,
+	"iota":        true,
+	"embedtext":   true,
+	"embedbytes":  true,
+	"embedfolder": true,
 }
 
 var lspDocs = map[string]string{}
@@ -677,6 +715,15 @@ func runLSP() {
 			defer func() {
 				if r := recover(); r != nil {
 					fmt.Fprintf(os.Stderr, "[tiny-lsp] recovered from request panic: %v\n", r)
+					if msg.ID != nil {
+						writeLSPMessage(LSPMessage{
+							ID: msg.ID,
+							Error: map[string]any{
+								"code":    -32603,
+								"message": fmt.Sprintf("internal error: %v", r),
+							},
+						})
+					}
 				}
 			}()
 			handleLSPMessage(msg)
@@ -1044,11 +1091,22 @@ func getDefinition(uri string, text string, pos Position) any {
 		return nil
 	}
 
+	if param, ok := functionParameterSymbolAtPosition(uri, text, pos, word); ok {
+		return locationFromSymbol(uri, text, param)
+	}
+
 	scope := scopeAtPosition(uri, text, pos)
 
 	if receiver, member, ok := memberExprAtPosition(text, pos); ok {
 		receiverSym, receiverType, exists := resolveReceiverPath(scope, text, pos, receiver)
 		if !exists {
+			stmts, _ := parseTinyForLSP(uri, text)
+			if loc, ok := resolveParamMemberDefinition(uri, stmts, pos, receiver, member); ok {
+				return loc
+			}
+			if loc, ok := propertyDefinitionFromAST(uri, text, pos, scope, word); ok {
+				return loc
+			}
 			return nil
 		}
 
@@ -1066,8 +1124,39 @@ func getDefinition(uri string, text string, pos Position) any {
 				return nil
 			}
 
+			if fieldSym, ok := classSym.Fields[member]; ok {
+				return locationFromSymbol(uri, text, fieldSym)
+			}
 			if methodSym, ok := classSym.Methods[member]; ok {
 				return locationFromSymbol(uri, text, methodSym)
+			}
+			return nil
+		}
+
+		if strings.HasPrefix(strings.TrimSpace(receiverType), "{") || strings.HasPrefix(strings.TrimSpace(receiverSym.Type), "{") {
+			if loc, ok := structuralFieldDefinitionLocation(uri, text, receiverSym, member); ok {
+				return loc
+			}
+		}
+
+		if strings.HasPrefix(receiverType, "interface:") || strings.HasPrefix(receiverSym.Type, "interface:") {
+			ifaceType := receiverType
+			if !strings.HasPrefix(ifaceType, "interface:") {
+				ifaceType = receiverSym.Type
+			}
+			ifaceName := strings.TrimPrefix(ifaceType, "interface:")
+			if ifaceSym, ok := resolveInterfaceSymbol(scope, ifaceName); ok {
+				if fieldSym, ok := ifaceSym.Fields[member]; ok {
+					return locationFromSymbol(uri, text, fieldSym)
+				}
+			}
+		}
+
+		if strings.HasPrefix(receiverType, "std:") {
+			module := strings.TrimPrefix(receiverType, "std:")
+			exports := loadTinyFileExports("std:"+module, map[string]bool{})
+			if memberSym, ok := exports[member]; ok {
+				return locationFromSymbol(uri, text, memberSym)
 			}
 			return nil
 		}
@@ -1078,15 +1167,132 @@ func getDefinition(uri string, text string, pos Position) any {
 			}
 		}
 
+		stmts, _ := parseTinyForLSP(uri, text)
+		if loc, ok := resolveParamMemberDefinition(uri, stmts, pos, receiver, member); ok {
+			return loc
+		}
+
 		return nil
+	}
+
+	if loc, ok := propertyDefinitionFromAST(uri, text, pos, scope, word); ok {
+		return loc
 	}
 
 	sym, ok := scope.Resolve(word)
 	if !ok {
+		if defLoc := definitionLocationFromSemanticModel(uri, text, word); defLoc != nil {
+			return defLoc
+		}
 		return nil
 	}
 
 	return locationFromSymbol(uri, text, sym)
+}
+
+func propertyDefinitionFromAST(uri string, text string, pos Position, scope *Scope, word string) (any, bool) {
+	stmts, _ := parseTinyForLSP(uri, text)
+	expr, ok := findExprAtPosition(stmts, pos.Line+1, pos.Character+1)
+	if !ok {
+		return nil, false
+	}
+	prop, ok := expr.(PropertyExpr)
+	if !ok || prop.Name != word {
+		return nil, false
+	}
+	ident, ok := prop.Object.(IdentExpr)
+	if !ok {
+		return nil, false
+	}
+	receiverSym, receiverType, exists := resolveReceiverPath(scope, text, pos, ident.Name)
+	if !exists {
+		return nil, false
+	}
+	if loc, ok := definitionForResolvedMember(uri, text, scope, receiverSym, receiverType, prop.Name); ok {
+		return loc, true
+	}
+	return nil, false
+}
+
+func definitionForResolvedMember(uri string, text string, scope *Scope, receiverSym SymbolInfo, receiverType string, member string) (any, bool) {
+	if strings.HasPrefix(strings.TrimSpace(receiverType), "{") || strings.HasPrefix(strings.TrimSpace(receiverSym.Type), "{") {
+		if loc, ok := structuralFieldDefinitionLocation(uri, text, receiverSym, member); ok {
+			return loc, true
+		}
+	}
+	if strings.HasPrefix(receiverType, "interface:") || strings.HasPrefix(receiverSym.Type, "interface:") {
+		ifaceType := receiverType
+		if !strings.HasPrefix(ifaceType, "interface:") {
+			ifaceType = receiverSym.Type
+		}
+		ifaceName := strings.TrimPrefix(ifaceType, "interface:")
+		if ifaceSym, ok := resolveInterfaceSymbol(scope, ifaceName); ok {
+			if fieldSym, ok := ifaceSym.Fields[member]; ok {
+				return locationFromSymbol(uri, text, fieldSym), true
+			}
+		}
+	}
+	return nil, false
+}
+
+func locationFromByteRange(uri string, text string, rng byteIdentifierRange) Location {
+	lineText := getLine(text, rng.Line)
+	return Location{
+		URI: uri,
+		Range: LSPRange{
+			Start: Position{Line: rng.Line, Character: byteColumnToUTF16Column(lineText, rng.Start)},
+			End:   Position{Line: rng.Line, Character: byteColumnToUTF16Column(lineText, rng.End)},
+		},
+	}
+}
+
+func structuralFieldDefinitionLocation(uri string, text string, receiverSym SymbolInfo, fieldName string) (Location, bool) {
+	if receiverSym.Line <= 0 || receiverSym.Column <= 0 || receiverSym.Type == "" {
+		return Location{}, false
+	}
+	rng, ok := structuralFieldRangeNearSymbol(text, receiverSym, fieldName)
+	if !ok {
+		return Location{}, false
+	}
+	return locationFromByteRange(uri, text, rng), true
+}
+
+func structuralFieldRangeNearSymbol(text string, receiverSym SymbolInfo, fieldName string) (byteIdentifierRange, bool) {
+	lineIdx := receiverSym.Line - 1
+	line := getLine(text, lineIdx)
+	if line == "" {
+		return byteIdentifierRange{}, false
+	}
+	nameStart := receiverSym.Column - 1
+	if nameStart < 0 || nameStart >= len(line) {
+		nameStart = strings.Index(line, receiverSym.Name)
+		if nameStart < 0 {
+			return byteIdentifierRange{}, false
+		}
+	}
+	typeStart := strings.Index(line[nameStart:], "{")
+	if typeStart < 0 {
+		return byteIdentifierRange{}, false
+	}
+	searchStart := nameStart + typeStart + 1
+	for i := searchStart; i+len(fieldName) <= len(line); i++ {
+		if line[i:i+len(fieldName)] != fieldName {
+			continue
+		}
+		beforeOK := i == 0 || !isIdentChar(line[i-1])
+		after := i + len(fieldName)
+		afterOK := after >= len(line) || !isIdentChar(line[after])
+		if beforeOK && afterOK {
+			j := after
+			for j < len(line) && (line[j] == ' ' || line[j] == '\t') {
+				j++
+			}
+			if j < len(line) && line[j] == ':' {
+				return byteIdentifierRange{Line: lineIdx, Start: i, End: after}, true
+			}
+		}
+	}
+	return byteIdentifierRange{}, false
 }
 
 func locationFromSymbol(defaultURI string, text string, sym SymbolInfo) any {
@@ -1097,6 +1303,10 @@ func locationFromSymbol(defaultURI string, text string, sym SymbolInfo) any {
 	targetURI := sym.SourceURI
 	if targetURI == "" {
 		targetURI = defaultURI
+	}
+	if module, ok := stdModuleFromLocationURI(targetURI); ok {
+		targetURI = stdlibVirtualURI(module)
+		writeStdlibStubFile(module)
 	}
 
 	line := sym.Line - 1
@@ -1110,6 +1320,12 @@ func locationFromSymbol(defaultURI string, text string, sym SymbolInfo) any {
 	if targetURI != defaultURI {
 		if openText, ok := lspDocs[targetURI]; ok {
 			targetText = openText
+		} else if module, ok := stdModuleFromVirtualURI(targetURI); ok {
+			if stubText, ok := stdlibStubText(module); ok {
+				targetText = stubText
+			}
+		} else if diskText, ok := tinyFileTextForLSP(URIToPath(targetURI), targetURI); ok {
+			targetText = diskText
 		}
 	}
 
@@ -1137,11 +1353,12 @@ func importLocationAtPosition(uri string, line string, pos Position) (Location, 
 		pos.Character = len(line)
 	}
 
-	quoteStart := strings.LastIndex(line[:pos.Character], `"`)
+	quoteStart := strings.LastIndexAny(line[:pos.Character], `"'`)
 	if quoteStart < 0 {
 		return Location{}, false
 	}
-	quoteEnd := strings.Index(line[quoteStart+1:], `"`)
+	quote := line[quoteStart]
+	quoteEnd := strings.IndexByte(line[quoteStart+1:], quote)
 	if quoteEnd < 0 || quoteStart+1+quoteEnd < pos.Character {
 		return Location{}, false
 	}
@@ -1151,10 +1368,17 @@ func importLocationAtPosition(uri string, line string, pos Position) (Location, 
 	targetPath := ""
 
 	switch {
-	case strings.Contains(prefix, "import lib"):
+	case strings.Contains(prefix, "import lib"), strings.Contains(prefix, "import library"):
 		targetPath = resolveLibraryImportPath(pathText, uri)
 	case strings.Contains(prefix, "import std"):
-		targetPath = "std:" + pathText
+		writeStdlibStubFile(pathText)
+		return Location{
+			URI: stdlibVirtualURI(pathText),
+			Range: LSPRange{
+				Start: Position{Line: 0, Character: 0},
+				End:   Position{Line: 0, Character: 0},
+			},
+		}, true
 	case strings.Contains(prefix, "import"):
 		targetPath = resolveImportPath(uri, pathText)
 	default:
@@ -1169,6 +1393,114 @@ func importLocationAtPosition(uri string, line string, pos Position) (Location, 
 			End:   Position{Line: 0, Character: 0},
 		},
 	}, true
+}
+
+func stdlibVirtualURI(module string) string {
+	module = strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(module), "std:"), ".tiny")
+	return stdlibVirtualScheme + ":/" + module + ".tiny"
+}
+
+func isStdlibVirtualURI(uri string) bool {
+	_, ok := stdModuleFromVirtualURI(uri)
+	return ok
+}
+
+func stdModuleFromVirtualURI(uri string) (string, bool) {
+	if !strings.HasPrefix(uri, stdlibVirtualScheme+":") {
+		return "", false
+	}
+	parsed, err := url.Parse(uri)
+	if err != nil {
+		return "", false
+	}
+	module := strings.TrimPrefix(parsed.Path, "/")
+	module = strings.TrimSuffix(module, ".tiny")
+	return module, module != ""
+}
+
+func stdModuleFromLocationURI(uri string) (string, bool) {
+	if module, ok := stdModuleFromVirtualURI(uri); ok {
+		return module, true
+	}
+	if strings.HasPrefix(uri, "std:") {
+		module := strings.TrimPrefix(uri, "std:")
+		return strings.TrimSuffix(module, ".tiny"), module != ""
+	}
+	if strings.HasPrefix(uri, "file://") {
+		path := URIToPath(uri)
+		if strings.HasPrefix(path, "std:") {
+			module := strings.TrimPrefix(path, "std:")
+			return strings.TrimSuffix(module, ".tiny"), module != ""
+		}
+		base := filepath.Base(path)
+		if strings.HasPrefix(base, "std:") {
+			module := strings.TrimPrefix(base, "std:")
+			return strings.TrimSuffix(module, ".tiny"), module != ""
+		}
+	}
+	return "", false
+}
+
+func stdlibStubText(module string) (string, bool) {
+	module = strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(module), "std:"), ".tiny")
+	if module == "" {
+		return "", false
+	}
+	bytes, err := lspStubs.ReadFile("lsp_stubs/" + module + ".tiny")
+	if err != nil {
+		return "", false
+	}
+	return string(bytes), true
+}
+
+func writeAllStdlibStubFiles() {
+	entries, err := lspStubs.ReadDir("lsp_stubs")
+	if err != nil {
+		return
+	}
+	valid := map[string]bool{}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".tiny") {
+			continue
+		}
+		valid[entry.Name()] = true
+		writeStdlibStubFile(strings.TrimSuffix(entry.Name(), ".tiny"))
+	}
+
+	dir := strings.TrimSpace(os.Getenv("TINY_STDLIB_STUB_DIR"))
+	if dir == "" {
+		return
+	}
+	diskEntries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range diskEntries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".tiny") || valid[entry.Name()] {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, entry.Name()))
+	}
+}
+
+func writeStdlibStubFile(module string) {
+	dir := strings.TrimSpace(os.Getenv("TINY_STDLIB_STUB_DIR"))
+	if dir == "" {
+		return
+	}
+	module = strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(module), "std:"), ".tiny")
+	content, ok := stdlibStubText(module)
+	if !ok {
+		return
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return
+	}
+	path := filepath.Join(dir, module+".tiny")
+	if existing, err := os.ReadFile(path); err == nil && string(existing) == content {
+		return
+	}
+	_ = os.WriteFile(path, []byte(content), 0644)
 }
 
 func getReferences(uri string, text string, pos Position, includeDeclaration bool) []Location {
@@ -1333,6 +1665,13 @@ func getRenameEdit(uri string, text string, pos Position, newName string) Worksp
 }
 
 func getInlayHints(uri string, text string, rng LSPRange) []InlayHint {
+	return []InlayHint{}
+
+	cacheKey := lspTextCacheKey(uri+":"+strconv.Itoa(rng.Start.Line)+":"+strconv.Itoa(rng.Start.Character)+":"+strconv.Itoa(rng.End.Line)+":"+strconv.Itoa(rng.End.Character), text)
+	if cached, ok := lspInlayHintCache[cacheKey]; ok {
+		return append([]InlayHint(nil), cached.hints...)
+	}
+
 	lines := strings.Split(text, "\n")
 	startLine := rng.Start.Line
 	endLine := rng.End.Line
@@ -1353,6 +1692,7 @@ func getInlayHints(uri string, text string, rng LSPRange) []InlayHint {
 		}
 		return hints[i].Position.Character < hints[j].Position.Character
 	})
+	lspInlayHintCache[cacheKey] = lspInlayHintCacheEntry{hints: append([]InlayHint(nil), hints...)}
 	return hints
 }
 
@@ -1814,9 +2154,19 @@ func paramsForCallName(scope *Scope, text string, pos Position, name string) []S
 			}
 		}
 		if strings.HasPrefix(receiverType, "class:") {
-			if classSym, ok := resolveClassSymbol(scope, strings.TrimPrefix(receiverType, "class:")); ok {
+			className := strings.TrimPrefix(receiverType, "class:")
+			if classSym, ok := resolveClassSymbol(scope, className); ok {
 				if methodSym, ok := classSym.Methods[member]; ok {
-					return methodSym.Params
+					params := methodSym.Params
+					if dot := strings.Index(className, "."); dot > 0 {
+						if nsSym, ok := scope.Resolve(className[:dot]); ok && nsSym.Kind == SymbolNamespace {
+							params = append([]StdArg(nil), params...)
+							for i := range params {
+								params[i].Type = qualifyNamespaceType(nsSym.Name, params[i].Type, nsSym.Members)
+							}
+						}
+					}
+					return params
 				}
 			}
 		}
@@ -1892,7 +2242,7 @@ func namespaceFunctionParamsFromText(scope *Scope, text string, namespace string
 		}
 		for _, fnBlock := range findBlocks(nsBlock.Body, "fn") {
 			if fnBlock.Name == member {
-				return normalizeStdArgs(scope, parseFunctionParams(fnBlock.ParamsText)), true
+				return normalizeStdArgs(scope, blockParamsToStdArgs(fnBlock)), true
 			}
 		}
 	}
@@ -2487,6 +2837,8 @@ func parseLSPImportLine(line string, lineIndex int) (lspImportLine, bool) {
 		case "std", "plugin", "library", "lib":
 			kind = tok.Literal
 			tok = lexer.NextToken()
+		case "type":
+			tok = lexer.NextToken()
 		}
 	}
 	if tok.Type != TOKEN_STRING {
@@ -3051,19 +3403,6 @@ func collectImportedReferenceDocuments(uri string, text string, docs map[string]
 
 func getDocumentSymbols(uri string, text string) []DocumentSymbol {
 	lines := strings.Split(text, "\n")
-	if len(lines) > 0 {
-		lastLine := len(lines) - 1
-		lastText := strings.TrimSuffix(lines[lastLine], "\r")
-		scope := scopeAtPosition(uri, text, Position{
-			Line:      lastLine,
-			Character: len(lastText),
-		})
-
-		symbols := documentSymbolsFromScope(uri, text, scope)
-		if len(symbols) > 0 {
-			return symbols
-		}
-	}
 
 	symbols := []DocumentSymbol{}
 	for i, rawLine := range lines {
@@ -3335,23 +3674,41 @@ func symbolKindToDocumentKind(kind SymbolKind) int {
 }
 
 func refreshLSPDocument(uri string, text string) {
+	if isStdlibVirtualURI(uri) {
+		return
+	}
 	path := URIToPath(uri)
 	lspDocs[path] = text
+	invalidateLSPFastCaches()
 	invalidateLSPImportCacheForURI(path)
 	publishDiagnostics(uri, text)
 	publishDiagnosticsForImportDependents(uri)
 }
 
 func refreshLSPDocumentFast(uri string, text string) {
+	if isStdlibVirtualURI(uri) {
+		return
+	}
 	path := URIToPath(uri)
 	lspDocs[path] = text
-	invalidateLSPImportCacheForURI(path)
-	publishDiagnostics(uri, text)
+	invalidateLSPDocumentFeatureCaches()
+	invalidateLSPLocalDocumentCaches(path)
+}
+
+func lspDocumentText(uri string) string {
+	if module, ok := stdModuleFromVirtualURI(uri); ok {
+		if text, ok := stdlibStubText(module); ok {
+			return text
+		}
+		return ""
+	}
+	return lspDocs[URIToPath(uri)]
 }
 
 func handleLSPMessage(msg LSPMessage) {
 	switch msg.Method {
 	case "initialize":
+		writeAllStdlibStubFiles()
 		writeLSPMessage(LSPMessage{
 			ID: msg.ID,
 			Result: map[string]any{
@@ -3364,7 +3721,7 @@ func handleLSPMessage(msg LSPMessage) {
 						},
 					},
 					"completionProvider": map[string]any{
-						"triggerCharacters":   []string{".", `"`},
+						"triggerCharacters":   []string{".", `"`, "'"},
 						"resolveProvider":     false,
 						"completionItem":      map[string]any{"snippetSupport": true},
 						"allCommitCharacters": []string{},
@@ -3379,7 +3736,7 @@ func handleLSPMessage(msg LSPMessage) {
 					"codeActionProvider": map[string]any{
 						"codeActionKinds": []string{"quickfix", "source.organizeImports"},
 					},
-					"inlayHintProvider":         true,
+					"inlayHintProvider":         false,
 					"documentSymbolProvider":    true,
 					"documentHighlightProvider": true,
 					"hoverProvider":             true,
@@ -3398,7 +3755,8 @@ func handleLSPMessage(msg LSPMessage) {
 		})
 
 	case "initialized":
-		publishProjectDiagnostics()
+		// Keep startup idle. Editors request diagnostics for opened documents; scanning
+		// the whole project here makes large workspaces burn CPU without user input.
 
 	case "shutdown":
 		writeLSPMessage(LSPMessage{
@@ -3414,7 +3772,6 @@ func handleLSPMessage(msg LSPMessage) {
 		json.Unmarshal(msg.Params, &params)
 
 		refreshLSPDocument(params.TextDocument.URI, params.TextDocument.Text)
-		publishProjectDiagnostics()
 
 	case "textDocument/didChange":
 		var params DidChangeParams
@@ -3423,12 +3780,15 @@ func handleLSPMessage(msg LSPMessage) {
 		if len(params.ContentChanges) > 0 {
 			text := params.ContentChanges[0].Text
 			refreshLSPDocumentFast(params.TextDocument.URI, text)
-			publishDiagnosticsForImportDependents(params.TextDocument.URI)
+			publishEditDiagnostics(params.TextDocument.URI, text)
 		}
 
 	case "textDocument/didSave":
 		var params DidSaveParams
 		json.Unmarshal(msg.Params, &params)
+		if isStdlibVirtualURI(params.TextDocument.URI) {
+			return
+		}
 
 		text := params.Text
 		if text == "" {
@@ -3440,23 +3800,24 @@ func handleLSPMessage(msg LSPMessage) {
 		}
 
 		refreshLSPDocument(params.TextDocument.URI, text)
-		publishProjectDiagnostics()
 
 	case "textDocument/didClose":
 		var params DidCloseParams
 		json.Unmarshal(msg.Params, &params)
+		if isStdlibVirtualURI(params.TextDocument.URI) {
+			return
+		}
 
 		delete(lspDocs, URIToPath(params.TextDocument.URI))
 		invalidateLSPImportCacheForURI(URIToPath(params.TextDocument.URI))
 		publishDiagnostics(params.TextDocument.URI, "")
 		publishDiagnosticsForImportDependents(params.TextDocument.URI)
-		publishProjectDiagnostics()
 
 	case "textDocument/completion":
 		var params CompletionParams
 		json.Unmarshal(msg.Params, &params)
 
-		text := lspDocs[URIToPath(params.TextDocument.URI)]
+		text := lspDocumentText(params.TextDocument.URI)
 		params.Position = lspPositionToBytePosition(text, params.Position)
 		items := getCompletions(params.TextDocument.URI, text, params.Position)
 
@@ -3469,7 +3830,7 @@ func handleLSPMessage(msg LSPMessage) {
 		var params CompletionParams
 		json.Unmarshal(msg.Params, &params)
 
-		text := lspDocs[URIToPath(params.TextDocument.URI)]
+		text := lspDocumentText(params.TextDocument.URI)
 		params.Position = lspPositionToBytePosition(text, params.Position)
 
 		var result any
@@ -3493,7 +3854,7 @@ func handleLSPMessage(msg LSPMessage) {
 		var params TextDocumentIdentifierParams
 		json.Unmarshal(msg.Params, &params)
 
-		text := lspDocs[URIToPath(params.TextDocument.URI)]
+		text := lspDocumentText(params.TextDocument.URI)
 		result := getSemanticTokens(params.TextDocument.URI, text)
 
 		writeLSPMessage(LSPMessage{
@@ -3505,7 +3866,7 @@ func handleLSPMessage(msg LSPMessage) {
 		var params InlayHintParams
 		json.Unmarshal(msg.Params, &params)
 
-		text := lspDocs[URIToPath(params.TextDocument.URI)]
+		text := lspDocumentText(params.TextDocument.URI)
 		params.Range.Start = lspPositionToBytePosition(text, params.Range.Start)
 		params.Range.End = lspPositionToBytePosition(text, params.Range.End)
 		result := getInlayHints(params.TextDocument.URI, text, params.Range)
@@ -3519,7 +3880,7 @@ func handleLSPMessage(msg LSPMessage) {
 		var params CodeActionParams
 		json.Unmarshal(msg.Params, &params)
 
-		text := lspDocs[URIToPath(params.TextDocument.URI)]
+		text := lspDocumentText(params.TextDocument.URI)
 		params.Range.Start = lspPositionToBytePosition(text, params.Range.Start)
 		params.Range.End = lspPositionToBytePosition(text, params.Range.End)
 		result := getCodeActions(params.TextDocument.URI, text, params)
@@ -3533,7 +3894,7 @@ func handleLSPMessage(msg LSPMessage) {
 		var params HoverParams
 		json.Unmarshal(msg.Params, &params)
 
-		text := lspDocs[URIToPath(params.TextDocument.URI)]
+		text := lspDocumentText(params.TextDocument.URI)
 		params.Position = lspPositionToBytePosition(text, params.Position)
 
 		var result any
@@ -3557,7 +3918,7 @@ func handleLSPMessage(msg LSPMessage) {
 		var params ReferenceParams
 		json.Unmarshal(msg.Params, &params)
 
-		text := lspDocs[URIToPath(params.TextDocument.URI)]
+		text := lspDocumentText(params.TextDocument.URI)
 		params.Position = lspPositionToBytePosition(text, params.Position)
 
 		var result any
@@ -3580,7 +3941,7 @@ func handleLSPMessage(msg LSPMessage) {
 		var params HoverParams
 		json.Unmarshal(msg.Params, &params)
 
-		text := lspDocs[URIToPath(params.TextDocument.URI)]
+		text := lspDocumentText(params.TextDocument.URI)
 		params.Position = lspPositionToBytePosition(text, params.Position)
 
 		var result any
@@ -3602,7 +3963,7 @@ func handleLSPMessage(msg LSPMessage) {
 		var params CallHierarchyPrepareParams
 		json.Unmarshal(msg.Params, &params)
 
-		text := lspDocs[URIToPath(params.TextDocument.URI)]
+		text := lspDocumentText(params.TextDocument.URI)
 		params.Position = lspPositionToBytePosition(text, params.Position)
 
 		var result any
@@ -3662,7 +4023,7 @@ func handleLSPMessage(msg LSPMessage) {
 		var params RenameParams
 		json.Unmarshal(msg.Params, &params)
 
-		text := lspDocs[URIToPath(params.TextDocument.URI)]
+		text := lspDocumentText(params.TextDocument.URI)
 		params.Position = lspPositionToBytePosition(text, params.Position)
 
 		var result any
@@ -3688,7 +4049,7 @@ func handleLSPMessage(msg LSPMessage) {
 
 		json.Unmarshal(msg.Params, &params)
 
-		text := lspDocs[URIToPath(params.TextDocument.URI)]
+		text := lspDocumentText(params.TextDocument.URI)
 
 		var result any
 
@@ -3711,7 +4072,7 @@ func handleLSPMessage(msg LSPMessage) {
 		var params HoverParams
 		json.Unmarshal(msg.Params, &params)
 
-		text := lspDocs[URIToPath(params.TextDocument.URI)]
+		text := lspDocumentText(params.TextDocument.URI)
 		params.Position = lspPositionToBytePosition(text, params.Position)
 
 		var result any
@@ -3734,7 +4095,7 @@ func handleLSPMessage(msg LSPMessage) {
 		var params FormattingParams
 		json.Unmarshal(msg.Params, &params)
 
-		text := lspDocs[URIToPath(params.TextDocument.URI)]
+		text := lspDocumentText(params.TextDocument.URI)
 
 		var result any = []TextEdit{}
 
@@ -3764,7 +4125,7 @@ func handleLSPMessage(msg LSPMessage) {
 		var params HoverParams
 		json.Unmarshal(msg.Params, &params)
 
-		text := lspDocs[URIToPath(params.TextDocument.URI)]
+		text := lspDocumentText(params.TextDocument.URI)
 		params.Position = lspPositionToBytePosition(text, params.Position)
 
 		var result any
@@ -3817,7 +4178,21 @@ func classBlockAtLine(text string, lineIndex int) *blockInfo {
 
 func functionBlockAtLine(text string, lineIndex int) *blockInfo {
 	offset := offsetAtLine(text, lineIndex+1)
+	return functionBlockAtOffset(text, offset)
+}
 
+func functionBlockAtPosition(text string, pos Position) *blockInfo {
+	offset := offsetAtLine(text, pos.Line+1) + pos.Character
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(text) {
+		offset = len(text)
+	}
+	return functionBlockAtOffset(text, offset)
+}
+
+func functionBlockAtOffset(text string, offset int) *blockInfo {
 	var best *blockInfo
 
 	for _, block := range findBlocks(text, "fn") {
@@ -3833,6 +4208,141 @@ func functionBlockAtLine(text string, lineIndex int) *blockInfo {
 	return best
 }
 
+func functionParameterSymbolAtPosition(uri string, text string, pos Position, word string) (SymbolInfo, bool) {
+	if strings.TrimSpace(word) == "" {
+		return SymbolInfo{}, false
+	}
+
+	if sym, ok := functionParameterSymbolOnCurrentLine(uri, text, pos, word); ok {
+		if sym.Type != "any" {
+			return sym, true
+		}
+	}
+
+	block := functionBlockAtPosition(text, pos)
+	if block == nil {
+		return SymbolInfo{}, false
+	}
+
+	cursorOffset := offsetAtLine(text, pos.Line+1) + pos.Character
+	if cursorOffset < block.Start {
+		return SymbolInfo{}, false
+	}
+
+	paramsStartRel := strings.Index(text[block.Start:block.End], "(")
+	if paramsStartRel < 0 {
+		return SymbolInfo{}, false
+	}
+	paramsStart := block.Start + paramsStartRel + 1
+	paramsEnd := paramsStart + len(block.ParamsText)
+
+	for _, param := range blockParamsToStdArgs(*block) {
+		if param.Name != word {
+			continue
+		}
+
+		nameOffsetRel := indexParamNameInList(block.ParamsText, word)
+		if nameOffsetRel < 0 {
+			nameOffsetRel = 0
+		}
+		nameOffset := paramsStart + nameOffsetRel
+		namePos := bytePositionAtOffset(text, nameOffset)
+		typ := firstNonEmpty(param.Type, "any")
+		if typ == "any" {
+			if scoped, ok := scopeAtPosition(uri, text, pos).Resolve(param.Name); ok && scoped.Type != "" {
+				typ = scoped.Type
+			}
+		}
+
+		if cursorOffset >= paramsStart && cursorOffset <= paramsEnd {
+			return SymbolInfo{
+				Name:      param.Name,
+				Kind:      SymbolVariable,
+				Type:      typ,
+				Detail:    "parameter " + param.Name,
+				Line:      namePos.Line + 1,
+				Column:    namePos.Character + 1,
+				SourceURI: uri,
+			}, true
+		}
+
+		return SymbolInfo{
+			Name:      param.Name,
+			Kind:      SymbolVariable,
+			Type:      typ,
+			Detail:    "parameter " + param.Name,
+			Line:      namePos.Line + 1,
+			Column:    namePos.Character + 1,
+			SourceURI: uri,
+		}, true
+	}
+
+	return SymbolInfo{}, false
+}
+
+func functionParameterSymbolOnCurrentLine(uri string, text string, pos Position, word string) (SymbolInfo, bool) {
+	line := getLine(text, pos.Line)
+	if line == "" {
+		return SymbolInfo{}, false
+	}
+	cursor := pos.Character
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > len(line) {
+		cursor = len(line)
+	}
+
+	for _, tok := range lexedTokensForText(line) {
+		if tok.Token.Type != TOKEN_FN {
+			continue
+		}
+		if tok.Offset > cursor {
+			break
+		}
+		block, ok := parseFunctionLikeBlockAt(line, tok.Offset, "fn")
+		if !ok || cursor < block.Start || cursor > block.End {
+			continue
+		}
+		paramsStartRel := strings.Index(line[block.Start:block.End], "(")
+		if paramsStartRel < 0 {
+			continue
+		}
+		paramsStart := block.Start + paramsStartRel + 1
+		for _, param := range blockParamsToStdArgs(block) {
+			if param.Name != word {
+				continue
+			}
+			nameOffsetRel := indexParamNameInList(block.ParamsText, word)
+			if nameOffsetRel < 0 {
+				nameOffsetRel = 0
+			}
+			nameColumn := paramsStart + nameOffsetRel
+			return SymbolInfo{
+				Name:      param.Name,
+				Kind:      SymbolVariable,
+				Type:      firstNonEmpty(param.Type, "any"),
+				Detail:    "parameter " + param.Name,
+				Line:      pos.Line + 1,
+				Column:    nameColumn + 1,
+				SourceURI: uri,
+			}, true
+		}
+	}
+
+	return SymbolInfo{}, false
+}
+
+func indexParamNameInList(paramsText string, name string) int {
+	tokens := lexedTokensForText(paramsText)
+	for _, tok := range tokens {
+		if tok.Token.Type == TOKEN_IDENT && tok.Token.Literal == name {
+			return tok.Offset
+		}
+	}
+	return -1
+}
+
 type semanticTokenCandidate struct {
 	Line  int
 	Start int
@@ -3841,6 +4351,11 @@ type semanticTokenCandidate struct {
 }
 
 func getSemanticTokens(uri string, text string) map[string]any {
+	cacheKey := lspTextCacheKey(uri, text)
+	if cached, ok := lspSemanticTokensCache[cacheKey]; ok {
+		return cloneLSPAnyMap(cached.result)
+	}
+
 	tokens := collectSemanticTokens(uri, text)
 	sort.SliceStable(tokens, func(i, j int) bool {
 		if tokens[i].Line != tokens[j].Line {
@@ -3892,7 +4407,22 @@ func getSemanticTokens(uri string, text string) map[string]any {
 		lastStart = startChar
 	}
 
-	return map[string]any{"data": data}
+	result := map[string]any{"data": data}
+	lspSemanticTokensCache[cacheKey] = lspSemanticTokensCacheEntry{result: cloneLSPAnyMap(result)}
+	return result
+}
+
+func cloneLSPAnyMap(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		switch v := value.(type) {
+		case []int:
+			out[key] = append([]int(nil), v...)
+		default:
+			out[key] = v
+		}
+	}
+	return out
 }
 
 type stringInterval struct {
@@ -3992,7 +4522,6 @@ func isInsideString(intervals []stringInterval, start int, end int) bool {
 
 func collectSemanticTokens(uri string, text string) []semanticTokenCandidate {
 	tokens := []semanticTokenCandidate{}
-	scope := fileBaseScope(uri, text)
 	lines := strings.Split(text, "\n")
 	identRe := regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*`)
 	numberRe := regexp.MustCompile(`\b[0-9]+(?:\.[0-9]+)?\b`)
@@ -4033,7 +4562,7 @@ func collectSemanticTokens(uri string, text string) []semanticTokenCandidate {
 			}
 
 			name := code[start:end]
-			tokenType := semanticTypeForIdentifier(scope, code, name, start, end)
+			tokenType := semanticTypeForIdentifier(nil, code, name, start, end)
 			if tokenType == "" {
 				continue
 			}
@@ -4045,7 +4574,11 @@ func collectSemanticTokens(uri string, text string) []semanticTokenCandidate {
 }
 
 func semanticTypeForIdentifier(scope *Scope, line string, name string, start int, end int) string {
-	if tinyKeywords[name] {
+	if tinySoftKeywords[name] {
+		if isSoftKeywordContext(line, name, start, end) {
+			return "keyword"
+		}
+	} else if tinyKeywords[name] {
 		return "keyword"
 	}
 
@@ -4084,22 +4617,24 @@ func semanticTypeForIdentifier(scope *Scope, line string, name string, start int
 		return "type"
 	}
 
-	if sym, ok := scope.Resolve(name); ok {
-		switch sym.Kind {
-		case SymbolNamespace, SymbolStd:
-			return "namespace"
-		case SymbolClass:
-			return "class"
-		case SymbolInterface:
-			return "interface"
-		case SymbolEnum:
-			return "enum"
-		case SymbolFunction:
-			return "function"
-		case SymbolField:
-			return "property"
-		case SymbolVariable:
-			return "variable"
+	if scope != nil {
+		if sym, ok := scope.Resolve(name); ok {
+			switch sym.Kind {
+			case SymbolNamespace, SymbolStd:
+				return "namespace"
+			case SymbolClass:
+				return "class"
+			case SymbolInterface:
+				return "interface"
+			case SymbolEnum:
+				return "enum"
+			case SymbolFunction:
+				return "function"
+			case SymbolField:
+				return "property"
+			case SymbolVariable:
+				return "variable"
+			}
 		}
 	}
 
@@ -4108,6 +4643,31 @@ func semanticTypeForIdentifier(scope *Scope, line string, name string, start int
 	}
 
 	return "variable"
+}
+
+func isSoftKeywordContext(line string, name string, start int, end int) bool {
+	prev := previousIdentifierInLine(line, start)
+	next := nextNonSpaceByte(line, end)
+	switch name {
+	case "embed":
+		return prev == "" && next != '('
+	case "match":
+		return prev == "" && next != '('
+	case "field":
+		return prev == "" && next != '('
+	case "native", "external":
+		return prev == "" && next != '('
+	case "private", "public":
+		return prev == "" && next != '('
+	case "implements", "extends":
+		return prev != "" && next != '('
+	case "iota":
+		return prev == "" && next != '('
+	case "embedtext", "embedbytes", "embedfolder":
+		return prev == "" && next != '('
+	default:
+		return false
+	}
 }
 
 func previousIdentifierInLine(line string, start int) string {
@@ -4200,19 +4760,122 @@ func isFunctionParameterIdentifier(line string, start int, end int) bool {
 	return prev == '(' || prev == ',' || next == ':' || next == ',' || next == ')'
 }
 
+type semanticModelCacheEntry struct {
+	model tinycompiler.SemanticModel
+	text  string
+}
+
+var (
+	semanticModelCacheMu sync.RWMutex
+	semanticModelCache   = make(map[string]*semanticModelCacheEntry)
+)
+
+func getSemanticModel(uri string, text string) *tinycompiler.SemanticModel {
+	key := filepathOrURIKey(uri)
+	semanticModelCacheMu.RLock()
+	if entry, ok := semanticModelCache[key]; ok && entry.text == text {
+		semanticModelCacheMu.RUnlock()
+		return &entry.model
+	}
+	semanticModelCacheMu.RUnlock()
+
+	lexer := NewLexer(text, URIToPath(uri))
+	parser := NewParser(lexer)
+	program := parser.ParseProgramTolerant()
+
+	c := tinycompiler.NewCompiler()
+	c.SetDiagnosticMode(true)
+	model := c.CompileDiagnostic(program)
+
+	semanticModelCacheMu.Lock()
+	semanticModelCache[key] = &semanticModelCacheEntry{
+		model: model,
+		text:  text,
+	}
+	semanticModelCacheMu.Unlock()
+
+	return &model
+}
+
+func clearSemanticModelCache(uri string) {
+	key := filepathOrURIKey(uri)
+	semanticModelCacheMu.Lock()
+	delete(semanticModelCache, key)
+	semanticModelCacheMu.Unlock()
+}
+
 func semanticDiagnostics(uri string, text string) []map[string]any {
 	return semanticDiagnosticsFromAST(uri, text)
 }
 
+func compilerDiagnostics(uri string, text string) []map[string]any {
+	model := getSemanticModel(uri, text)
+	if model == nil || len(model.Errors) == 0 {
+		return nil
+	}
+
+	diagnostics := make([]map[string]any, 0, len(model.Errors))
+	for _, err := range model.Errors {
+		diagnostics = append(diagnostics, langErrorToDiagnostic(uri, text, err))
+	}
+	return diagnostics
+}
+
+func langErrorToDiagnostic(uri string, text string, err tinyerrors.LangErrorType) map[string]any {
+	line := err.Line
+	column := err.Column
+
+	if line <= 0 || column <= 0 {
+		name := extractNameFromMessage(err.Message)
+		if name != "" {
+			l, c := findWordFirstOccurrence(text, name)
+			if l > 0 && c > 0 {
+				line = l
+				column = c
+			}
+		}
+	}
+
+	if line <= 0 {
+		line = 1
+	}
+	if column <= 0 {
+		column = 1
+	}
+
+	lineIndex := line - 1
+	colIndex := column - 1
+
+	lineText := getLine(text, lineIndex)
+	wordLen := wordLengthAtColumn(lineText, colIndex)
+
+	severity := 1
+	if err.Kind == tinyerrors.ErrorSyntax {
+		severity = 2
+	}
+
+	return makeRangeDiagnostic(
+		lineIndex,
+		colIndex,
+		colIndex+wordLen,
+		severity,
+		string(err.Kind)+": "+err.Message,
+	)
+}
+
 func publishDiagnostics(uri string, text string) {
-	publishDiagnosticsWithMode(uri, text, true)
+	publishDiagnosticsWithMode(uri, text, true, true)
 }
 
 func publishParseDiagnostics(uri string, text string) {
-	publishDiagnosticsWithMode(uri, text, false)
+	publishDiagnosticsWithMode(uri, text, false, false)
 }
 
-func publishDiagnosticsWithMode(uri string, text string, includeSlowChecks bool) {
+func publishEditDiagnostics(uri string, text string) {
+	publishDiagnosticsWithMode(uri, text, true, false)
+}
+
+func publishDiagnosticsWithMode(uri string, text string, includeSemanticChecks bool, includeImportChecks bool) {
 	if text == "" {
 		params, _ := json.Marshal(map[string]any{
 			"uri":         uri,
@@ -4270,13 +4933,15 @@ func publishDiagnosticsWithMode(uri string, text string, includeSlowChecks bool)
 		})
 	}
 
-	if includeSlowChecks {
+	if includeSemanticChecks {
 		diagnostics = append(diagnostics, semanticDiagnostics(uri, text)...)
+		diagnostics = append(diagnostics, compilerDiagnostics(uri, text)...)
 	}
-	if includeSlowChecks {
+	if includeImportChecks {
 		diagnostics = append(diagnostics, importDiagnostics(uri, text)...)
 	}
 
+	diagnostics = dedupeDiagnostics(diagnostics)
 	diagnostics = normalizeDiagnosticRangesForLSP(text, diagnostics)
 
 	params, _ := json.Marshal(map[string]any{
@@ -4488,6 +5153,39 @@ type importPathInLine struct {
 
 func importPathsInLine(line string) []importPathInLine {
 	result := []importPathInLine{}
+	if statements, diagnostics := parseTinyForLSP("", strings.TrimSpace(line)); statements != nil && len(diagnostics) == 0 {
+		for _, raw := range statements {
+			stmt, _ := unwrapExport(raw)
+			imp, ok := stmt.(ImportStmt)
+			if !ok {
+				continue
+			}
+			kind := "file"
+			if imp.Std {
+				kind = "std"
+			} else if imp.Plugin {
+				kind = "plugin"
+			} else if imp.Library {
+				kind = "library"
+			}
+			start := strings.Index(line, `"`+imp.Path+`"`)
+			if start >= 0 {
+				start++
+			} else {
+				start = maxInt(0, imp.Column-1)
+			}
+			result = append(result, importPathInLine{
+				Kind:  kind,
+				Path:  imp.Path,
+				Start: start,
+				End:   start + len(imp.Path),
+			})
+		}
+		if len(result) > 0 {
+			return result
+		}
+	}
+
 	re := regexp.MustCompile(`\bimport\s+(?:(std|plugin|library|lib)\s+)?"([^"]+)"`)
 	for _, match := range re.FindAllStringSubmatchIndex(line, -1) {
 		kind := "file"
@@ -4557,6 +5255,34 @@ func documentImportsPath(uri string, text string, targetPath string, visited map
 	targetPath = filepath.Clean(targetPath)
 
 	cleanedText2 := stripNativeGoBlocks(text)
+	if statements, diagnostics := parseTinyForLSP(docPath, cleanedText2); statements != nil && len(diagnostics) == 0 {
+		for _, raw := range statements {
+			stmt, _ := unwrapExport(raw)
+			imp, ok := stmt.(ImportStmt)
+			if !ok || imp.Std || imp.Plugin {
+				continue
+			}
+
+			importPath := ""
+			if imp.Library {
+				importPath = filepath.Clean(resolveLibraryImportPath(imp.Path, docPath))
+			} else {
+				importPath = filepath.Clean(resolveImportPath(docPath, imp.Path))
+			}
+
+			if importPath == targetPath {
+				return true
+			}
+
+			importURI := pathToFileURI(importPath)
+			importText, ok := tinyFileTextForLSP(importPath, importURI)
+			if ok && documentImportsPath(importPath, importText, targetPath, visited) {
+				return true
+			}
+		}
+		return false
+	}
+
 	for _, match := range fileImportRegex.FindAllStringSubmatch(cleanedText2, -1) {
 		importPath := filepath.Clean(resolveImportPath(docPath, match[1]))
 		if importPath == targetPath {
@@ -4603,7 +5329,7 @@ func isInsideLibraryImportString(line string, character int) bool {
 
 	before := line[:character]
 
-	return strings.Contains(before, `import lib "`)
+	return containsLibraryImportMarker(before)
 }
 
 func isInsidePluginImportString(line string, character int) bool {
@@ -4618,7 +5344,7 @@ func isInsideFileImportString(line string, character int) bool {
 		character = len(line)
 	}
 	before := line[:character]
-	return strings.Contains(before, `import "`) && !strings.Contains(before, `import std "`) && !strings.Contains(before, `import lib "`) && !strings.Contains(before, `import plugin "`)
+	return strings.Contains(before, `import "`) && !strings.Contains(before, `import std "`) && !containsLibraryImportMarker(before) && !strings.Contains(before, `import plugin "`)
 }
 
 func pluginImportPathCompletions() []CompletionItem {
@@ -4680,17 +5406,17 @@ func fileImportPrefixAt(line string, character int) string {
 func libraryImportPathCompletions(uri string, line string, character int) []CompletionItem {
 	prefix := libraryImportPrefixAt(line, character)
 	if prefix == "" || strings.Count(prefix, "/") < 2 {
-		return libraryPackageCompletions()
+		return libraryPackageCompletions(uri)
 	}
 
 	lib, ok := parseLibraryImportPath(prefix)
 	if !ok {
-		return libraryPackageCompletions()
+		return libraryPackageCompletions(uri)
 	}
 
 	root := resolveLibraryRoot(lib.Owner, lib.Repo, uri)
 	if root == "" {
-		return libraryPackageCompletions()
+		return libraryPackageCompletions(uri)
 	}
 
 	dir := root
@@ -4701,7 +5427,7 @@ func libraryImportPathCompletions(uri string, line string, character int) []Comp
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return libraryPackageCompletions()
+		return libraryPackageCompletions(uri)
 	}
 
 	basePrefix := lib.Owner + "/" + lib.Repo
@@ -4739,14 +5465,14 @@ func libraryImportPrefixAt(line string, character int) string {
 	}
 
 	before := line[:character]
-	markers := `import lib "`
 	idx := -1
 	marker := ""
-	candidateIdx := strings.LastIndex(before, markers)
-
-	if candidateIdx > idx {
-		idx = candidateIdx
-		marker = markers
+	for _, candidate := range []string{`import lib "`, `import library "`} {
+		candidateIdx := strings.LastIndex(before, candidate)
+		if candidateIdx > idx {
+			idx = candidateIdx
+			marker = candidate
+		}
 	}
 
 	if idx < 0 || marker == "" {
@@ -4754,6 +5480,10 @@ func libraryImportPrefixAt(line string, character int) string {
 	}
 
 	return before[idx+len(marker):]
+}
+
+func containsLibraryImportMarker(text string) bool {
+	return strings.Contains(text, `import lib "`) || strings.Contains(text, `import library "`)
 }
 
 func parseGitHubPackageSourceSafe(source string) (githubPackageSpec, error) {
@@ -4783,9 +5513,12 @@ func parseGitHubPackageSourceSafe(source string) (githubPackageSpec, error) {
 	}, nil
 }
 
-func libraryPackageCompletions() []CompletionItem {
+func libraryPackageCompletions(uri string) []CompletionItem {
 	items := []CompletionItem{}
-	config, ok := loadTinyConfig()
+	config, ok := loadTinyConfigFromPath(URIToPath(uri))
+	if !ok {
+		config, ok = loadTinyConfig()
+	}
 	if !ok {
 		return items
 	}
@@ -4887,12 +5620,14 @@ func formatNativeSignature(typeName string, method StdMethodInfo) string {
 	return typeName + "." + method.Name + "(" + strings.Join(parts, ", ") + "): " + method.Returns
 }
 
+var lspEnableHeavyAutoImportCompletions bool
+
 func scopeCompletions(scope *Scope, uri string, text string, hasParens bool) []CompletionItem {
 	items := []CompletionItem{
 		snippetCompletion("import", "import statement", "import \"$1\"$0"),
 		snippetCompletion("import std", "standard library import", "import std \"$1\"$0"),
 		snippetCompletion("import plugin", "plugin import", "import plugin \"$1\" as ${2:Plugin}$0"),
-		snippetCompletion("import library", "library import", "import lib \"$1\" as ${2:Library}$0"),
+		snippetCompletion("import library", "library import", "import library \"$1\" as ${2:Library}$0"),
 		{Label: "export", Kind: 14, Detail: "export statement", InsertText: "export $0", InsertTextFormat: 2},
 		{Label: "std", Kind: 14, Detail: "standard library import"},
 		snippetCompletion("fn", "function", "fn ${1:name}(${2}) {\n    $0\n}"),
@@ -4902,6 +5637,7 @@ func scopeCompletions(scope *Scope, uri string, text string, hasParens bool) []C
 		{Label: "enum", Kind: 7, Detail: "enum", InsertText: "enum ${1:Name} {\n    $0\n}", InsertTextFormat: 2},
 		{Label: "interface", Kind: 7, Detail: "interface", InsertText: "interface ${1:Name} {\n    $0\n}", InsertTextFormat: 2},
 		{Label: "embed", Kind: 14, Detail: "embed class methods"},
+		{Label: "async", Kind: 14, Detail: "async declaration"},
 		snippetCompletion("field", "class field", "field ${1:name} = ${2:value}$0"),
 		{Label: "private", Kind: 14, Detail: "private field"},
 		{Label: "public", Kind: 14, Detail: "public field"},
@@ -4924,10 +5660,13 @@ func scopeCompletions(scope *Scope, uri string, text string, hasParens bool) []C
 		snippetCompletion("embedtext", "embedtext statement", "embedtext \"$0\" const $1"),
 		snippetCompletion("embedbytes", "embedbytes statement", "embedbytes \"$0\" const $1"),
 		snippetCompletion("embedfolder", "embedfolder statement", "embedfolder \"$0\" const $1"),
-		snippetCompletion("native fn", "native fn statement", "native fn ${0:Name}(): null {\n\tgo {\n$1\n\t}\n}"),
+		snippetCompletion("native fn", "native function statement", "native fn ${0:Name}(): null {\n\tgo {\n$1\n\t}\n}"),
+		snippetCompletion("external fn", "external function statement", "external fn ${0:Name}(${1:...any: any}): ${2:any}"),
+		snippetCompletion("external const", "external global statement", "external const ${0:Name}: ${1:any}"),
 		{Label: "await ", Kind: 14, Detail: "await statement"},
 		{Label: "typeof", Kind: 14, Detail: "type operator"},
 		{Label: "instanceof", Kind: 14, Detail: "instance check"},
+		{Label: "implements", Kind: 14, Detail: "implements"},
 		{Label: "true", Kind: 14, Detail: "boolean literal"},
 		{Label: "false", Kind: 14, Detail: "boolean literal"},
 		{Label: "null", Kind: 14, Detail: "null literal"},
@@ -4978,8 +5717,62 @@ func scopeCompletions(scope *Scope, uri string, text string, hasParens bool) []C
 	}
 
 	items = append(items, stdAutoImportCompletions(scope, text)...)
-	items = append(items, fileAutoImportCompletions(scope, uri, text, hasParens)...)
-	items = append(items, libraryAutoImportCompletions(scope, uri, text, hasParens)...)
+	if lspEnableHeavyAutoImportCompletions {
+		items = append(items, fileAutoImportCompletions(scope, uri, text, hasParens)...)
+		items = append(items, libraryAutoImportCompletions(scope, uri, text, hasParens)...)
+	}
+
+	if sm := getSemanticModel(uri, text); sm != nil {
+		for name, fn := range sm.Functions {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			ret := typeHintString(fn.ReturnType)
+			detail := "(" + compilerParamsToDetail(fn.Params) + "): " + ret
+			items = append(items, CompletionItem{
+				Label:            name,
+				Kind:             3,
+				Detail:           detail,
+				InsertText:       completionInsertTextForFunc(name, hasParens),
+				InsertTextFormat: completionInsertTextFormatForFunc(fn, hasParens),
+			})
+		}
+		for name, cls := range sm.Classes {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			items = append(items, CompletionItem{
+				Label:  name,
+				Kind:   7,
+				Detail: "class " + cls.Name,
+			})
+		}
+		for name, iface := range sm.Interfaces {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			fieldCount := len(iface.Fields)
+			items = append(items, CompletionItem{
+				Label:  name,
+				Kind:   7,
+				Detail: "interface " + iface.Name + " (" + strconv.Itoa(fieldCount) + " fields)",
+			})
+		}
+		for name, typ := range sm.Globals {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			items = append(items, CompletionItem{
+				Label:  name,
+				Kind:   12,
+				Detail: "global " + typ,
+			})
+		}
+	}
 
 	return rankedCompletionItems(dedupeCompletionItems(items))
 }
@@ -5371,6 +6164,9 @@ func mergeCompletionItems(base CompletionItem, incoming CompletionItem) Completi
 	if base.TextEdit == nil {
 		base.TextEdit = incoming.TextEdit
 	}
+	if base.Command == nil {
+		base.Command = incoming.Command
+	}
 
 	base.AdditionalTextEdits = mergeTextEdits(base.AdditionalTextEdits, incoming.AdditionalTextEdits)
 	return base
@@ -5403,6 +6199,7 @@ func mergeTextEdits(base []TextEdit, incoming []TextEdit) []TextEdit {
 
 func rankedCompletionItems(items []CompletionItem) []CompletionItem {
 	for i := range items {
+		items[i] = completionItemWithParameterHintCommand(items[i])
 		if items[i].SortText != "" {
 			continue
 		}
@@ -5412,6 +6209,20 @@ func rankedCompletionItems(items []CompletionItem) []CompletionItem {
 		return items[i].SortText < items[j].SortText
 	})
 	return items
+}
+
+func completionItemWithParameterHintCommand(item CompletionItem) CompletionItem {
+	if item.Command != nil || (item.Kind != 2 && item.Kind != 3) {
+		return item
+	}
+	if !strings.Contains(firstNonEmpty(item.InsertText, item.Label), "(") && !strings.Contains(item.Detail, "(") {
+		return item
+	}
+	item.Command = &Command{
+		Title:   "Trigger parameter hints",
+		Command: "editor.action.triggerParameterHints",
+	}
+	return item
 }
 
 func completionRank(item CompletionItem) string {
@@ -5437,6 +6248,73 @@ func completionRank(item CompletionItem) string {
 }
 
 func classNameAtPosition(text string, pos Position) string {
+	stmts, _ := parseTinyForLSP("", text)
+	cursorLine := pos.Line + 1
+
+	var best string
+	bestDepth := -1
+
+	var walk func(stmts []Stmt, depth int)
+	walk = func(stmts []Stmt, depth int) {
+		for _, stmt := range stmts {
+			if stmt == nil {
+				continue
+			}
+			switch s := stmt.(type) {
+			case ClassStmt:
+				endLine := classEndLine(s)
+				if cursorLine >= s.Line && cursorLine <= endLine {
+					if depth > bestDepth {
+						best = s.Name
+						bestDepth = depth
+					}
+					for _, method := range s.Methods {
+						walk(method.Body, depth+1)
+					}
+				}
+			case FunctionStmt:
+				if cursorLine >= s.Line && cursorLine <= funcEndLine(s) {
+					walk(s.Body, depth)
+				}
+			case IfStmt:
+				if cursorLine >= s.Line {
+					walk(s.ThenBody, depth)
+					walk(s.ElseBody, depth)
+				}
+			case ForStmt:
+				if cursorLine >= s.Line {
+					walk(s.Body, depth)
+				}
+			case ForInStmt:
+				if cursorLine >= s.Line {
+					walk(s.Body, depth)
+				}
+			case WhileStmt:
+				if cursorLine >= s.Line {
+					walk(s.Body, depth)
+				}
+			case TryCatchStmt:
+				if cursorLine >= s.Line {
+					walk(s.TryBody, depth)
+					walk(s.CatchBody, depth)
+					walk(s.FinallyBody, depth)
+				}
+			case MatchStmt:
+				if cursorLine >= s.Line {
+					for _, c := range s.Cases {
+						walk(c.Body, depth)
+					}
+				}
+			}
+		}
+	}
+
+	walk(stmts, 0)
+
+	if best != "" {
+		return best
+	}
+
 	offset := offsetFromLineCol(text, pos.Line+1, pos.Character+1)
 	for _, b := range findBlocks(text, "class") {
 		if offset >= b.Start && offset <= b.End {
@@ -5444,6 +6322,29 @@ func classNameAtPosition(text string, pos Position) string {
 		}
 	}
 	return ""
+}
+
+func classEndLine(s ClassStmt) int {
+	maxLine := s.Line
+	for _, method := range s.Methods {
+		if method.Range.End.Line > maxLine {
+			maxLine = method.Range.End.Line
+		}
+	}
+	if len(s.Methods) == 0 && maxLine == s.Line {
+		maxLine = s.Line + 1
+	}
+	if maxLine <= s.Line {
+		maxLine = s.Line + 1
+	}
+	return maxLine
+}
+
+func funcEndLine(s FunctionStmt) int {
+	if s.Range.End.Line > 0 {
+		return s.Range.End.Line
+	}
+	return s.Line
 }
 
 func completionItemsForClass(classSym SymbolInfo, receiver string, hasParens bool) []CompletionItem {
@@ -5640,6 +6541,16 @@ func resolveMemberFromStaticType(scope *Scope, typ string, member string) (Symbo
 		return SymbolInfo{}, "unknown", false
 	}
 
+	if strings.HasPrefix(typ, "{") && strings.HasSuffix(typ, "}") {
+		sym := resolveInlineStructuralType(scope, typ)
+		if len(sym.Fields) > 0 {
+			if fieldSym, ok := sym.Fields[member]; ok {
+				return fieldSym, fieldSym.Type, true
+			}
+		}
+		return SymbolInfo{}, "unknown", false
+	}
+
 	if strings.HasPrefix(typ, "namespace:") {
 		nsName := strings.TrimPrefix(typ, "namespace:")
 		ns, ok := scope.Resolve(nsName)
@@ -5713,7 +6624,7 @@ func resolveMemberFromStaticType(scope *Scope, typ string, member string) (Symbo
 			return SymbolInfo{}, "unknown", false
 		}
 		if memberSym, ok := enumSym.Members[member]; ok {
-			return memberSym, "number", true
+			return memberSym, firstNonEmpty(memberSym.Type, "any"), true
 		}
 		return SymbolInfo{}, "unknown", false
 	}
@@ -5901,7 +6812,7 @@ func currentClassSymbolAtPosition(scope *Scope, text string, pos Position, class
 	if classBlock != nil {
 		for _, b := range findBlocks(text, "fn") {
 			if b.Start > classBlock.Start && b.Start < classBlock.End {
-				params := normalizeStdArgs(scope, parseFunctionParams(b.ParamsText))
+				params := normalizeStdArgs(scope, blockParamsToStdArgs(b))
 
 				nestedScope := NewScope(scope)
 				for _, p := range params {
@@ -6036,14 +6947,26 @@ func addAdditionalTextEditToCompletions(items []CompletionItem, edit TextEdit) [
 
 func completionItemsForReceiver(scope *Scope, text string, pos Position, receiver string, hasParens bool) []CompletionItem {
 	sym, typ, ok := resolveReceiverPath(scope, text, pos, receiver)
+
+	if !ok || typ == "" || typ == "any" || typ == "unknown" {
+		if smTyp, smOK := resolveTypeForReceiver("", text, receiver, pos); smOK && smTyp != "" {
+			items := completionItemsFromSemanticModelMembers("", text, smTyp, hasParens)
+			if len(items) > 0 {
+				return rankedCompletionItems(items)
+			}
+		}
+	}
+
 	if !ok {
 		return []CompletionItem{}
 	}
 
 	if (typ == "any" || typ == "unknown") && receiver != "" {
-		if ifLine, isInElse, ok := findEnclosingIfAndElse(text, pos); ok {
+		stmts, _ := parseTinyForLSP("", text)
+		if ifStmt := findEnclosingIfStmt(stmts, pos.Line+1); ifStmt != nil {
+			isInElse := isInIfElseBranch(ifStmt, pos.Line+1)
 			narrowedScope := cloneScope(scope)
-			applyTypeNarrowing(narrowedScope, ifLine, isInElse)
+			applyTypeNarrowingFromAST(narrowedScope, ifStmt.Condition, isInElse)
 			if narrowedSym, narrowedType, narrowedOK := resolveReceiverPath(narrowedScope, text, pos, receiver); narrowedOK {
 				sym = narrowedSym
 				typ = narrowedType
@@ -6092,6 +7015,9 @@ func completionItemsForReceiver(scope *Scope, text string, pos Position, receive
 			}
 		}
 		items = completionItemsForClass(classSym, receiver, hasParens)
+	} else if strings.HasPrefix(typ, "{") && strings.HasSuffix(typ, "}") {
+		sym2 := resolveInlineStructuralType(scope, typ)
+		items = completionItemsForInterface(sym2)
 	} else if typ == "object" {
 		items = []CompletionItem{}
 		for _, field := range sym.Fields {
@@ -6214,6 +7140,116 @@ func hasCallParensAfter(after string) bool {
 	return len(trimmed) > 0 && trimmed[0] == '('
 }
 
+func isCompletionCursorInsideString(text string, pos Position) bool {
+	cursor := offsetAtLine(text, pos.Line+1) + pos.Character
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > len(text) {
+		cursor = len(text)
+	}
+
+	type stringState struct {
+		kind       int
+		quote      byte
+		braceDepth int
+	}
+
+	stack := []stringState{{kind: 0}}
+	inLineComment := false
+	inBlockComment := false
+	escaped := false
+
+	for i := 0; i < cursor; i++ {
+		ch := text[i]
+		state := &stack[len(stack)-1]
+
+		if inLineComment {
+			if ch == '\n' {
+				inLineComment = false
+			}
+			continue
+		}
+		if inBlockComment {
+			if ch == '*' && i+1 < cursor && text[i+1] == '/' {
+				inBlockComment = false
+				i++
+			}
+			continue
+		}
+
+		switch state.kind {
+		case 1:
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == state.quote {
+				stack = stack[:len(stack)-1]
+			}
+			continue
+
+		case 2:
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == '`' {
+				stack = stack[:len(stack)-1]
+				continue
+			}
+			if ch == '$' && i+1 < cursor && text[i+1] == '{' {
+				stack = append(stack, stringState{kind: 0, braceDepth: 1})
+				i++
+				continue
+			}
+			continue
+		}
+
+		if ch == '/' && i+1 < cursor && text[i+1] == '/' {
+			inLineComment = true
+			i++
+			continue
+		}
+		if ch == '/' && i+1 < cursor && text[i+1] == '*' {
+			inBlockComment = true
+			i++
+			continue
+		}
+		if ch == '"' || ch == '\'' {
+			stack = append(stack, stringState{kind: 1, quote: ch})
+			continue
+		}
+		if ch == '`' {
+			stack = append(stack, stringState{kind: 2})
+			continue
+		}
+		if len(stack) > 1 {
+			if ch == '{' {
+				state.braceDepth++
+			} else if ch == '}' {
+				state.braceDepth--
+				if state.braceDepth <= 0 {
+					stack = stack[:len(stack)-1]
+				}
+			}
+		}
+	}
+
+	if len(stack) == 0 {
+		return false
+	}
+	return stack[len(stack)-1].kind == 1 || stack[len(stack)-1].kind == 2
+}
+
 func getCompletions(uri string, text string, pos Position) []CompletionItem {
 	line := getLine(text, pos.Line)
 
@@ -6237,6 +7273,15 @@ func getCompletions(uri string, text string, pos Position) []CompletionItem {
 		return rankedCompletionItems(fileImportPathCompletions(uri, line, pos.Character))
 	}
 
+	if isCompletionCursorInsideString(text, pos) {
+		scope := scopeAtPosition(uri, text, pos)
+		editorCtx := parseEditorContext(text, pos, scope)
+		if editorCtx.InsideObject && editorCtx.ObjectInterfaceType != "" && editorCtx.IsObjectStringKey {
+			return rankedCompletionItems(objectLiteralCompletionsWithContext(editorCtx))
+		}
+		return nil
+	}
+
 	before := line[:pos.Character]
 	i := len(before) - 1
 	for i >= 0 && isIdentChar(before[i]) {
@@ -6244,24 +7289,40 @@ func getCompletions(uri string, text string, pos Position) []CompletionItem {
 	}
 	beforeTrimmed := before[:i+1]
 	receiver := receiverBeforeDot(beforeTrimmed)
+	if receiver == "" {
+		if astReceiver, _, ok2 := memberExprAtPosition(text, pos); ok2 && astReceiver != "" {
+			receiver = astReceiver
+		} else {
+			receiver = receiverBeforeDot(textBeforePositionWithoutTrailingIdentifier(text, pos))
+		}
+	} else if strings.Contains(receiver, "(") && !strings.Contains(receiver, ".") {
+		if astReceiver, _, ok2 := memberExprAtPosition(text, pos); ok2 && astReceiver != "" {
+			receiver = astReceiver
+		}
+	}
 
 	after := line[pos.Character:]
 	hasParens := hasCallParensAfter(after)
 
 	scope := scopeAtPosition(uri, text, pos)
 
-	editorCtx := parseEditorContext(text, pos, scope)
-
-	if editorCtx.InsideString {
+	if isCompletionCursorInsideString(text, pos) {
+		editorCtx := parseEditorContext(text, pos, scope)
 		if editorCtx.InsideObject && editorCtx.ObjectInterfaceType != "" && editorCtx.IsObjectStringKey {
 			return rankedCompletionItems(objectLiteralCompletionsWithContext(editorCtx))
 		}
 		return nil
 	}
 
+	editorCtx := parseEditorContext(text, pos, scope)
 	if editorCtx.InsideObject && editorCtx.IsObjectKeyPosition {
 		if editorCtx.ObjectInterfaceType != "" {
 			return rankedCompletionItems(objectLiteralCompletionsWithContext(editorCtx))
+		}
+		if editorCtx.ObjectDepth <= 1 {
+			if items := objectLiteralCompletions(scope, text, pos); len(items) > 0 {
+				return rankedCompletionItems(items)
+			}
 		}
 		return nil
 	}
@@ -6270,7 +7331,41 @@ func getCompletions(uri string, text string, pos Position) []CompletionItem {
 		return rankedCompletionItems(scopeCompletions(scope, uri, text, hasParens))
 	}
 
-	return rankedCompletionItems(completionItemsForReceiver(scope, text, pos, receiver, hasParens))
+	receiverType, smOK := resolveTypeForReceiver(uri, text, receiver, pos)
+
+	items := completionItemsForReceiver(scope, text, pos, receiver, hasParens)
+	if len(items) > 0 {
+		return rankedCompletionItems(items)
+	}
+
+	if smOK && receiverType != "" {
+		smItems := completionItemsFromSemanticModelMembers(uri, text, receiverType, hasParens)
+		if len(smItems) > 0 {
+			return rankedCompletionItems(dedupeCompletionItems(smItems))
+		}
+	}
+
+	return rankedCompletionItems(items)
+}
+
+func textBeforePosition(text string, pos Position) string {
+	offset := offsetAtLine(text, pos.Line+1) + pos.Character
+	if offset < 0 {
+		return ""
+	}
+	if offset > len(text) {
+		offset = len(text)
+	}
+	return text[:offset]
+}
+
+func textBeforePositionWithoutTrailingIdentifier(text string, pos Position) string {
+	before := textBeforePosition(text, pos)
+	i := len(before) - 1
+	for i >= 0 && isIdentChar(before[i]) {
+		i--
+	}
+	return before[:i+1]
 }
 
 func completionItemsFromMembers(members map[string]SymbolInfo, hasParens bool) []CompletionItem {
@@ -6368,7 +7463,7 @@ func cleanMemberName(member string) string {
 }
 
 func receiverBeforeDot(text string) string {
-	text = strings.TrimRight(text, " \t")
+	text = strings.TrimRight(text, " \t\r\n")
 
 	if !strings.HasSuffix(text, ".") && !strings.HasSuffix(text, "?.") {
 		return ""
@@ -6380,7 +7475,7 @@ func receiverBeforeDot(text string) string {
 		text = strings.TrimSuffix(text, ".")
 	}
 
-	text = strings.TrimRight(text, " \t")
+	text = strings.TrimRight(text, " \t\r\n")
 
 	i := len(text) - 1
 	depthParen := 0
@@ -6570,4 +7665,30 @@ func copyAndSubstituteClassSym(scope *Scope, classSym SymbolInfo, className stri
 	}
 
 	return copied
+}
+
+func compilerParamsToDetail(params []Param) string {
+	detailParts := []string{}
+	for _, p := range params {
+		label := p.Name + ": " + typeHintString(p.TypeHint)
+		if p.Variadic {
+			label = "..." + p.Name + ": " + typeHintString(p.TypeHint)
+		}
+		detailParts = append(detailParts, label)
+	}
+	return strings.Join(detailParts, ", ")
+}
+
+func completionInsertTextForFunc(name string, hasParens bool) string {
+	if hasParens {
+		return name
+	}
+	return name + "($0)"
+}
+
+func completionInsertTextFormatForFunc(fn Function, hasParens bool) int {
+	if hasParens || len(fn.Params) == 0 {
+		return 0
+	}
+	return 2
 }

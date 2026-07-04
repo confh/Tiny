@@ -282,7 +282,7 @@ tiny src/main.tiny</code></pre>
       </section>
 
       <section class="doc-section" id="language"
-        data-search="language basics let const strings arrays objects interpolation typeof operators bitwise destructuring">
+        data-search="language basics let const strings arrays objects interpolation typeof operators bitwise destructuring arrow functions hex binary octal">
         <div class="section-heading">
           <p class="eyebrow">04</p>
           <h2>Language Basics</h2>
@@ -296,9 +296,20 @@ tiny src/main.tiny</code></pre>
             <p>Use `let` for mutable bindings and `const` for values that should not be reassigned.</p>
             <pre><code>const language: string = "Tiny"
 let count: number = 1_000_000 // support underscores
+let hex = 0xFF
+let bin = 0b1010
+let oct = 0o77
 
 count = count + (1 << 2) // bitwise ops
 count++</code></pre>
+          </article>
+
+          <article>
+            <h3>Arrow Functions</h3>
+            <p>Concise single-expression and multi-parameter function syntax.</p>
+            <pre><code>const double = x => x * 2
+const add = (a: number, b: number) => a + b
+const greet = (name) => `Hello, ${name}`</code></pre>
           </article>
 
           <article>
@@ -331,7 +342,7 @@ user["level"] = "beginner"</code></pre>
       </section>
 
       <section class="doc-section" id="types"
-        data-search="types hints interface structural validation union optional any string number bool object array function">
+        data-search="types hints interface structural validation union optional any string number bool object array function extends inline">
         <div class="section-heading">
           <p class="eyebrow">05</p>
           <h2>Types & Interfaces</h2>
@@ -367,6 +378,26 @@ fn logRequest(req: Request) {
 }</code></pre>
             <p>Interfaces are structural: an object is valid when it has the required shape, regardless of where it was
               created.</p>
+          </div>
+        </div>
+
+        <div class="split">
+          <div>
+            <h3>Interface extends</h3>
+            <pre><code>interface Base {
+    id: number
+}
+
+interface User extends Base {
+    name: string
+}</code></pre>
+          </div>
+
+          <div>
+            <h3>Inline structural types</h3>
+            <pre><code>fn process(input: { name: string, age: number }): { ok: bool } {
+    return { ok: true }
+}</code></pre>
           </div>
         </div>
 
@@ -837,7 +868,7 @@ const html = assets["index.html"]</code></pre>
       </section>
 
       <section class="doc-section" id="stdlib"
-        data-search="standard library std validate url io json fs http array math process regex runtime sync time ui desktop net object path buffer tests app error strings websocket observer tray os metadata">
+        data-search="standard library std validate url io json fs http array math process regex runtime sync time ui desktop net object path buffer tests app error strings websocket observer tray os metadata sqlite crypto multipart file dialog">
         <div class="section-heading">
           <p class="eyebrow">16</p>
           <h2>Standard Library</h2>
@@ -852,7 +883,7 @@ const html = assets["index.html"]</code></pre>
           </div>
           <div role="row">
             <strong role="cell">`validate`</strong>
-            <span role="cell">Chainable schema validation for objects, arrays, and primitives with transformation support.</span>
+            <span role="cell">Chainable schema validation for objects, arrays, and primitives with transformation support. Includes `interfaceOf` and `isInterface` for runtime interface checks.</span>
           </div>
           <div role="row">
             <strong role="cell">`io`</strong>
@@ -868,8 +899,7 @@ const html = assets["index.html"]</code></pre>
           </div>
           <div role="row">
             <strong role="cell">`fs`</strong>
-            <span role="cell">Read/write files, bytes, directories, stat paths, copy, remove, and create
-              directories.</span>
+            <span role="cell">Read/write files, bytes, directories, stat paths, copy, remove, create directories, `isDir`, `isFile`, and `readBytes`.</span>
           </div>
           <div role="row">
             <strong role="cell">`os`</strong>
@@ -877,7 +907,7 @@ const html = assets["index.html"]</code></pre>
           </div>
           <div role="row">
             <strong role="cell">`http`</strong>
-            <span role="cell">HTTP client helpers and a route-based server with JSON/text responses.</span>
+            <span role="cell">HTTP client/server with route-based multiplexing, JSON responses, and multipart/form-data file uploads.</span>
           </div>
           <div role="row">
             <strong role="cell">`websocket`</strong>
@@ -905,11 +935,11 @@ const html = assets["index.html"]</code></pre>
           </div>
           <div role="row">
             <strong role="cell">`time`</strong>
-            <span role="cell">Sleep, clock, managed timers (`timeout`, `interval`), and current time in ns/ms/sec.</span>
+            <span role="cell">Sleep, clock, managed timers (`timeout`, `interval`), current time in ns/ms/sec, and `parseUnix` for RFC3339 timestamps.</span>
           </div>
           <div role="row">
             <strong role="cell">`ui`</strong>
-            <span role="cell">Native WebView windows, window controls (frameless, minimize, maximize, drag/resize), HTML content, navigation, and JS-to-Tiny callbacks.</span>
+            <span role="cell">Native WebView windows, window controls, HTML content, navigation, JS-to-Tiny callbacks, and OS file/folder dialogs (`openFileDialog`, `saveFileDialog`, `selectFolderDialog`).</span>
           </div>
           <div role="row">
             <strong role="cell">`desktop`</strong>
@@ -921,8 +951,7 @@ const html = assets["index.html"]</code></pre>
           </div>
           <div role="row">
             <strong role="cell">`object`</strong>
-            <span role="cell">Dynamic object operations: get, set, has, delete, keys, values, entries, length,
-              clear.</span>
+            <span role="cell">Dynamic object operations: get, set, has, delete, keys, values, entries, length, clear.</span>
           </div>
           <div role="row">
             <strong role="cell">`path`</strong>
@@ -934,7 +963,7 @@ const html = assets["index.html"]</code></pre>
           </div>
           <div role="row">
             <strong role="cell">`runtime`</strong>
-            <span role="cell">Thread locking, fatal handlers, memory stats, manual GC, child VMs, and source/bytecode compilation.</span>
+            <span role="cell">Thread locking, fatal handlers, memory stats, manual GC, child VMs (`stop`, `functionExists`, `listFunctions`), and source/bytecode compilation.</span>
           </div>
           <div role="row">
             <strong role="cell">`observer`</strong>
@@ -947,6 +976,14 @@ const html = assets["index.html"]</code></pre>
           <div role="row">
             <strong role="cell">`tray`</strong>
             <span role="cell">Native tray menu support where the platform backend is available.</span>
+          </div>
+          <div role="row">
+            <strong role="cell">`sqlite`</strong>
+            <span role="cell">Embedded SQLite database access for local data storage.</span>
+          </div>
+          <div role="row">
+            <strong role="cell">`crypto`</strong>
+            <span role="cell">Cryptographic helpers for hashing and encoding.</span>
           </div>
           <div role="row">
             <strong role="cell">`error`</strong>
@@ -1015,6 +1052,12 @@ const html = assets["index.html"]</code></pre>
           <a href="https://github.com/confh/Tiny/tree/master/examples/16-observer" target="_blank"
             rel="noopener noreferrer"><strong>16 Observer</strong><span>Live runtime inspection, commands, events,
               messages, and shutdown hooks.</span></a>
+          <a href="https://github.com/confh/Tiny/tree/master/examples/17-sqlite" target="_blank"
+            rel="noopener noreferrer"><strong>17 SQLite</strong><span>Database creation, parameterized queries,
+              inserts, updates, and connection management.</span></a>
+          <a href="https://github.com/confh/Tiny/tree/master/examples/py_tiny_compiler" target="_blank"
+            rel="noopener noreferrer"><strong>Python-to-Tiny Compiler</strong><span>A proof-of-concept compiler written
+              in Tiny that compiles a Python subset to Tiny bytecode.</span></a>
         </div>
       </section>
 
@@ -1361,23 +1404,47 @@ tiny deps</code></pre>
           <article>
             <h3>Developer loop</h3>
             <pre><code>tiny watch src/main.tiny
+tiny fmt src/main.tiny
 tiny update
 tiny version</code></pre>
-            <p>`watch` restarts when the entry or imported files change. `update` replaces the Tiny binary with the
-              latest release asset for the current platform.</p>
+            <p>`watch` restarts when the entry or imported files change. `fmt` formats source files in place. `update`
+              replaces the Tiny binary with the latest release asset for the current platform.</p>
           </article>
         </div>
       </section>
 
       <section class="doc-section" id="lsp"
-        data-search="lsp editor vscode autocomplete diagnostics formatter language server type narrowing jump definition inlay hints semantic tokens">
+        data-search="lsp editor vscode autocomplete diagnostics formatter language server type narrowing jump definition inlay hints semantic tokens compiler diagnostics semantic model">
         <div class="section-heading">
           <p class="eyebrow">22</p>
           <h2>Editor Support</h2>
           <p>The project includes a Tiny language server with diagnostics, formatting, autocomplete, type analysis, and
-            jump-to-definition support. The LSP also provides **semantic highlighting** and **callback type inlay hints** to improve development speed.</p>
+            jump-to-definition support. The LSP also provides semantic highlighting and callback type inlay hints to
+            improve development speed.</p>
           <p><a href="https://marketplace.visualstudio.com/items?itemName=Confis.tiny" target="_blank"
               rel="noopener noreferrer">Open the Tiny VS Code extension on the Marketplace</a>.</p>
+        </div>
+
+        <div class="reference-grid">
+          <article>
+            <h3>Compiler-backed diagnostics</h3>
+            <p>Undefined variables, duplicate declarations, argument count mismatches, and missing return statements are
+              reported as LSP diagnostics using the real compiler's semantic analysis.</p>
+          </article>
+          <article>
+            <h3>Semantic model</h3>
+            <p>Member type resolution, function signature queries, and class/interface lookups power accurate completions
+              and hover information.</p>
+          </article>
+          <article>
+            <h3>Go-to-definition</h3>
+            <p>Navigate to class field declarations, interface fields, structural type fields, and std module
+              definitions.</p>
+          </article>
+          <article>
+            <h3>Virtual stdlib documents</h3>
+            <p>Open std library stubs directly in the editor via `tiny-stdlib://` URIs.</p>
+          </article>
         </div>
       </section>
 

@@ -1,6 +1,12 @@
 name: Test Tiny
 
-on: [push, pull_request]
+on:
+  push:
+    branches:
+      - "**"
+    tags-ignore:
+      - "**"
+  pull_request:
 
 jobs:
   test-linux:
@@ -9,11 +15,23 @@ jobs:
       - uses: actions/checkout@v3
       - uses: actions/setup-go@v4
         with:
-          go-version: '1.26.2'
+          go-version: "1.26.2"
       - run: chmod +x build_linux.sh
       - run: ./build_linux.sh --compiler
       - run: go test ./src/...
       - run: ./tiny_linux_amd64 test.tiny
+
+  test-linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-go@v4
+        with:
+          go-version: "1.26.2"
+      - run: chmod +x build_linux.sh
+      - run: ./build_linux.sh --compiler
+      - run: go test ./src/...
+      - run: ./tiny_linux_arm64 test.tiny
 
   test-windows:
     runs-on: windows-latest
@@ -21,7 +39,7 @@ jobs:
       - uses: actions/checkout@v3
       - uses: actions/setup-go@v4
         with:
-          go-version: '1.26.2'
+          go-version: "1.26.2"
       - run: ./build.bat --compiler
       - run: go test ./src/...
       - run: ./tiny.exe test.tiny
@@ -32,7 +50,7 @@ jobs:
       - uses: actions/checkout@v3
       - uses: actions/setup-go@v4
         with:
-          go-version: '1.26.2'
+          go-version: "1.26.2"
       - run: chmod +x build_mac.sh
       - run: ./build_mac.sh --compiler
       - run: go test ./src/...

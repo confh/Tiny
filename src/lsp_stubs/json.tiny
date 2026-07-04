@@ -1,4 +1,4 @@
-interface SafeParseResult {
+export interface SafeParseResult {
     success: bool,
     data?: object
 }

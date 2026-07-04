@@ -159,9 +159,16 @@ func TestBytecodeObfuscation(t *testing.T) {
 		{Op: vm.OP_CONST, Value: vm.FunctionValue{ID: 1, Name: "myFunction"}},
 		{Op: vm.OP_CLOSURE, Value: vm.ClosureInfo{Name: "myFunction"}},
 		{Op: vm.OP_CALL_DIRECT_SUB_CONST, Value: vm.CallDirectSubConstInfo{Slot: 0, SubValue: 1, FnID: 1, FnName: "myFunction", ArgCount: 0}},
+		{Op: vm.OP_CONST, Value: vm.Class{Name: "Gateway.BuilderModule.Builder"}},
+		{Op: vm.OP_STORE_GLOBAL, Value: vm.VariableInfo{Name: "Gateway.BuilderModule.Builder"}},
 		{Op: vm.OP_CONST, Value: vm.NamespaceValue{Name: "Testing", Members: map[string]vm.TinyValue{
-			"ass": vm.NewNative(vm.NamespaceMemberRef{GlobalName: "myGlobal"}),
+			"ass":     vm.NewNative(vm.NamespaceMemberRef{GlobalName: "myGlobal"}),
+			"MyClass": vm.NewNative(vm.Class{Name: "MyClass"}),
 		}}},
+		{Op: vm.OP_CONST, Value: vm.NamespaceValue{Name: "Gateway", Members: map[string]vm.TinyValue{
+			"Builder": vm.NewNative(vm.NamespaceMemberRef{GlobalName: "Gateway.BuilderModule.Builder"}),
+		}}},
+		{Op: vm.OP_STORE_GLOBAL, Value: vm.VariableInfo{Name: "data", TypeHint: vm.TypeHint{Name: "Gateway.Builder", Types: []string{"Gateway.Builder"}}}},
 		{Op: vm.OP_HALT},
 	}
 
@@ -169,6 +176,11 @@ func TestBytecodeObfuscation(t *testing.T) {
 		"myFunction": {
 			ID:   1,
 			Name: "myFunction",
+			Params: []vm.Param{
+				{Name: "config", TypeHint: vm.TypeHint{Name: "MyInterface", Types: []string{"MyInterface"}}},
+				{Name: "namespaced", TypeHint: vm.TypeHint{Name: "NamespacedInterface", Types: []string{"NamespacedInterface"}}},
+			},
+			ReturnType: vm.TypeHint{Name: "MyClass", Types: []string{"MyClass"}},
 			Instructions: []vm.Instruction{
 				{Op: vm.OP_LOAD_GLOBAL, Value: vm.VariableInfo{Name: "myGlobal"}},
 				{Op: vm.OP_RETURN},
@@ -178,18 +190,39 @@ func TestBytecodeObfuscation(t *testing.T) {
 
 	classes := map[string]vm.Class{
 		"MyClass": {
-			Name: "MyClass",
+			Name:       "MyClass",
+			Implements: []string{"MyInterface"},
+			Fields: []vm.ClassField{
+				{Name: "config", TypeHint: vm.TypeHint{Name: "MyInterface", Types: []string{"MyInterface"}}},
+			},
+			Methods: map[string]string{
+				"init": "myFunction",
+			},
+		},
+		"Gateway.BuilderModule.Builder": {
+			Name:    "Gateway.BuilderModule.Builder",
+			Fields:  []vm.ClassField{{Name: "name"}},
+			Methods: map[string]string{},
 		},
 	}
 
 	interfaces := map[string]vm.Interface{
 		"MyInterface": {
 			Name: "MyInterface",
+			Fields: map[string]vm.TypeHint{
+				"child": {Name: "MyClass", Types: []string{"MyClass"}},
+			},
+		},
+		"Namespace.NamespacedInterface": {
+			Name:   "Namespace.NamespacedInterface",
+			Fields: map[string]vm.TypeHint{},
 		},
 	}
 
 	globalIndex := map[string]int{
-		"myGlobal": 0,
+		"myGlobal":                      0,
+		"Gateway":                       1,
+		"Gateway.BuilderModule.Builder": 2,
 	}
 
 	// Compile with obfuscation enabled
@@ -215,6 +248,24 @@ func TestBytecodeObfuscation(t *testing.T) {
 		}
 		if name == directCall.Name && fn.Name == directCall.Name {
 			foundObfuscatedFunc = true
+			if fn.Params[0].TypeHint.Name == "MyInterface" {
+				t.Fatal("function param type hint was not obfuscated")
+			}
+			if _, exists := loadedInterfaces[fn.Params[0].TypeHint.Name]; !exists {
+				t.Fatalf("function param type hint points at missing interface %q", fn.Params[0].TypeHint.Name)
+			}
+			if fn.Params[1].TypeHint.Name == "NamespacedInterface" {
+				t.Fatal("short namespaced function param type hint was not obfuscated")
+			}
+			if _, exists := loadedInterfaces[fn.Params[1].TypeHint.Name]; !exists {
+				t.Fatalf("short namespaced function param type hint points at missing interface %q", fn.Params[1].TypeHint.Name)
+			}
+			if fn.ReturnType.Name == "MyClass" {
+				t.Fatal("function return type hint was not obfuscated")
+			}
+			if _, exists := loadedClasses[fn.ReturnType.Name]; !exists {
+				t.Fatalf("function return type hint points at missing class %q", fn.ReturnType.Name)
+			}
 
 			// Verify instruction inside function referencing myGlobal got renamed
 			if len(fn.Instructions) < 1 || fn.Instructions[0].Op != vm.OP_LOAD_GLOBAL {
@@ -260,7 +311,7 @@ func TestBytecodeObfuscation(t *testing.T) {
 		t.Fatal("callDirectSubConst FnName was not obfuscated")
 	}
 
-	namespaceVal, ok := loadedMain[4].Value.(vm.NamespaceValue)
+	namespaceVal, ok := loadedMain[6].Value.(vm.NamespaceValue)
 	if !ok {
 		t.Fatalf("expected NamespaceValue, got %T", loadedMain[4].Value)
 	}
@@ -272,11 +323,51 @@ func TestBytecodeObfuscation(t *testing.T) {
 	if memberRef.GlobalName == "myGlobal" {
 		t.Fatal("namespace member ref globalName was not obfuscated")
 	}
+	classValue, ok := namespaceVal.Members["MyClass"].Value.(vm.Class)
+	if !ok {
+		t.Fatalf("expected namespace class value, got %T", namespaceVal.Members["MyClass"].Value)
+	}
+	if classValue.Name == "MyClass" {
+		t.Fatal("namespace class value name was not obfuscated")
+	}
+	if _, exists := loadedClasses[classValue.Name]; !exists {
+		t.Fatalf("namespace class value points at missing class %q; classes=%v", classValue.Name, loadedClasses)
+	}
+
+	aliasVarInfo, ok := loadedMain[8].Value.(vm.VariableInfo)
+	if !ok {
+		t.Fatalf("expected alias variable info, got %T", loadedMain[6].Value)
+	}
+	if aliasVarInfo.TypeHint.Name == "Gateway.Builder" {
+		t.Fatal("namespace alias type hint was not obfuscated")
+	}
+	if _, exists := loadedClasses[aliasVarInfo.TypeHint.Name]; !exists {
+		t.Fatalf("namespace alias type hint points at missing class %q", aliasVarInfo.TypeHint.Name)
+	}
 
 	// Check class name was obfuscated
 	for name, cls := range loadedClasses {
 		if name == "MyClass" || cls.Name == "MyClass" {
 			t.Fatal("class name was not obfuscated")
+		}
+		if cls.Methods["init"] == "myFunction" {
+			t.Fatal("class method function name was not obfuscated")
+		}
+		if initFn := cls.Methods["init"]; initFn != "" {
+			if _, exists := loadedFunctions[initFn]; !exists {
+				t.Fatalf("class method points at missing function %q; functions=%v", initFn, loadedFunctions)
+			}
+		}
+		if len(cls.Implements) > 0 {
+			if cls.Implements[0] == "MyInterface" {
+				t.Fatal("class implements type was not obfuscated")
+			}
+			if _, exists := loadedInterfaces[cls.Implements[0]]; !exists {
+				t.Fatalf("class implements missing interface %q", cls.Implements[0])
+			}
+		}
+		if len(cls.Fields) > 0 && cls.Fields[0].TypeHint.Name == "MyInterface" {
+			t.Fatal("class field type hint was not obfuscated")
 		}
 	}
 
@@ -284,6 +375,14 @@ func TestBytecodeObfuscation(t *testing.T) {
 	for name, inter := range loadedInterfaces {
 		if name == "MyInterface" || inter.Name == "MyInterface" {
 			t.Fatal("interface name was not obfuscated")
+		}
+		if childHint, hasChild := inter.Fields["child"]; hasChild {
+			if childHint.Name == "MyClass" {
+				t.Fatal("interface field type hint was not obfuscated")
+			}
+			if _, exists := loadedClasses[childHint.Name]; !exists {
+				t.Fatalf("interface field type hint points at missing class %q", childHint.Name)
+			}
 		}
 	}
 

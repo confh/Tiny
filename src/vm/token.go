@@ -27,6 +27,7 @@ const (
 	TOKEN_THROW      TokenType = "THROW"
 	TOKEN_CLASS      TokenType = "CLASS"
 	TOKEN_IMPLEMENTS TokenType = "IMPLEMENTS"
+	TOKEN_EXTENDS    TokenType = "EXTENDS"
 	TOKEN_PRIVATE    TokenType = "PRIVATE"
 	TOKEN_PUBLIC     TokenType = "PUBLIC"
 	TOKEN_INTERFACE  TokenType = "INTERFACE"
@@ -104,6 +105,7 @@ const (
 	TOKEN_QUESTION_DOT      TokenType = "?."
 	TOKEN_QUESTION_QUESTION TokenType = "??"
 	TOKEN_PIPE              TokenType = "|"
+	TOKEN_ARROW             TokenType = "=>"
 
 	// Grouping & punctuation
 	TOKEN_LPAREN   TokenType = "("

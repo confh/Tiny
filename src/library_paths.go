@@ -36,6 +36,8 @@ func findProjectRoot(startPath string) string {
 	dir := abs
 	if info, err := os.Stat(dir); err == nil && !info.IsDir() {
 		dir = filepath.Dir(dir)
+	} else if err != nil && filepath.Ext(dir) != "" {
+		dir = filepath.Dir(dir)
 	}
 
 	for {

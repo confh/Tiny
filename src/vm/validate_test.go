@@ -118,3 +118,31 @@ func TestSchemaSafeParseResultShape(t *testing.T) {
 		t.Fatalf("expected safeParse error object, got %#v", failObj["error"])
 	}
 }
+
+func TestValidateInterfaceOf(t *testing.T) {
+	vm := NewVM(VMInfo{JITDisabled: true})
+	vm.interfaces = map[string]Interface{
+		"Named": {
+			Name: "Named",
+			Fields: map[string]TypeHint{
+				"name": stdTypeHint("string"),
+			},
+		},
+	}
+
+	validateInterfaceOf(vm, []TinyValue{
+		NewNative(ObjectValue{"name": NewNative("Ada")}),
+		NewNative(InterfaceValue{Name: "Named"}),
+	})
+	if ok, _ := vm.pop().Value.(bool); !ok {
+		t.Fatal("expected interface validation to succeed")
+	}
+
+	validateInterfaceOf(vm, []TinyValue{
+		NewNative(ObjectValue{"name": NewInt(1)}),
+		NewNative(InterfaceValue{Name: "Named"}),
+	})
+	if ok, _ := vm.pop().Value.(bool); ok {
+		t.Fatal("expected interface validation to reject wrong field type")
+	}
+}

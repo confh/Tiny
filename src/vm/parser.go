@@ -3,6 +3,7 @@ package vm
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -138,6 +139,29 @@ func (p *Parser) posOfToken(tok Token) int {
 	}
 
 	return len(p.lexer.input)
+}
+
+func tokenEndPosition(tok Token) SourcePosition {
+	literal := tok.Literal
+	if literal == "" {
+		literal = string(tok.Type)
+	}
+	line, column := advanceSourcePosition(literal, tok.Line, tok.Column)
+	return SourcePosition{File: tok.File, Line: line, Column: column}
+}
+
+func tokenRange(tok Token) SourceRange {
+	return SourceRange{
+		Start: SourcePosition{File: tok.File, Line: tok.Line, Column: tok.Column},
+		End:   tokenEndPosition(tok),
+	}
+}
+
+func rangeFromTokens(start Token, end Token) SourceRange {
+	return SourceRange{
+		Start: SourcePosition{File: start.File, Line: start.Line, Column: start.Column},
+		End:   tokenEndPosition(end),
+	}
 }
 
 type ParsedBlockInfo struct {
@@ -327,7 +351,34 @@ func (p *Parser) synchronize() {
 	}
 }
 
+func (p *Parser) synchronizeBlock() {
+	p.advance()
+
+	for p.current.Type != TOKEN_EOF && p.current.Type != TOKEN_RBRACE {
+		if p.current.Type == TOKEN_SEMI {
+			p.advance()
+			return
+		}
+
+		switch p.current.Type {
+		case TOKEN_IMPORT, TOKEN_LET, TOKEN_CONST, TOKEN_NATIVE, TOKEN_EXTERNAL,
+			TOKEN_FN, TOKEN_ASYNC, TOKEN_RETURN, TOKEN_INTERFACE,
+			TOKEN_IF, TOKEN_WHILE, TOKEN_FOR, TOKEN_CLASS, TOKEN_BREAK,
+			TOKEN_CONTINUE, TOKEN_THROW, TOKEN_TRY, TOKEN_ENUM, TOKEN_EXPORT, TOKEN_MATCH:
+			return
+		}
+
+		p.advance()
+	}
+}
+
 func (p *Parser) recordBlock(kind string, name string, startTok Token, endTok Token, isAsync bool, typeParams []string, lparenTok Token, rparenTok Token, lbraceTok Token, rbraceTok Token) {
+	if name == "" || startTok.Line <= 0 || lbraceTok.Line <= 0 {
+		return
+	}
+	if rbraceTok.Line <= 0 {
+		rbraceTok = endTok
+	}
 	p.Blocks = append(p.Blocks, ParsedBlockInfo{
 		Kind:           kind,
 		Name:           name,
@@ -349,6 +400,11 @@ func (p *Parser) recordBlock(kind string, name string, startTok Token, endTok To
 }
 
 func (p *Parser) parseTypeName() string {
+	if p.current.Type == TOKEN_LBRACE {
+		fields := p.parseStructuralTypeFields()
+		return "{" + strings.Join(structuralTypeFieldStrings(fields), ", ") + "}"
+	}
+
 	if !p.isValidType(p.current.Type) {
 		LangErrorAt(
 			ErrorSyntax,
@@ -416,8 +472,50 @@ func (p *Parser) parseTypeName() string {
 	return name
 }
 
+func (p *Parser) parseStructuralTypeFields() map[string]TypeHint {
+	p.expect(TOKEN_LBRACE)
+	fields := make(map[string]TypeHint)
+
+	for p.current.Type != TOKEN_RBRACE {
+		if !isSoftIdentifierToken(p.current.Type) {
+			LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "expected field name in structural type")
+		}
+		fieldName := p.current.Literal
+		fieldLine := p.current.Line
+		fieldCol := p.current.Column
+		p.advance()
+
+		fieldType := p.parseOptionalTypeHint()
+		fieldType.Range = SourceRange{
+			Start: SourcePosition{Line: fieldLine, Column: fieldCol},
+			End:   SourcePosition{Line: fieldLine, Column: fieldCol + len(fieldName)},
+		}
+		fields[fieldName] = fieldType
+
+		if p.current.Type == TOKEN_COMMA {
+			p.advance()
+		}
+	}
+
+	p.expect(TOKEN_RBRACE)
+	return fields
+}
+
 func (p *Parser) parseTypeHint(nullable bool) TypeHint {
 	p.expect(TOKEN_COLON)
+
+	if p.current.Type == TOKEN_LBRACE {
+		fields := p.parseStructuralTypeFields()
+		hint := TypeHint{
+			Name:   "{" + strings.Join(structuralTypeFieldStrings(fields), ", ") + "}",
+			Fields: fields,
+		}
+		if nullable {
+			hint.Name += " | null"
+			hint.Types = []string{hint.Name}
+		}
+		return hint
+	}
 
 	types := []string{}
 
@@ -462,6 +560,14 @@ func (p *Parser) parseOptionalTypeHint() TypeHint {
 
 	p.advance()
 
+	if p.current.Type == TOKEN_LBRACE {
+		fields := p.parseStructuralTypeFields()
+		return TypeHint{
+			Name:   "{" + strings.Join(structuralTypeFieldStrings(fields), ", ") + "}",
+			Fields: fields,
+		}
+	}
+
 	types := []string{}
 
 	for {
@@ -482,6 +588,15 @@ func (p *Parser) parseOptionalTypeHint() TypeHint {
 		Name:  strings.Join(types, " | "),
 		Types: types,
 	}
+}
+
+func structuralTypeFieldStrings(fields map[string]TypeHint) []string {
+	parts := make([]string, 0, len(fields))
+	for name, field := range fields {
+		parts = append(parts, name+": "+field.String())
+	}
+	sort.Strings(parts)
+	return parts
 }
 
 func (p *Parser) isValidType(token TokenType) bool {
@@ -535,6 +650,21 @@ func isIdentifierLikeToken(tokenType TokenType) bool {
 		TOKEN_EMBED_TEXT,
 		TOKEN_EMBED_BYTES,
 		TOKEN_EMBED_FOLDER:
+		return true
+	default:
+		return false
+	}
+}
+
+func isSoftIdentifierToken(tokenType TokenType) bool {
+	switch tokenType {
+	case TOKEN_IDENT,
+		TOKEN_EMBED, TOKEN_MATCH,
+		TOKEN_FIELD, TOKEN_NATIVE, TOKEN_EXTERNAL,
+		TOKEN_PRIVATE, TOKEN_PUBLIC,
+		TOKEN_IMPLEMENTS, TOKEN_EXTENDS,
+		TOKEN_IOTA,
+		TOKEN_EMBED_TEXT, TOKEN_EMBED_BYTES, TOKEN_EMBED_FOLDER:
 		return true
 	default:
 		return false
@@ -1182,6 +1312,9 @@ func (p *Parser) parseStatement() Stmt {
 	case TOKEN_CONST:
 		return p.parseConstStatement()
 	case TOKEN_NATIVE:
+		if p.peek(1).Type != TOKEN_FN {
+			return p.parseExpressionStatement()
+		}
 		return p.parseNativeFunctionStatement()
 	case TOKEN_EXTERNAL:
 		nextToken := p.peek(1).Type
@@ -1191,8 +1324,7 @@ func (p *Parser) parseStatement() Stmt {
 		case TOKEN_CONST:
 			return p.parseExternalGlobalStatement()
 		default:
-			LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "external keyword expects 'fn' or 'const' after it.")
-			return ExprStmt{}
+			return p.parseExpressionStatement()
 		}
 
 	case TOKEN_FN:
@@ -1230,6 +1362,9 @@ func (p *Parser) parseStatement() Stmt {
 	case TOKEN_EXPORT:
 		return p.parseExportStatement()
 	case TOKEN_MATCH:
+		if p.peek(1).Type == TOKEN_LPAREN {
+			return p.parseExpressionStatement()
+		}
 		return p.parseMatchStatement()
 	default:
 		return p.parseExpressionStatement()
@@ -1427,7 +1562,7 @@ func (p *Parser) parseTryCatchStatement() Stmt {
 
 	p.expect(TOKEN_CATCH)
 
-	if p.current.Type != TOKEN_IDENT {
+	if !isSoftIdentifierToken(p.current.Type) {
 		LangErrorAt(
 			ErrorSyntax,
 			p.current.File,
@@ -1481,6 +1616,11 @@ func (p *Parser) parseForStatement() Stmt {
 	p.expect(TOKEN_FOR)
 	line := p.current.Line
 	column := p.current.Column
+
+	hasParens := p.current.Type == TOKEN_LPAREN
+	if hasParens {
+		p.advance()
+	}
 
 	if p.current.Type == TOKEN_IDENT {
 		itemName := p.current.Literal
@@ -1556,8 +1696,14 @@ func (p *Parser) parseForStatement() Stmt {
 
 	var update Stmt
 
-	if p.current.Type != TOKEN_LBRACE {
+	if p.current.Type != TOKEN_LBRACE && p.current.Type != TOKEN_RPAREN {
 		update = p.parseForUpdateStatement()
+	}
+
+	if hasParens {
+		if p.current.Type == TOKEN_RPAREN {
+			p.advance()
+		}
 	}
 
 	body := p.parseBlock()
@@ -1977,6 +2123,7 @@ func (p *Parser) parseInterfaceStatement() Stmt {
 
 	var name string
 	var typeParams []string
+	var extends []string
 	var lbraceTok Token
 	var rbraceTok Token
 
@@ -1995,7 +2142,9 @@ func (p *Parser) parseInterfaceStatement() Stmt {
 		p.recordBlock("interface", name, startTok, endTok, false, typeParams, Token{}, Token{}, lbraceTok, rbrace)
 	}()
 
+	nameTok := p.current
 	name = p.current.Literal
+	nameRange := tokenRange(nameTok)
 	p.expect(TOKEN_IDENT)
 
 	for p.current.Type == TOKEN_COLON {
@@ -2007,14 +2156,28 @@ func (p *Parser) parseInterfaceStatement() Stmt {
 		p.advance()
 	}
 
+	if p.current.Type == TOKEN_EXTENDS {
+		p.advance()
+		for {
+			extends = append(extends, p.parseTypeName())
+			if p.current.Type != TOKEN_COMMA {
+				break
+			}
+			p.advance()
+		}
+	}
+
 	lbraceTok = p.current
 	p.expect(TOKEN_LBRACE)
 
 	fields := map[string]TypeHint{}
+	fieldRanges := map[string]SourceRange{}
+	fieldNameRanges := map[string]SourceRange{}
+	fieldTypeRanges := map[string]SourceRange{}
 
 	for p.current.Type != TOKEN_RBRACE && p.current.Type != TOKEN_EOF {
-		fieldName := p.current.Literal
-		p.expect(TOKEN_IDENT)
+		fieldStartTok := p.current
+		fieldName := p.parseIdentifierLikeName("interface field name")
 
 		nullable := false
 		if p.current.Type == TOKEN_QUESTION {
@@ -2022,8 +2185,15 @@ func (p *Parser) parseInterfaceStatement() Stmt {
 			nullable = true
 		}
 
+		typeStartTok := p.current
 		typeHint := p.parseTypeHint(nullable)
+		typeEndTok := p.current
 		fields[fieldName] = typeHint
+		fieldRanges[fieldName] = rangeFromTokens(fieldStartTok, typeEndTok)
+		fieldNameRanges[fieldName] = tokenRange(fieldStartTok)
+		if typeStartTok.Line > 0 && typeEndTok.Line > 0 {
+			fieldTypeRanges[fieldName] = rangeFromTokens(typeStartTok, typeEndTok)
+		}
 
 		if p.current.Type == TOKEN_COMMA || p.current.Type == TOKEN_SEMI {
 			p.advance()
@@ -2033,14 +2203,21 @@ func (p *Parser) parseInterfaceStatement() Stmt {
 	rbraceTok = p.current
 	p.expect(TOKEN_RBRACE)
 
-	return InterfaceStmt{
+	stmt := InterfaceStmt{
 		Name:           name,
 		TypeParameters: typeParams,
+		Extends:        extends,
 		Fields:         fields,
 		File:           file,
 		Line:           line,
 		Column:         column,
 	}
+	stmt.Range = rangeFromTokens(startTok, rbraceTok)
+	stmt.NameRange = nameRange
+	stmt.FieldRanges = fieldRanges
+	stmt.FieldNameRanges = fieldNameRanges
+	stmt.FieldTypeRanges = fieldTypeRanges
+	return stmt
 }
 
 func (p *Parser) parseIfStatement() Stmt {
@@ -2083,9 +2260,28 @@ func (p *Parser) parseBlock() []Stmt {
 	statements := []Stmt{}
 
 	for p.current.Type != TOKEN_RBRACE && p.current.Type != TOKEN_EOF {
-		stmt := p.parseStatement()
-		if stmt != nil {
-			statements = append(statements, stmt)
+		if p.ErrorTolerant {
+			stmt := func() Stmt {
+				defer func() {
+					if r := recover(); r != nil {
+						if err, ok := r.(LangErrorType); ok {
+							p.Diagnostics = append(p.Diagnostics, err)
+						} else {
+							panic(r)
+						}
+						p.synchronizeBlock()
+					}
+				}()
+				return p.parseStatement()
+			}()
+			if stmt != nil {
+				statements = append(statements, stmt)
+			}
+		} else {
+			stmt := p.parseStatement()
+			if stmt != nil {
+				statements = append(statements, stmt)
+			}
 		}
 	}
 
@@ -2096,12 +2292,22 @@ func (p *Parser) parseBlock() []Stmt {
 }
 
 func (p *Parser) parseImportStatement() Stmt {
+	importStartTok := p.current
 	file := p.current.File
 	line := p.current.Line
 	column := p.current.Column
 	p.expect(TOKEN_IMPORT)
 
+	typeOnly := false
+	if p.current.Type == TOKEN_IDENT && p.current.Literal == "type" {
+		typeOnly = true
+		p.advance()
+	}
+
 	if p.current.Type == TOKEN_IDENT && p.current.Literal == "std" {
+		if typeOnly {
+			LangErrorAt(ErrorSyntax, file, line, column, "import type only supports source files")
+		}
 		p.advance()
 
 		if p.current.Type != TOKEN_STRING {
@@ -2114,10 +2320,12 @@ func (p *Parser) parseImportStatement() Stmt {
 			)
 		}
 
+		moduleNameTok := p.current
 		moduleName := p.current.Literal
 		p.advance()
 
 		alias := moduleName
+		aliasTok := Token{}
 
 		if p.current.Type == TOKEN_IDENT && p.current.Literal == "as" {
 			p.advance()
@@ -2132,13 +2340,14 @@ func (p *Parser) parseImportStatement() Stmt {
 				)
 			}
 
+			aliasTok = p.current
 			alias = p.current.Literal
 			p.advance()
 		}
 
 		p.consumeTerminator()
 
-		return ImportStmt{
+		stmt := ImportStmt{
 			Path:   moduleName,
 			Std:    true,
 			Alias:  alias,
@@ -2146,7 +2355,16 @@ func (p *Parser) parseImportStatement() Stmt {
 			Line:   line,
 			Column: column,
 		}
+		stmt.Range = rangeFromTokens(importStartTok, p.current)
+		stmt.PathRange = tokenRange(moduleNameTok)
+		if aliasTok.Line > 0 {
+			stmt.AliasRange = tokenRange(aliasTok)
+		}
+		return stmt
 	} else if p.current.Type == TOKEN_IDENT && p.current.Literal == "plugin" {
+		if typeOnly {
+			LangErrorAt(ErrorSyntax, file, line, column, "import type only supports source files")
+		}
 		p.advance()
 
 		if p.current.Type != TOKEN_STRING {
@@ -2159,10 +2377,12 @@ func (p *Parser) parseImportStatement() Stmt {
 			)
 		}
 
+		pluginPathTok := p.current
 		pluginPath := p.current.Literal
 		p.advance()
 
 		alias := ""
+		aliasTok := Token{}
 
 		if p.current.Type == TOKEN_IDENT && p.current.Literal == "as" {
 			p.advance()
@@ -2177,6 +2397,7 @@ func (p *Parser) parseImportStatement() Stmt {
 				)
 			}
 
+			aliasTok = p.current
 			alias = p.current.Literal
 			p.advance()
 		} else {
@@ -2191,7 +2412,7 @@ func (p *Parser) parseImportStatement() Stmt {
 
 		p.consumeTerminator()
 
-		return ImportStmt{
+		stmt := ImportStmt{
 			Path:   pluginPath,
 			Plugin: true,
 			Std:    false,
@@ -2200,7 +2421,16 @@ func (p *Parser) parseImportStatement() Stmt {
 			Line:   line,
 			Column: column,
 		}
-	} else if p.current.Type == TOKEN_IDENT && (p.current.Literal == "library" || p.current.Literal == "lib") {
+		stmt.Range = rangeFromTokens(importStartTok, p.current)
+		stmt.PathRange = tokenRange(pluginPathTok)
+		if aliasTok.Line > 0 {
+			stmt.AliasRange = tokenRange(aliasTok)
+		}
+		return stmt
+	} else if p.current.Type == TOKEN_IDENT && (p.current.Literal == "lib" || p.current.Literal == "library") {
+		if typeOnly {
+			LangErrorAt(ErrorSyntax, file, line, column, "import type only supports source files")
+		}
 		p.advance()
 
 		if p.current.Type != TOKEN_STRING {
@@ -2213,10 +2443,12 @@ func (p *Parser) parseImportStatement() Stmt {
 			)
 		}
 
+		libraryPathTok := p.current
 		libraryPath := p.current.Literal
 		p.advance()
 
 		alias := ""
+		aliasTok := Token{}
 
 		if p.current.Type == TOKEN_IDENT && p.current.Literal == "as" {
 			p.advance()
@@ -2231,13 +2463,14 @@ func (p *Parser) parseImportStatement() Stmt {
 				)
 			}
 
+			aliasTok = p.current
 			alias = p.current.Literal
 			p.advance()
 		}
 
 		p.consumeTerminator()
 
-		return ImportStmt{
+		stmt := ImportStmt{
 			Path:    libraryPath,
 			Library: true,
 			Alias:   alias,
@@ -2245,6 +2478,12 @@ func (p *Parser) parseImportStatement() Stmt {
 			Line:    line,
 			Column:  column,
 		}
+		stmt.Range = rangeFromTokens(importStartTok, p.current)
+		stmt.PathRange = tokenRange(libraryPathTok)
+		if aliasTok.Line > 0 {
+			stmt.AliasRange = tokenRange(aliasTok)
+		}
+		return stmt
 	}
 
 	if p.current.Type != TOKEN_STRING {
@@ -2257,10 +2496,12 @@ func (p *Parser) parseImportStatement() Stmt {
 		)
 	}
 
+	pathTok := p.current
 	path := p.current.Literal
 	p.advance()
 
 	alias := ""
+	aliasTok := Token{}
 
 	if p.current.Type == TOKEN_IDENT && p.current.Literal == "as" {
 		p.advance()
@@ -2275,21 +2516,29 @@ func (p *Parser) parseImportStatement() Stmt {
 			)
 		}
 
+		aliasTok = p.current
 		alias = p.current.Literal
 		p.advance()
 	}
 
 	p.consumeTerminator()
 
-	return ImportStmt{
-		Path:   path,
-		Plugin: false,
-		Std:    false,
-		Alias:  alias,
-		File:   file,
-		Line:   line,
-		Column: column,
+	stmt := ImportStmt{
+		Path:     path,
+		Plugin:   false,
+		Std:      false,
+		TypeOnly: typeOnly,
+		Alias:    alias,
+		File:     file,
+		Line:     line,
+		Column:   column,
 	}
+	stmt.Range = rangeFromTokens(importStartTok, p.current)
+	stmt.PathRange = tokenRange(pathTok)
+	if aliasTok.Line > 0 {
+		stmt.AliasRange = tokenRange(aliasTok)
+	}
+	return stmt
 }
 
 func (p *Parser) parseFieldStatement() Stmt {
@@ -2312,7 +2561,7 @@ func (p *Parser) parseFieldStatement() Stmt {
 		constant = true
 	}
 
-	if p.current.Type != TOKEN_IDENT {
+	if !isSoftIdentifierToken(p.current.Type) {
 		LangErrorAt(
 			ErrorSyntax,
 			p.current.File,
@@ -2388,7 +2637,7 @@ func (p *Parser) parseLetStatement() Stmt {
 		}
 	}
 
-	if p.current.Type != TOKEN_IDENT {
+	if !isSoftIdentifierToken(p.current.Type) {
 		LangErrorAt(
 			ErrorSyntax,
 			p.current.File,
@@ -2591,7 +2840,7 @@ func (p *Parser) parseConstStatement() Stmt {
 		}
 	}
 
-	if p.current.Type != TOKEN_IDENT {
+	if !isSoftIdentifierToken(p.current.Type) {
 		LangErrorAt(
 			ErrorSyntax,
 			p.current.File,
@@ -2901,6 +3150,7 @@ func (p *Parser) parseFunctionStatement(async bool, asyncTok ...Token) Stmt {
 		p.recordBlock("fn", name, startTok, rbraceTok, async, typeParams, lparenTok, rparenTok, lbraceTok, rbraceTok)
 	}()
 
+	nameTok := p.current
 	name = p.parseIdentifierLikeName("function name")
 
 	for p.current.Type == TOKEN_COLON {
@@ -2919,8 +3169,11 @@ func (p *Parser) parseFunctionStatement(async bool, asyncTok ...Token) Stmt {
 	p.expect(TOKEN_RPAREN)
 
 	returnType := TypeHint{}
+	returnTypeRange := SourceRange{}
 	if p.current.Type == TOKEN_COLON {
+		returnTypeStartTok := p.current
 		returnType = p.parseTypeHint(false)
+		returnTypeRange = rangeFromTokens(returnTypeStartTok, p.current)
 	}
 
 	var body []Stmt
@@ -2931,7 +3184,12 @@ func (p *Parser) parseFunctionStatement(async bool, asyncTok ...Token) Stmt {
 		rbraceTok = p.lastRbraceToken
 	}
 
-	return FunctionStmt{
+	endTok := rbraceTok
+	if endTok.Line == 0 {
+		endTok = p.current
+	}
+
+	stmt := FunctionStmt{
 		Name:           name,
 		TypeParameters: typeParams,
 		Params:         params,
@@ -2942,6 +3200,15 @@ func (p *Parser) parseFunctionStatement(async bool, asyncTok ...Token) Stmt {
 		Column:         column,
 		File:           file,
 	}
+	stmt.Range = rangeFromTokens(startTok, endTok)
+	stmt.NameRange = tokenRange(nameTok)
+	if lparenTok.Line > 0 && rparenTok.Line > 0 {
+		stmt.ParamsRange = rangeFromTokens(lparenTok, rparenTok)
+	}
+	if returnTypeRange.Start.Line > 0 {
+		stmt.ReturnTypeRange = returnTypeRange
+	}
+	return stmt
 }
 
 func containsString(items []string, target string) bool {
@@ -2968,6 +3235,7 @@ func (p *Parser) parseParameterList(enforceTypes ...bool) []Param {
 	}
 
 	for {
+		paramStartTok := p.current
 		for p.current.Type == TOKEN_SEMI {
 			p.advance()
 		}
@@ -2978,11 +3246,12 @@ func (p *Parser) parseParameterList(enforceTypes ...bool) []Param {
 
 		variadic := false
 		if p.current.Type == TOKEN_DOT_DOT_DOT {
+			paramStartTok = p.current
 			p.expect(TOKEN_DOT_DOT_DOT)
 			variadic = true
 		}
 
-		if p.current.Type != TOKEN_IDENT {
+		if !isSoftIdentifierToken(p.current.Type) {
 			LangErrorAt(
 				ErrorSyntax,
 				p.current.File,
@@ -2992,6 +3261,7 @@ func (p *Parser) parseParameterList(enforceTypes ...bool) []Param {
 			)
 		}
 
+		nameTok := p.current
 		name := p.current.Literal
 		p.advance()
 
@@ -3003,6 +3273,8 @@ func (p *Parser) parseParameterList(enforceTypes ...bool) []Param {
 		}
 
 		typeHint := TypeHint{}
+		typeStartTok := Token{}
+		typeEndTok := Token{}
 
 		if enforceTypeChecks && p.current.Type != TOKEN_COLON {
 			LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "function parameter types are required")
@@ -3010,22 +3282,36 @@ func (p *Parser) parseParameterList(enforceTypes ...bool) []Param {
 
 		if p.current.Type == TOKEN_COLON {
 			p.advance()
+			typeStartTok = p.current
 
-			types := []string{}
+			if p.current.Type == TOKEN_LBRACE {
+				fields := p.parseStructuralTypeFields()
+				typeHint = TypeHint{
+					Name:   "{" + strings.Join(structuralTypeFieldStrings(fields), ", ") + "}",
+					Fields: fields,
+				}
+				typeEndTok = p.current
+			} else {
+				types := []string{}
 
-			for {
-				types = append(types, p.parseTypeName())
+				for {
+					typeEndTok = p.current
+					types = append(types, p.parseTypeName())
 
-				if p.current.Type != TOKEN_PIPE {
-					break
+					if p.current.Type != TOKEN_PIPE {
+						break
+					}
+
+					p.advance()
 				}
 
-				p.advance()
+				typeHint = TypeHint{
+					Name:  strings.Join(types, "|"),
+					Types: types,
+				}
 			}
-
-			typeHint = TypeHint{
-				Name:  strings.Join(types, "|"),
-				Types: types,
+			if typeStartTok.Line > 0 && typeEndTok.Line > 0 {
+				typeHint.Range = rangeFromTokens(typeStartTok, typeEndTok)
 			}
 		}
 
@@ -3053,6 +3339,15 @@ func (p *Parser) parseParameterList(enforceTypes ...bool) []Param {
 			Name:     name,
 			TypeHint: typeHint,
 			Variadic: variadic,
+		}
+		paramEndTok := nameTok
+		if typeEndTok.Line > 0 {
+			paramEndTok = typeEndTok
+		}
+		param.Range = rangeFromTokens(paramStartTok, paramEndTok)
+		param.NameRange = tokenRange(nameTok)
+		if typeHint.Range.Start.Line > 0 {
+			param.TypeRange = typeHint.Range
 		}
 
 		if nullable {
@@ -3348,8 +3643,8 @@ func (p *Parser) parseComparison() Expr {
 
 		case TOKEN_IN:
 			left = ObjectInExpr{
-				Key:    right,
-				Object: left,
+				Key:    left,
+				Object: right,
 				File:   p.current.File,
 				Line:   p.current.Line,
 				Column: p.current.Column,
@@ -3479,9 +3774,27 @@ func (p *Parser) parsePostfix() Expr {
 			if safe {
 				safeChain = true
 			}
+			dotTok := p.current
 			p.advance()
 
 			if !isIdentifierLikeToken(p.current.Type) {
+				if p.ErrorTolerant {
+					objFile, objLine, objCol := exprSourcePosition(expr)
+					if objLine <= 0 || objCol <= 0 {
+						objFile = p.current.File
+						objLine = p.current.Line
+						objCol = p.current.Column
+					}
+					expr = PropertyExpr{
+						Object: expr,
+						Name:   "",
+						File:   objFile,
+						Line:   objLine,
+						Column: objCol,
+						Range:  rangeFromTokens(dotTok, p.current),
+					}
+					break
+				}
 				LangErrorAt(
 					ErrorSyntax,
 					p.current.File,
@@ -3525,6 +3838,7 @@ func (p *Parser) parsePostfix() Expr {
 				Line:   line,
 				Column: column,
 				Safe:   safe || safeChain,
+				Range:  rangeFromTokens(dotTok, p.current),
 			}
 
 		case TOKEN_LBRACKET:
@@ -3720,23 +4034,29 @@ func (p *Parser) parseArrayLiteral() Expr {
 }
 
 func (p *Parser) parseObjectLiteral() Expr {
+	lbraceTok := p.current
 	p.expect(TOKEN_LBRACE)
 
 	var fields []ObjectField
 
 	if p.current.Type == TOKEN_RBRACE {
+		rbraceTok := p.current
 		p.expect(TOKEN_RBRACE)
-		return ObjectExpr{Fields: fields}
+		expr := ObjectExpr{Fields: fields}
+		expr.Range = rangeFromTokens(lbraceTok, rbraceTok)
+		return expr
 	}
 
 	for {
 		if p.current.Type == TOKEN_DOT_DOT_DOT {
+			fieldStartTok := p.current
 			p.advance()
+			nameTok := p.current
 			name := p.current.Literal
 			tokenType := p.current.Type
 			p.advance()
 
-			if tokenType != TOKEN_IDENT {
+			if !isIdentifierLikeToken(tokenType) {
 				LangErrorAt(
 					ErrorSyntax,
 					p.current.File,
@@ -3754,12 +4074,15 @@ func (p *Parser) parseObjectLiteral() Expr {
 				Column: p.current.Column,
 			}
 
-			fields = append(fields, ObjectField{
+			field := ObjectField{
 				Name:    name,
 				Value:   nil,
 				Copy:    value,
 				HasCopy: true,
-			})
+			}
+			field.Range = rangeFromTokens(fieldStartTok, p.current)
+			field.NameRange = tokenRange(nameTok)
+			fields = append(fields, field)
 
 			if p.current.Type == TOKEN_SEMI {
 				p.advance()
@@ -3783,6 +4106,8 @@ func (p *Parser) parseObjectLiteral() Expr {
 			)
 		}
 
+		fieldStartTok := p.current
+		nameTok := p.current
 		name := p.current.Literal
 		tokenType := p.current.Type
 		p.advance()
@@ -3792,10 +4117,13 @@ func (p *Parser) parseObjectLiteral() Expr {
 
 			value := p.parseExpression()
 
-			fields = append(fields, ObjectField{
+			field := ObjectField{
 				Name:  name,
 				Value: value,
-			})
+			}
+			field.Range = rangeFromTokens(fieldStartTok, p.current)
+			field.NameRange = tokenRange(nameTok)
+			fields = append(fields, field)
 		} else {
 			if tokenType != TOKEN_IDENT {
 				LangErrorAt(
@@ -3814,10 +4142,13 @@ func (p *Parser) parseObjectLiteral() Expr {
 				Column: p.current.Column,
 			}
 
-			fields = append(fields, ObjectField{
+			field := ObjectField{
 				Name:  name,
 				Value: value,
-			})
+			}
+			field.Range = rangeFromTokens(fieldStartTok, p.current)
+			field.NameRange = tokenRange(nameTok)
+			fields = append(fields, field)
 		}
 
 		for p.current.Type == TOKEN_SEMI {
@@ -3831,9 +4162,12 @@ func (p *Parser) parseObjectLiteral() Expr {
 		p.advance()
 	}
 
+	rbraceTok := p.current
 	p.expect(TOKEN_RBRACE)
 
-	return ObjectExpr{Fields: fields}
+	expr := ObjectExpr{Fields: fields}
+	expr.Range = rangeFromTokens(lbraceTok, rbraceTok)
+	return expr
 }
 
 func (p *Parser) parseFunctionSignatureAndBody() ([]Param, TypeHint, []Stmt, Token, Token) {
@@ -3866,6 +4200,13 @@ func (p *Parser) parseFunctionSignatureAndBody() ([]Param, TypeHint, []Stmt, Tok
 }
 
 func (p *Parser) parsePrimary() Expr {
+	if p.current.Type == TOKEN_IDENT && p.peek(1).Type == TOKEN_ARROW {
+		return p.parseArrowFunctionExpr()
+	}
+	if p.current.Type == TOKEN_LPAREN && p.isArrowFunctionAhead() {
+		return p.parseArrowFunctionExpr()
+	}
+
 	switch p.current.Type {
 	case TOKEN_NUMBER:
 		literal := p.current.Literal
@@ -3911,7 +4252,13 @@ func (p *Parser) parsePrimary() Expr {
 	case TOKEN_LBRACKET:
 		return p.parseArrayLiteral()
 
-	case TOKEN_IDENT:
+	case TOKEN_IDENT, TOKEN_EMBED, TOKEN_MATCH,
+		TOKEN_FIELD, TOKEN_NATIVE, TOKEN_EXTERNAL,
+		TOKEN_PRIVATE, TOKEN_PUBLIC,
+		TOKEN_IMPLEMENTS, TOKEN_EXTENDS,
+		TOKEN_IOTA,
+		TOKEN_EMBED_TEXT, TOKEN_EMBED_BYTES, TOKEN_EMBED_FOLDER:
+		tok := p.current
 		file := p.current.File
 		line := p.current.Line
 		column := p.current.Column
@@ -3923,6 +4270,7 @@ func (p *Parser) parsePrimary() Expr {
 			File:   file,
 			Line:   line,
 			Column: column,
+			Range:  tokenRange(tok),
 		}
 
 	case TOKEN_LPAREN:
@@ -4194,6 +4542,149 @@ func (p *Parser) parseEnumStatement() Stmt {
 		File:    enumFile,
 		Line:    enumLine,
 		Column:  enumColumn,
+	}
+}
+
+func (p *Parser) isArrowFunctionAhead() bool {
+	if p.current.Type != TOKEN_LPAREN {
+		return false
+	}
+
+	parenDepth := 0
+	braceDepth := 0
+	for i := 1; ; i++ {
+		t := p.peek(i)
+		switch t.Type {
+		case TOKEN_LPAREN:
+			parenDepth++
+		case TOKEN_RPAREN:
+			if parenDepth == 0 {
+				next := p.peek(i + 1)
+				if next.Type == TOKEN_ARROW {
+					return true
+				}
+				if next.Type == TOKEN_COLON {
+					for j := i + 2; ; j++ {
+						t2 := p.peek(j)
+						if t2.Type == TOKEN_ARROW {
+							return true
+						}
+						if t2.Type == TOKEN_EOF || t2.Type == TOKEN_SEMI {
+							return false
+						}
+					}
+				}
+				return false
+			}
+			parenDepth--
+		case TOKEN_LBRACE:
+			braceDepth++
+		case TOKEN_RBRACE:
+			if braceDepth > 0 {
+				braceDepth--
+			}
+		case TOKEN_EOF, TOKEN_SEMI:
+			return false
+		}
+	}
+}
+
+func (p *Parser) parseArrowFunctionExpr() Expr {
+	file := p.current.File
+	line := p.current.Line
+	column := p.current.Column
+
+	var params []Param
+
+	if p.current.Type == TOKEN_LPAREN {
+		p.expect(TOKEN_LPAREN)
+		if p.current.Type != TOKEN_RPAREN {
+			for {
+				if !isSoftIdentifierToken(p.current.Type) {
+					LangErrorAt(ErrorSyntax, p.current.File, p.current.Line, p.current.Column, "expected parameter name")
+				}
+				paramName := p.current.Literal
+				p.advance()
+
+				var typeHint TypeHint
+				if p.current.Type == TOKEN_COLON {
+					p.expect(TOKEN_COLON)
+					typeHint = p.parseTypeNameAsHint()
+				}
+
+				params = append(params, Param{
+					Name:     paramName,
+					TypeHint: typeHint,
+				})
+
+				if p.current.Type != TOKEN_COMMA {
+					break
+				}
+				p.advance()
+			}
+		}
+		p.expect(TOKEN_RPAREN)
+	} else {
+		paramName := p.current.Literal
+		p.advance()
+
+		var typeHint TypeHint
+		if p.current.Type == TOKEN_COLON {
+			p.expect(TOKEN_COLON)
+			typeHint = p.parseTypeNameAsHint()
+		}
+
+		params = append(params, Param{
+			Name:     paramName,
+			TypeHint: typeHint,
+		})
+	}
+
+	var returnType TypeHint
+	if p.current.Type == TOKEN_COLON {
+		p.expect(TOKEN_COLON)
+		returnType = p.parseTypeNameAsHint()
+	}
+
+	p.expect(TOKEN_ARROW)
+
+	bodyExpr := p.parseExpression()
+
+	body := []Stmt{
+		ReturnStmt{
+			Value:    bodyExpr,
+			HasValue: true,
+			File:     file,
+			Line:     line,
+			Column:   column,
+		},
+	}
+
+	return FunctionExpr{
+		Params:     params,
+		ReturnType: returnType,
+		Body:       body,
+		File:       file,
+		Line:       line,
+		Column:     column,
+	}
+}
+
+func (p *Parser) parseTypeNameAsHint() TypeHint {
+	types := []string{}
+	types = append(types, p.parseTypeName())
+
+	for p.current.Type == TOKEN_PIPE {
+		p.advance()
+		types = append(types, p.parseTypeName())
+	}
+
+	if len(types) == 1 {
+		return TypeHint{Name: types[0]}
+	}
+	return TypeHint{
+		Name:  strings.Join(types, " | "),
+		Types: types,
 	}
 }
 

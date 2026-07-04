@@ -2,6 +2,17 @@ package vm
 
 type EmbedType = byte
 
+type SourcePosition struct {
+	File   string `json:"file,omitempty"`
+	Line   int    `json:"line"`
+	Column int    `json:"column"`
+}
+
+type SourceRange struct {
+	Start SourcePosition `json:"start"`
+	End   SourcePosition `json:"end"`
+}
+
 const (
 	EmbedText EmbedType = iota
 	EmbedBytes
@@ -91,14 +102,19 @@ type PropertyAssignStmt struct {
 func (s PropertyAssignStmt) stmtNode() {}
 
 type ImportStmt struct {
-	Path    string
-	Std     bool
-	Plugin  bool
-	Library bool
-	Alias   string
-	File    string
-	Line    int
-	Column  int
+	Path          string
+	Std           bool
+	Plugin        bool
+	Library       bool
+	TypeOnly      bool
+	TypeNamespace string
+	Alias         string
+	File          string
+	Line          int
+	Column        int
+	Range         SourceRange
+	PathRange     SourceRange
+	AliasRange    SourceRange
 }
 
 func (s ImportStmt) stmtNode() {}
@@ -325,8 +341,10 @@ type UnaryExpr struct {
 func (e UnaryExpr) exprNode() {}
 
 type ObjectField struct {
-	Name  string
-	Value Expr
+	Name      string
+	Value     Expr
+	Range     SourceRange
+	NameRange SourceRange
 
 	Copy    IdentExpr
 	HasCopy bool
@@ -334,6 +352,7 @@ type ObjectField struct {
 
 type ObjectExpr struct {
 	Fields []ObjectField
+	Range  SourceRange
 }
 
 func (e ObjectExpr) exprNode() {}
@@ -345,6 +364,7 @@ type PropertyExpr struct {
 	File   string
 	Line   int
 	Column int
+	Range  SourceRange
 }
 
 func (e PropertyExpr) exprNode() {}
@@ -381,10 +401,16 @@ func (s ExprStmt) stmtNode() {}
 type InterfaceStmt struct {
 	Name           string
 	TypeParameters []string
+	Extends        []string
 	Fields         map[string]TypeHint
 	File           string
 	Line           int
 	Column         int
+	Range          SourceRange
+	NameRange      SourceRange
+	FieldRanges    map[string]SourceRange
+	FieldNameRanges map[string]SourceRange
+	FieldTypeRanges map[string]SourceRange
 }
 
 func (s InterfaceStmt) stmtNode() {}
@@ -414,11 +440,14 @@ type IndexAssignStmt struct {
 func (s IndexAssignStmt) stmtNode() {}
 
 type Param struct {
-	Name         string    `json:"name"`
-	TypeHint     TypeHint  `json:"typeHint"`
-	HasDefault   bool      `json:"hasDefault"`
-	DefaultValue TinyValue `json:"-"`
-	Variadic     bool      `json:"variadic"`
+	Name         string      `json:"name"`
+	TypeHint     TypeHint    `json:"typeHint"`
+	HasDefault   bool        `json:"hasDefault"`
+	DefaultValue TinyValue   `json:"-"`
+	Variadic     bool        `json:"variadic"`
+	Range        SourceRange `json:"range,omitempty"`
+	NameRange    SourceRange `json:"nameRange,omitempty"`
+	TypeRange    SourceRange `json:"typeRange,omitempty"`
 }
 
 type FunctionStmt struct {
@@ -432,6 +461,10 @@ type FunctionStmt struct {
 	File           string
 	Line           int
 	Column         int
+	Range          SourceRange
+	NameRange      SourceRange
+	ParamsRange    SourceRange
+	ReturnTypeRange SourceRange
 }
 
 func (s FunctionStmt) stmtNode() {}
@@ -532,6 +565,7 @@ type IdentExpr struct {
 	File   string
 	Line   int
 	Column int
+	Range  SourceRange
 }
 
 func (e IdentExpr) exprNode() {}

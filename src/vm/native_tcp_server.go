@@ -68,6 +68,7 @@ func tcpStart(vm *VM, tcp *NativeTcpServerValue, args []TinyValue) {
 	listener, err := net.Listen("tcp", tcp.Host+":"+strconv.Itoa(tcp.Port))
 	if err != nil {
 		vm.runtimeError(ErrorRuntime, "failed to start TCP server on %s:%d: %v", tcp.Host, tcp.Port, err)
+		return
 	}
 
 	tcp.Listener = &listener

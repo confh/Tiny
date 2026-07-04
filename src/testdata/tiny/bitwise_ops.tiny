@@ -1,0 +1,24 @@
+import std "io";
+
+io.println(6 & 3);
+io.println(4 | 1);
+io.println(5 ^ 3);
+io.println(3 << 2);
+io.println(16 >> 2);
+io.println(~5);
+
+let value = 6;
+value &= 3;
+io.println(value);
+
+value |= 4;
+io.println(value);
+
+value ^= 7;
+io.println(value);
+
+value <<= 2;
+io.println(value);
+
+value >>= 1;
+io.println(value);

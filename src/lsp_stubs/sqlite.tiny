@@ -1,0 +1,24 @@
+// Represents an open SQLite database connection.
+export class Database {
+    // Executes a SQL statement (like INSERT, UPDATE, DELETE, CREATE TABLE)
+    // with optional positional parameters. Returns the number of affected rows.
+    fn execute(query: string, params?: array): number
+
+    // Executes a query and returns all resulting rows as an array of objects.
+    // Each object represents a row where keys are column names.
+    fn query(query: string, params?: array): array:object
+
+    // Executes a query and returns the first resulting row as an object,
+    // or null if no rows match.
+    fn queryRow(query: string, params?: array): object | null
+
+    // Returns the ID of the last row inserted into the database.
+    fn lastInsertId(): number
+
+    // Closes the database connection and frees resources.
+    fn close(): null
+}
+
+// Opens a SQLite database file at the specified path.
+// If the file does not exist, it will be created.
+export fn open(path: string): Database

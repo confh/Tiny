@@ -13,7 +13,7 @@ export class TcpConnection {
 }
 
 // Represents a TCP server capable of listening for incoming connections.
-class TcpServer {
+export class TcpServer {
     // Starts the TCP server, optionally in asynchronous mode.
     fn start(isAsync?: bool): null
     // Registers a callback function to handle incoming client connections.

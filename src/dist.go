@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	. "language.com/src/bytecode"
+	tinycompiler "language.com/src/compiler"
+	tinyloader "language.com/src/loader"
 	. "language.com/src/tinyerrors"
 	. "language.com/src/vm"
 )
@@ -97,7 +99,7 @@ func DistCommand(args []string) {
 		LangError(ErrorRuntime, "failed to create dist folder: %v", err)
 	}
 
-	program := LoadProgram(entryFile)
+	program := tinyloader.LoadProgram(entryFile)
 	pluginPaths := bundledPluginPaths(program, target, extraPlugins)
 
 	program = rewritePluginPathsForDist(program, target)
@@ -136,7 +138,7 @@ func defaultDistOutputName(entryFile string, target string) string {
 func packToOutput(entryFile string, outFile string, target string, windowed bool, iconPath string) {
 	target = normalizeTarget(target)
 
-	program := LoadProgram(entryFile)
+	program := tinyloader.LoadProgram(entryFile)
 	pluginPaths := bundledPluginPaths(program, target, nil)
 
 	if len(pluginPaths) > 0 {
@@ -219,7 +221,7 @@ func copyPluginsToOutputDir(pluginPaths []string, outputDir string) {
 func packProgramToOutput(program Program, outFile string, target string, windowed bool, iconPath string) {
 	target = normalizeTarget(target)
 
-	compiler := NewCompiler()
+	compiler := tinycompiler.NewCompiler()
 	mainInstructions, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
 	mainInstructions = OptimizeBytecode(mainInstructions)
 

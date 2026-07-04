@@ -13,7 +13,10 @@ import (
 	"time"
 
 	. "language.com/src/bytecode"
+	tinycompiler "language.com/src/compiler"
+	tinyloader "language.com/src/loader"
 	. "language.com/src/tinyerrors"
+	. "language.com/src/version"
 	. "language.com/src/vm"
 )
 
@@ -29,6 +32,28 @@ func getScriptArgs() []string {
 	}
 
 	return []string{}
+}
+
+func formatCommand(args []string) {
+	if len(args) < 1 {
+		LangError(ErrorRuntime, "usage: tiny fmt <file.tiny>")
+	}
+
+	file := args[0]
+
+	fileContent, err := os.ReadFile(file)
+	if err != nil {
+		LangError(ErrorRuntime, "error while reading file: %s", err)
+	}
+
+	formatted := formatTinyDocument(string(fileContent))
+
+	err = os.WriteFile(file, []byte(formatted), 0644)
+	if err != nil {
+		LangError(ErrorRuntime, "error while writing file: %s", err)
+	}
+
+	fmt.Println("Formatted", file)
 }
 
 func main() {
@@ -51,6 +76,10 @@ func main() {
 
 		case "build":
 			buildCommand(os.Args[2:])
+			return
+
+		case "fmt":
+			formatCommand(os.Args[2:])
 			return
 
 		case "run":
@@ -94,7 +123,7 @@ func main() {
 			return
 
 		case "version", "ver", "v":
-			versionCommand()
+			VersionCommand()
 			return
 
 		case "update":
@@ -230,6 +259,11 @@ func runSourceCommand(args []string) {
 		entryFile = filteredArgs[0]
 	}
 
+	if filepath.Ext(entryFile) == ".tbc" {
+		runBytecodeFile(entryFile, disableJIT)
+		return
+	}
+
 	sourceBytes, err := os.ReadFile(entryFile)
 	if err != nil {
 		panic(err)
@@ -306,10 +340,13 @@ func runBytecodeFile(path string, disableJit bool) {
 	vm.Run()
 }
 
-func saveBytecodeFile(entryFile string, outFile string, cache bool) {
-	program := LoadProgram(entryFile)
+func saveBytecodeFile(entryFile string, outFile string, cache bool, preserveAllFunctions ...bool) {
+	program := tinyloader.LoadProgram(entryFile)
 
-	compiler := NewCompiler()
+	compiler := tinycompiler.NewCompiler()
+	if len(preserveAllFunctions) > 0 && preserveAllFunctions[0] {
+		compiler.SetPreserveAllFunctions(true)
+	}
 	mainBytecode, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
 
 	mainBytecode = OptimizeBytecode(mainBytecode)
@@ -323,9 +360,9 @@ func saveBytecodeFile(entryFile string, outFile string, cache bool) {
 }
 
 func compileAndRun(entryFile string, cliArgs []string, disableJit bool) {
-	program := LoadProgram(entryFile)
+	program := tinyloader.LoadProgram(entryFile)
 
-	compiler := NewCompiler()
+	compiler := tinycompiler.NewCompiler()
 	mainBytecode, functions, classes, interfaces, _ := compiler.CompileProgram(program)
 
 	mainBytecode = OptimizeBytecode(mainBytecode)
@@ -355,15 +392,22 @@ func buildCommand(args []string) {
 
 	entryFile := args[0]
 	outFile := "out.tbc"
+	preserveAll := false
 
 	for i := 1; i < len(args); i++ {
-		if args[i] == "-o" && i+1 < len(args) {
+		switch args[i] {
+		case "-o":
+			if i+1 >= len(args) {
+				LangError(ErrorRuntime, "expected output path after -o")
+			}
 			outFile = args[i+1]
 			i++
+		case "--preserve-all":
+			preserveAll = true
 		}
 	}
 
-	saveBytecodeFile(entryFile, outFile, false)
+	saveBytecodeFile(entryFile, outFile, false, preserveAll)
 
 	fmt.Println("Built", outFile)
 }
@@ -458,6 +502,9 @@ func watchCommand(args []string) {
 					log.Fatalf("failed to get cwd: %v", err)
 				}
 				relPath, err := filepath.Rel(cwd, changedFile)
+				if err != nil {
+					relPath = changedFile
+				}
 				fmt.Printf("[watch] change detected: %s\n", relPath)
 				stopWatchChild(child)
 				files = watchedFilesForEntry(entryFile)
@@ -479,7 +526,7 @@ func watchedFilesForEntry(entryFile string) []string {
 			}
 		}()
 
-		_, files = LoadProgramWithFiles(entryFile)
+		_, files = tinyloader.LoadProgramWithFiles(entryFile)
 	}()
 
 	if len(files) == 0 {

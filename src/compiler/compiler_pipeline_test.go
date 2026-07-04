@@ -1,9 +1,10 @@
-package main
+package compiler
 
 import (
 	"bytes"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,6 +13,7 @@ import (
 	"testing"
 
 	"language.com/src/bytecode"
+	tinyloader "language.com/src/loader"
 	"language.com/src/tinyerrors"
 	"language.com/src/vm"
 )
@@ -42,7 +44,7 @@ func runTinyFile(t *testing.T, path string, args ...string) (res tinyRunResult) 
 func compileTinyFile(t *testing.T, path string) ([]vm.Instruction, map[string]vm.Function, map[string]vm.Class, map[string]vm.Interface, map[string]int) {
 	t.Helper()
 
-	program := LoadProgram(path)
+	program := tinyloader.LoadProgram(path)
 	compiler := NewCompiler()
 	mainInstructions, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
 
@@ -53,6 +55,77 @@ func compileTinyFile(t *testing.T, path string) ([]vm.Instruction, map[string]vm
 	}
 
 	return mainInstructions, functions, classes, interfaces, globalIndex
+}
+
+func init() {
+	vm.SetRuntimeBytecodeLoader(func(data []byte) vm.RuntimeBytecodeProgram {
+		mainInstructions, functions, classes, interfaces, globalIndex := bytecode.LoadBytecodeFromBytes(data)
+		return vm.RuntimeBytecodeProgram{
+			MainInstructions: mainInstructions,
+			Functions:        functions,
+			Classes:          classes,
+			Interfaces:       interfaces,
+			GlobalIndex:      globalIndex,
+		}
+	})
+
+	vm.SetRuntimeSourceLoader(func(source string, file string) vm.RuntimeBytecodeProgram {
+		lexer := vm.NewLexer(source, file)
+		parser := vm.NewParser(lexer)
+		program := parser.ParseProgram()
+
+		compiler := NewCompiler()
+		compiler.SetPreserveAllFunctions(true)
+		mainInstructions, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
+
+		mainInstructions = vm.OptimizeBytecode(mainInstructions)
+		for name, fn := range functions {
+			fn.Instructions = vm.OptimizeBytecode(fn.Instructions)
+			functions[name] = fn
+		}
+
+		return vm.RuntimeBytecodeProgram{
+			MainInstructions: mainInstructions,
+			Functions:        functions,
+			Classes:          classes,
+			Interfaces:       interfaces,
+			GlobalIndex:      globalIndex,
+		}
+	})
+
+	vm.SetCompileSourceFunc(func(source string, file string) []byte {
+		lexer := vm.NewLexer(source, file)
+		parser := vm.NewParser(lexer)
+		program := parser.ParseProgram()
+
+		compiler := NewCompiler()
+		compiler.SetPreserveAllFunctions(true)
+		mainInstructions, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
+
+		mainInstructions = vm.OptimizeBytecode(mainInstructions)
+		for name, fn := range functions {
+			fn.Instructions = vm.OptimizeBytecode(fn.Instructions)
+			functions[name] = fn
+		}
+
+		return bytecode.SaveBytecodeToBytes(mainInstructions, functions, classes, interfaces, globalIndex, false, false)
+	})
+
+	vm.SetCompileFileFunc(func(path string) []byte {
+		program := tinyloader.LoadProgram(path)
+
+		compiler := NewCompiler()
+		compiler.SetPreserveAllFunctions(true)
+		mainInstructions, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
+
+		mainInstructions = vm.OptimizeBytecode(mainInstructions)
+		for name, fn := range functions {
+			fn.Instructions = vm.OptimizeBytecode(fn.Instructions)
+			functions[name] = fn
+		}
+
+		return bytecode.SaveBytecodeToBytes(mainInstructions, functions, classes, interfaces, globalIndex, false, false)
+	})
 }
 
 func writeTinyBytecodeFile(t *testing.T, sourcePath string, outPath string) {
@@ -242,6 +315,55 @@ func TestRuntimeNewVMLoadSourcePreservesCallableFunctions(t *testing.T) {
 	}
 }
 
+func TestRuntimeNewVMExternalNamespaceFallsBackToExposedFunction(t *testing.T) {
+	dir := t.TempDir()
+	parentPath := filepath.Join(dir, "parent.tiny")
+	externalPath := filepath.Join(dir, "external.tiny")
+	childPath := filepath.Join(dir, "child.tiny")
+	childBytecodePath := filepath.Join(dir, "child.tbc")
+
+	if err := os.WriteFile(externalPath, []byte(`export external fn log(...any: any): null`), 0644); err != nil {
+		t.Fatalf("write external: %v", err)
+	}
+	if err := os.WriteFile(childPath, []byte(strings.Join([]string{
+		`import std "http" as http`,
+		`import "external.tiny" as External`,
+		`export fn handleRequest() {`,
+		`    let res = http.response(200, "ok")`,
+		`    External.log("from external")`,
+		`}`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+	writeTinyBytecodeFile(t, childPath, childBytecodePath)
+
+	if err := os.WriteFile(parentPath, []byte(strings.Join([]string{
+		`import std "io" as io`,
+		`import std "runtime" as runtime`,
+		`embedbytes "child.tbc" const childBytes`,
+		`const child = runtime.newVM({`,
+		`    isolated: true,`,
+		`    allowedStdlib: { http: true }`,
+		`})`,
+		`child.exposeFunction("log", fn (...r) {`,
+		`    io.println(...r)`,
+		`})`,
+		`child.loadBytecode(childBytes)`,
+		`child.run()`,
+		`child.call("handleRequest")`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+
+	result := runTinyFile(t, parentPath)
+	if result.Panic != nil {
+		t.Fatalf("unexpected panic: %#v", result.Panic)
+	}
+	if strings.TrimSpace(result.Stdout) != "from external" {
+		t.Fatalf("expected stdout from external, got %q", result.Stdout)
+	}
+}
+
 func TestRuntimeNewVMLoadBytecodeStringSourceCompatibility(t *testing.T) {
 	dir := t.TempDir()
 	parentPath := filepath.Join(dir, "parent.tiny")
@@ -333,6 +455,308 @@ func TestRuntimeNewVMCrashHandling(t *testing.T) {
 	}
 }
 
+func TestRuntimeNewVMRunErrorIsCatchableByParent(t *testing.T) {
+	dir := t.TempDir()
+	parentPath := filepath.Join(dir, "parent.tiny")
+
+	if err := os.WriteFile(parentPath, []byte(strings.Join([]string{
+		`import std "runtime" as runtime`,
+		`import std "io" as io`,
+		`const child = runtime.newVM({ runMainOnLoad: false })`,
+		`child.loadSource("throw 'child run error'")`,
+		`try {`,
+		`    child.run()`,
+		`} catch e {`,
+		`    io.println("caught run: " + e.message)`,
+		`}`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+
+	result := runTinyFile(t, parentPath)
+	if result.Panic != nil {
+		t.Fatalf("unexpected panic: %#v", result.Panic)
+	}
+	if !strings.Contains(result.Stdout, "caught run: child run error") || !strings.Contains(result.Stdout, "<runtime>:1:1") {
+		t.Fatalf("expected parent to catch child run error with location, got %q", result.Stdout)
+	}
+}
+
+func TestObserverDuplicateStartIsCatchable(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		t.Fatalf("close listener: %v", err)
+	}
+
+	dir := t.TempDir()
+	parentPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(parentPath, []byte(strings.Join([]string{
+		`import std "observer" as observer`,
+		`import std "io" as io`,
+		fmt.Sprintf(`observer.start({ host: "127.0.0.1", port: %d })`, port),
+		`try {`,
+		fmt.Sprintf(`    observer.start({ host: "127.0.0.1", port: %d })`, port),
+		`} catch e {`,
+		`    io.println("caught")`,
+		`}`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+
+	result := runTinyFile(t, parentPath)
+	if result.Panic != nil {
+		t.Fatalf("unexpected host panic: %#v", result.Panic)
+	}
+	if !strings.Contains(result.Stdout, "caught") {
+		t.Fatalf("expected duplicate observer start to be catchable, stdout=%q stderr=%q", result.Stdout, result.Stderr)
+	}
+}
+
+func TestTCPServerStartBindErrorIsCatchable(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	defer listener.Close()
+
+	dir := t.TempDir()
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(strings.Join([]string{
+		`import std "net" as net`,
+		`import std "io" as io`,
+		fmt.Sprintf(`const server = net.tcpServer("127.0.0.1", %d)`, port),
+		`try {`,
+		`    server.start(true)`,
+		`} catch e {`,
+		`    io.println("caught")`,
+		`}`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("write main: %v", err)
+	}
+
+	result := runTinyFile(t, mainPath)
+	if result.Panic != nil {
+		t.Fatalf("unexpected host panic: %#v", result.Panic)
+	}
+	if !strings.Contains(result.Stdout, "caught") {
+		t.Fatalf("expected TCP bind error to be catchable, stdout=%q stderr=%q", result.Stdout, result.Stderr)
+	}
+}
+
+func TestWebsocketServerStartBindErrorIsCatchable(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	defer listener.Close()
+
+	dir := t.TempDir()
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(strings.Join([]string{
+		`import std "websocket" as websocket`,
+		`import std "io" as io`,
+		fmt.Sprintf(`const server = websocket.server({ host: "127.0.0.1", port: %d })`, port),
+		`try {`,
+		`    server.start(true)`,
+		`} catch e {`,
+		`    io.println("caught")`,
+		`}`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("write main: %v", err)
+	}
+
+	result := runTinyFile(t, mainPath)
+	if result.Panic != nil {
+		t.Fatalf("unexpected host panic: %#v", result.Panic)
+	}
+	if !strings.Contains(result.Stdout, "caught") {
+		t.Fatalf("expected websocket bind error to be catchable, stdout=%q stderr=%q", result.Stdout, result.Stderr)
+	}
+}
+
+func TestRuntimeVMStopAllowsResetOfRunningTask(t *testing.T) {
+	dir := t.TempDir()
+	parentPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(parentPath, []byte(strings.Join([]string{
+		`import std "runtime" as runtime`,
+		`import std "time" as time`,
+		`import std "io" as io`,
+		`const child = runtime.newVM({ runMainOnLoad: false })`,
+		`child.loadSource("import std \"time\" as time\nwhile true { time.sleep(1) }")`,
+		`spawn() fn() { child.run() }`,
+		`time.sleep(20)`,
+		`child.stop()`,
+		`try {`,
+		`    child.reset()`,
+		`    io.println("reset")`,
+		`} catch e {`,
+		`    io.println("failed")`,
+		`}`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+
+	result := runTinyFile(t, parentPath)
+	if result.Panic != nil {
+		t.Fatalf("unexpected host panic: %#v", result.Panic)
+	}
+	if !strings.Contains(result.Stdout, "reset") {
+		t.Fatalf("expected stopped child VM to reset, stdout=%q stderr=%q", result.Stdout, result.Stderr)
+	}
+}
+
+func TestPrivateFieldAssignmentAllowedInsideClassMethod(t *testing.T) {
+	dir := t.TempDir()
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(strings.Join([]string{
+		`import std "io" as io`,
+		`class Box {`,
+		`    field private value = 0`,
+		`    public fn set(v) {`,
+		`        this.value = v`,
+		`    }`,
+		`    public fn get() {`,
+		`        return this.value`,
+		`    }`,
+		`}`,
+		`const box = Box()`,
+		`box.set(42)`,
+		`io.println(box.get())`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("write main: %v", err)
+	}
+
+	result := runTinyFile(t, mainPath)
+	if result.Panic != nil {
+		t.Fatalf("unexpected panic: %#v", result.Panic)
+	}
+	if strings.TrimSpace(result.Stdout) != "42" {
+		t.Fatalf("expected private field assignment to work inside method, stdout=%q stderr=%q", result.Stdout, result.Stderr)
+	}
+}
+
+func TestPrivateFieldCompoundAssignmentAllowedInsideClassMethod(t *testing.T) {
+	dir := t.TempDir()
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(strings.Join([]string{
+		`import std "io" as io`,
+		`class Box {`,
+		`    field private value = 1`,
+		`    public fn inc(v) {`,
+		`        this.value += v`,
+		`    }`,
+		`    public fn get() {`,
+		`        return this.value`,
+		`    }`,
+		`}`,
+		`const box = Box()`,
+		`box.inc(41)`,
+		`io.println(box.get())`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("write main: %v", err)
+	}
+
+	result := runTinyFile(t, mainPath)
+	if result.Panic != nil {
+		t.Fatalf("unexpected panic: %#v", result.Panic)
+	}
+	if strings.TrimSpace(result.Stdout) != "42" {
+		t.Fatalf("expected private field compound assignment to work inside method, stdout=%q stderr=%q", result.Stdout, result.Stderr)
+	}
+}
+
+func TestPrivateFieldAssignmentAllowedInsideClassMethodFromObfuscatedBytecode(t *testing.T) {
+	dir := t.TempDir()
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(strings.Join([]string{
+		`import std "io" as io`,
+		`class Box {`,
+		`    field private value = 0`,
+		`    public fn set(v) {`,
+		`        this.value = v`,
+		`    }`,
+		`    public fn get() {`,
+		`        return this.value`,
+		`    }`,
+		`}`,
+		`const box = Box()`,
+		`box.set(42)`,
+		`io.println(box.get())`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("write main: %v", err)
+	}
+
+	mainInstructions, functions, classes, interfaces, globalIndex := compileTinyFile(t, mainPath)
+	data := bytecode.SaveBytecodeToBytes(mainInstructions, functions, classes, interfaces, globalIndex, false, true)
+	loadedMain, loadedFunctions, loadedClasses, loadedInterfaces, loadedGlobalIndex := bytecode.LoadBytecodeFromBytes(data)
+
+	result := runTinyBytecode(t, loadedMain, loadedFunctions, loadedClasses, loadedInterfaces, loadedGlobalIndex)
+	if result.Panic != nil {
+		t.Fatalf("unexpected panic: %#v", result.Panic)
+	}
+	if strings.TrimSpace(result.Stdout) != "42" {
+		t.Fatalf("expected private field assignment from obfuscated bytecode to work inside method, stdout=%q stderr=%q", result.Stdout, result.Stderr)
+	}
+}
+
+func TestSoftKeywordsCanBeIdentifiers(t *testing.T) {
+	dir := t.TempDir()
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(strings.Join([]string{
+		`import std "io" as io`,
+		`const embed = fn(v) { return v + 1 }`,
+		`const match = fn(v) { return v + 2 }`,
+		`let value = embed(1) + match(1)`,
+		`fn use(embed, match) { return embed + match }`,
+		`io.println(value + use(1, 2))`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("write main: %v", err)
+	}
+
+	result := runTinyFile(t, mainPath)
+	if result.Panic != nil {
+		t.Fatalf("unexpected panic: %#v", result.Panic)
+	}
+	if strings.TrimSpace(result.Stdout) != "8" {
+		t.Fatalf("expected soft keyword identifiers to run, stdout=%q stderr=%q", result.Stdout, result.Stderr)
+	}
+}
+
+func TestSoftKeywordGrammarStillWorks(t *testing.T) {
+	dir := t.TempDir()
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(strings.Join([]string{
+		`import std "io" as io`,
+		`class Logger { public fn value() { return 40 } }`,
+		`class Service {`,
+		`    embed logger`,
+		`    public fn init() { this.logger = Logger() }`,
+		`}`,
+		`let out = 0`,
+		`match 1 {`,
+		`    1 { out = Service().value() + 2 }`,
+		`    _ { out = -1 }`,
+		`}`,
+		`io.println(out)`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("write main: %v", err)
+	}
+
+	result := runTinyFile(t, mainPath)
+	if result.Panic != nil {
+		t.Fatalf("unexpected panic: %#v", result.Panic)
+	}
+	if strings.TrimSpace(result.Stdout) != "42" {
+		t.Fatalf("expected match/embed grammar to still work, stdout=%q stderr=%q", result.Stdout, result.Stderr)
+	}
+}
+
 func TestRuntimeNewVMStdlibRestrictions(t *testing.T) {
 	dir := t.TempDir()
 	parentPath := filepath.Join(dir, "parent.tiny")
@@ -391,7 +815,7 @@ func requireTinyError(t *testing.T, result tinyRunResult, kind tinyerrors.ErrorK
 }
 
 func fixturePath(parts ...string) string {
-	all := append([]string{"testdata", "tiny"}, parts...)
+	all := append([]string{"..", "testdata", "tiny"}, parts...)
 	return filepath.Join(all...)
 }
 
@@ -440,6 +864,33 @@ func TestTinyPipelineClasses(t *testing.T) {
 	}
 }
 
+func TestTinyPipelineObjectCannotForgeClassIdentity(t *testing.T) {
+	dir := t.TempDir()
+
+	mainContent := strings.Join([]string{
+		`import std "io";`,
+		`class User {`,
+		`    field name: string = "real";`,
+		`}`,
+		`fn accept(user: User) {`,
+		`    io.println(user.name);`,
+		`}`,
+		`let fake = { __class: "User", name: "fake" };`,
+		`io.println(fake instanceof User);`,
+		`accept(fake);`,
+	}, "\n")
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main.tiny: %v", err)
+	}
+
+	result := runTinyFile(t, mainPath)
+	if result.Stdout != "false\n" {
+		t.Fatalf("unexpected stdout before type error: %q", result.Stdout)
+	}
+	requireTinyError(t, result, tinyerrors.ErrorType, "function accept parameter user expected User")
+}
+
 func TestTinyPipelineNamespacedImports(t *testing.T) {
 	out := requireTinySuccess(t, runTinyFile(t, fixturePath("imports", "main.tiny")))
 
@@ -452,7 +903,7 @@ func TestTinyPipelineNamespacedImports(t *testing.T) {
 func TestTinyPipelineArraysObjectsAndNativeMethods(t *testing.T) {
 	out := requireTinySuccess(t, runTinyFile(t, fixturePath("arrays_objects.tiny")))
 
-	const want = "4\n1\n1-2-3-4\nTiny\n15\nnull\n2,4,6,8\n"
+	const want = "4\n1\n1-2-3-4\nTiny\n15\nnull\n2,4,6,8\nTiny\nnull\n15\n1\n1\n"
 	if out != want {
 		t.Fatalf("unexpected output:\nwant:\n%q\ngot:\n%q", want, out)
 	}
@@ -503,6 +954,78 @@ func TestTinyPipelineInterfaceReturnObjectLiteral(t *testing.T) {
 	}
 }
 
+func TestTinyPipelineReturnObjectLiteralAsObject(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.tiny")
+	source := strings.Join([]string{
+		`import std "io"`,
+		`export fn authHeaders(token: string): object {`,
+		`    return {`,
+		`        "Authorization": ` + "`Bot ${token}`" + `,`,
+		`        "Content-Type": "application/json"`,
+		`    }`,
+		`}`,
+		`let headers = authHeaders("abc")`,
+		`io.println(headers.Authorization)`,
+		`io.println(headers["Content-Type"])`,
+	}, "\n")
+	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := requireTinySuccess(t, runTinyFile(t, path))
+	const want = "Bot abc\napplication/json\n"
+	if out != want {
+		t.Fatalf("unexpected output:\nwant:\n%q\ngot:\n%q", want, out)
+	}
+}
+
+func TestTinyPipelineOptionalInterfaceFieldChecksPresentValue(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.tiny")
+	source := strings.Join([]string{
+		`interface Payload { name?: string }`,
+		`fn usePayload(payload: Payload) {}`,
+		`usePayload({ name: 123 })`,
+	}, "\n")
+	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	requireTinyError(t, runTinyFile(t, path), tinyerrors.ErrorType, "cannot pass")
+}
+
+func TestTinyPipelineInterfaceExtendsCompileTimeCheck(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.tiny")
+	source := strings.Join([]string{
+		`interface Base { id: number }`,
+		`interface User extends Base { name: string }`,
+		`fn useUser(user: User) {}`,
+		`useUser({ name: "Ada" })`,
+	}, "\n")
+	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	requireTinyError(t, runTinyFile(t, path), tinyerrors.ErrorType, "cannot pass")
+}
+
+func TestTinyPipelineGenericInterfaceCompileTimeCheck(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.tiny")
+	source := strings.Join([]string{
+		`interface Box:T { value: T }`,
+		`fn useBox(box: Box:string) {}`,
+		`useBox({ value: 123 })`,
+	}, "\n")
+	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	requireTinyError(t, runTinyFile(t, path), tinyerrors.ErrorType, "cannot pass")
+}
+
 func TestTinyPipelineUninitializedVariablesAndFields(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "main.tiny")
@@ -515,6 +1038,30 @@ func TestTinyPipelineUninitializedVariablesAndFields(t *testing.T) {
 		`let user = User()`,
 		`io.println(count == null)`,
 		`io.println(user.name == null)`,
+	}, "\n")
+	if err := os.WriteFile(path, []byte(source), 0644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	out := requireTinySuccess(t, runTinyFile(t, path))
+	const want = "true\ntrue\n"
+	if out != want {
+		t.Fatalf("unexpected output:\nwant:\n%q\ngot:\n%q", want, out)
+	}
+}
+
+func TestTinyPipelineMissingObjectPropertiesReturnNull(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.tiny")
+	source := strings.Join([]string{
+		`import std "io"`,
+		`let object = { name: "Tiny" }`,
+		`class User {`,
+		`    field name: string = "Ada"`,
+		`}`,
+		`let user = User()`,
+		`io.println(object.age == null)`,
+		`io.println(user.age == null)`,
 	}, "\n")
 	if err := os.WriteFile(path, []byte(source), 0644); err != nil {
 		t.Fatalf("write fixture: %v", err)
@@ -568,6 +1115,200 @@ func TestTinyPipelineNamespaceMethodReturnsInterfaceObjectLiteral(t *testing.T) 
 
 	if _, ok := interfaces["TinyJWT.VerifyData"]; !ok {
 		t.Fatalf("expected namespaced interface to be compiled, got %#v", interfaces)
+	}
+}
+
+func TestTinyPipelineImportedNamespaceCanUseParentClassTypeHint(t *testing.T) {
+	dir := t.TempDir()
+
+	messagePath := filepath.Join(dir, "message.tiny")
+	if err := os.WriteFile(messagePath, []byte(strings.Join([]string{
+		`export class Message {`,
+		`    field client: Client`,
+		`    fn init(client: Client) {`,
+		`        this.client = client`,
+		`    }`,
+		`}`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("failed to write message.tiny: %v", err)
+	}
+
+	gatewayPath := filepath.Join(dir, "gateway.tiny")
+	if err := os.WriteFile(gatewayPath, []byte(strings.Join([]string{
+		`import "message.tiny" as MessageModule`,
+		`export const Message = MessageModule.Message`,
+		`export class Client {`,
+		`    field name = "client"`,
+		`}`,
+		`export fn makeMessage(): MessageModule.Message {`,
+		`    return MessageModule.Message(Client())`,
+		`}`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("failed to write gateway.tiny: %v", err)
+	}
+
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(strings.Join([]string{
+		`import std "io"`,
+		`import "gateway.tiny" as Discord`,
+		`const msg = Discord.makeMessage()`,
+		`io.println(msg.client.name)`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("failed to write main.tiny: %v", err)
+	}
+
+	out := requireTinySuccess(t, runTinyFile(t, mainPath))
+	const want = "client\n"
+	if out != want {
+		t.Fatalf("unexpected output: want %q, got %q", want, out)
+	}
+}
+
+func TestTinyPipelineReExportedClassAliasConstructsAndCallsMethods(t *testing.T) {
+	dir := t.TempDir()
+
+	builderPath := filepath.Join(dir, "builder.tiny")
+	if err := os.WriteFile(builderPath, []byte(strings.Join([]string{
+		`export class Builder {`,
+		`    field name = ""`,
+		`    fn setName(name: string): Builder {`,
+		`        this.name = name`,
+		`        return this`,
+		`    }`,
+		`}`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("failed to write builder.tiny: %v", err)
+	}
+
+	gatewayPath := filepath.Join(dir, "gateway.tiny")
+	if err := os.WriteFile(gatewayPath, []byte(strings.Join([]string{
+		`import "builder.tiny" as BuilderModule`,
+		`export const Builder = BuilderModule.Builder`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("failed to write gateway.tiny: %v", err)
+	}
+
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(strings.Join([]string{
+		`import std "io"`,
+		`import "gateway.tiny" as Gateway`,
+		`const builder = Gateway.Builder()`,
+		`builder.setName("ping")`,
+		`io.println(builder.name)`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("failed to write main.tiny: %v", err)
+	}
+
+	out := requireTinySuccess(t, runTinyFile(t, mainPath))
+	const want = "ping\n"
+	if out != want {
+		t.Fatalf("unexpected output: want %q, got %q", want, out)
+	}
+}
+
+func TestRuntimeVMCallInitializesImportsBeforeExportedFunction(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := os.WriteFile(filepath.Join(dir, "builder.tiny"), []byte(strings.Join([]string{
+		`export class Builder {`,
+		`    field name = ""`,
+		`    fn setName(name: string): Builder {`,
+		`        this.name = name`,
+		`        return this`,
+		`    }`,
+		`}`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("failed to write builder.tiny: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "gateway.tiny"), []byte(strings.Join([]string{
+		`import "builder.tiny" as BuilderModule`,
+		`export const Builder = BuilderModule.Builder`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("failed to write gateway.tiny: %v", err)
+	}
+
+	commandPath := filepath.Join(dir, "command.tiny")
+	if err := os.WriteFile(commandPath, []byte(strings.Join([]string{
+		`import "gateway.tiny" as Gateway`,
+		`export fn info() {`,
+		`    const builder = Gateway.Builder()`,
+		`    builder.setName("ping")`,
+		`    return builder.name`,
+		`}`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("failed to write command.tiny: %v", err)
+	}
+
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(fmt.Sprintf(strings.Join([]string{
+		`import std "io"`,
+		`import std "runtime"`,
+		`const child = runtime.newVM({ runMainOnLoad: false, disableJIT: true })`,
+		`child.loadBytecode(runtime.compileFile(%q))`,
+		`io.println(child.call("info"))`,
+	}, "\n"), filepath.ToSlash(commandPath))), 0644); err != nil {
+		t.Fatalf("failed to write main.tiny: %v", err)
+	}
+
+	out := requireTinySuccess(t, runTinyFile(t, mainPath))
+	const want = "ping\n"
+	if out != want {
+		t.Fatalf("unexpected output: want %q, got %q", want, out)
+	}
+}
+
+func TestRuntimeVMReturnedReExportedClassAliasTypeCheck(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := os.WriteFile(filepath.Join(dir, "builder.tiny"), []byte(strings.Join([]string{
+		`export class Builder {`,
+		`    field name = ""`,
+		`    fn setName(name: string): Builder {`,
+		`        this.name = name`,
+		`        return this`,
+		`    }`,
+		`}`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("failed to write builder.tiny: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "gateway.tiny"), []byte(strings.Join([]string{
+		`import "builder.tiny" as BuilderModule`,
+		`export const Builder = BuilderModule.Builder`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("failed to write gateway.tiny: %v", err)
+	}
+
+	commandPath := filepath.Join(dir, "command.tiny")
+	if err := os.WriteFile(commandPath, []byte(strings.Join([]string{
+		`import "gateway.tiny" as Gateway`,
+		`export fn info() {`,
+		`    const builder = Gateway.Builder()`,
+		`    builder.setName("ping")`,
+		`    return builder`,
+		`}`,
+	}, "\n")), 0644); err != nil {
+		t.Fatalf("failed to write command.tiny: %v", err)
+	}
+
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(fmt.Sprintf(strings.Join([]string{
+		`import std "io"`,
+		`import std "runtime"`,
+		`import "gateway.tiny" as Gateway`,
+		`const child = runtime.newVM({ runMainOnLoad: false, disableJIT: true })`,
+		`child.loadBytecode(runtime.compileFile(%q))`,
+		`const builder: Gateway.Builder = child.call("info")`,
+		`io.println(builder.name)`,
+	}, "\n"), filepath.ToSlash(commandPath))), 0644); err != nil {
+		t.Fatalf("failed to write main.tiny: %v", err)
+	}
+
+	out := requireTinySuccess(t, runTinyFile(t, mainPath))
+	const want = "ping\n"
+	if out != want {
+		t.Fatalf("unexpected output: want %q, got %q", want, out)
 	}
 }
 
@@ -782,7 +1523,7 @@ func TestCompileNestedNamespaceInterfaceReturn(t *testing.T) {
 	}
 
 	// Compile should succeed without TypeError
-	program := LoadProgram(mainPath)
+	program := tinyloader.LoadProgram(mainPath)
 	compiler := NewCompiler()
 	_, _, _, _, _ = compiler.CompileProgram(program)
 }
@@ -851,6 +1592,147 @@ func TestTinyPipelineGenericInterfaces(t *testing.T) {
 
 	out := requireTinySuccess(t, runTinyFile(t, mainPath))
 	const want = "42\nhello\n"
+	if out != want {
+		t.Fatalf("unexpected output: want %q, got %q", want, out)
+	}
+}
+
+func TestTinyPipelineInterfaceExtendsAndValidate(t *testing.T) {
+	dir := t.TempDir()
+
+	mainContent := strings.Join([]string{
+		`import std "io" as io;`,
+		`import std "validate" as validate;`,
+		`interface Entity {`,
+		`    id: number`,
+		`}`,
+		`interface User extends Entity {`,
+		`    name: string`,
+		`}`,
+		`fn printUser(user: User) {`,
+		`    io.println(user.id);`,
+		`    io.println(user.name);`,
+		`}`,
+		`let user = { id: 7, name: "Ada" };`,
+		`printUser(user);`,
+		`io.println(validate.interfaceOf(user, User));`,
+		`io.println(validate.interfaceOf({ name: "Bad" }, User));`,
+	}, "\n")
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main.tiny: %v", err)
+	}
+
+	out := requireTinySuccess(t, runTinyFile(t, mainPath))
+	const want = "7\nAda\ntrue\nfalse\n"
+	if out != want {
+		t.Fatalf("unexpected output: want %q, got %q", want, out)
+	}
+}
+
+func TestTinyPipelineValidateNamespacedInterfaceValue(t *testing.T) {
+	dir := t.TempDir()
+
+	modelsContent := strings.Join([]string{
+		`export interface Entity {`,
+		`    id: number`,
+		`}`,
+		`export interface User extends Entity {`,
+		`    name: string`,
+		`}`,
+	}, "\n")
+	modelsPath := filepath.Join(dir, "models.tiny")
+	if err := os.WriteFile(modelsPath, []byte(modelsContent), 0644); err != nil {
+		t.Fatalf("failed to write models.tiny: %v", err)
+	}
+
+	mainContent := strings.Join([]string{
+		`import std "io" as io;`,
+		`import std "validate" as validate;`,
+		`import "./models.tiny" as models;`,
+		`let user = { id: 7, name: "Ada" };`,
+		`io.println(validate.interfaceOf(user, models.User));`,
+		`io.println(validate.interfaceOf({ name: "Bad" }, models.User));`,
+	}, "\n")
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main.tiny: %v", err)
+	}
+
+	mainInstructions, functions, classes, interfaces, globalIndex := compileTinyFile(t, mainPath)
+	data := bytecode.SaveBytecodeToBytes(mainInstructions, functions, classes, interfaces, globalIndex, false, false)
+	loadedMain, loadedFunctions, loadedClasses, loadedInterfaces, loadedGlobalIndex := bytecode.LoadBytecodeFromBytes(data)
+	out := requireTinySuccess(t, runTinyBytecode(t, loadedMain, loadedFunctions, loadedClasses, loadedInterfaces, loadedGlobalIndex))
+	const want = "true\nfalse\n"
+	if out != want {
+		t.Fatalf("unexpected output: want %q, got %q", want, out)
+	}
+}
+
+func TestTinyPipelineStdModuleEnumProperty(t *testing.T) {
+	dir := t.TempDir()
+
+	mainContent := strings.Join([]string{
+		`import std "crypto";`,
+		`import std "io";`,
+		`io.println(crypto.Algorithms.MD5);`,
+	}, "\n")
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main.tiny: %v", err)
+	}
+
+	out := requireTinySuccess(t, runTinyFile(t, mainPath))
+	const want = "md5\n"
+	if out != want {
+		t.Fatalf("unexpected output: want %q, got %q", want, out)
+	}
+}
+
+func TestTinyPipelineTimeParseUnix(t *testing.T) {
+	dir := t.TempDir()
+
+	mainContent := strings.Join([]string{
+		`import std "io";`,
+		`import std "time";`,
+		`const timestamp = "2026-07-01T10:00:08.972000+00:00";`,
+		`io.println(time.parseUnix(timestamp, "sec").toString());`,
+		`io.println(time.parseUnix(timestamp, time.TimeUnit.Milliseconds).toString());`,
+		`io.println(time.parseUnix(timestamp, time.TimeUnit.Nanoseconds).toString());`,
+	}, "\n")
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main.tiny: %v", err)
+	}
+
+	out := requireTinySuccess(t, runTinyFile(t, mainPath))
+	const want = "1782900008\n1782900008972\n1782900008972000000\n"
+	if out != want {
+		t.Fatalf("unexpected output: want %q, got %q", want, out)
+	}
+}
+
+func TestTinyPipelineLogicalOperatorsShortCircuit(t *testing.T) {
+	dir := t.TempDir()
+
+	mainContent := strings.Join([]string{
+		`import std "io";`,
+		`fn mark(label: string): bool {`,
+		`    io.println(label);`,
+		`    return true;`,
+		`}`,
+		`io.println(false and mark("and-skipped"));`,
+		`io.println(true or mark("or-skipped"));`,
+		`io.println(true and mark("and-run"));`,
+		`io.println(false or mark("or-run"));`,
+	}, "\n")
+	mainPath := filepath.Join(dir, "main.tiny")
+	if err := os.WriteFile(mainPath, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main.tiny: %v", err)
+	}
+
+	out := requireTinySuccess(t, runTinyFile(t, mainPath))
+	const want = "false\ntrue\nand-run\ntrue\nor-run\ntrue\n"
 	if out != want {
 		t.Fatalf("unexpected output: want %q, got %q", want, out)
 	}
@@ -1938,7 +2820,7 @@ func TestJitDefaultParameters(t *testing.T) {
 		t.Fatalf("failed to write temp file: %v", err)
 	}
 
-	program := LoadProgram(filePath)
+	program := tinyloader.LoadProgram(filePath)
 	compiler := NewCompiler()
 	mainBytecode, functions, classes, interfaces, _ := compiler.CompileProgram(program)
 
@@ -2045,5 +2927,335 @@ func TestRuntimeCompileSourceAndFile(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "sandbox caught:") || !strings.Contains(stdout, "fs") {
 		t.Errorf("expected stdout to contain 'sandbox caught:' with 'fs' module message, got: %q", stdout)
+	}
+}
+
+func TestRuntimeVMCallbackKeepsOwningVM(t *testing.T) {
+	tmpDir := t.TempDir()
+	mainFile := filepath.Join(tmpDir, "main.tiny")
+
+	childSource := strings.Join([]string{
+		`import std "io" as io`,
+		`export fn register(store) {`,
+		`    store(fn(i, client) {`,
+		`        io.println("child callback")`,
+		`    })`,
+		`}`,
+	}, "\n")
+
+	mainContent := fmt.Sprintf(`
+import std "io" as io
+import std "runtime" as runtime
+
+const state = {}
+
+fn parentCollision(a, b) {
+    io.println(b)
+}
+
+const child = runtime.newVM({ runMainOnLoad: false, disableJIT: true })
+child.loadBytecode(runtime.compileSource(%q, "child.tiny"))
+child.call("register", [fn(handler) { state.handler = handler }])
+state.handler({}, {"huge": "client"})
+`, childSource)
+
+	if err := os.WriteFile(mainFile, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main file: %v", err)
+	}
+
+	res := runTinyFile(t, mainFile)
+	if res.Panic != nil {
+		t.Fatalf("unexpected panic during test run: %v", res.Panic)
+	}
+	if strings.Contains(res.Stdout, "huge") {
+		t.Fatalf("expected child callback to run in child VM, got stdout:\n%s", res.Stdout)
+	}
+	if strings.TrimSpace(res.Stdout) != "child callback" {
+		t.Fatalf("expected child callback output, got stdout:\n%s", res.Stdout)
+	}
+}
+
+func TestRuntimeVMWrappingDoesNotMutateParentInstanceMethods(t *testing.T) {
+	tmpDir := t.TempDir()
+	mainFile := filepath.Join(tmpDir, "main.tiny")
+
+	childSource := strings.Join([]string{
+		`export fn register(client) {`,
+		`    client.store(fn() { return "child callback" })`,
+		`}`,
+	}, "\n")
+
+	mainContent := fmt.Sprintf(`
+import std "io" as io
+import std "runtime" as runtime
+
+let stored = null
+
+class Client {
+    fn store(handler) {
+        stored = handler
+    }
+
+    fn handlePayload() {
+        io.println("parent handlePayload")
+    }
+}
+
+const client = Client()
+const child = runtime.newVM({ runMainOnLoad: false, disableJIT: true })
+child.loadBytecode(runtime.compileSource(%q, "child.tiny"))
+child.call("register", [client])
+client.handlePayload()
+`, childSource)
+
+	if err := os.WriteFile(mainFile, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main file: %v", err)
+	}
+
+	res := runTinyFile(t, mainFile)
+	if res.Panic != nil {
+		t.Fatalf("unexpected panic during test run: %v", res.Panic)
+	}
+	if strings.TrimSpace(res.Stdout) != "parent handlePayload" {
+		t.Fatalf("expected parent instance method to remain callable, got stdout:\n%s", res.Stdout)
+	}
+}
+
+func TestRuntimeVMChildCanCallParentInteractionMethod(t *testing.T) {
+	tmpDir := t.TempDir()
+	mainFile := filepath.Join(tmpDir, "main.tiny")
+
+	childSource := strings.Join([]string{
+		`export fn run(interaction) {`,
+		`    interaction.replyComponents(["ping"])`,
+		`}`,
+	}, "\n")
+
+	mainContent := fmt.Sprintf(`
+import std "io" as io
+import std "runtime" as runtime
+
+class Interaction {
+    field responded = false
+
+    fn replyComponents(components) {
+        this.responded = true
+    }
+}
+
+const interaction = Interaction()
+const child = runtime.newVM({ runMainOnLoad: false, disableJIT: true })
+child.loadBytecode(runtime.compileSource(%q, "child.tiny"))
+child.call("run", [interaction])
+io.println(interaction.responded)
+`, childSource)
+
+	if err := os.WriteFile(mainFile, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main file: %v", err)
+	}
+
+	res := runTinyFile(t, mainFile)
+	if res.Panic != nil {
+		t.Fatalf("unexpected panic during test run: %v", res.Panic)
+	}
+	if strings.TrimSpace(res.Stdout) != "true" {
+		t.Fatalf("expected child VM to call parent interaction method, got stdout:\n%s", res.Stdout)
+	}
+}
+
+func TestRuntimeVMAssignedInstanceFunctionFieldDoesNotReceiveThis(t *testing.T) {
+	tmpDir := t.TempDir()
+	mainFile := filepath.Join(tmpDir, "main.tiny")
+
+	childSource := strings.Join([]string{
+		`export fn run(client) {`,
+		`    client.tempButton(1, "label", fn() {})`,
+		`}`,
+	}, "\n")
+
+	mainContent := fmt.Sprintf(`
+import std "io" as io
+import std "runtime" as runtime
+
+class Client {
+    field tempButton = null
+}
+
+const client = Client()
+client.tempButton = fn(style, label, handler) {
+    io.println(label)
+}
+
+const child = runtime.newVM({ runMainOnLoad: false, disableJIT: true })
+child.loadBytecode(runtime.compileSource(%q, "child.tiny"))
+child.call("run", [client])
+`, childSource)
+
+	if err := os.WriteFile(mainFile, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main file: %v", err)
+	}
+
+	res := runTinyFile(t, mainFile)
+	if res.Panic != nil {
+		t.Fatalf("unexpected panic during test run: %v", res.Panic)
+	}
+	if strings.TrimSpace(res.Stdout) != "label" {
+		t.Fatalf("expected assigned function field to be called without hidden receiver, got stdout:\n%s", res.Stdout)
+	}
+}
+
+func TestRuntimeVMHostFunctionSatisfiesFunctionTypeHint(t *testing.T) {
+	tmpDir := t.TempDir()
+	mainFile := filepath.Join(tmpDir, "main.tiny")
+
+	childSource := strings.Join([]string{
+		`export fn run(register) {`,
+		`    register(fn(value) { return value })`,
+		`}`,
+	}, "\n")
+
+	mainContent := fmt.Sprintf(`
+import std "runtime" as runtime
+
+fn accept(handler: function(string)) {
+}
+
+const child = runtime.newVM({ runMainOnLoad: false, disableJIT: true })
+child.loadBytecode(runtime.compileSource(%q, "child.tiny"))
+child.call("run", [accept])
+`, childSource)
+
+	if err := os.WriteFile(mainFile, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main file: %v", err)
+	}
+
+	res := runTinyFile(t, mainFile)
+	if res.Panic != nil {
+		t.Fatalf("unexpected panic during test run: %v", res.Panic)
+	}
+}
+
+func TestRuntimeVMChildCanCatchHostFunctionError(t *testing.T) {
+	tmpDir := t.TempDir()
+	mainFile := filepath.Join(tmpDir, "main.tiny")
+
+	childSource := strings.Join([]string{
+		`export fn run(fail) {`,
+		`    try {`,
+		`        fail()`,
+		`    } catch err {`,
+		`        return "caught: " + err.kind`,
+		`    }`,
+		`    return "missed"`,
+		`}`,
+	}, "\n")
+
+	mainContent := fmt.Sprintf(`
+import std "io" as io
+import std "runtime" as runtime
+
+fn fail() {
+    throw "boom"
+}
+
+const child = runtime.newVM({ runMainOnLoad: false, disableJIT: true })
+child.loadBytecode(runtime.compileSource(%q, "child.tiny"))
+io.println(child.call("run", [fail]))
+`, childSource)
+
+	if err := os.WriteFile(mainFile, []byte(mainContent), 0644); err != nil {
+		t.Fatalf("failed to write main file: %v", err)
+	}
+
+	res := runTinyFile(t, mainFile)
+	if res.Panic != nil {
+		t.Fatalf("unexpected panic during test run: %v", res.Panic)
+	}
+	if strings.TrimSpace(res.Stdout) != "caught: Error" {
+		t.Fatalf("expected child VM to catch host function error, got stdout:\n%s", res.Stdout)
+	}
+}
+
+func TestCompileDiagnosticCollectsErrors(t *testing.T) {
+	src := "let x = 1\nlet x = 2"
+	lexer := vm.NewLexer(src, "test.tiny")
+	parser := vm.NewParser(lexer)
+	program := parser.ParseProgram()
+
+	c := NewCompiler()
+	c.SetDiagnosticMode(true)
+	model := c.CompileDiagnostic(program)
+
+	if len(model.Errors) == 0 {
+		t.Fatal("expected at least one diagnostic error, got none")
+	}
+
+	found := false
+	for _, err := range model.Errors {
+		if strings.Contains(err.Message, "already declared") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected 'already declared' error, got errors: %v", model.Errors)
+	}
+}
+
+func TestCompileDiagnosticNoErrorsOnValidCode(t *testing.T) {
+	lexer := vm.NewLexer(`fn add(x: number, y: number): number { return x + y }`, "test.tiny")
+	parser := vm.NewParser(lexer)
+	program := parser.ParseProgram()
+
+	c := NewCompiler()
+	c.SetDiagnosticMode(true)
+	model := c.CompileDiagnostic(program)
+
+	if len(model.Errors) != 0 {
+		t.Fatalf("expected no errors on valid code, got: %v", model.Errors)
+	}
+}
+
+func TestCompileDiagnosticReturnsFunctions(t *testing.T) {
+	lexer := vm.NewLexer(`fn add(x: number, y: number): number { return x + y }`, "test.tiny")
+	parser := vm.NewParser(lexer)
+	program := parser.ParseProgram()
+
+	c := NewCompiler()
+	c.SetDiagnosticMode(true)
+	model := c.CompileDiagnostic(program)
+
+	if _, ok := model.Functions["add"]; !ok {
+		t.Fatal("expected 'add' function in semantic model")
+	}
+}
+
+func TestCompileDiagnosticReturnsClasses(t *testing.T) {
+	src := "class Box {\n    field private value = 0\n    public fn get() {\n        return this.value\n    }\n}"
+	lexer := vm.NewLexer(src, "test.tiny")
+	parser := vm.NewParser(lexer)
+	program := parser.ParseProgram()
+
+	c := NewCompiler()
+	c.SetDiagnosticMode(true)
+	model := c.CompileDiagnostic(program)
+
+	if _, ok := model.Classes["Box"]; !ok {
+		t.Fatal("expected 'Box' class in semantic model")
+	}
+}
+
+func TestCompileDiagnosticReturnsInterfaces(t *testing.T) {
+	src := "interface Greeter {\n    greet: function\n}"
+	lexer := vm.NewLexer(src, "test.tiny")
+	parser := vm.NewParser(lexer)
+	program := parser.ParseProgram()
+
+	c := NewCompiler()
+	c.SetDiagnosticMode(true)
+	model := c.CompileDiagnostic(program)
+
+	if _, ok := model.Interfaces["Greeter"]; !ok {
+		t.Fatal("expected 'Greeter' interface in semantic model")
 	}
 }

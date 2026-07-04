@@ -58,6 +58,7 @@ type SerializableFunction struct {
 type SerializableInterface struct {
 	Name           string              `json:"name"`
 	TypeParameters []string            `json:"typeParameters,omitempty"`
+	Extends        []string            `json:"extends,omitempty"`
 	Fields         map[string]TypeHint `json:"fields"`
 }
 
@@ -182,6 +183,7 @@ func SaveBytecode(path string, main []Instruction, functions map[string]Function
 		file.Interfaces[name] = SerializableInterface{
 			Name:           interfaceData.Name,
 			TypeParameters: interfaceData.TypeParameters,
+			Extends:        interfaceData.Extends,
 			Fields:         interfaceData.Fields,
 		}
 	}
@@ -226,6 +228,7 @@ func SaveBytecodeToBytes(main []Instruction, functions map[string]Function, clas
 		file.Interfaces[name] = SerializableInterface{
 			Name:           interfaceData.Name,
 			TypeParameters: interfaceData.TypeParameters,
+			Extends:        interfaceData.Extends,
 			Fields:         interfaceData.Fields,
 		}
 	}
@@ -280,6 +283,7 @@ func LoadBytecodeFromBytes(data []byte) ([]Instruction, map[string]Function, map
 		interfaces[name] = Interface{
 			Name:           interfaceData.Name,
 			TypeParameters: interfaceData.TypeParameters,
+			Extends:        interfaceData.Extends,
 			Fields:         interfaceData.Fields,
 		}
 	}
@@ -321,16 +325,200 @@ func obfuscateBytecodeFile(file *BytecodeFile) {
 		globalCounter++
 	}
 
+	typeRenameMap := map[string]string{}
+	ambiguousTypeNames := map[string]bool{}
+	for originalName, newName := range renameMap {
+		if _, isClass := file.Classes[originalName]; !isClass {
+			if _, isInterface := file.Interfaces[originalName]; !isInterface {
+				continue
+			}
+		}
+		typeRenameMap[originalName] = newName
+		if dot := strings.LastIndex(originalName, "."); dot >= 0 && dot+1 < len(originalName) {
+			shortName := originalName[dot+1:]
+			if existing, exists := typeRenameMap[shortName]; exists && existing != newName {
+				ambiguousTypeNames[shortName] = true
+				delete(typeRenameMap, shortName)
+			} else if !ambiguousTypeNames[shortName] {
+				typeRenameMap[shortName] = newName
+			}
+		}
+	}
+
+	globalAliasValues := map[string]EncodedValue{}
+	collectGlobalAliasValues := func(instructions []SerializableInstruction) {
+		var lastConst EncodedValue
+		hasLastConst := false
+		for _, instr := range instructions {
+			if instr.Op == OP_CONST {
+				lastConst = instr.Value
+				hasLastConst = true
+				continue
+			}
+
+			if (instr.Op == OP_STORE_GLOBAL || instr.Op == OP_ASSIGN_GLOBAL) && hasLastConst {
+				if varInfo, ok := instr.Value.Data.(VariableInfo); ok {
+					globalAliasValues[varInfo.Name] = lastConst
+				} else if varInfoMap, ok := instr.Value.Data.(map[string]any); ok {
+					if name, ok := varInfoMap["Name"].(string); ok {
+						globalAliasValues[name] = lastConst
+					}
+				}
+			}
+
+			hasLastConst = false
+		}
+	}
+	collectGlobalAliasValues(file.Main)
+	for _, fn := range file.Functions {
+		collectGlobalAliasValues(fn.Instructions)
+	}
+
+	var encodedClassName func(value EncodedValue, seen map[string]bool) (string, bool)
+	encodedClassName = func(value EncodedValue, seen map[string]bool) (string, bool) {
+		switch value.Type {
+		case "class":
+			var classInfo Class
+			if encoded, err := json.Marshal(value.Data); err == nil && json.Unmarshal(encoded, &classInfo) == nil && classInfo.Name != "" {
+				return classInfo.Name, true
+			}
+		case "namespaceRef":
+			var ref SerializableNamespaceMemberRef
+			if encoded, err := json.Marshal(value.Data); err != nil || json.Unmarshal(encoded, &ref) != nil || ref.GlobalName == "" {
+				return "", false
+			}
+			if seen[ref.GlobalName] {
+				return "", false
+			}
+			seen[ref.GlobalName] = true
+			if _, exists := file.Classes[ref.GlobalName]; exists {
+				return ref.GlobalName, true
+			}
+			if aliased, exists := globalAliasValues[ref.GlobalName]; exists {
+				return encodedClassName(aliased, seen)
+			}
+		}
+		return "", false
+	}
+
+	var collectNamespaceTypeAliases func(value EncodedValue)
+	collectNamespaceTypeAliases = func(value EncodedValue) {
+		switch value.Type {
+		case "namespace":
+			var ns SerializableNamespaceValue
+			switch data := value.Data.(type) {
+			case SerializableNamespaceValue:
+				ns = data
+			case map[string]any:
+				if encoded, err := json.Marshal(data); err == nil {
+					_ = json.Unmarshal(encoded, &ns)
+				}
+			default:
+				return
+			}
+
+			for memberName, member := range ns.Members {
+				aliasName := ns.Name + "." + memberName
+				switch member.Type {
+				case "class", "namespaceRef":
+					if className, ok := encodedClassName(member, map[string]bool{}); ok {
+						if renamed, exists := renameMap[className]; exists {
+							typeRenameMap[aliasName] = renamed
+						}
+					}
+				case "namespace":
+					collectNamespaceTypeAliases(member)
+				}
+			}
+
+		case "objectValue":
+			if obj, ok := value.Data.(map[string]EncodedValue); ok {
+				for _, member := range obj {
+					collectNamespaceTypeAliases(member)
+				}
+			}
+		}
+	}
+
+	for _, instr := range file.Main {
+		collectNamespaceTypeAliases(instr.Value)
+	}
+	for _, fn := range file.Functions {
+		for _, instr := range fn.Instructions {
+			collectNamespaceTypeAliases(instr.Value)
+		}
+	}
+
+	var resolveTypeName func(name string) string
+	resolveTypeName = func(name string) string {
+		if newName, exists := typeRenameMap[name]; exists {
+			return newName
+		}
+		if dot := strings.LastIndex(name, "."); dot >= 0 && dot+1 < len(name) {
+			shortName := name[dot+1:]
+			if newName, exists := typeRenameMap[shortName]; exists {
+				return newName
+			}
+		}
+		return name
+	}
+
+	renameTypeName := func(name string) string {
+		if newName := resolveTypeName(name); newName != name {
+			return newName
+		}
+		if strings.Contains(name, "|") {
+			parts := strings.Split(name, "|")
+			changed := false
+			for i, part := range parts {
+				trimmed := strings.TrimSpace(part)
+				if newName := resolveTypeName(trimmed); newName != trimmed {
+					parts[i] = strings.Replace(part, trimmed, newName, 1)
+					changed = true
+				}
+			}
+			if changed {
+				return strings.Join(parts, "|")
+			}
+		}
+		if strings.Contains(name, ":") {
+			parts := strings.Split(name, ":")
+			changed := false
+			for i, part := range parts {
+				if newName := resolveTypeName(part); newName != part {
+					parts[i] = newName
+					changed = true
+				}
+			}
+			if changed {
+				return strings.Join(parts, ":")
+			}
+		}
+		return name
+	}
+
+	renameTypeHint := func(hint TypeHint) TypeHint {
+		hint.Name = renameTypeName(hint.Name)
+		for i, typ := range hint.Types {
+			hint.Types[i] = renameTypeName(typ)
+		}
+		return hint
+	}
+
 	// Rename functions
 	newFunctions := make(map[string]SerializableFunction)
 	for originalName, fn := range file.Functions {
 		newName, exists := renameMap[originalName]
 		if exists {
 			fn.Name = newName
-			newFunctions[newName] = fn
 		} else {
-			newFunctions[originalName] = fn
+			newName = originalName
 		}
+		fn.ReturnType = renameTypeHint(fn.ReturnType)
+		for i := range fn.Params {
+			fn.Params[i].TypeHint = renameTypeHint(fn.Params[i].TypeHint)
+		}
+		newFunctions[newName] = fn
 	}
 	file.Functions = newFunctions
 
@@ -340,10 +528,24 @@ func obfuscateBytecodeFile(file *BytecodeFile) {
 		newName, exists := renameMap[originalName]
 		if exists {
 			class.Name = newName
-			newClasses[newName] = class
 		} else {
-			newClasses[originalName] = class
+			newName = originalName
 		}
+		for methodName, functionName := range class.Methods {
+			if renamedFunction, exists := renameMap[functionName]; exists {
+				class.Methods[methodName] = renamedFunction
+			}
+		}
+		for i, name := range class.Implements {
+			class.Implements[i] = renameTypeName(name)
+		}
+		for i, name := range class.Embeds {
+			class.Embeds[i] = renameTypeName(name)
+		}
+		for i := range class.Fields {
+			class.Fields[i].TypeHint = renameTypeHint(class.Fields[i].TypeHint)
+		}
+		newClasses[newName] = class
 	}
 	file.Classes = newClasses
 
@@ -353,10 +555,16 @@ func obfuscateBytecodeFile(file *BytecodeFile) {
 		newName, exists := renameMap[originalName]
 		if exists {
 			inter.Name = newName
-			newInterfaces[newName] = inter
 		} else {
-			newInterfaces[originalName] = inter
+			newName = originalName
 		}
+		for i, name := range inter.Extends {
+			inter.Extends[i] = renameTypeName(name)
+		}
+		for fieldName, hint := range inter.Fields {
+			inter.Fields[fieldName] = renameTypeHint(hint)
+		}
+		newInterfaces[newName] = inter
 	}
 	file.Interfaces = newInterfaces
 
@@ -438,13 +646,17 @@ func obfuscateBytecodeFile(file *BytecodeFile) {
 			if varInfo, ok := value.Data.(VariableInfo); ok {
 				if newName, exists := renameMap[varInfo.Name]; exists {
 					varInfo.Name = newName
-					value.Data = varInfo
 				}
+				varInfo.TypeHint = renameTypeHint(varInfo.TypeHint)
+				value.Data = varInfo
 			} else if varInfoMap, ok := value.Data.(map[string]any); ok {
 				if name, ok := varInfoMap["Name"].(string); ok {
 					if newName, exists := renameMap[name]; exists {
 						varInfoMap["Name"] = newName
 					}
+				}
+				if hint, ok := varInfoMap["TypeHint"].(TypeHint); ok {
+					varInfoMap["TypeHint"] = renameTypeHint(hint)
 				}
 			}
 		case "closure":
@@ -457,6 +669,19 @@ func obfuscateBytecodeFile(file *BytecodeFile) {
 				if name, ok := closureInfoMap["Name"].(string); ok {
 					if newName, exists := renameMap[name]; exists {
 						closureInfoMap["Name"] = newName
+					}
+				}
+			}
+		case "class":
+			if classInfo, ok := value.Data.(Class); ok {
+				if newName, exists := renameMap[classInfo.Name]; exists {
+					classInfo.Name = newName
+					value.Data = classInfo
+				}
+			} else if classInfoMap, ok := value.Data.(map[string]any); ok {
+				if name, ok := classInfoMap["Name"].(string); ok {
+					if newName, exists := renameMap[name]; exists {
+						classInfoMap["Name"] = newName
 					}
 				}
 			}
@@ -784,6 +1009,9 @@ func EncodeValue(value any) EncodedValue {
 	case CallInfo:
 		return EncodedValue{Type: "call", Data: v}
 
+	case SpreadCallInfo:
+		return EncodedValue{Type: "spreadCall", Data: v}
+
 	case DirectCallInfo:
 		return EncodedValue{Type: "directCall", Data: v}
 
@@ -904,6 +1132,18 @@ func EncodeValue(value any) EncodedValue {
 			Data: SerializableNamespaceMemberRef{
 				GlobalName: v.GlobalName,
 			},
+		}
+
+	case InterfaceValue:
+		return EncodedValue{
+			Type: "interfaceValue",
+			Data: v,
+		}
+
+	case *InterfaceValue:
+		return EncodedValue{
+			Type: "interfaceValue",
+			Data: *v,
 		}
 
 	case Class:
@@ -1111,6 +1351,11 @@ func DecodeValue(value EncodedValue) any {
 		decodeInto(value.Data, &result)
 		return result
 
+	case "spreadCall":
+		var result SpreadCallInfo
+		decodeInto(value.Data, &result)
+		return result
+
 	case "directCall":
 		var result DirectCallInfo
 		decodeInto(value.Data, &result)
@@ -1237,6 +1482,11 @@ func DecodeValue(value EncodedValue) any {
 		return NamespaceMemberRef{
 			GlobalName: data.GlobalName,
 		}
+
+	case "interfaceValue":
+		var data InterfaceValue
+		decodeInto(value.Data, &data)
+		return data
 
 	default:
 		LangError(ErrorRuntime, "unknown encoded value type: %s", value.Type)

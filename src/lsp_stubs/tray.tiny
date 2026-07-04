@@ -6,7 +6,7 @@ export interface Bounds {
 }
 
 // Represents a system tray icon with its context menu and callbacks.
-class Tray {
+export class Tray {
     // Sets the tray icon from PNG bytes.
     // Example:
     // const app = tray.new()

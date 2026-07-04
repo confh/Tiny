@@ -2,6 +2,8 @@ package main
 
 import (
 	. "language.com/src/bytecode"
+	tinycompiler "language.com/src/compiler"
+	tinyloader "language.com/src/loader"
 	. "language.com/src/vm"
 )
 
@@ -22,8 +24,8 @@ func init() {
 		parser := NewParser(lexer)
 		program := parser.ParseProgram()
 
-		compiler := NewCompiler()
-		compiler.preserveAllFunctions = true
+		compiler := tinycompiler.NewCompiler()
+		compiler.SetPreserveAllFunctions(true)
 		mainInstructions, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
 
 		mainInstructions = OptimizeBytecode(mainInstructions)
@@ -46,8 +48,8 @@ func init() {
 		parser := NewParser(lexer)
 		program := parser.ParseProgram()
 
-		compiler := NewCompiler()
-		compiler.preserveAllFunctions = true
+		compiler := tinycompiler.NewCompiler()
+		compiler.SetPreserveAllFunctions(true)
 		mainInstructions, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
 
 		mainInstructions = OptimizeBytecode(mainInstructions)
@@ -60,10 +62,10 @@ func init() {
 	})
 
 	SetCompileFileFunc(func(path string) []byte {
-		program := LoadProgram(path)
+		program := tinyloader.LoadProgram(path)
 
-		compiler := NewCompiler()
-		compiler.preserveAllFunctions = true
+		compiler := tinycompiler.NewCompiler()
+		compiler.SetPreserveAllFunctions(true)
 		mainInstructions, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
 
 		mainInstructions = OptimizeBytecode(mainInstructions)

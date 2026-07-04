@@ -1,0 +1,500 @@
+import "./tokens.tiny" as tokens
+import "./lexer.tiny" as lexer
+import std "io"
+import std "buffer"
+
+enum OpCode {
+    OP_CONST = 0,
+    OP_LOAD_LOCAL = 10,
+    OP_STORE_LOCAL = 11,
+    OP_LOAD_GLOBAL = 12,
+    OP_STORE_GLOBAL = 13,
+    OP_ADD = 15,
+    OP_SUB = 16,
+    OP_MUL = 17,
+    OP_DIV = 18,
+    OP_CALL = 28,
+    OP_RETURN = 31,
+    OP_POP = 33,
+    OP_HALT = 34,
+    OP_PRINT = 103
+}
+
+fn obfuscateString(str: string): array {
+    let buf = buffer.fromString(str);
+    let len = buf.length();
+    let result = [];
+    let i = 0;
+    while i < len {
+        let b = buf.getU8(i);
+        let xored = b ^ 90; // 0x5A is 90
+        result.push(xored);
+        i = i + 1;
+    }
+    return result;
+}
+
+fn makeVariableInfo(name: string, slot: number): object {
+    return {
+        "type": "variable",
+        "data": {
+            "Name": name,
+            "Slot": slot,
+            "Constant": false,
+            "TypeHint": {
+                "Name": "any"
+            }
+        }
+    };
+}
+
+class FunctionContext {
+    field name: string;
+    field instructions: array;
+    field localIndex: object;
+    field localCount: number;
+    field params: array;
+}
+
+export class Parser {
+    field lex: lexer.Lexer;
+    field currentToken: tokens.Token;
+    
+    // Output Bytecode Structures
+    field instructions: array; // Main program
+    field functions: object;    // Declared functions
+    
+    // Globals Context
+    field globalIndex: object;
+    field globalCount: number;
+    
+    // Current Active Function Context (null if global scope)
+    field currentFuncCtx: FunctionContext;
+    field funcIdCounter: number;
+
+    fn init(src: string) {
+        this.lex = lexer.Lexer(src);
+        this.currentToken = this.lex.scanToken();
+        this.instructions = [];
+        this.functions = {};
+        this.globalIndex = {};
+        this.globalCount = 0;
+        this.currentFuncCtx = null;
+        this.funcIdCounter = 0;
+    }
+
+    fn advance() {
+        this.currentToken = this.lex.scanToken();
+    }
+
+    fn error(msg: string) {
+        let fullMsg = "Parser Error: " + msg;
+        io.println(fullMsg);
+        throw fullMsg;
+    }
+
+    fn consume(expectedType: string) {
+        if this.currentToken.type == expectedType {
+            this.advance();
+        } else {
+            this.error("Expected token " + expectedType + ", got " + this.currentToken.type);
+        }
+    }
+
+    fn emit(instr: object) {
+        if this.currentFuncCtx != null {
+            this.currentFuncCtx.instructions.push(instr);
+        } else {
+            this.instructions.push(instr);
+        }
+    }
+
+    fn compile() {
+        // Skip initial newlines
+        while this.currentToken.type == tokens.TokenType.NEWLINE {
+            this.advance();
+        }
+
+        while this.currentToken.type != tokens.TokenType.EOF {
+            this.parseStatement();
+            
+            // Expect statement terminator (newline or EOF)
+            if this.currentToken.type == tokens.TokenType.NEWLINE {
+                this.consume(tokens.TokenType.NEWLINE);
+            }
+            
+            // Skip empty lines
+            while this.currentToken.type == tokens.TokenType.NEWLINE {
+                this.advance();
+            }
+        }
+
+        // Emit OP_HALT for main
+        this.instructions.push({
+            "op": OpCode.OP_HALT,
+            "value": {
+                "type": "nil"
+            }
+        });
+    }
+
+    fn parseStatement() {
+        if this.currentToken.type == tokens.TokenType.PRINT {
+            this.consume(tokens.TokenType.PRINT);
+            this.consume(tokens.TokenType.LPAREN);
+            this.parseExpr();
+            this.consume(tokens.TokenType.RPAREN);
+
+            // Emit OP_PRINT
+            this.emit({
+                "op": OpCode.OP_PRINT,
+                "value": {
+                    "type": "print",
+                    "data": {
+                        "ArgCount": 1,
+                        "NewLine": true,
+                        "SpreadArgs": []
+                    }
+                }
+            });
+        } else if this.currentToken.type == tokens.TokenType.DEF {
+            this.parseFunctionDefinition();
+        } else if this.currentToken.type == tokens.TokenType.RETURN {
+            if this.currentFuncCtx == null {
+                this.error("return statement outside function");
+            }
+            this.consume(tokens.TokenType.RETURN);
+            
+            // check if there is an expression
+            let hasExpr = true;
+            if (this.currentToken.type == tokens.TokenType.NEWLINE or 
+                this.currentToken.type == tokens.TokenType.EOF or 
+                this.currentToken.type == tokens.TokenType.DEDENT) {
+                hasExpr = false;
+            }
+            
+            if hasExpr {
+                this.parseExpr();
+            } else {
+                // push nil
+                this.emit({
+                    "op": OpCode.OP_CONST,
+                    "value": {
+                        "type": "nil"
+                    }
+                });
+            }
+            
+            this.emit({
+                "op": OpCode.OP_RETURN,
+                "value": {
+                    "type": "nil"
+                }
+            });
+        } else if this.currentToken.type == tokens.TokenType.IDENT {
+            let name = this.currentToken.value;
+            this.consume(tokens.TokenType.IDENT);
+            
+            if this.currentToken.type == tokens.TokenType.EQUAL {
+                this.consume(tokens.TokenType.EQUAL);
+                this.parseExpr();
+                
+                // Store in scope
+                if this.currentFuncCtx != null {
+                    let slot = 0;
+                    if (name in this.currentFuncCtx.localIndex) {
+                        slot = this.currentFuncCtx.localIndex[name];
+                    } else {
+                        slot = this.currentFuncCtx.localCount;
+                        this.currentFuncCtx.localIndex[name] = slot;
+                        this.currentFuncCtx.localCount = this.currentFuncCtx.localCount + 1;
+                    }
+                    
+                    this.emit({
+                        "op": OpCode.OP_STORE_LOCAL,
+                        "value": makeVariableInfo(name, slot)
+                    });
+                } else {
+                    let slot = 0;
+                    if (name in this.globalIndex) {
+                        slot = this.globalIndex[name];
+                    } else {
+                        slot = this.globalCount;
+                        this.globalIndex[name] = slot;
+                        this.globalCount = this.globalCount + 1;
+                    }
+                    
+                    this.emit({
+                        "op": OpCode.OP_STORE_GLOBAL,
+                        "value": makeVariableInfo(name, slot)
+                    });
+                }
+            } else if this.currentToken.type == tokens.TokenType.LPAREN {
+                // Expression Statement (Function Call)
+                this.consume(tokens.TokenType.LPAREN);
+                let argCount = 0;
+                if this.currentToken.type != tokens.TokenType.RPAREN {
+                    this.parseExpr();
+                    argCount = 1;
+                    while this.currentToken.type == tokens.TokenType.COMMA {
+                        this.consume(tokens.TokenType.COMMA);
+                        this.parseExpr();
+                        argCount = argCount + 1;
+                    }
+                }
+                this.consume(tokens.TokenType.RPAREN);
+                
+                // Emit OP_CALL
+                this.emit({
+                    "op": OpCode.OP_CALL,
+                    "value": {
+                        "type": "call",
+                        "data": {
+                            "Name": name,
+                            "ArgCount": argCount
+                        }
+                    }
+                });
+                
+                // Since this call is used as a statement, discard the pushed return value
+                this.emit({
+                    "op": OpCode.OP_POP,
+                    "value": {
+                        "type": "nil"
+                    }
+                });
+            } else {
+                this.error("Expected assignment or function call, got " + this.currentToken.type);
+            }
+        } else {
+            this.error("Expected statement, got " + this.currentToken.type);
+        }
+    }
+
+    fn parseFunctionDefinition() {
+        this.consume(tokens.TokenType.DEF);
+        let funcName = this.currentToken.value;
+        this.consume(tokens.TokenType.IDENT);
+        
+        let funcCtx = FunctionContext();
+        funcCtx.name = funcName;
+        funcCtx.instructions = [];
+        funcCtx.localIndex = {};
+        funcCtx.localCount = 0;
+        funcCtx.params = [];
+        
+        this.consume(tokens.TokenType.LPAREN);
+        if this.currentToken.type == tokens.TokenType.IDENT {
+            let paramName = this.currentToken.value;
+            this.consume(tokens.TokenType.IDENT);
+            
+            funcCtx.localIndex[paramName] = funcCtx.localCount;
+            funcCtx.localCount = funcCtx.localCount + 1;
+            funcCtx.params.push({
+                "name": paramName,
+                "typeHint": { "Name": "any" },
+                "hasDefault": false,
+                "defaultValue": { "type": "nil" },
+                "variadic": false
+            });
+            
+            while this.currentToken.type == tokens.TokenType.COMMA {
+                this.consume(tokens.TokenType.COMMA);
+                let nextParam = this.currentToken.value;
+                this.consume(tokens.TokenType.IDENT);
+                
+                funcCtx.localIndex[nextParam] = funcCtx.localCount;
+                funcCtx.localCount = funcCtx.localCount + 1;
+                funcCtx.params.push({
+                    "name": nextParam,
+                    "typeHint": { "Name": "any" },
+                    "hasDefault": false,
+                    "defaultValue": { "type": "nil" },
+                    "variadic": false
+                });
+            }
+        }
+        this.consume(tokens.TokenType.RPAREN);
+        this.consume(tokens.TokenType.COLON);
+        
+        // Skip newline and consume INDENT
+        this.consume(tokens.TokenType.NEWLINE);
+        this.consume(tokens.TokenType.INDENT);
+        
+        // Swap context
+        let prevCtx = this.currentFuncCtx;
+        this.currentFuncCtx = funcCtx;
+        
+        while (this.currentToken.type != tokens.TokenType.DEDENT and this.currentToken.type != tokens.TokenType.EOF) {
+            this.parseStatement();
+            if this.currentToken.type == tokens.TokenType.NEWLINE {
+                this.consume(tokens.TokenType.NEWLINE);
+            }
+            while this.currentToken.type == tokens.TokenType.NEWLINE {
+                this.advance();
+            }
+        }
+        
+        this.consume(tokens.TokenType.DEDENT);
+        
+        // Add default implicit return
+        this.emit({
+            "op": OpCode.OP_CONST,
+            "value": {
+                "type": "nil"
+            }
+        });
+        this.emit({
+            "op": OpCode.OP_RETURN,
+            "value": {
+                "type": "nil"
+            }
+        });
+        
+        // Register the function
+        this.functions[funcName] = {
+            "id": this.funcIdCounter,
+            "name": funcName,
+            "params": funcCtx.params,
+            "returnType": { "Name": "any" },
+            "localCount": funcCtx.localCount,
+            "captures": [],
+            "instructions": funcCtx.instructions,
+            "statementCount": 0,
+            "async": false,
+            "hasDefaults": false,
+            "hasTypeHints": false
+        };
+        
+        this.funcIdCounter = this.funcIdCounter + 1;
+        
+        // Restore context
+        this.currentFuncCtx = prevCtx;
+    }
+
+    fn parseExpr() {
+        this.parseTerm();
+        while (this.currentToken.type == tokens.TokenType.PLUS or this.currentToken.type == tokens.TokenType.MINUS) {
+            let op = this.currentToken.type;
+            this.advance();
+            this.parseTerm();
+
+            if op == tokens.TokenType.PLUS {
+                this.emit({ "op": OpCode.OP_ADD, "value": { "type": "nil" } });
+            } else {
+                this.emit({ "op": OpCode.OP_SUB, "value": { "type": "nil" } });
+            }
+        }
+    }
+
+    fn parseTerm() {
+        this.parseFactor();
+        while (this.currentToken.type == tokens.TokenType.STAR or this.currentToken.type == tokens.TokenType.SLASH) {
+            let op = this.currentToken.type;
+            this.advance();
+            this.parseFactor();
+
+            if op == tokens.TokenType.STAR {
+                this.emit({ "op": OpCode.OP_MUL, "value": { "type": "nil" } });
+            } else {
+                this.emit({ "op": OpCode.OP_DIV, "value": { "type": "nil" } });
+            }
+        }
+    }
+
+    fn parseFactor() {
+        if this.currentToken.type == tokens.TokenType.NUMBER {
+            let val = this.currentToken.value;
+            this.consume(tokens.TokenType.NUMBER);
+
+            this.emit({
+                "op": OpCode.OP_CONST,
+                "value": {
+                    "type": "float",
+                    "data": val
+                }
+            });
+        } else if this.currentToken.type == tokens.TokenType.STRING {
+            let val = this.currentToken.value;
+            this.consume(tokens.TokenType.STRING);
+
+            let obfuscated = obfuscateString(val);
+            this.emit({
+                "op": OpCode.OP_CONST,
+                "value": {
+                    "type": "string",
+                    "data": obfuscated
+                }
+            });
+        } else if this.currentToken.type == tokens.TokenType.IDENT {
+            let name = this.currentToken.value;
+            this.consume(tokens.TokenType.IDENT);
+            
+            // Check if it's a function call inside an expression
+            if this.currentToken.type == tokens.TokenType.LPAREN {
+                this.consume(tokens.TokenType.LPAREN);
+                let argCount = 0;
+                if this.currentToken.type != tokens.TokenType.RPAREN {
+                    this.parseExpr();
+                    argCount = 1;
+                    while this.currentToken.type == tokens.TokenType.COMMA {
+                        this.consume(tokens.TokenType.COMMA);
+                        this.parseExpr();
+                        argCount = argCount + 1;
+                    }
+                }
+                this.consume(tokens.TokenType.RPAREN);
+                
+                this.emit({
+                    "op": OpCode.OP_CALL,
+                    "value": {
+                        "type": "call",
+                        "data": {
+                            "Name": name,
+                            "ArgCount": argCount
+                        }
+                    }
+                });
+            } else {
+                // Variable load
+                if this.currentFuncCtx != null {
+                    if (name in this.currentFuncCtx.localIndex) {
+                        let slot = this.currentFuncCtx.localIndex[name];
+                        this.emit({
+                            "op": OpCode.OP_LOAD_LOCAL,
+                            "value": {
+                                "type": "int",
+                                "data": slot
+                            }
+                        });
+                    } else if (name in this.globalIndex) {
+                        let slot = this.globalIndex[name];
+                        this.emit({
+                            "op": OpCode.OP_LOAD_GLOBAL,
+                            "value": makeVariableInfo(name, slot)
+                        });
+                    } else {
+                        // Python name lookup error
+                        this.error("NameError: name '" + name + "' is not defined");
+                    }
+                } else {
+                    if (name in this.globalIndex) {
+                        let slot = this.globalIndex[name];
+                        this.emit({
+                            "op": OpCode.OP_LOAD_GLOBAL,
+                            "value": makeVariableInfo(name, slot)
+                        });
+                    } else {
+                        this.error("NameError: name '" + name + "' is not defined");
+                    }
+                }
+            }
+        } else if this.currentToken.type == tokens.TokenType.LPAREN {
+            this.consume(tokens.TokenType.LPAREN);
+            this.parseExpr();
+            this.consume(tokens.TokenType.RPAREN);
+        } else {
+            this.error("Expected number, string, variable, or parenthesis, got " + this.currentToken.type);
+        }
+    }
+}

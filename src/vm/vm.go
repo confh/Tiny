@@ -20,6 +20,7 @@ import (
 
 	stdjson "encoding/json"
 	"io"
+
 	. "language.com/src/tinyerrors"
 )
 
@@ -115,6 +116,8 @@ type VM struct {
 	functionList     []Function
 
 	taskPool *VMPool
+	stopped  *atomic.Bool
+	active   *atomic.Int64
 
 	observerStats *ObserverRuntimeStats
 
@@ -248,10 +251,12 @@ func FloatToString(val float64) string {
 	return strconv.FormatFloat(val, 'f', 6, 64)
 }
 
-func isClass(value ObjectValue) bool {
-	_, exists := value["__class"]
-
-	return exists
+func instanceValue(value TinyValue) (*InstanceValue, bool) {
+	if value.IsInt {
+		return nil, false
+	}
+	inst, ok := value.Value.(*InstanceValue)
+	return inst, ok && inst != nil
 }
 
 func NewVM(info VMInfo) *VM {
@@ -283,6 +288,8 @@ func NewVM(info VMInfo) *VM {
 		cliArgs:              []string{},
 		globalTypes:          map[string]TypeHint{},
 		observerStats:        newObserverRuntimeStats(),
+		stopped:              &atomic.Bool{},
+		active:               &atomic.Int64{},
 		packed:               packed,
 		jitDisabled:          jitDisabled,
 		isolated:             info.Isolated,
@@ -713,6 +720,8 @@ func (vm *VM) CloneForTask() *VM {
 		functionList:     vm.functionList,
 		observerStats:    vm.observerStats,
 		taskPool:         vm.taskPool,
+		stopped:          vm.stopped,
+		active:           vm.active,
 
 		stack:       make([]TinyValue, 256),
 		framePool:   make([]*Frame, 0, 256),
@@ -772,6 +781,22 @@ func cloneValue(value TinyValue) TinyValue {
 	}
 
 	switch v := raw.(type) {
+	case *InstanceValue:
+		if v == nil {
+			return NewNull()
+		}
+		copyFields := ObjectValue{}
+		for key, val := range v.Fields {
+			copyFields[key] = cloneValue(val)
+		}
+		return NewNative(&InstanceValue{
+			ClassName:      v.ClassName,
+			Fields:         copyFields,
+			ConstFields:    cloneMap(v.ConstFields),
+			PrivateFields:  cloneMap(v.PrivateFields),
+			PrivateMethods: cloneMap(v.PrivateMethods),
+		})
+
 	case ObjectValue:
 		copyObj := ObjectValue{}
 
@@ -831,6 +856,192 @@ func cloneValue(value TinyValue) TinyValue {
 	case WasmArrayValue:
 		return value
 
+	default:
+		return value
+	}
+}
+
+func wrapFunctionArgsForHostVM(args []TinyValue, owner *VM) []TinyValue {
+	if len(args) == 0 {
+		return args
+	}
+	wrapped := make([]TinyValue, len(args))
+	for i, arg := range args {
+		wrapped[i] = wrapFunctionsForHostVM(arg, owner)
+	}
+	return wrapped
+}
+
+func (vm *VM) callHostFunctionValue(host *HostFunctionValue, args []TinyValue) (TinyValue, bool) {
+	if host == nil || host.VM == nil {
+		vm.fatalError(ErrorRuntime, "host function is not attached to a VM")
+	}
+
+	callArgs := wrapFunctionArgsForHostVM(args, vm)
+	if host.HasReceiver {
+		callArgs = append([]TinyValue{host.Receiver}, callArgs...)
+	}
+
+	hostFrameDepth := len(host.VM.frames)
+	hostStackDepth := host.VM.top
+	hostTryDepth := len(host.VM.tryHandlers)
+	hostDeferDepth := len(host.VM.deferHandlers)
+	hostNativeDepth := len(host.VM.nativeFrames)
+
+	var result TinyValue
+	handledError := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				switch err := r.(type) {
+				case LangErrorType:
+					host.VM.discardInterruptedCall(hostFrameDepth, hostStackDepth, hostTryDepth, hostDeferDepth, hostNativeDepth)
+					vm.runtimeError(err.Kind, "%s", err.Message)
+					result = NewNull()
+					handledError = true
+				case *LangErrorType:
+					host.VM.discardInterruptedCall(hostFrameDepth, hostStackDepth, hostTryDepth, hostDeferDepth, hostNativeDepth)
+					vm.runtimeError(err.Kind, "%s", err.Message)
+					result = NewNull()
+					handledError = true
+				default:
+					panic(r)
+				}
+			}
+		}()
+		result = host.VM.callFunctionValue(host.Function, callArgs)
+	}()
+	return result, !handledError
+}
+
+func (vm *VM) discardInterruptedCall(frameDepth int, stackDepth int, tryDepth int, deferDepth int, nativeDepth int) {
+	for len(vm.frames) > frameDepth {
+		frame := vm.frames[len(vm.frames)-1]
+		for _, m := range frame.lockedMutexes {
+			m.Unlock()
+		}
+		vm.frames = vm.frames[:len(vm.frames)-1]
+		vm.releaseFrame(frame)
+	}
+
+	for i := stackDepth; i < vm.top && i < len(vm.stack); i++ {
+		vm.stack[i] = TinyValue{}
+	}
+	if stackDepth < vm.top {
+		vm.top = stackDepth
+	}
+
+	if len(vm.tryHandlers) > tryDepth {
+		vm.tryHandlers = vm.tryHandlers[:tryDepth]
+	}
+	if len(vm.deferHandlers) > deferDepth {
+		vm.deferHandlers = vm.deferHandlers[:deferDepth]
+	}
+	if len(vm.nativeFrames) > nativeDepth {
+		vm.nativeFrames = vm.nativeFrames[:nativeDepth]
+	}
+}
+
+func wrapFunctionsForHostVM(value TinyValue, owner *VM) TinyValue {
+	return wrapFunctionsForHostVMSeen(value, owner, map[*InstanceValue]*InstanceValue{}, map[*ArrayValue]*ArrayValue{}, map[*ObjectValue]*ObjectValue{})
+}
+
+func wrapFunctionsForHostVMSeen(value TinyValue, owner *VM, seenInstances map[*InstanceValue]*InstanceValue, seenArrays map[*ArrayValue]*ArrayValue, seenObjects map[*ObjectValue]*ObjectValue) TinyValue {
+	if owner == nil || value.IsInt {
+		return value
+	}
+
+	switch v := value.Value.(type) {
+	case FunctionValue:
+		return NewNative(&HostFunctionValue{VM: owner, Function: v, Name: v.Name})
+	case *FunctionValue:
+		if v == nil {
+			return NewNull()
+		}
+		return NewNative(&HostFunctionValue{VM: owner, Function: *v, Name: v.Name})
+	case *HostFunctionValue, *CallbackFunctionValue:
+		return value
+	case *InstanceValue:
+		if v == nil {
+			return value
+		}
+		if wrapped, ok := seenInstances[v]; ok {
+			return NewNative(wrapped)
+		}
+		wrapped := &InstanceValue{
+			ClassName:      v.ClassName,
+			Fields:         ObjectValue{},
+			ConstFields:    cloneMap(v.ConstFields),
+			PrivateFields:  cloneMap(v.PrivateFields),
+			PrivateMethods: cloneMap(v.PrivateMethods),
+		}
+		seenInstances[v] = wrapped
+		receiver := NewNative(v)
+		for key, field := range v.Fields {
+			switch fn := field.Value.(type) {
+			case FunctionValue:
+				hasReceiver := methodOwnerClass(fn.Name) != ""
+				host := &HostFunctionValue{VM: owner, Function: fn, Name: fn.Name}
+				if hasReceiver {
+					host.Receiver = receiver
+					host.HasReceiver = true
+				}
+				wrapped.Fields[key] = NewNative(host)
+			case *FunctionValue:
+				if fn == nil {
+					wrapped.Fields[key] = NewNull()
+				} else {
+					hasReceiver := methodOwnerClass(fn.Name) != ""
+					host := &HostFunctionValue{VM: owner, Function: *fn, Name: fn.Name}
+					if hasReceiver {
+						host.Receiver = receiver
+						host.HasReceiver = true
+					}
+					wrapped.Fields[key] = NewNative(host)
+				}
+			default:
+				wrapped.Fields[key] = wrapFunctionsForHostVMSeen(field, owner, seenInstances, seenArrays, seenObjects)
+			}
+		}
+		return NewNative(wrapped)
+	case ObjectValue:
+		wrapped := ObjectValue{}
+		for key, field := range v {
+			wrapped[key] = wrapFunctionsForHostVMSeen(field, owner, seenInstances, seenArrays, seenObjects)
+		}
+		return NewNative(wrapped)
+	case *ObjectValue:
+		if v == nil {
+			return value
+		}
+		if wrapped, ok := seenObjects[v]; ok {
+			return NewNative(wrapped)
+		}
+		wrapped := ObjectValue{}
+		seenObjects[v] = &wrapped
+		for key, field := range *v {
+			wrapped[key] = wrapFunctionsForHostVMSeen(field, owner, seenInstances, seenArrays, seenObjects)
+		}
+		return NewNative(wrapped)
+	case *ArrayValue:
+		if v == nil {
+			return value
+		}
+		if wrapped, ok := seenArrays[v]; ok {
+			return NewNative(wrapped)
+		}
+		wrapped := &ArrayValue{Elements: make([]TinyValue, len(v.Elements))}
+		seenArrays[v] = wrapped
+		for i, item := range v.Elements {
+			wrapped.Elements[i] = wrapFunctionsForHostVMSeen(item, owner, seenInstances, seenArrays, seenObjects)
+		}
+		return NewNative(wrapped)
+	case ArrayValue:
+		array := &ArrayValue{Elements: make([]TinyValue, len(v.Elements))}
+		for i, item := range v.Elements {
+			array.Elements[i] = wrapFunctionsForHostVMSeen(item, owner, seenInstances, seenArrays, seenObjects)
+		}
+		return NewNative(array)
 	default:
 		return value
 	}
@@ -896,16 +1107,23 @@ func propertyValue(vm *VM, objectValue TinyValue, name string) TinyValue {
 		}
 	}
 
-	if object, ok := vm.valueAsObjectForRead(objectValue); ok {
-		if _, isClass := object["__class"]; isClass {
-			if !vm.canAccessField(object, name) {
-				vm.fatalError(ErrorRuntime, "cannot access private field: %s", name)
-			}
+	if inst, ok := instanceValue(objectValue); ok {
+		if !vm.canAccessField(inst, name) {
+			vm.fatalError(ErrorRuntime, "cannot access private field: %s", name)
 		}
 
+		value, exists := inst.Fields[name]
+		if !exists {
+			return NewNull()
+		}
+
+		return value
+	}
+
+	if object, ok := vm.valueAsObjectForRead(objectValue); ok {
 		value, exists := object[name]
 		if !exists {
-			vm.fatalError(ErrorName, "object has no property: %s", name)
+			return NewNull()
 		}
 
 		return value
@@ -933,22 +1151,45 @@ func propertyValue(vm *VM, objectValue TinyValue, name string) TinyValue {
 
 func resolveNamespaceValue(vm *VM, value TinyValue) TinyValue {
 	if ref, ok := value.Value.(NamespaceMemberRef); ok {
-		slot, exists := vm.globalNames[ref.GlobalName]
-		if !exists {
-			vm.fatalError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
-		}
-		return vm.getGlobal(slot)
+		return vm.resolveNamespaceMemberRef(ref.GlobalName)
 	}
 
 	if ref, ok := value.Value.(*NamespaceMemberRef); ok {
-		slot, exists := vm.globalNames[ref.GlobalName]
-		if !exists {
-			vm.fatalError(ErrorName, "undefined namespace global: %s", ref.GlobalName)
-		}
-		return vm.getGlobal(slot)
+		return vm.resolveNamespaceMemberRef(ref.GlobalName)
 	}
 
 	return value
+}
+
+func (vm *VM) resolveNamespaceMemberRef(globalName string) TinyValue {
+	slot, exists := vm.globalNames[globalName]
+	if exists {
+		value := vm.getGlobal(slot)
+		if !isUnboundNamespaceExternal(value) {
+			return value
+		}
+	}
+
+	if dot := strings.LastIndex(globalName, "."); dot >= 0 {
+		shortName := globalName[dot+1:]
+		slot, exists = vm.globalNames[shortName]
+		if exists {
+			return vm.getGlobal(slot)
+		}
+	}
+
+	vm.fatalError(ErrorName, "undefined namespace global: %s", globalName)
+	return NewNull()
+}
+
+func isUnboundNamespaceExternal(value TinyValue) bool {
+	if value.IsInt {
+		return false
+	}
+	if value.Value == nil {
+		return true
+	}
+	return isNullish(value)
 }
 
 func (vm *VM) multiplyByInt(value TinyValue, factor int) TinyValue {
@@ -1524,8 +1765,61 @@ func (vm *VM) applyBinaryOp(left TinyValue, right TinyValue, op OpCode) TinyValu
 		return vm.divValues(left, right)
 	case OP_MOD:
 		return vm.modValues(left, right)
+	case OP_AND_BIT, OP_OR_BIT, OP_XOR, OP_LSHIFT, OP_RSHIFT:
+		return vm.bitwiseValues(left, right, op)
 	default:
 		vm.fatalError(ErrorInternal, "unsupported binary op in superinstruction: %s", op.String())
+		return TinyValue{}
+	}
+}
+
+func (vm *VM) bitwiseInt(value TinyValue) int {
+	if value.IsInt {
+		return value.AsInt
+	}
+
+	switch v := value.Value.(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case uint64:
+		return int(v)
+	case float64:
+		return int(v)
+	case float32:
+		return int(v)
+	default:
+		vm.fatalError(ErrorType, "expected number for bitwise operation, got %s", TypeName(value))
+		return 0
+	}
+}
+
+func (vm *VM) bitwiseValues(left TinyValue, right TinyValue, op OpCode) TinyValue {
+	l := vm.bitwiseInt(left)
+	r := vm.bitwiseInt(right)
+
+	switch op {
+	case OP_AND_BIT:
+		return NewInt(l & r)
+	case OP_OR_BIT:
+		return NewInt(l | r)
+	case OP_XOR:
+		return NewInt(l ^ r)
+	case OP_LSHIFT:
+		if r < 0 {
+			vm.runtimeError(ErrorRuntime, "cannot shift by negative count")
+			return TinyValue{}
+		}
+		return NewInt(l << r)
+	case OP_RSHIFT:
+		if r < 0 {
+			vm.runtimeError(ErrorRuntime, "cannot shift by negative count")
+			return TinyValue{}
+		}
+		return NewInt(l >> r)
+	default:
+		vm.fatalError(ErrorInternal, "unsupported bitwise op: %s", op.String())
 		return TinyValue{}
 	}
 }
@@ -1744,27 +2038,23 @@ func (vm *VM) getCachedGlobalPair(globalSlotA int, globalSlotB int) (TinyValue, 
 	return valueA, valueB
 }
 
-func (vm *VM) canAccessField(object ObjectValue, field string) bool {
-	className, isClass := object["__class"]
-	if !isClass {
+func (vm *VM) canAccessField(inst *InstanceValue, field string) bool {
+	if inst == nil {
 		return true
 	}
-	privateFields := object["__privateFields"].Value.(map[string]bool)
-	if _, fieldIsPrivate := privateFields[field]; fieldIsPrivate {
-		return vm.currentMethodClass() == className.Value.(string)
+	if _, fieldIsPrivate := inst.PrivateFields[field]; fieldIsPrivate {
+		return vm.currentMethodClass() == inst.ClassName
 	}
 
 	return true
 }
 
-func (vm *VM) canAccessMethod(object ObjectValue, method string) bool {
-	className, isClass := object["__class"]
-	if !isClass {
+func (vm *VM) canAccessMethod(inst *InstanceValue, method string) bool {
+	if inst == nil {
 		return true
 	}
-	privateMethods := object["__privateMethods"].Value.(map[string]bool)
-	if _, methodIsPrivate := privateMethods[method]; methodIsPrivate {
-		return vm.currentMethodClass() == className.Value.(string)
+	if _, methodIsPrivate := inst.PrivateMethods[method]; methodIsPrivate {
+		return vm.currentMethodClass() == inst.ClassName
 	}
 
 	return true
@@ -1773,16 +2063,22 @@ func (vm *VM) canAccessMethod(object ObjectValue, method string) bool {
 func (vm *VM) getObjectLocalPropertyFast(frame *Frame, objectSlot int, name string, op string) TinyValue {
 	objectValue := frameLocalValue(frame, objectSlot, op)
 
-	if object, ok := vm.valueAsObjectForRead(objectValue); ok {
-		if _, isClass := object["__class"]; isClass {
-			if !vm.canAccessField(object, name) {
-				vm.fatalError(ErrorRuntime, "cannot access private field: %s", name)
-			}
+	if inst, ok := instanceValue(objectValue); ok {
+		if !vm.canAccessField(inst, name) {
+			vm.fatalError(ErrorRuntime, "cannot access private field: %s", name)
 		}
 
+		value, exists := inst.Fields[name]
+		if !exists {
+			return NewNull()
+		}
+		return value
+	}
+
+	if object, ok := vm.valueAsObjectForRead(objectValue); ok {
 		value, exists := object[name]
 		if !exists {
-			vm.fatalError(ErrorName, "object has no property: %s", name)
+			return NewNull()
 		}
 		return value
 	}
@@ -1799,16 +2095,13 @@ func (vm *VM) setObjectLocalPropertyFast(frame *Frame, objectSlot int, name stri
 		return
 	}
 
-	if !object.isWasm() {
-		native := object.materialize()
-		if _, isClass := native["__class"]; isClass {
-			constFields, _ := native["__constFields"].Value.(map[string]bool)
-			if _, isConstant := constFields[name]; isConstant {
-				vm.fatalError(ErrorRuntime, "cannot assign to constant field: %s", name)
-			}
-			if !vm.canAccessField(native, name) {
-				vm.fatalError(ErrorRuntime, "cannot assign private field: %s", name)
-			}
+	if object.isInstance() {
+		inst := object.inst
+		if _, isConstant := inst.ConstFields[name]; isConstant {
+			vm.fatalError(ErrorRuntime, "cannot assign to constant field: %s", name)
+		}
+		if !vm.canAccessField(inst, name) {
+			vm.fatalError(ErrorRuntime, "cannot assign private field: %s", name)
 		}
 	}
 
@@ -1847,6 +2140,20 @@ func (vm *VM) getProperty(objectValue TinyValue, name string, safe bool) TinyVal
 		return NewNull()
 	}
 
+	if module, ok := objectValue.Value.(*StandardModuleValue); ok {
+		if value, exists := getStdModuleProperty(module.Name, name); exists {
+			return value
+		}
+		if safe {
+			return NewNull()
+		}
+		vm.nameError("standard module %s has no property: %s", module.Name, name)
+	}
+
+	if value, ok := errorPropertyValue(objectValue.Value, name); ok {
+		return value
+	}
+
 	if ns, ok := objectValue.Value.(NamespaceValue); ok {
 		value, exists := ns.Members[name]
 		if !exists {
@@ -1856,18 +2163,7 @@ func (vm *VM) getProperty(objectValue TinyValue, name string, safe bool) TinyVal
 			vm.nameError("namespace %s has no member: %s", ns.Name, name)
 		}
 
-		if ref, ok := value.Value.(NamespaceMemberRef); ok {
-			slot, exists := vm.globalNames[ref.GlobalName]
-			if !exists {
-				if safe {
-					return NewNull()
-				}
-				vm.nameError("undefined namespace global: %s", ref.GlobalName)
-			}
-			return vm.getGlobal(slot)
-		}
-
-		return value
+		return resolveNamespaceValue(vm, value)
 	}
 
 	if ns, ok := objectValue.Value.(*NamespaceValue); ok {
@@ -1879,15 +2175,17 @@ func (vm *VM) getProperty(objectValue TinyValue, name string, safe bool) TinyVal
 			vm.nameError("namespace %s has no member: %s", ns.Name, name)
 		}
 
-		if ref, ok := value.Value.(NamespaceMemberRef); ok {
-			slot, exists := vm.globalNames[ref.GlobalName]
-			if !exists {
-				if safe {
-					return NewNull()
-				}
-				vm.nameError("undefined namespace global: %s", ref.GlobalName)
-			}
-			return vm.getGlobal(slot)
+		return resolveNamespaceValue(vm, value)
+	}
+
+	if inst, ok := instanceValue(objectValue); ok {
+		if !vm.canAccessField(inst, name) {
+			vm.fatalError(ErrorRuntime, "cannot access private field: %s", name)
+		}
+
+		value, exists := inst.Fields[name]
+		if !exists {
+			return NewNull()
 		}
 
 		return value
@@ -1901,53 +2199,65 @@ func (vm *VM) getProperty(objectValue TinyValue, name string, safe bool) TinyVal
 		vm.typeError("expected object, got %s", TypeName(objectValue))
 	}
 
-	if _, isClass := object["__class"]; isClass {
-		if !vm.canAccessField(object, name) {
-			vm.fatalError(ErrorRuntime, "cannot access private field: %s", name)
-		}
-	}
-
 	value, exists := object[name]
 	if !exists {
-		if safe {
-			return NewNull()
-		}
-		vm.nameError("object has no property: %s", name)
+		return NewNull()
 	}
 
 	return value
 }
 
-func (vm *VM) callClassWithArgs(class Class, args []TinyValue) {
-	object := ObjectValue{
-		"__class":          NewNative(class.Name),
-		"__constFields":    NewNative(map[string]bool{}),
-		"__privateFields":  NewNative(map[string]bool{}),
-		"__privateMethods": NewNative(map[string]bool{}),
+func errorPropertyValue(value any, name string) (TinyValue, bool) {
+	var err ErrorValue
+	switch v := value.(type) {
+	case ErrorValue:
+		err = v
+	case *ErrorValue:
+		if v == nil {
+			return TinyValue{}, false
+		}
+		err = *v
+	default:
+		return TinyValue{}, false
 	}
 
-	constFields, _ := object["__constFields"].Value.(map[string]bool)
-	privateFields, _ := object["__privateFields"].Value.(map[string]bool)
-	privateMethods, _ := object["__privateMethods"].Value.(map[string]bool)
+	switch name {
+	case "kind", "name":
+		return NewNative(err.Kind), true
+	case "message":
+		return NewNative(err.Message), true
+	default:
+		return TinyValue{}, false
+	}
+}
+
+func (vm *VM) callClassWithArgs(class Class, args []TinyValue) {
+	instance := &InstanceValue{
+		ClassName:      class.Name,
+		Fields:         ObjectValue{},
+		ConstFields:    map[string]bool{},
+		PrivateFields:  map[string]bool{},
+		PrivateMethods: map[string]bool{},
+	}
 
 	for methodName, functionName := range class.Methods {
-		object[methodName] = NewNative(FunctionValue{
+		instance.Fields[methodName] = NewNative(FunctionValue{
 			Name: functionName,
 		})
 
 		if class.PrivateMethods[methodName] {
-			privateMethods[methodName] = true
+			instance.PrivateMethods[methodName] = true
 		}
 	}
 
 	for _, field := range class.Fields {
-		object[field.Name] = cloneValue(field.Value)
+		instance.Fields[field.Name] = cloneValue(field.Value)
 		if field.Constant {
-			constFields[field.Name] = true
+			instance.ConstFields[field.Name] = true
 		}
 
 		if field.Private {
-			privateFields[field.Name] = true
+			instance.PrivateFields[field.Name] = true
 		}
 	}
 
@@ -1990,7 +2300,7 @@ func (vm *VM) callClassWithArgs(class Class, args []TinyValue) {
 
 		frame.methodClass = class.Name
 
-		setCellValue(frame.locals[0], NewNative(object))
+		setCellValue(frame.locals[0], NewNative(instance))
 		frame.locals[0].Constant = true
 
 		if isVariadic {
@@ -2046,7 +2356,7 @@ func (vm *VM) callClassWithArgs(class Class, args []TinyValue) {
 		}
 	}
 
-	vm.push(NewNative(object))
+	vm.push(NewNative(instance))
 }
 
 func (vm *VM) callClassByName(name string, args []TinyValue) {
@@ -2063,7 +2373,149 @@ func (vm *VM) checkTypeHint(value TinyValue, hint TypeHint) (bool, string) {
 	if vm.globals != nil {
 		globals = *vm.globals
 	}
-	return CheckTypeHintWithGlobals(value, hint, vm.interfaces, globals, vm.globalNames)
+	ok, reason := CheckTypeHintWithGlobals(value, hint, vm.interfaces, globals, vm.globalNames)
+	if ok {
+		return true, ""
+	}
+	if vm.acceptsRuntimeClassAlias(value, hint) {
+		return true, ""
+	}
+	return false, reason
+}
+
+func (vm *VM) acceptsRuntimeClassAlias(value TinyValue, hint TypeHint) bool {
+	if vm == nil || vm.isolated {
+		return false
+	}
+
+	inst, ok := instanceValue(value)
+	if !ok || inst.ClassName == "" {
+		return false
+	}
+
+	for _, typ := range hint.AllTypes() {
+		if typ == "" || strings.Contains(typ, ":") {
+			continue
+		}
+		if inst.ClassName == typ || strings.HasSuffix(inst.ClassName, "."+typ) {
+			return true
+		}
+		if class, exists := vm.resolveRuntimeClassAlias(typ); exists {
+			if inst.ClassName == class.Name || runtimeInstanceMatchesClassShape(inst, class) {
+				return true
+			}
+		} else if strings.Contains(typ, ".") && classBaseName(inst.ClassName) == classBaseName(typ) {
+			return true
+		}
+		if classBaseName(inst.ClassName) == classBaseName(typ) {
+			if class, exists := vm.classes[typ]; exists && runtimeInstanceMatchesClassShape(inst, class) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func (vm *VM) resolveRuntimeClassAlias(typeName string) (Class, bool) {
+	typeName = strings.TrimSpace(typeName)
+	if class, ok := vm.classes[typeName]; ok {
+		return class, true
+	}
+	if !strings.Contains(typeName, ".") || vm.globalNames == nil || vm.globals == nil {
+		return Class{}, false
+	}
+
+	parts := strings.Split(typeName, ".")
+	for i := len(parts) - 1; i > 0; i-- {
+		nsName := strings.Join(parts[:i], ".")
+		memberPath := parts[i:]
+		slot, exists := vm.globalNames[nsName]
+		if !exists || slot < 0 || slot >= len(*vm.globals) {
+			continue
+		}
+
+		value := (*vm.globals)[slot]
+		for _, memberName := range memberPath {
+			ns, ok := namespaceValueFromTinyValue(value)
+			if !ok {
+				value = TinyValue{}
+				break
+			}
+			member, exists := ns.Members[memberName]
+			if !exists {
+				value = TinyValue{}
+				break
+			}
+			value = resolveNamespaceValue(vm, member)
+		}
+		if class, ok := classFromTinyValue(value); ok {
+			return class, true
+		}
+	}
+
+	return Class{}, false
+}
+
+func namespaceValueFromTinyValue(value TinyValue) (NamespaceValue, bool) {
+	if value.IsInt {
+		return NamespaceValue{}, false
+	}
+	switch ns := value.Value.(type) {
+	case NamespaceValue:
+		return ns, true
+	case *NamespaceValue:
+		if ns == nil {
+			return NamespaceValue{}, false
+		}
+		return *ns, true
+	default:
+		return NamespaceValue{}, false
+	}
+}
+
+func classFromTinyValue(value TinyValue) (Class, bool) {
+	if value.IsInt {
+		return Class{}, false
+	}
+	switch class := value.Value.(type) {
+	case Class:
+		return class, true
+	case *Class:
+		if class == nil {
+			return Class{}, false
+		}
+		return *class, true
+	default:
+		return Class{}, false
+	}
+}
+
+func classBaseName(name string) string {
+	if idx := strings.LastIndex(name, "."); idx >= 0 {
+		return name[idx+1:]
+	}
+	return name
+}
+
+func runtimeInstanceMatchesClassShape(inst *InstanceValue, class Class) bool {
+	if inst == nil {
+		return false
+	}
+
+	for _, field := range class.Fields {
+		if _, exists := inst.Fields[field.Name]; !exists {
+			return false
+		}
+	}
+
+	for methodName := range class.Methods {
+		if _, exists := inst.Fields[methodName]; !exists {
+			return false
+		}
+	}
+
+	return true
 }
 
 func (vm *VM) genericTypeParamsForFunction(fn Function) []string {
@@ -2306,45 +2758,85 @@ func (vm *VM) runtimeError(kind ErrorKind, format string, args ...any) {
 }
 
 func (vm *VM) isInstanceOf(value TinyValue, className string) bool {
-	object, ok := vm.valueAsObjectForRead(value)
+	inst, ok := instanceValue(value)
 	if !ok {
 		return false
 	}
 
-	return vm.objectIsOrEmbedsClass(object, className)
+	return vm.instanceIsOrEmbedsClass(inst, className)
 }
 
-func (vm *VM) objectIsOrEmbedsClass(object ObjectValue, className string) bool {
-	currentClassValue, ok := object["__class"]
-	if ok {
-		currentClassName, ok := currentClassValue.Value.(string)
-		if ok && currentClassName == className {
-			return true
+func (vm *VM) instanceIsOrEmbedsClass(inst *InstanceValue, className string) bool {
+	if inst == nil {
+		return false
+	}
+	if inst.ClassName == className {
+		return true
+	}
+
+	class, exists := vm.classes[inst.ClassName]
+	if !exists {
+		return false
+	}
+
+	for _, fieldName := range class.Embeds {
+		fieldValue, exists := inst.Fields[fieldName]
+		if !exists {
+			continue
 		}
 
-		if ok {
-			class, exists := vm.classes[currentClassName]
-			if exists {
-				for _, fieldName := range class.Embeds {
-					fieldValue, exists := object[fieldName]
-					if !exists {
-						continue
-					}
+		embeddedInstance, ok := instanceValue(fieldValue)
+		if !ok {
+			continue
+		}
 
-					embeddedObject, ok := vm.valueAsObjectForRead(fieldValue)
-					if !ok {
-						continue
-					}
-
-					if vm.objectIsOrEmbedsClass(embeddedObject, className) {
-						return true
-					}
-				}
-			}
+		if vm.instanceIsOrEmbedsClass(embeddedInstance, className) {
+			return true
 		}
 	}
 
 	return false
+}
+
+func (vm *VM) findEmbeddedMethodInstance(inst *InstanceValue, method string) (*InstanceValue, FunctionValue, bool) {
+	if inst == nil {
+		return nil, FunctionValue{}, false
+	}
+
+	class, ok := vm.classes[inst.ClassName]
+	if !ok {
+		return nil, FunctionValue{}, false
+	}
+
+	for _, fieldName := range class.Embeds {
+		fieldValue, exists := inst.Fields[fieldName]
+		if !exists {
+			continue
+		}
+
+		embeddedInstance, ok := instanceValue(fieldValue)
+		if !ok {
+			continue
+		}
+
+		methodValue, exists := embeddedInstance.Fields[method]
+		if !exists {
+			if receiver, fn, ok := vm.findEmbeddedMethodInstance(embeddedInstance, method); ok {
+				return receiver, fn, true
+			}
+
+			continue
+		}
+
+		fnValue, ok := methodValue.Value.(FunctionValue)
+		if !ok {
+			continue
+		}
+
+		return embeddedInstance, fnValue, true
+	}
+
+	return nil, FunctionValue{}, false
 }
 
 func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableName string) {
@@ -2956,7 +3448,40 @@ func (vm *VM) ResetForRequest() {
 	}
 }
 
+func (vm *VM) Stop() {
+	if vm.stopped != nil {
+		vm.stopped.Store(true)
+	}
+}
+
+func (vm *VM) IsStopped() bool {
+	return vm.stopped != nil && vm.stopped.Load()
+}
+
+func (vm *VM) ActiveExecutions() int64 {
+	if vm.active == nil {
+		return 0
+	}
+	return vm.active.Load()
+}
+
+func (vm *VM) WaitIdle(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for vm.ActiveExecutions() > 0 {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return true
+}
+
 func (vm *VM) execute(targetDepth int) bool {
+	if vm.active != nil {
+		vm.active.Add(1)
+		defer vm.active.Add(-1)
+	}
+
 	var cfFrame *Frame
 	var cfInstructions []Instruction
 	var cfIP int
@@ -2984,6 +3509,12 @@ func (vm *VM) execute(targetDepth int) bool {
 	loadState()
 
 	for {
+		if vm.IsStopped() {
+			saveState()
+			vm.runDefersAboveDepth(targetDepth)
+			return len(vm.frames) == 0
+		}
+
 		// Sync local state at the start of loop iteration
 		newTopFrame := (*Frame)(nil)
 		if len(vm.frames) > 0 {
@@ -3790,21 +4321,22 @@ func (vm *VM) execute(targetDepth int) bool {
 				break
 			}
 
-			object, ok := vm.valueAsObjectForRead(objectValue)
-			if !ok {
-				vm.fatalError(ErrorType, "expected object, got %s", TypeName(objectValue))
-			}
-
-			_, isClass := object["__class"]
-			if isClass {
-				constFields, _ := object["__constFields"].Value.(map[string]bool)
-				if _, isConstant := constFields[name]; isConstant {
+			if inst, ok := instanceValue(objectValue); ok {
+				if _, isConstant := inst.ConstFields[name]; isConstant {
 					vm.runtimeError(ErrorRuntime, "cannot assign to constant field: %s", name)
 				}
 
-				if !vm.canAccessField(object, name) {
+				if !vm.canAccessField(inst, name) {
 					vm.runtimeError(ErrorRuntime, "cannot assign private field: %s", name)
 				}
+
+				inst.Fields[name] = value
+				break
+			}
+
+			object, ok := vm.valueAsObjectForRead(objectValue)
+			if !ok {
+				vm.fatalError(ErrorType, "expected object, got %s", TypeName(objectValue))
 			}
 
 			object[name] = value
@@ -3813,7 +4345,7 @@ func (vm *VM) execute(targetDepth int) bool {
 		case OP_METHOD_CALL_SAFE:
 			info := instr.Value.(MethodCallInfo)
 
-			args := vm.popArgs(info.ArgCount)
+			args := vm.popCallArgs(info.ArgCount, info.SpreadArgs)
 			objectValue := vm.popFast()
 
 			if isNullish(objectValue) {
@@ -4370,13 +4902,7 @@ func (vm *VM) execute(targetDepth int) bool {
 
 		case OP_PRINT:
 			info := instr.Value.(PrintInfo)
-			if vm.top < info.ArgCount {
-				vm.handleUnderflow()
-				break
-			}
-
-			start := vm.top - info.ArgCount
-			args := vm.stack[start:vm.top]
+			args := vm.popCallArgs(info.ArgCount, info.SpreadArgs)
 
 			if info.NewLine {
 				for i, arg := range args {
@@ -4392,10 +4918,6 @@ func (vm *VM) execute(targetDepth int) bool {
 				}
 			}
 
-			for i := start; i < vm.top; i++ {
-				vm.stack[i] = TinyValue{}
-			}
-			vm.top = start
 			vm.push(NewNull())
 
 		case OP_MUL_LOCAL_CONST:
@@ -4500,6 +5022,11 @@ func (vm *VM) execute(targetDepth int) bool {
 				}
 			}
 			vm.push(vm.modValues(left, right))
+
+		case OP_AND_BIT, OP_OR_BIT, OP_XOR, OP_LSHIFT, OP_RSHIFT:
+			right := vm.popFast()
+			left := vm.popFast()
+			vm.push(vm.bitwiseValues(left, right, instr.Op))
 
 		case OP_EQ:
 			right := vm.popFast()
@@ -4641,7 +5168,13 @@ func (vm *VM) execute(targetDepth int) bool {
 		case OP_METHOD_CALL:
 			info := instr.Value.(MethodCallInfo)
 
-			vm.callMethod(info.Method, info.ArgCount)
+			if len(info.SpreadArgs) > 0 {
+				args := vm.popCallArgs(info.ArgCount, info.SpreadArgs)
+				objectValue := vm.popFast()
+				vm.callMethodResolved(info.Method, objectValue, args)
+			} else {
+				vm.callMethod(info.Method, info.ArgCount)
+			}
 
 		case OP_METHOD_CALL_LOCAL_0:
 			info := instr.Value.(MethodLocalCallInfo)
@@ -4841,9 +5374,6 @@ func (vm *VM) execute(targetDepth int) bool {
 			case string:
 				vm.push(NewInt(len([]rune(v))))
 
-			case ObjectValue:
-				vm.push(NewInt(len(v)))
-
 			case BufferValue:
 				vm.push(NewInt(len(v.Bytes)))
 
@@ -4851,7 +5381,6 @@ func (vm *VM) execute(targetDepth int) bool {
 				vm.push(NewInt(len(v.Bytes)))
 
 			default:
-				fmt.Printf("%T\n", v)
 				vm.fatalError(ErrorType, "cannot get length of %s", TypeName(value))
 			}
 
@@ -4884,7 +5413,15 @@ func (vm *VM) execute(targetDepth int) bool {
 				vm.push(result)
 
 			case *HostFunctionValue:
-				result := v.VM.callFunctionValue(v.Function, args)
+				if result, ok := vm.callHostFunctionValue(v, args); ok {
+					vm.push(result)
+				}
+
+			case *CallbackFunctionValue:
+				result, err := v.Callback(args)
+				if err != nil {
+					vm.fatalError(ErrorRuntime, "callback %s failed: %s", v.Name, err.Error())
+				}
 				vm.push(result)
 
 			case Class:
@@ -4900,22 +5437,46 @@ func (vm *VM) execute(targetDepth int) bool {
 			break
 
 		case OP_CALL_VALUE_SPREAD:
-			arrayValue := vm.popFast()
-			callee := vm.popFast()
+			var args []TinyValue
+			if info, ok := instr.Value.(SpreadCallInfo); ok {
+				args = vm.popCallArgs(len(info.SpreadArgs), info.SpreadArgs)
+			} else {
+				arrayValue := vm.popFast()
 
-			array, ok := vm.valueAsArrayForRead(arrayValue)
-			if !ok {
-				vm.fatalError(ErrorType, "spread operator expects array, got %s", TypeName(arrayValue))
+				array, ok := vm.valueAsArrayForRead(arrayValue)
+				if !ok {
+					vm.fatalError(ErrorType, "spread operator expects array, got %s", TypeName(arrayValue))
+				}
+
+				args = array.Elements
 			}
+
+			callee := vm.popFast()
 
 			var result TinyValue
 			switch v := callee.Value.(type) {
 			case FunctionValue:
-				result = vm.callFunctionValue(v, array.Elements)
+				result = vm.callFunctionValue(v, args)
 			case *FunctionValue:
-				result = vm.callFunctionValue(*v, array.Elements)
+				result = vm.callFunctionValue(*v, args)
 			case *HostFunctionValue:
-				result = v.VM.callFunctionValue(v.Function, array.Elements)
+				var ok bool
+				result, ok = vm.callHostFunctionValue(v, args)
+				if !ok {
+					continue
+				}
+			case *CallbackFunctionValue:
+				callbackResult, err := v.Callback(args)
+				if err != nil {
+					vm.fatalError(ErrorRuntime, "callback %s failed: %s", v.Name, err.Error())
+				}
+				result = callbackResult
+			case Class:
+				vm.callClassByName(v.Name, args)
+				continue
+			case *Class:
+				vm.callClassByName(v.Name, args)
+				continue
 			default:
 				vm.fatalError(ErrorType, "expected function in spread call, got %s", TypeName(callee))
 			}
@@ -5132,6 +5693,11 @@ func (vm *VM) execute(targetDepth int) bool {
 					break
 				}
 
+				if inst, ok := instanceValue(objectValue); ok {
+					vm.runtimeError(ErrorRuntime, "cannot modify class '%s' by index operator.", inst.ClassName)
+					break
+				}
+
 				if obj, ok := vm.valueAsObjectForRead(objectValue); ok {
 					var key string
 					if indexValue.IsInt {
@@ -5140,9 +5706,6 @@ func (vm *VM) execute(targetDepth int) bool {
 						key = valueToString(indexValue)
 					}
 
-					if className, isClass := obj["__class"]; isClass {
-						vm.runtimeError(ErrorRuntime, "cannot modify class '%s' by index operator.", className.Value)
-					}
 					obj[key] = value
 					vm.invalidateJitObjectMirror(obj)
 					break
@@ -5260,6 +5823,10 @@ func (vm *VM) execute(targetDepth int) bool {
 			value := vm.popFast()
 			vm.push(NewNative(!isTruthy(value)))
 
+		case OP_NOT_BIT:
+			value := vm.popFast()
+			vm.push(NewInt(^vm.bitwiseInt(value)))
+
 		case OP_GET_PROPERTY_LOCAL:
 			info := instr.Value.(PropertyLocalInfo)
 			frame := vm.frames[len(vm.frames)-1]
@@ -5337,20 +5904,32 @@ func (vm *VM) execute(targetDepth int) bool {
 				break
 			}
 
+			if inst, ok := instanceValue(objectValue); ok {
+				if _, isConstant := inst.ConstFields[info.Name]; isConstant {
+					vm.fatalError(ErrorRuntime, "cannot assign to constant field: %s", info.Name)
+				}
+				if !vm.canAccessField(inst, info.Name) {
+					vm.fatalError(ErrorRuntime, "cannot assign private field: %s", info.Name)
+				}
+
+				current, exists := inst.Fields[info.Name]
+				if !exists {
+					vm.fatalError(ErrorName, "object has no property: %s", info.Name)
+				}
+				source := frameLocalValue(frame, info.SourceSlot, "OP_ADD_PROPERTY_LOCAL_LOCAL")
+				if l, ok := fastNumericValue(current); ok {
+					if r, ok := fastNumericValue(source); ok {
+						inst.Fields[info.Name] = NewNative(l + r)
+						break
+					}
+				}
+				inst.Fields[info.Name] = vm.addValues(current, source)
+				break
+			}
+
 			object, ok := vm.valueAsObjectForRead(objectValue)
 			if !ok {
 				vm.fatalError(ErrorType, "expected object, got %s", TypeName(objectValue))
-			}
-
-			_, isClass := object["__class"]
-			if isClass {
-				constFields, _ := object["__constFields"].Value.(map[string]bool)
-				if _, isConstant := constFields[info.Name]; isConstant {
-					vm.fatalError(ErrorRuntime, "cannot assign to constant field: %s", info.Name)
-				}
-				if !vm.canAccessField(object, info.Name) {
-					vm.fatalError(ErrorRuntime, "cannot assign private field: %s", info.Name)
-				}
 			}
 
 			current, exists := object[info.Name]
@@ -5482,6 +6061,8 @@ func (vm *VM) callNamespaceMethod(ns NamespaceValue, method string, args []TinyV
 		vm.fatalError(ErrorName, "namespace %s has no member: %s", ns.Name, method)
 	}
 
+	value = resolveNamespaceValue(vm, value)
+
 	var rawVal any
 	if value.IsInt {
 		rawVal = value.AsInt
@@ -5498,6 +6079,18 @@ func (vm *VM) callNamespaceMethod(ns NamespaceValue, method string, args []TinyV
 		result := vm.callFunctionValue(*v, args)
 		vm.push(result)
 
+	case *HostFunctionValue:
+		if result, ok := vm.callHostFunctionValue(v, args); ok {
+			vm.push(result)
+		}
+
+	case *CallbackFunctionValue:
+		result, err := v.Callback(args)
+		if err != nil {
+			vm.fatalError(ErrorRuntime, "callback %s failed: %s", v.Name, err.Error())
+		}
+		vm.push(result)
+
 	case Class:
 		vm.callClassByName(v.Name, args)
 
@@ -5505,55 +6098,8 @@ func (vm *VM) callNamespaceMethod(ns NamespaceValue, method string, args []TinyV
 		vm.callClassByName(v.Name, args)
 
 	default:
-		vm.fatalError(ErrorType, "namespace member %s is not callable", method)
+		vm.fatalError(ErrorType, "namespace member %s is not callable: %T", method, rawVal)
 	}
-}
-
-func (vm *VM) findEmbeddedMethod(object ObjectValue, method string) (ObjectValue, FunctionValue, bool) {
-	classNameValue, ok := object["__class"]
-	if !ok {
-		return nil, FunctionValue{}, false
-	}
-
-	className, ok := classNameValue.Value.(string)
-	if !ok {
-		return nil, FunctionValue{}, false
-	}
-
-	class, ok := vm.classes[className]
-	if !ok {
-		return nil, FunctionValue{}, false
-	}
-
-	for _, fieldName := range class.Embeds {
-		fieldValue, exists := object[fieldName]
-		if !exists {
-			continue
-		}
-
-		embeddedObject, ok := vm.valueAsObjectForRead(fieldValue)
-		if !ok {
-			continue
-		}
-
-		methodValue, exists := embeddedObject[method]
-		if !exists {
-			if receiver, fn, ok := vm.findEmbeddedMethod(embeddedObject, method); ok {
-				return receiver, fn, true
-			}
-
-			continue
-		}
-
-		fnValue, ok := methodValue.Value.(FunctionValue)
-		if !ok {
-			continue
-		}
-
-		return embeddedObject, fnValue, true
-	}
-
-	return nil, FunctionValue{}, false
 }
 
 func (vm *VM) callZeroArgNativeMethod(method string, objectValue TinyValue) bool {
@@ -5868,6 +6414,10 @@ func (vm *VM) callMethodResolved(method string, objectValue TinyValue, args []Ti
 		vm.callServerMethod(val, method, args)
 		return
 
+	case *NativeSqliteValue:
+		vm.callSqliteMethod(val, method, args)
+		return
+
 	case *NativeTcpServerValue:
 		vm.callTcpServerMethod(val, method, args)
 		return
@@ -5946,32 +6496,46 @@ func (vm *VM) callMethodResolved(method string, objectValue TinyValue, args []Ti
 		return
 	}
 
-	object, ok := vm.valueAsObjectForRead(ToValue(rawVal))
+	objectValueForRead := ToValue(rawVal)
+	object, ok := vm.valueAsObjectForRead(objectValueForRead)
 	if !ok {
 		vm.fatalError(ErrorType, "expected object, got %s", TypeName(objectValue))
 	}
 
-	receiver := object
+	receiverValue := objectValueForRead
+	receiverInstance, receiverIsInstance := instanceValue(objectValueForRead)
 
 	methodValue, exists := object[method]
 
 	var fnValue FunctionValue
 
 	if exists {
-		var ok bool
+		if hostFn, ok := methodValue.Value.(*HostFunctionValue); ok {
+			if result, ok := vm.callHostFunctionValue(hostFn, args); ok {
+				vm.push(result)
+			}
+			return
+		}
 
+		var ok bool
 		fnValue, ok = methodValue.Value.(FunctionValue)
 		if !ok {
 			vm.fatalError(ErrorType, "property %s is not callable", method)
 		}
 	} else {
-		embeddedReceiver, embeddedFn, ok := vm.findEmbeddedMethod(object, method)
-		if !ok {
+		if receiverIsInstance {
+			embeddedReceiver, embeddedFn, ok := vm.findEmbeddedMethodInstance(receiverInstance, method)
+			if !ok {
+				vm.fatalError(ErrorName, "object has no method: %s", method)
+			}
+
+			receiverValue = NewNative(embeddedReceiver)
+			receiverInstance = embeddedReceiver
+			receiverIsInstance = true
+			fnValue = embeddedFn
+		} else {
 			vm.fatalError(ErrorName, "object has no method: %s", method)
 		}
-
-		receiver = embeddedReceiver
-		fnValue = embeddedFn
 	}
 
 	fn, ok := vm.functions[fnValue.Name]
@@ -5980,8 +6544,11 @@ func (vm *VM) callMethodResolved(method string, objectValue TinyValue, args []Ti
 	}
 
 	ownerClass := methodOwnerClass(fnValue.Name)
+	if ownerClass == "" && receiverIsInstance {
+		ownerClass = receiverInstance.ClassName
+	}
 
-	if isClass(receiver) && !vm.canAccessMethod(object, method) {
+	if receiverIsInstance && !vm.canAccessMethod(receiverInstance, method) {
 		vm.fatalError(ErrorRuntime, "cannot access private method %s in class %s", method, ownerClass)
 	}
 
@@ -6022,7 +6589,7 @@ func (vm *VM) callMethodResolved(method string, objectValue TinyValue, args []Ti
 	frame := vm.getFrame(fn)
 	frame.methodClass = ownerClass
 
-	setCellValue(frame.locals[0], NewNative(receiver))
+	setCellValue(frame.locals[0], receiverValue)
 	frame.locals[0].Constant = true
 
 	if isVariadic {
@@ -6305,6 +6872,33 @@ func (vm *VM) popArgs(count int) []TinyValue {
 	}
 
 	vm.top = start
+
+	return args
+}
+
+func (vm *VM) popCallArgs(count int, spreadArgs []bool) []TinyValue {
+	values := vm.popArgs(count)
+	if len(spreadArgs) == 0 {
+		return values
+	}
+	if len(spreadArgs) != count {
+		vm.fatalError(ErrorInternal, "spread argument metadata length mismatch: expected %d, got %d", count, len(spreadArgs))
+	}
+
+	args := make([]TinyValue, 0, len(values))
+	for i, value := range values {
+		if !spreadArgs[i] {
+			args = append(args, value)
+			continue
+		}
+
+		array, ok := vm.valueAsArrayForRead(value)
+		if !ok {
+			vm.fatalError(ErrorType, "spread operator expects array, got %s", TypeName(value))
+		}
+
+		args = append(args, array.Elements...)
+	}
 
 	return args
 }
@@ -6709,6 +7303,20 @@ func (vm *VM) getIndexValue(objectValue TinyValue, indexValue TinyValue) TinyVal
 
 		return value
 
+	case *InstanceValue:
+		var key string
+		if indexValue.IsInt {
+			key = intToString(indexValue.AsInt)
+		} else {
+			key = valueToString(indexValue)
+		}
+		value, exists := obj.Fields[key]
+		if !exists {
+			return NewNull()
+		}
+
+		return value
+
 	default:
 		vm.fatalError(ErrorType, "cannot index %s", TypeName(objectValue))
 		return NewNull()
@@ -6755,12 +7363,12 @@ func (vm *VM) setIndexValue(objectValue TinyValue, indexValue TinyValue, value T
 		} else {
 			key = valueToString(indexValue)
 		}
-		if className, isClass := obj["__class"]; isClass {
-			vm.runtimeError(ErrorRuntime, "cannot modify class '%s' by index operator.", className.Value)
-			return
-		}
 		obj[key] = value
 		vm.invalidateJitObjectMirror(obj)
+
+	case *InstanceValue:
+		vm.runtimeError(ErrorRuntime, "cannot modify class '%s' by index operator.", obj.ClassName)
+		return
 
 	default:
 		vm.fatalError(ErrorType, "cannot index assign %s", TypeName(objectValue))

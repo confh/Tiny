@@ -40,8 +40,6 @@ func tcpConnReadLine(vm *VM, tcp *NativeTcpConnectionValue, args []TinyValue) {
 		tcp.Reader = reader
 	}
 
-	expectArgs(vm, "conn.readLine", args, 0)
-
 	line, err := reader.ReadString('\n')
 	if err != nil {
 		if err == io.EOF {
@@ -82,7 +80,7 @@ func tcpConnRead(vm *VM, tcp *NativeTcpConnectionValue, args []TinyValue) {
 }
 
 func tcpConnAddress(vm *VM, tcp *NativeTcpConnectionValue, args []TinyValue) {
-	dontExpectArgs(vm, "tcp.write", args)
+	dontExpectArgs(vm, "tcp.address", args)
 
 	vm.push(NewNative(tcp.Connection.RemoteAddr().String()))
 }

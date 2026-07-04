@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	. "language.com/src/version"
 )
 
 type GitHubRelease struct {

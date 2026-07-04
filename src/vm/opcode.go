@@ -194,6 +194,10 @@ type CallInfo struct {
 	ArgCount int
 }
 
+type SpreadCallInfo struct {
+	SpreadArgs []bool
+}
+
 type DirectCallInfo struct {
 	ID       int    `json:"id"`
 	Name     string `json:"name"`
@@ -201,8 +205,9 @@ type DirectCallInfo struct {
 }
 
 type PrintInfo struct {
-	ArgCount int
-	NewLine  bool
+	ArgCount   int
+	NewLine    bool
+	SpreadArgs []bool
 }
 
 type JumpLocalGELocalInfo struct {
@@ -262,8 +267,9 @@ type ObjectInfo struct {
 }
 
 type MethodCallInfo struct {
-	Method   string
-	ArgCount int
+	Method     string
+	ArgCount   int
+	SpreadArgs []bool
 }
 
 type MethodLocalCallInfo struct {
@@ -417,18 +423,26 @@ type CallDirectSubConstInfo struct {
 }
 
 type Class struct {
-	Name           string
-	TypeParameters []string
-	Implements     []string
-	Fields         []ClassField
-	Methods        map[string]string
-	Embeds         []string
-	PrivateMethods map[string]bool
+	Name             string
+	TypeParameters   []string
+	Implements       []string
+	Fields           []ClassField
+	Methods          map[string]string
+	MethodSignatures map[string]MethodSignature
+	Embeds           []string
+	PrivateMethods   map[string]bool
+}
+
+type MethodSignature struct {
+	Params     []Param
+	ReturnType TypeHint
+	Async      bool
 }
 
 type Interface struct {
 	Name           string
 	TypeParameters []string
+	Extends        []string
 	Fields         map[string]TypeHint
 }
 

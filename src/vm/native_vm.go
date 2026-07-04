@@ -3,6 +3,7 @@ package vm
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	. "language.com/src/tinyerrors"
 )
@@ -33,16 +34,18 @@ var runtimeVMMethods map[string]NativeModuleFunc[*NativeVMValue]
 
 func init() {
 	runtimeVMMethods = map[string]NativeModuleFunc[*NativeVMValue]{
-		"loadBytecode": runtimeVMLoadBytecode,
-		"loadSource":   runtimeVMLoadSource,
-		"run":          runtimeVMRun,
-		"call":         runtimeVMCall,
-		"reset":        runtimeVMReset,
-		"setGlobal":    runtimeVMSetGlobal,
+		"loadBytecode":   runtimeVMLoadBytecode,
+		"loadSource":     runtimeVMLoadSource,
+		"run":            runtimeVMRun,
+		"call":           runtimeVMCall,
+		"stop":           runtimeVMStop,
+		"reset":          runtimeVMReset,
+		"setGlobal":      runtimeVMSetGlobal,
 		"exposeFunction": runtimeVMExposeFunction,
-		"info":         runtimeVMInfo,
+		"info":           runtimeVMInfo,
+		"functionExists": runtimeVMFunctionExists,
+		"listFunctions":  runtimeVMListFunctions,
 	}
-
 }
 
 func (vm *VM) callRuntimeVMMethod(child *NativeVMValue, method string, args []TinyValue) {
@@ -121,6 +124,7 @@ func runtimeVMLoadBytecode(vm *VM, child *NativeVMValue, args []TinyValue) {
 	loadRuntimeVMProgram(child, runtimeBytecodeLoader(runtimeVMByteSlice(vm, args[0])))
 	if child.RunMainOnLoad {
 		runRuntimeVMMain(vm, child)
+		child.MainRan = true
 	}
 
 	vm.push(NewNative(child))
@@ -151,6 +155,7 @@ func loadRuntimeVMSource(vm *VM, child *NativeVMValue, source string, file strin
 	loadRuntimeVMProgram(child, runtimeSourceLoader(source, file))
 	if child.RunMainOnLoad {
 		runRuntimeVMMain(vm, child)
+		child.MainRan = true
 	}
 }
 
@@ -200,27 +205,54 @@ func loadRuntimeVMProgram(child *NativeVMValue, program RuntimeBytecodeProgram) 
 	}
 
 	child.Loaded = true
+	child.MainRan = false
 }
 
 func runtimeVMRun(vm *VM, child *NativeVMValue, args []TinyValue) {
 	dontExpectArgs(vm, "runtime.VM.run", args)
 	runRuntimeVMMain(vm, child)
+	child.MainRan = true
 	vm.push(NewNull())
 }
 
-func runtimeVMCall(vm *VM, child *NativeVMValue, args []TinyValue) {
-	if len(args) < 1 || len(args) > 2 {
-		vm.runtimeError(ErrorRuntime, "runtime.VM.call expects 1 or 2 arguments, got %d", len(args))
-		return
+func runtimeVMListFunctions(vm *VM, child *NativeVMValue, args []TinyValue) {
+	dontExpectArgs(vm, "runtime.VM.listFunctions", args)
+
+	ensureRuntimeVMLoaded(vm, child)
+
+	functionNames := []TinyValue{}
+
+	for name := range child.VM.FunctionNames() {
+		functionNames = append(functionNames, NewNative(name))
 	}
+
+	vm.push(NewArray(functionNames))
+}
+
+func runtimeVMFunctionExists(vm *VM, child *NativeVMValue, args []TinyValue) {
+	expectArgs(vm, "runtime.VM.functionExists", args, 1)
+
+	ensureRuntimeVMLoaded(vm, child)
+
+	fnName := argString(vm, "runtime.VM.functionExists", args, 0)
+
+	vm.push(NewNative(child.VM.HasFunction(fnName)))
+}
+
+func runtimeVMCall(vm *VM, child *NativeVMValue, args []TinyValue) {
+	expectArgsRange(vm, "runtime.VM.call", args, 1, 2)
+
 	ensureRuntimeVMLoaded(vm, child)
 
 	name := argString(vm, "runtime.VM.call", args, 0)
 	callArgs := []TinyValue{}
+
 	if len(args) == 2 {
-		array := asArray(args[1], vm)
+		array := argArray(vm, "runtime.VM.call", args, 1)
 		callArgs = make([]TinyValue, len(array.Elements))
-		copy(callArgs, array.Elements)
+		for i, arg := range array.Elements {
+			callArgs[i] = wrapFunctionsForHostVM(arg, vm)
+		}
 	}
 
 	fn, ok := child.VM.functions[name]
@@ -235,13 +267,37 @@ func runtimeVMCall(vm *VM, child *NativeVMValue, args []TinyValue) {
 		return
 	}
 
+	if !child.MainRan {
+		runRuntimeVMMain(vm, child)
+		child.MainRan = true
+	}
+
 	result := child.VM.callFunctionValue(FunctionValue{ID: fn.ID, Name: fn.Name}, callArgs)
-	vm.push(result)
+	vm.push(wrapFunctionsForHostVM(result, child.VM))
 }
 
 func runtimeVMReset(vm *VM, child *NativeVMValue, args []TinyValue) {
 	dontExpectArgs(vm, "runtime.VM.reset", args)
+	child.VM.Stop()
+	if !child.VM.WaitIdle(2 * time.Second) {
+		vm.runtimeError(ErrorRuntime, "runtime.VM.reset timed out waiting for %d active execution(s); call stop() and let the VM finish before resetting", child.VM.ActiveExecutions())
+		return
+	}
+	if child.VM.taskPool != nil && !child.VM.taskPool.WaitIdle(2*time.Second) {
+		vm.runtimeError(ErrorRuntime, "runtime.VM.reset timed out waiting for %d active task(s); call stop() and let tasks finish before resetting", child.VM.taskPool.Active())
+		return
+	}
 	child.VM.ResetForRequest()
+	if child.VM.stopped != nil {
+		child.VM.stopped.Store(false)
+	}
+	child.MainRan = false
+	vm.push(NewNative(child))
+}
+
+func runtimeVMStop(vm *VM, child *NativeVMValue, args []TinyValue) {
+	dontExpectArgs(vm, "runtime.VM.stop", args)
+	child.VM.Stop()
 	vm.push(NewNative(child))
 }
 
@@ -270,7 +326,6 @@ func runtimeVMExposeFunction(vm *VM, child *NativeVMValue, args []TinyValue) {
 		vm.runtimeError(ErrorType, "runtime.VM.exposeFunction expected function, got %s", TypeName(args[1]))
 		return
 	}
-
 	value := NewNative(&HostFunctionValue{
 		VM:       vm,
 		Function: fn,
@@ -359,7 +414,7 @@ func setRuntimeVMGlobal(vm *VM, name string, value TinyValue) {
 
 	slot, exists := vm.globalNames[name]
 	if !exists {
-		slot = len(*vm.globals)
+		slot = vm.nextGlobalSlot()
 		vm.globalNames[name] = slot
 	}
 
@@ -369,4 +424,14 @@ func setRuntimeVMGlobal(vm *VM, name string, value TinyValue) {
 	(*vm.globals)[slot] = cloneValue(value)
 	vm.globalConstants[name] = false
 	vm.globalVersion++
+}
+
+func (vm *VM) nextGlobalSlot() int {
+	slot := len(*vm.globals)
+	for _, existingSlot := range vm.globalNames {
+		if existingSlot >= slot {
+			slot = existingSlot + 1
+		}
+	}
+	return slot
 }

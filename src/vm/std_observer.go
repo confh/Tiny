@@ -1,6 +1,7 @@
 package vm
 
 import (
+	"net"
 	"net/http"
 	"os"
 	"runtime"
@@ -484,11 +485,16 @@ func stdObserverStart(vm *VM, args []TinyValue) {
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		vm.runtimeError(ErrorRuntime, "observer server failed: %v", err)
+		return
+	}
 
 	go func() {
-		err := server.ListenAndServe()
+		err := server.Serve(listener)
 		if err != nil && err != http.ErrServerClosed {
-			vm.runtimeError(ErrorRuntime, "observer server failed: %v", err)
+			vm.observerStats.AddEvent("observer.error", "server failed", NewNative(err.Error()))
 		}
 	}()
 

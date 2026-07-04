@@ -1,5 +1,5 @@
 // Represents an open file stream for reading.
-class File {
+export class File {
     // Reads up to size bytes from the file and returns them as a string.
     fn read(size: number): string { }
     // Closes the file stream. Returns true if successful.
@@ -11,6 +11,9 @@ export fn open(path: string): File
 
 // Reads the entire contents of a file and returns it as a string.
 export fn readFile(fileName: string): string
+
+// Reads the entire contents of a file and returns it as a buffer.
+export fn readBytes(fileName: string): buffer
 
 // Writes the specified string data to a file. Returns true if successful.
 export fn writeFile(fileName: string, data: string): bool

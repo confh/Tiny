@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	tinyloader "language.com/src/loader"
 	. "language.com/src/vm"
 )
 
@@ -182,7 +183,7 @@ func TestLoaderResolvesDependencyEntryImport(t *testing.T) {
 		t.Fatalf("write dependency source: %v", err)
 	}
 
-	program := LoadProgram(filepath.Join("src", "main.tiny"))
+	program := tinyloader.LoadProgram(filepath.Join("src", "main.tiny"))
 	if len(program.Statements) != 1 {
 		t.Fatalf("expected dependency namespace statement, got %#v", program.Statements)
 	}
@@ -219,7 +220,7 @@ func TestLoaderResolvesLibraryFileImport(t *testing.T) {
 		t.Fatalf("write dependency source: %v", err)
 	}
 
-	program := LoadProgram(filepath.Join("src", "main.tiny"))
+	program := tinyloader.LoadProgram(filepath.Join("src", "main.tiny"))
 	if len(program.Statements) != 1 {
 		t.Fatalf("expected dependency namespace statement, got %#v", program.Statements)
 	}
@@ -404,7 +405,7 @@ func TestLoaderUsesTinyLockVersionForUnpinnedDependency(t *testing.T) {
 		t.Fatalf("write dependency source: %v", err)
 	}
 
-	program := LoadProgram(filepath.Join("src", "main.tiny"))
+	program := tinyloader.LoadProgram(filepath.Join("src", "main.tiny"))
 	if len(program.Statements) != 1 {
 		t.Fatalf("expected dependency namespace statement, got %#v", program.Statements)
 	}
@@ -588,7 +589,7 @@ export const v2 = httpxs.value;
 		t.Fatalf("write main.tiny: %v", err)
 	}
 
-	program := LoadProgram(mainPath)
+	program := tinyloader.LoadProgram(mainPath)
 	// Statements should contain the namespaces for the imports
 	if len(program.Statements) < 2 {
 		t.Fatalf("expected at least 2 namespace statements for imports, got %#v", program.Statements)

@@ -36,8 +36,8 @@ var bufferNativeMetadata = NativeTypeInfo{
 			Returns:     "bool",
 			Description: "Sets the unsigned 8-bit integer at the specified offset.",
 		},
-		"string": {
-			Name:        "string",
+		"stringify": {
+			Name:        "stringify",
 			Args:        []StdArg{},
 			Returns:     "string",
 			Description: "Turns the bytes into a string and returns it.",

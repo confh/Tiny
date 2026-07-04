@@ -1,0 +1,8 @@
+import std "io"
+
+io.println(0xFF)
+io.println(0b1010)
+io.println(0o77)
+io.println(0X1A)
+io.println(0x1_000)
+io.println(0xFF + 0b1010 + 0o77)

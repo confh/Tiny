@@ -1,4 +1,4 @@
-package main
+package compiler
 
 import (
 	"bytes"
@@ -90,8 +90,10 @@ type Compiler struct {
 	currentNamespaceVariables  map[string]string
 	currentNamespaceClasses    map[string]string
 	currentNamespaceFunctions  map[string]string
+	namespacePrivateMembers    map[string]bool
 	currentNamespaceEnums      map[string]string
 	currentNamespaceInterfaces map[string]string
+	currentTypeImportAliases   map[string]string
 
 	currentReturnType   TypeHint
 	currentFunctionName string
@@ -121,9 +123,160 @@ type Compiler struct {
 	inlineCandidates map[string]FunctionStmt
 	inlineDepth      int
 
-	enumVariants map[string]map[string][]Param // enumName -> variantName -> params
+	enumVariants map[string]map[string][]Param
 
 	jitRegionCount int
+
+	diagnosticMode bool
+}
+
+type SemanticModel struct {
+	Functions  map[string]Function
+	Classes    map[string]Class
+	Interfaces map[string]Interface
+	Globals    map[string]string
+	AST        []Stmt
+	Errors     []LangErrorType
+	compiler   *Compiler
+}
+
+func (m *SemanticModel) InferType(expr Expr) string {
+	if m.compiler == nil {
+		return "any"
+	}
+	return m.compiler.inferCompileTimeType(expr)
+}
+
+func (m *SemanticModel) ResolveVariable(name string) (Binding, bool) {
+	if m.compiler == nil {
+		return Binding{}, false
+	}
+	return m.compiler.resolveVariable(name)
+}
+
+type MemberInfo struct {
+	Name       string
+	Type       string
+	Kind       string
+	Private    bool
+	Constant   bool
+	Params     []Param
+	ReturnType TypeHint
+	Async      bool
+}
+
+func (m *SemanticModel) MemberType(ownerType string, memberName string) (MemberInfo, bool) {
+	if m == nil {
+		return MemberInfo{}, false
+	}
+
+	baseType := ownerType
+	isArray := false
+	if strings.HasPrefix(baseType, "array<") && strings.HasSuffix(baseType, ">") {
+		baseType = strings.TrimPrefix(strings.TrimSuffix(baseType, ">"), "array<")
+		isArray = true
+	}
+
+	if isArray {
+		switch memberName {
+		case "push", "pop", "shift", "unshift", "splice", "slice", "indexOf", "includes", "reverse", "sort":
+			return MemberInfo{Name: memberName, Type: "any", Kind: "method"}, true
+		case "length":
+			return MemberInfo{Name: "length", Type: "number", Kind: "property"}, true
+		}
+	}
+
+	switch baseType {
+	case "string":
+		switch memberName {
+		case "length":
+			return MemberInfo{Name: "length", Type: "number", Kind: "property"}, true
+		case "toUpperCase", "toLowerCase", "trim", "trimStart", "trimEnd":
+			return MemberInfo{Name: memberName, Type: "string", Kind: "method"}, true
+		case "indexOf", "lastIndexOf", "includes", "startsWith", "endsWith", "search":
+			return MemberInfo{Name: memberName, Type: "number", Kind: "method"}, true
+		case "replace", "replaceAll", "substring", "slice", "padStart", "padEnd", "repeat", "split", "charAt":
+			return MemberInfo{Name: memberName, Type: "string", Kind: "method"}, true
+		case "charCodeAt", "codePointAt":
+			return MemberInfo{Name: memberName, Type: "number", Kind: "method"}, true
+		}
+	case "number":
+		switch memberName {
+		case "toString":
+			return MemberInfo{Name: "toString", Type: "string", Kind: "method"}, true
+		case "toFixed", "toPrecision", "toExponential":
+			return MemberInfo{Name: memberName, Type: "string", Kind: "method"}, true
+		}
+	case "bool":
+		switch memberName {
+		case "toString":
+			return MemberInfo{Name: "toString", Type: "string", Kind: "method"}, true
+		}
+	}
+
+	if cls, exists := m.Classes[ownerType]; exists {
+		for _, field := range cls.Fields {
+			if field.Name == memberName {
+				return MemberInfo{
+					Name:     field.Name,
+					Type:     field.TypeHint.Name,
+					Kind:     "property",
+					Private:  field.Private,
+					Constant: field.Constant,
+				}, true
+			}
+		}
+		if sig, exists := cls.MethodSignatures[memberName]; exists {
+			return MemberInfo{
+				Name:       memberName,
+				Type:       sig.ReturnType.Name,
+				Kind:       "method",
+				Params:     sig.Params,
+				ReturnType: sig.ReturnType,
+				Async:      sig.Async,
+			}, true
+		}
+	}
+
+	if iface, exists := m.Interfaces[ownerType]; exists {
+		if fieldType, exists := iface.Fields[memberName]; exists {
+			return MemberInfo{
+				Name: memberName,
+				Type: fieldType.Name,
+				Kind: "property",
+			}, true
+		}
+	}
+
+	for _, ifaceName := range m.Interfaces {
+		_ = ifaceName
+	}
+
+	return MemberInfo{}, false
+}
+
+func (m *SemanticModel) GetFunctionSignature(name string) (Function, bool) {
+	if m == nil {
+		return Function{}, false
+	}
+	fn, exists := m.Functions[name]
+	return fn, exists
+}
+
+func (m *SemanticModel) GetClass(name string) (Class, bool) {
+	if m == nil {
+		return Class{}, false
+	}
+	cls, exists := m.Classes[name]
+	return cls, exists
+}
+
+func (m *SemanticModel) GetInterface(name string) (Interface, bool) {
+	if m == nil {
+		return Interface{}, false
+	}
+	iface, exists := m.Interfaces[name]
+	return iface, exists
 }
 
 func unwrapExport(stmt Stmt) (Stmt, bool) {
@@ -132,6 +285,38 @@ func unwrapExport(stmt Stmt) (Stmt, bool) {
 	}
 
 	return stmt, false
+}
+
+func collectDestructuredNames(pattern DestructurePattern) []string {
+	switch p := pattern.(type) {
+	case ObjectDestructurePattern:
+		names := []string{}
+		for _, field := range p.Fields {
+			if field.HasNested {
+				names = append(names, collectDestructuredNames(field.Pattern)...)
+			} else if field.AliasIsRenamed {
+				names = append(names, field.Alias)
+			} else {
+				names = append(names, field.Key)
+			}
+		}
+		if p.HasSpread {
+			names = append(names, p.Spread)
+		}
+		return names
+	case ArrayDestructurePattern:
+		names := []string{}
+		for _, elem := range p.Elements {
+			if elem.HasNested {
+				names = append(names, collectDestructuredNames(elem.Pattern)...)
+			} else {
+				names = append(names, elem.Name)
+			}
+		}
+		return names
+	default:
+		return nil
+	}
 }
 
 func getNumberLiteral(expr Expr) (int, float64, bool, bool) {
@@ -408,33 +593,42 @@ func (c *Compiler) optimizeExpr(expr Expr) Expr {
 
 func NewCompiler() *Compiler {
 	c := &Compiler{
-		mainInstructions:       []Instruction{},
-		functions:              map[string]Function{},
-		interfaces:             map[string]Interface{},
-		nativeFunctions:        map[string]string{},
-		externalFunctions:      map[string]Function{},
-		classes:                map[string]Class{},
-		usedFunctions:          map[string]bool{},
-		loopStack:              []LoopContext{},
-		localCount:             0,
-		globalConstants:        map[string]bool{},
-		globalIndexes:          map[string]int{},
-		anonymousFunctionCount: 0,
-		functionIDs:            map[string]int{},
-		declaredFunctions:      map[string]bool{},
-		scopes:                 []map[string]Binding{},
-		importStates:           map[string]ImportState{},
-		importStack:            []string{},
-		virtualObjects:         map[VarNodeKey]map[string]int{},
-		stdImportModules:       map[string]string{},
-		inlineCandidates:       map[string]FunctionStmt{},
-		enumVariants:           map[string]map[string][]Param{},
+		mainInstructions:        []Instruction{},
+		functions:               map[string]Function{},
+		interfaces:              map[string]Interface{},
+		nativeFunctions:         map[string]string{},
+		externalFunctions:       map[string]Function{},
+		classes:                 map[string]Class{},
+		usedFunctions:           map[string]bool{},
+		loopStack:               []LoopContext{},
+		localCount:              0,
+		globalConstants:         map[string]bool{},
+		globalIndexes:           map[string]int{},
+		anonymousFunctionCount:  0,
+		functionIDs:             map[string]int{},
+		declaredFunctions:       map[string]bool{},
+		scopes:                  []map[string]Binding{},
+		importStates:            map[string]ImportState{},
+		importStack:             []string{},
+		virtualObjects:          map[VarNodeKey]map[string]int{},
+		stdImportModules:        map[string]string{},
+		inlineCandidates:        map[string]FunctionStmt{},
+		enumVariants:            map[string]map[string][]Param{},
+		namespacePrivateMembers: map[string]bool{},
 	}
 
 	c.currentInstructions = &c.mainInstructions
 	c.beginScope()
 
 	return c
+}
+
+func (c *Compiler) SetPreserveAllFunctions(preserve bool) {
+	c.preserveAllFunctions = preserve
+}
+
+func (c *Compiler) SetDiagnosticMode(enabled bool) {
+	c.diagnosticMode = enabled
 }
 
 func (c *Compiler) predeclareNamespaceFunctions(prefix string, ns NamespaceStmt) {
@@ -816,49 +1010,6 @@ func (c *Compiler) compileScopedBlock(body []Stmt) {
 	c.endScope()
 }
 
-func abortOnCompilerSemanticErrors(file string, statements []Stmt) {
-	if file == "" && len(statements) > 0 {
-		for _, s := range statements {
-			if f := getStatementFile(s); f != "" {
-				file = f
-				break
-			}
-		}
-	}
-	diagnostics := CheckProgramSemantics(file, "", statements, false)
-	for _, diagnostic := range diagnostics {
-		if intFromAny(diagnostic["severity"]) != 1 {
-			continue
-		}
-
-		message, _ := diagnostic["message"].(string)
-		if strings.HasPrefix(message, "cannot pass type ") {
-			continue
-		}
-
-		line := 0
-		column := 0
-		if rangeValue, ok := diagnostic["range"].(map[string]any); ok {
-			if startValue, ok := rangeValue["start"].(map[string]any); ok {
-				line = intFromAny(startValue["line"]) + 1
-				column = intFromAny(startValue["character"]) + 1
-			}
-		}
-
-		diagFile, _ := diagnostic["uri"].(string)
-		if diagFile == "" {
-			diagFile = file
-		}
-		diagFile = uriToPath(diagFile)
-
-		kind := ErrorType
-		if strings.HasPrefix(message, "undefined variable: ") || strings.HasPrefix(message, "undefined export: ") {
-			kind = ErrorName
-		}
-		LangErrorAt(kind, diagFile, line, column, "%s", message)
-	}
-}
-
 func uriToPath(uri string) string {
 	if strings.HasPrefix(uri, "file:///") {
 		path := strings.TrimPrefix(uri, "file:///")
@@ -952,6 +1103,54 @@ func (c *Compiler) CompileProgram(program Program) ([]Instruction, map[string]Fu
 	return c.mainInstructions, c.functions, c.classes, c.interfaces, c.globalIndexes
 }
 
+func (c *Compiler) CompileDiagnostic(program Program) SemanticModel {
+	c.diagnosticMode = true
+	c.preserveAllFunctions = true
+
+	var collectedErrors []LangErrorType
+	SetErrorCollector(&collectedErrors)
+	defer ClearErrorCollector()
+
+	defer func() {
+		if r := recover(); r != nil {
+			switch err := r.(type) {
+			case LangErrorType:
+				collectedErrors = append(collectedErrors, err)
+			case *LangErrorType:
+				collectedErrors = append(collectedErrors, *err)
+			}
+		}
+	}()
+
+	abortOnCompilerSemanticErrors(c.currentFile, program.Statements)
+
+	c.virtualObjects = map[VarNodeKey]map[string]int{}
+	c.predeclareFunctions(program.Statements)
+
+	for _, stmt := range program.Statements {
+		c.compileStatement(stmt)
+	}
+
+	c.emit(OP_HALT, nil)
+
+	globals := map[string]string{}
+	for name := range c.globalIndexes {
+		if binding, ok := c.resolveVariable(name); ok && binding.TypeHint != "" {
+			globals[name] = binding.TypeHint
+		}
+	}
+
+	return SemanticModel{
+		Functions:  c.functions,
+		Classes:    c.classes,
+		Interfaces: c.interfaces,
+		Globals:    globals,
+		AST:        program.Statements,
+		Errors:     collectedErrors,
+		compiler:   c,
+	}
+}
+
 func (c *Compiler) predeclareStdImportsForJitRegions(stmts []Stmt) {
 	if c.stdImportModules == nil {
 		c.stdImportModules = map[string]string{}
@@ -1035,33 +1234,35 @@ func (c *Compiler) tryCompileStdIntrinsic(e MemberCallExpr) bool {
 		return false
 	}
 
+	if module != "io" && hasSpreadArg(e.Args) {
+		return false
+	}
+
 	switch module {
 	case "io":
 		switch e.Method {
 		case "println":
-			for _, arg := range e.Args {
-				c.compileExpr(arg)
-			}
+			spreadArgs := c.compileCallArgs(e.Args)
 
 			c.setLocation(e.File, e.Line, e.Column)
 
 			c.emit(OP_PRINT, PrintInfo{
-				ArgCount: len(e.Args),
-				NewLine:  true,
+				ArgCount:   len(e.Args),
+				NewLine:    true,
+				SpreadArgs: spreadArgs,
 			})
 
 			return true
 
 		case "print":
-			for _, arg := range e.Args {
-				c.compileExpr(arg)
-			}
+			spreadArgs := c.compileCallArgs(e.Args)
 
 			c.setLocation(e.File, e.Line, e.Column)
 
 			c.emit(OP_PRINT, PrintInfo{
-				ArgCount: len(e.Args),
-				NewLine:  false,
+				ArgCount:   len(e.Args),
+				NewLine:    false,
+				SpreadArgs: spreadArgs,
 			})
 
 			return true
@@ -1145,37 +1346,31 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 	oldNamespaceClasses := c.currentNamespaceClasses
 	oldNamespaceEnums := c.currentNamespaceEnums
 	oldNamespaceInterfaces := c.currentNamespaceInterfaces
+	oldTypeImportAliases := c.currentTypeImportAliases
 	oldIsCompilingNamespace := c.isCompilingNamespace
 	oldNamespaceName := c.currentNamespaceName
 
 	namespaceFunctions := map[string]string{}
 	namespaceVariables := map[string]string{}
-	namespaceClasses := map[string]string{}
+	namespaceClasses := cloneStringMap(oldNamespaceClasses)
 	namespaceEnums := map[string]string{}
-	namespaceInterfaces := map[string]string{}
+	namespaceInterfaces := cloneStringMap(oldNamespaceInterfaces)
+	namespaceTypeImportAliases := cloneStringMap(oldTypeImportAliases)
 	members := map[string]TinyValue{}
-
-	// 1. Nested namespaces first
-	for _, raw := range stmt.Statements {
-		ns, ok := raw.(NamespaceStmt)
-		if !ok {
-			continue
-		}
-
-		originalName := ns.Name
-		ns.Name = stmt.Name + "." + ns.Name
-
-		c.compileNamespace(ns)
-
-		namespaceVariables[originalName] = ns.Name
-
-		members[originalName] = NewNative(NamespaceMemberRef{
-			GlobalName: ns.Name,
-		})
-	}
 
 	for _, raw := range stmt.Statements {
 		inner, _ := unwrapExport(raw)
+
+		if ns, ok := inner.(NamespaceStmt); ok {
+			namespaceTypeImportAliases[ns.Name] = qualify(ns.Name)
+		}
+
+		if imp, ok := inner.(ImportStmt); ok {
+			namespaceTypeImportAliases[imp.Alias] = imp.TypeNamespace
+			if imp.TypeOnly {
+				continue
+			}
+		}
 
 		imp, ok := inner.(ImportStmt)
 		if !ok || (!imp.Std && !imp.Plugin) {
@@ -1221,6 +1416,12 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		fullName := qualify(name)
 
 		namespaceFunctions[name] = fullName
+		if (hasExplicitExports && !exported) || (func() bool {
+			fn, ok := inner.(FunctionStmt)
+			return ok && fn.Private
+		})() {
+			c.namespacePrivateMembers[fullName] = true
+		}
 
 		if !hasExplicitExports || exported {
 			if _, ok := inner.(ExternalFnStmt); ok {
@@ -1281,6 +1482,9 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		fullName := qualify(name)
 
 		namespaceVariables[name] = fullName
+		if hasExplicitExports && !exported {
+			c.namespacePrivateMembers[fullName] = true
+		}
 
 		if !hasExplicitExports || exported {
 			members[name] = NewNative(NamespaceMemberRef{GlobalName: fullName})
@@ -1345,6 +1549,30 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 		}
 	}
 
+	c.currentNamespaceClasses = namespaceClasses
+	c.currentNamespaceInterfaces = namespaceInterfaces
+	c.currentTypeImportAliases = namespaceTypeImportAliases
+
+	// 1. Nested namespaces after this namespace's type names are known, so
+	// imported child modules can use sibling parent types like Client.
+	for _, raw := range stmt.Statements {
+		ns, ok := raw.(NamespaceStmt)
+		if !ok {
+			continue
+		}
+
+		originalName := ns.Name
+		ns.Name = stmt.Name + "." + ns.Name
+
+		c.compileNamespace(ns)
+
+		namespaceVariables[originalName] = ns.Name
+
+		members[originalName] = NewNative(NamespaceMemberRef{
+			GlobalName: ns.Name,
+		})
+	}
+
 	for _, raw := range stmt.Statements {
 		inner, _ := unwrapExport(raw)
 
@@ -1406,6 +1634,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 	c.currentNamespaceClasses = namespaceClasses
 	c.currentNamespaceEnums = namespaceEnums
 	c.currentNamespaceInterfaces = namespaceInterfaces
+	c.currentTypeImportAliases = namespaceTypeImportAliases
 	c.isCompilingNamespace = true
 	c.currentNamespaceName = stmt.Name
 
@@ -1526,6 +1755,8 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 
 		namespacedInterface := interfaceStmt
 		namespacedInterface.Name = fullName
+		namespacedInterface.Extends = qualifyNamespaceInterfaceNames(interfaceStmt.Extends, namespaceInterfaces)
+		namespacedInterface.Fields = c.qualifyNamespaceTypeHintMap(interfaceStmt.Fields)
 
 		c.compileInterfaceStatement(namespacedInterface)
 	}
@@ -1543,6 +1774,10 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 
 		namespacedClass := classStmt
 		namespacedClass.Name = fullName
+		namespacedClass.Implements = qualifyNamespaceInterfaceNames(classStmt.Implements, namespaceInterfaces)
+		namespacedClass.Embeds = qualifyNamespaceInterfaceNames(classStmt.Embeds, namespaceClasses)
+		namespacedClass.Fields = c.qualifyNamespaceClassFields(classStmt.Fields)
+		namespacedClass.Methods = c.qualifyNamespaceMethods(classStmt.Methods)
 
 		c.compileClass(namespacedClass)
 	}
@@ -1560,6 +1795,8 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 
 		namespacedFn := fn
 		namespacedFn.Name = fullName
+		namespacedFn.Params = c.qualifyNamespaceParams(fn.Params)
+		namespacedFn.ReturnType = c.qualifyNamespaceTypeHint(fn.ReturnType)
 
 		c.compileFunction(namespacedFn)
 	}
@@ -1569,6 +1806,7 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 	c.currentNamespaceClasses = oldNamespaceClasses
 	c.currentNamespaceEnums = oldNamespaceEnums
 	c.currentNamespaceInterfaces = oldNamespaceInterfaces
+	c.currentTypeImportAliases = oldTypeImportAliases
 	c.isCompilingNamespace = oldIsCompilingNamespace
 	c.currentNamespaceName = oldNamespaceName
 
@@ -2101,6 +2339,10 @@ func (c *Compiler) compileForInStatement(stmt ForInStmt) {
 
 	loopStart := len(*c.currentInstructions)
 
+	c.loopStack = append(c.loopStack, LoopContext{
+		Start: loopStart,
+	})
+
 	// condition: __i < len(__iter)
 	c.emitLoadBinding(indexBinding)
 	c.emitLoadBinding(iterBinding)
@@ -2115,7 +2357,7 @@ func (c *Compiler) compileForInStatement(stmt ForInStmt) {
 	// const item = __iter[__i]
 	c.emitLoadBinding(iterBinding)
 	c.emitLoadBinding(indexBinding)
-	c.emit(OP_INDEX, nil) // use your actual index opcode if different
+	c.emit(OP_INDEX, nil)
 
 	itemBinding := c.declareVariable(stmt.ItemName, true)
 	c.emitStoreBinding(itemBinding, stmt.ItemName, true, TypeHint{})
@@ -2132,6 +2374,14 @@ func (c *Compiler) compileForInStatement(stmt ForInStmt) {
 		c.compileStatement(bodyStmt)
 	}
 
+	updateStart := len(*c.currentInstructions)
+
+	currentLoop := c.loopStack[len(c.loopStack)-1]
+
+	for _, continueJump := range currentLoop.ContinueJumps {
+		(*c.currentInstructions)[continueJump].Value = updateStart
+	}
+
 	c.endScope()
 
 	// __i = __i + 1
@@ -2143,6 +2393,13 @@ func (c *Compiler) compileForInStatement(stmt ForInStmt) {
 	c.emit(OP_JUMP, loopStart)
 
 	c.patchJump(exitJump)
+
+	currentLoop = c.loopStack[len(c.loopStack)-1]
+	c.loopStack = c.loopStack[:len(c.loopStack)-1]
+
+	for _, breakJump := range currentLoop.BreakJumps {
+		c.patchJump(breakJump)
+	}
 }
 
 func (c *Compiler) compileStatement(stmt Stmt) {
@@ -2456,6 +2713,10 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 		c.emit(OP_RETURN, nil)
 
 	case ImportStmt:
+		if s.TypeOnly {
+			return
+		}
+
 		if s.Std {
 			c.compileStdImport(s)
 			return
@@ -2463,6 +2724,11 @@ func (c *Compiler) compileStatement(stmt Stmt) {
 
 		if s.Plugin {
 			c.compilePluginImport(s)
+			return
+		}
+
+		if c.diagnosticMode {
+			c.storeImportedAlias(s.Alias, true)
 			return
 		}
 
@@ -2915,12 +3181,18 @@ func (c *Compiler) compileClass(stmt ClassStmt) {
 	}()
 
 	methods := map[string]string{}
+	methodSignatures := map[string]MethodSignature{}
 	privateMethods := map[string]bool{}
 	fields := []ClassField{}
 
 	for _, method := range stmt.Methods {
 		compiledName := stmt.Name + "." + method.Name
 		methods[method.Name] = compiledName
+		methodSignatures[method.Name] = MethodSignature{
+			Params:     method.Params,
+			ReturnType: method.ReturnType,
+			Async:      method.Async,
+		}
 
 		if method.Private {
 			privateMethods[method.Name] = true
@@ -2978,13 +3250,14 @@ func (c *Compiler) compileClass(stmt ClassStmt) {
 	}
 
 	c.classes[stmt.Name] = Class{
-		Name:           stmt.Name,
-		TypeParameters: stmt.TypeParameters,
-		Implements:     stmt.Implements,
-		Methods:        methods,
-		Embeds:         stmt.Embeds,
-		Fields:         fields,
-		PrivateMethods: privateMethods,
+		Name:             stmt.Name,
+		TypeParameters:   stmt.TypeParameters,
+		Implements:       stmt.Implements,
+		Methods:          methods,
+		MethodSignatures: methodSignatures,
+		Embeds:           stmt.Embeds,
+		Fields:           fields,
+		PrivateMethods:   privateMethods,
 	}
 }
 
@@ -3154,8 +3427,136 @@ func (c *Compiler) compileInterfaceStatement(stmt InterfaceStmt) {
 	c.interfaces[stmt.Name] = Interface{
 		Name:           stmt.Name,
 		TypeParameters: stmt.TypeParameters,
+		Extends:        stmt.Extends,
 		Fields:         stmt.Fields,
 	}
+
+	c.emit(OP_CONST, NewNative(InterfaceValue{Name: stmt.Name}))
+	binding := c.declareVariable(stmt.Name, true)
+	c.emit(OP_STORE_GLOBAL, VariableInfo{
+		Name:     binding.Name,
+		Constant: true,
+		Slot:     binding.Slot,
+	})
+}
+
+func qualifyNamespaceInterfaceNames(names []string, namespaceInterfaces map[string]string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	qualified := make([]string, len(names))
+	for i, name := range names {
+		base := name
+		suffix := ""
+		if colon := strings.Index(name, ":"); colon >= 0 {
+			base = name[:colon]
+			suffix = name[colon:]
+		}
+		if fullName, exists := namespaceInterfaces[base]; exists {
+			qualified[i] = fullName + suffix
+			continue
+		}
+		qualified[i] = name
+	}
+	return qualified
+}
+
+func cloneStringMap(src map[string]string) map[string]string {
+	dst := map[string]string{}
+	for key, value := range src {
+		dst[key] = value
+	}
+	return dst
+}
+
+func (c *Compiler) qualifyNamespaceTypeHint(hint TypeHint) TypeHint {
+	if hint.IsEmpty() {
+		return hint
+	}
+
+	hint.Name = c.qualifyNamespaceTypeName(hint.Name)
+	for i, typ := range hint.Types {
+		hint.Types[i] = c.qualifyNamespaceTypeName(typ)
+	}
+	return hint
+}
+
+func (c *Compiler) qualifyNamespaceTypeName(name string) string {
+	if name == "" {
+		return name
+	}
+	if strings.HasPrefix(name, "function(") {
+		return name
+	}
+	if strings.Contains(name, "|") {
+		parts := strings.Split(name, "|")
+		for i, part := range parts {
+			trimmed := strings.TrimSpace(part)
+			parts[i] = strings.Replace(part, trimmed, c.qualifyNamespaceTypeName(trimmed), 1)
+		}
+		return strings.Join(parts, "|")
+	}
+	if strings.HasPrefix(name, "array:") {
+		return "array:" + c.qualifyNamespaceTypeName(strings.TrimPrefix(name, "array:"))
+	}
+	if strings.Contains(name, ":") {
+		parts := strings.Split(name, ":")
+		for i, part := range parts {
+			parts[i] = c.qualifyNamespaceTypeName(part)
+		}
+		return strings.Join(parts, ":")
+	}
+	if strings.Contains(name, ".") {
+		dot := strings.Index(name, ".")
+		alias := name[:dot]
+		baseName := name[dot+1:]
+		if fullNamespace, exists := c.currentTypeImportAliases[alias]; exists {
+			return fullNamespace + "." + baseName
+		}
+	}
+	if fullName, exists := c.currentNamespaceClasses[name]; exists {
+		return fullName
+	}
+	if fullName, exists := c.currentNamespaceInterfaces[name]; exists {
+		return fullName
+	}
+	return name
+}
+
+func (c *Compiler) qualifyNamespaceParams(params []Param) []Param {
+	out := append([]Param(nil), params...)
+	for i := range out {
+		out[i].TypeHint = c.qualifyNamespaceTypeHint(out[i].TypeHint)
+	}
+	return out
+}
+
+func (c *Compiler) qualifyNamespaceClassFields(fields []FieldStmt) []FieldStmt {
+	out := append([]FieldStmt(nil), fields...)
+	for i := range out {
+		out[i].TypeHint = c.qualifyNamespaceTypeHint(out[i].TypeHint)
+	}
+	return out
+}
+
+func (c *Compiler) qualifyNamespaceMethods(methods []FunctionStmt) []FunctionStmt {
+	out := append([]FunctionStmt(nil), methods...)
+	for i := range out {
+		out[i].Params = c.qualifyNamespaceParams(out[i].Params)
+		out[i].ReturnType = c.qualifyNamespaceTypeHint(out[i].ReturnType)
+	}
+	return out
+}
+
+func (c *Compiler) qualifyNamespaceTypeHintMap(fields map[string]TypeHint) map[string]TypeHint {
+	if fields == nil {
+		return nil
+	}
+	out := map[string]TypeHint{}
+	for name, hint := range fields {
+		out[name] = c.qualifyNamespaceTypeHint(hint)
+	}
+	return out
 }
 
 func (c *Compiler) compileIfStatement(stmt IfStmt) {
@@ -3176,6 +3577,34 @@ func (c *Compiler) compileIfStatement(stmt IfStmt) {
 	} else {
 		c.patchJump(jumpIfFalseIndex)
 	}
+}
+
+func (c *Compiler) compileLogicalAnd(left Expr, right Expr) {
+	c.compileExpr(left)
+	jumpIfFalseIndex := c.emitJump(OP_JUMP_IF_FALSE)
+
+	c.compileExpr(right)
+	c.emit(OP_NOT, nil)
+	c.emit(OP_NOT, nil)
+	jumpOverFalseIndex := c.emitJump(OP_JUMP)
+
+	c.patchJump(jumpIfFalseIndex)
+	c.emit(OP_CONST, NewNative(false))
+	c.patchJump(jumpOverFalseIndex)
+}
+
+func (c *Compiler) compileLogicalOr(left Expr, right Expr) {
+	c.compileExpr(left)
+	jumpIfTrueIndex := c.emitJump(OP_JUMP_IF_TRUE)
+
+	c.compileExpr(right)
+	c.emit(OP_NOT, nil)
+	c.emit(OP_NOT, nil)
+	jumpOverTrueIndex := c.emitJump(OP_JUMP)
+
+	c.patchJump(jumpIfTrueIndex)
+	c.emit(OP_CONST, NewNative(true))
+	c.patchJump(jumpOverTrueIndex)
 }
 
 func isImplicitNullInitializer(expr Expr) bool {
@@ -3252,6 +3681,13 @@ func (c *Compiler) compileFunction(stmt FunctionStmt) {
 
 	for _, bodyStmt := range stmt.Body {
 		c.compileStatement(bodyStmt)
+	}
+
+	if !stmt.ReturnType.IsEmpty() && stmt.ReturnType.Name != "any" && stmt.ReturnType.Name != "null" {
+		if !alwaysReturnsOrThrowsBlock(stmt.Body) {
+			c.setLocation(stmt.File, stmt.Line, stmt.Column)
+			c.fatalError(ErrorType, "missing return: function '%s' expects return type '%s'", stmt.Name, stmt.ReturnType.Name)
+		}
 	}
 
 	c.emit(OP_CONST, NewNull())
@@ -6030,6 +6466,15 @@ func (c *Compiler) compileExpr(expr Expr) {
 		return
 
 	case BinaryExpr:
+		if e.Op == TOKEN_AND {
+			c.compileLogicalAnd(e.Left, e.Right)
+			return
+		}
+		if e.Op == TOKEN_OR {
+			c.compileLogicalOr(e.Left, e.Right)
+			return
+		}
+
 		if e.Op == TOKEN_PLUS {
 			parts := []Expr{}
 			hasString := flattenStringConcat(e, &parts)
@@ -6092,6 +6537,21 @@ func (c *Compiler) compileExpr(expr Expr) {
 		}
 
 	case CallExpr:
+		if hasSpreadArg(e.Args) {
+			c.compileExpr(IdentExpr{
+				Name:   e.Name,
+				File:   e.File,
+				Line:   e.Line,
+				Column: e.Column,
+			})
+
+			spreadArgs := c.compileCallArgs(e.Args)
+
+			c.setLocation(e.File, e.Line, e.Column)
+			c.emit(OP_CALL_VALUE_SPREAD, SpreadCallInfo{SpreadArgs: spreadArgs})
+			return
+		}
+
 		if cls, exists := c.classes[e.Name]; exists {
 			inferredArgs := []TypeHint{}
 			if len(cls.TypeParameters) > 0 {
@@ -6257,17 +6717,15 @@ func (c *Compiler) compileExpr(expr Expr) {
 		})
 
 	case CallValueExpr:
-		if len(e.Args) == 1 {
-			if spread, ok := e.Args[0].(SpreadExpr); ok {
-				c.compileExpr(e.Callee)
+		if hasSpreadArg(e.Args) {
+			c.compileExpr(e.Callee)
 
-				c.compileExpr(spread.Value)
+			spreadArgs := c.compileCallArgs(e.Args)
 
-				c.setLocation(e.File, e.Line, e.Column)
+			c.setLocation(e.File, e.Line, e.Column)
 
-				c.emit(OP_CALL_VALUE_SPREAD, nil)
-				return
-			}
+			c.emit(OP_CALL_VALUE_SPREAD, SpreadCallInfo{SpreadArgs: spreadArgs})
+			return
 		}
 
 		if instantiated, ok := e.Callee.(InstantiatedExpr); ok {
@@ -6515,12 +6973,13 @@ func (c *Compiler) compileExpr(expr Expr) {
 
 		c.compileExpr(e.Object)
 
-		for _, arg := range e.Args {
-			c.compileExpr(arg)
-		}
+		spreadArgs := c.compileCallArgs(e.Args)
 
 		if objName, ok := c.resolveFullyQualifiedName(e.Object); ok {
 			funcName := objName + "." + e.Method
+			if c.namespacePrivateMembers[funcName] && c.currentNamespaceName != objName {
+				LangErrorAt(ErrorRuntime, e.File, e.Line, e.Column, "cannot access private namespace member: %s", funcName)
+			}
 			if _, exists := c.functions[funcName]; exists {
 				c.usedFunctions[funcName] = true
 			}
@@ -6530,13 +6989,15 @@ func (c *Compiler) compileExpr(expr Expr) {
 
 		if e.Safe {
 			c.emit(OP_METHOD_CALL_SAFE, MethodCallInfo{
-				Method:   e.Method,
-				ArgCount: len(e.Args),
+				Method:     e.Method,
+				ArgCount:   len(e.Args),
+				SpreadArgs: spreadArgs,
 			})
 		} else {
 			c.emit(OP_METHOD_CALL, MethodCallInfo{
-				Method:   e.Method,
-				ArgCount: len(e.Args),
+				Method:     e.Method,
+				ArgCount:   len(e.Args),
+				SpreadArgs: spreadArgs,
 			})
 		}
 
@@ -6556,6 +7017,35 @@ func (c *Compiler) compileExpr(expr Expr) {
 	default:
 		c.fatalError(ErrorInternal, "unknown expression, %T", expr)
 	}
+}
+
+func hasSpreadArg(args []Expr) bool {
+	for _, arg := range args {
+		if _, ok := arg.(SpreadExpr); ok {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (c *Compiler) compileCallArgs(args []Expr) []bool {
+	hasSpread := hasSpreadArg(args)
+	var spreadArgs []bool
+	if hasSpread {
+		spreadArgs = make([]bool, len(args))
+	}
+
+	for i, arg := range args {
+		if spread, ok := arg.(SpreadExpr); ok {
+			c.compileExpr(spread.Value)
+			spreadArgs[i] = true
+		} else {
+			c.compileExpr(arg)
+		}
+	}
+
+	return spreadArgs
 }
 
 func (c *Compiler) isCompilingMain() bool {
@@ -6662,6 +7152,9 @@ func (c *Compiler) compileMethod(className string, stmt FunctionStmt) {
 }
 
 func (c *Compiler) emit(op OpCode, value any) {
+	if c.diagnosticMode {
+		return
+	}
 	intVal := 0
 	hasInt := false
 	if v, ok := value.(int); ok {
@@ -6685,10 +7178,16 @@ func (c *Compiler) isInsideFunction() bool {
 
 func (c *Compiler) emitJump(op OpCode) int {
 	c.emit(op, -1)
+	if c.diagnosticMode {
+		return 0
+	}
 	return len(*c.currentInstructions) - 1
 }
 
 func (c *Compiler) patchJump(index int) {
+	if c.diagnosticMode {
+		return
+	}
 	target := len(*c.currentInstructions)
 	(*c.currentInstructions)[index].Value = target
 	(*c.currentInstructions)[index].IntArg = target
@@ -6721,7 +7220,24 @@ func (c *Compiler) inferCompileTimeType(expr Expr) string {
 		}
 		return "array"
 	case ObjectExpr:
-		return "object"
+		if len(e.Fields) == 0 {
+			return "object"
+		}
+		parts := []string{}
+		for _, f := range e.Fields {
+			if f.HasCopy {
+				continue
+			}
+			fieldType := c.inferCompileTimeType(f.Value)
+			if fieldType == "any" {
+				return "object"
+			}
+			parts = append(parts, f.Name+": "+fieldType)
+		}
+		if len(parts) == 0 {
+			return "object"
+		}
+		return "{" + strings.Join(parts, ", ") + "}"
 	case IdentExpr:
 		if binding, exists := c.resolveVariable(e.Name); exists {
 			if binding.TypeHint != "" {
@@ -6885,6 +7401,9 @@ func (c *Compiler) compareCompileTimeTypes(got string, expected string) bool {
 				expected = resolvedPrefix + "." + suffix
 			}
 		}
+		if module, ok := c.stdImportModules[prefix]; ok {
+			expected = module + "." + suffix
+		}
 	}
 	if dot := strings.Index(got, "."); dot >= 0 {
 		prefix := got[:dot]
@@ -6893,6 +7412,9 @@ func (c *Compiler) compareCompileTimeTypes(got string, expected string) bool {
 			if resolvedPrefix, exists := c.currentNamespaceVariables[prefix]; exists {
 				got = resolvedPrefix + "." + suffix
 			}
+		}
+		if module, ok := c.stdImportModules[prefix]; ok {
+			got = module + "." + suffix
 		}
 	}
 
@@ -6904,6 +7426,40 @@ func (c *Compiler) compareCompileTimeTypes(got string, expected string) bool {
 	}
 
 	if expected == "any" || got == "any" {
+		return true
+	}
+	if expected == "object" && strings.HasPrefix(got, "{") {
+		return true
+	}
+	if strings.HasPrefix(got, "{") && typeContainsObject(expected) {
+		return true
+	}
+	if strings.HasPrefix(expected, "{") && strings.HasPrefix(got, "{") {
+		return c.compareStructuralTypesCompileTime(got, expected)
+	}
+	if strings.HasPrefix(got, "{") && !strings.HasPrefix(expected, "{") {
+		if c.hasInterfaceHint(expected) || c.hasInterfaceHint(strings.Split(expected, ":")[0]) {
+			ifaceFields := c.getInterfaceFieldsForCompare(expected)
+			if ifaceFields != nil {
+				gotFields := parseStructuralTypeString(got)
+				for name, expectedType := range ifaceFields {
+					gotType, ok := gotFields[name]
+					if !ok {
+						if typeAllowsNull(expectedType) {
+							continue
+						}
+						return false
+					}
+					if !c.compareCompileTimeTypes(gotType, expectedType) {
+						return false
+					}
+				}
+				return true
+			}
+		}
+		return false
+	}
+	if strings.HasPrefix(expected, "{") && (got == "object" || got == "any") {
 		return true
 	}
 	if strings.HasPrefix(expected, "function(") && got == "function" {
@@ -6982,7 +7538,7 @@ func (c *Compiler) compareCompileTimeTypes(got string, expected string) bool {
 			}
 		}
 
-		if part == "object" && (strings.HasPrefix(got, "class:") || strings.HasPrefix(got, "interface:") || got == "object" || c.hasInterfaceHint(got)) {
+		if part == "object" && (strings.HasPrefix(got, "{") || strings.HasPrefix(got, "class:") || strings.HasPrefix(got, "interface:") || got == "object" || c.hasInterfaceHint(got)) {
 			return true
 		}
 
@@ -7003,6 +7559,66 @@ func (c *Compiler) compareCompileTimeTypes(got string, expected string) bool {
 	return false
 }
 
+func (c *Compiler) compareStructuralTypesCompileTime(got string, expected string) bool {
+	gotFields := parseStructuralTypeString(got)
+	expectedFields := parseStructuralTypeString(expected)
+	for name, expectedType := range expectedFields {
+		gotType, ok := gotFields[name]
+		if !ok {
+			return false
+		}
+		if !c.compareCompileTimeTypes(gotType, expectedType) {
+			return false
+		}
+	}
+	return true
+}
+
+func parseStructuralTypeString(s string) map[string]string {
+	fields := map[string]string{}
+	s = strings.TrimPrefix(s, "{")
+	s = strings.TrimSuffix(s, "}")
+	if s == "" {
+		return fields
+	}
+	parts := SplitTopLevelTypeList(s, ',')
+	for _, part := range parts {
+		kv := splitTopLevelCompiler(strings.TrimSpace(part), ':', 2)
+		if len(kv) == 2 {
+			fields[strings.TrimSpace(strings.TrimSuffix(kv[0], "?"))] = strings.TrimSpace(kv[1])
+		}
+	}
+	return fields
+}
+
+func splitTopLevelCompiler(s string, sep rune, n int) []string {
+	parts := SplitTopLevelTypeList(s, sep)
+	if n <= 0 || len(parts) <= n {
+		return parts
+	}
+	merged := append([]string{}, parts[:n-1]...)
+	merged = append(merged, strings.Join(parts[n-1:], string(sep)))
+	return merged
+}
+
+func typeAllowsNull(typeName string) bool {
+	for _, part := range SplitTopLevelTypeList(typeName, '|') {
+		if strings.TrimSpace(part) == "null" {
+			return true
+		}
+	}
+	return false
+}
+
+func typeContainsObject(typeName string) bool {
+	for _, part := range SplitTopLevelTypeList(typeName, '|') {
+		if strings.TrimSpace(part) == "object" {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Compiler) hasInterfaceHint(name string) bool {
 	if _, exists := c.interfaces[name]; exists {
 		return true
@@ -7012,6 +7628,10 @@ func (c *Compiler) hasInterfaceHint(name string) bool {
 		if _, exists := c.interfaces[fullName]; exists {
 			return true
 		}
+	}
+
+	if HasStandardInterfaceHint(name) {
+		return true
 	}
 
 	if dot := strings.LastIndex(name, "."); dot >= 0 {
@@ -7032,7 +7652,151 @@ func (c *Compiler) hasInterfaceHint(name string) bool {
 	return false
 }
 
+func (c *Compiler) getInterfaceFieldsForCompare(name string) map[string]string {
+	iface, ok := c.resolveInterfaceForCompare(name)
+	if !ok {
+		return nil
+	}
+	fields := map[string]string{}
+	for fname, ftype := range iface.Fields {
+		fields[fname] = ftype.Name
+	}
+	return fields
+}
+
+func (c *Compiler) resolveInterfaceForCompare(name string) (Interface, bool) {
+	baseName := name
+	typeArgs := []string{}
+	if strings.Contains(name, ":") {
+		parts := SplitTopLevelTypeList(name, ':')
+		baseName = parts[0]
+		if len(parts) > 1 {
+			typeArgs = parts[1:]
+		}
+	}
+
+	resolveBase := func(candidate string) (Interface, bool) {
+		if iface, exists := c.interfaces[candidate]; exists {
+			return iface, true
+		}
+		if fullName, exists := c.currentNamespaceInterfaces[candidate]; exists {
+			if iface, exists := c.interfaces[fullName]; exists {
+				return iface, true
+			}
+		}
+		if iface, exists := GetStandardInterfaceHint(candidate); exists {
+			return iface, true
+		}
+		if dot := strings.LastIndex(candidate, "."); dot >= 0 {
+			shortName := candidate[dot+1:]
+			if iface, exists := c.interfaces[shortName]; exists {
+				return iface, true
+			}
+		}
+		if !strings.Contains(candidate, ".") {
+			for key, iface := range c.interfaces {
+				if strings.HasSuffix(key, "."+candidate) {
+					return iface, true
+				}
+			}
+		}
+		return Interface{}, false
+	}
+
+	iface, ok := resolveBase(baseName)
+	if !ok {
+		return Interface{}, false
+	}
+	iface = mergeInterfaceExtendsForCompare(iface, resolveBase, map[string]bool{})
+
+	if len(typeArgs) > 0 && len(iface.TypeParameters) > 0 {
+		subst := map[string]string{}
+		for i, tp := range iface.TypeParameters {
+			if i < len(typeArgs) {
+				subst[tp] = typeArgs[i]
+			}
+		}
+		fields := map[string]TypeHint{}
+		for fname, ftype := range iface.Fields {
+			fields[fname] = TypeHintFromString(substituteTypeHintForCompare(ftype.Name, subst))
+		}
+		iface.Fields = fields
+	}
+
+	return iface, true
+}
+
+func mergeInterfaceExtendsForCompare(iface Interface, resolveBase func(string) (Interface, bool), visiting map[string]bool) Interface {
+	if visiting[iface.Name] {
+		return iface
+	}
+	visiting[iface.Name] = true
+	defer delete(visiting, iface.Name)
+
+	fields := map[string]TypeHint{}
+	for _, parentName := range iface.Extends {
+		parentBase := parentName
+		if strings.Contains(parentBase, ":") {
+			parentBase = SplitTopLevelTypeList(parentBase, ':')[0]
+		}
+		parent, ok := resolveBase(parentBase)
+		if !ok || visiting[parent.Name] {
+			continue
+		}
+		parent = mergeInterfaceExtendsForCompare(parent, resolveBase, visiting)
+		for fname, ftype := range parent.Fields {
+			fields[fname] = ftype
+		}
+	}
+	for fname, ftype := range iface.Fields {
+		fields[fname] = ftype
+	}
+	iface.Fields = fields
+	return iface
+}
+
+func substituteTypeHintForCompare(typeName string, subst map[string]string) string {
+	if val, exists := subst[typeName]; exists {
+		return val
+	}
+	if strings.Contains(typeName, "|") {
+		parts := SplitTopLevelTypeList(typeName, '|')
+		for i, part := range parts {
+			parts[i] = substituteTypeHintForCompare(strings.TrimSpace(part), subst)
+		}
+		return strings.Join(parts, " | ")
+	}
+	if strings.Contains(typeName, ":") {
+		parts := SplitTopLevelTypeList(typeName, ':')
+		for i, part := range parts {
+			parts[i] = substituteTypeHintForCompare(strings.TrimSpace(part), subst)
+		}
+		return strings.Join(parts, ":")
+	}
+	return typeName
+}
+
 func (c *Compiler) checkCompileTimeArguments(fnName string, args []Expr, params []Param, line int, col int) {
+	minArgs := 0
+	hasVariadic := false
+	for _, p := range params {
+		if p.Variadic {
+			hasVariadic = true
+			continue
+		}
+		if !p.HasDefault {
+			minArgs++
+		}
+	}
+
+	if !hasVariadic && len(args) > len(params) {
+		c.setLocation(c.currentFile, line, col)
+		c.fatalError(ErrorType, "wrong argument count for %s: expected at most %d, got %d", fnName, len(params), len(args))
+	} else if len(args) < minArgs {
+		c.setLocation(c.currentFile, line, col)
+		c.fatalError(ErrorType, "wrong argument count for %s: expected at least %d, got %d", fnName, minArgs, len(args))
+	}
+
 	for i, arg := range args {
 		if i >= len(params) {
 			break
@@ -7692,6 +8456,94 @@ func (c *Compiler) classImplementsInterface(gotClass string, expectedInterface s
 			return true
 		}
 		if strings.HasSuffix(imp, "."+expectedInterface) || strings.HasSuffix(expectedInterface, "."+imp) {
+			return true
+		}
+		if c.interfaceExtendsInterface(imp, expectedInterface, map[string]bool{}) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Compiler) interfaceExtendsInterface(gotInterface string, expectedInterface string, visiting map[string]bool) bool {
+	gotInterface = baseTypeName(gotInterface)
+	expectedInterface = baseTypeName(expectedInterface)
+	if gotInterface == expectedInterface || strings.HasSuffix(gotInterface, "."+expectedInterface) || strings.HasSuffix(expectedInterface, "."+gotInterface) {
+		return true
+	}
+	if visiting[gotInterface] {
+		return false
+	}
+	visiting[gotInterface] = true
+	defer delete(visiting, gotInterface)
+
+	iface, ok := c.interfaces[gotInterface]
+	if !ok {
+		for name, candidate := range c.interfaces {
+			if strings.HasSuffix(name, "."+gotInterface) {
+				iface = candidate
+				ok = true
+				break
+			}
+		}
+	}
+	if !ok {
+		return false
+	}
+	for _, parent := range iface.Extends {
+		parent = baseTypeName(parent)
+		if parent == expectedInterface || strings.HasSuffix(parent, "."+expectedInterface) || strings.HasSuffix(expectedInterface, "."+parent) {
+			return true
+		}
+		if c.interfaceExtendsInterface(parent, expectedInterface, visiting) {
+			return true
+		}
+	}
+	return false
+}
+
+func baseTypeName(name string) string {
+	if strings.Contains(name, ":") {
+		name = strings.Split(name, ":")[0]
+	}
+	return name
+}
+
+func alwaysReturnsOrThrows(stmt Stmt) bool {
+	if stmt == nil {
+		return false
+	}
+	switch s := stmt.(type) {
+	case ReturnStmt, ThrowStmt:
+		return true
+	case IfStmt:
+		if len(s.ElseBody) > 0 && alwaysReturnsOrThrowsBlock(s.ThenBody) && alwaysReturnsOrThrowsBlock(s.ElseBody) {
+			return true
+		}
+		return false
+	case TryCatchStmt:
+		if alwaysReturnsOrThrowsBlock(s.FinallyBody) {
+			return true
+		}
+		return alwaysReturnsOrThrowsBlock(s.TryBody) && alwaysReturnsOrThrowsBlock(s.CatchBody)
+	case MatchStmt:
+		if len(s.Default) == 0 || !alwaysReturnsOrThrowsBlock(s.Default) {
+			return false
+		}
+		for _, c := range s.Cases {
+			if !alwaysReturnsOrThrowsBlock(c.Body) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func alwaysReturnsOrThrowsBlock(stmts []Stmt) bool {
+	for _, raw := range stmts {
+		stmt, _ := unwrapExport(raw)
+		if alwaysReturnsOrThrows(stmt) {
 			return true
 		}
 	}

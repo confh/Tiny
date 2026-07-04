@@ -103,21 +103,57 @@ func runFatalHook(info FatalCrashInfo) bool {
 	return handled
 }
 
+var (
+	errorCollectorMu sync.Mutex
+	errorCollector   *[]LangErrorType
+)
+
+func SetErrorCollector(collector *[]LangErrorType) {
+	errorCollectorMu.Lock()
+	defer errorCollectorMu.Unlock()
+	errorCollector = collector
+}
+
+func ClearErrorCollector() {
+	errorCollectorMu.Lock()
+	defer errorCollectorMu.Unlock()
+	errorCollector = nil
+}
+
 func LangError(kind ErrorKind, format string, args ...any) {
-	panic(LangErrorType{
+	err := LangErrorType{
 		Kind:    kind,
 		Message: fmt.Sprintf(format, args...),
-	})
+	}
+	if tryCollect(err) {
+		return
+	}
+	panic(err)
 }
 
 func LangErrorAt(kind ErrorKind, file string, line int, column int, format string, args ...any) {
-	panic(LangErrorType{
+	err := LangErrorType{
 		Kind:    kind,
 		Message: fmt.Sprintf(format, args...),
 		File:    file,
 		Line:    line,
 		Column:  column,
-	})
+	}
+	if tryCollect(err) {
+		return
+	}
+	panic(err)
+}
+
+func tryCollect(err LangErrorType) bool {
+	errorCollectorMu.Lock()
+	collector := errorCollector
+	errorCollectorMu.Unlock()
+	if collector == nil {
+		return false
+	}
+	*collector = append(*collector, err)
+	return true
 }
 
 func HandleLangError() {

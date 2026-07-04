@@ -1,9 +1,14 @@
 package vm
 
 import (
+	"bytes"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
+	"net"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -149,6 +154,30 @@ func (p *VMPool) Put(vm *VM) {
 	p.mu.Unlock()
 
 	p.cond.Signal()
+}
+
+func (p *VMPool) Active() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.active
+}
+
+func (p *VMPool) WaitIdle(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for p.active > 0 {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false
+		}
+		timer := time.AfterFunc(remaining, func() {
+			p.cond.Broadcast()
+		})
+		p.cond.Wait()
+		timer.Stop()
+	}
+	return true
 }
 
 func (p *VMPool) Snapshot() ObjectValue {
@@ -334,7 +363,7 @@ func serverStart(vm *VM, server *NativeServerValue, args []TinyValue) {
 				}
 			}
 
-			reqObj := NewNative(requestObjectFromHTTP(r, string(bodyBytes), params))
+			reqObj := NewNative(requestObjectFromHTTP(r, bodyBytes, params))
 
 			requestVM := server.Workers.Get()
 			defer server.Workers.Put(requestVM)
@@ -370,17 +399,24 @@ func serverStart(vm *VM, server *NativeServerValue, args []TinyValue) {
 	}
 	server.httpServer = httpServer
 
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		vm.runtimeError(ErrorRuntime, "server failed: %v", err)
+		return
+	}
+
 	if async {
 		go func() {
-			err := httpServer.ListenAndServe()
+			err := httpServer.Serve(listener)
 			if err != nil && err != http.ErrServerClosed {
-				vm.runtimeError(ErrorRuntime, "server failed: %v", err)
+				fmt.Printf("[http server error] %v\n", err)
 			}
 		}()
 	} else {
-		err := httpServer.ListenAndServe()
+		err := httpServer.Serve(listener)
 		if err != nil && err != http.ErrServerClosed {
 			vm.runtimeError(ErrorRuntime, "server failed: %v", err)
+			return
 		}
 	}
 
@@ -433,15 +469,23 @@ func serveStaticRoute(w http.ResponseWriter, r *http.Request, routes map[string]
 	return false
 }
 
-func requestObjectFromHTTP(r *http.Request, body string, params ObjectValue) ObjectValue {
+func requestObjectFromHTTP(r *http.Request, bodyBytes []byte, params ObjectValue) ObjectValue {
+	body := string(bodyBytes)
+	form, formAll, files, isMultipart := requestFormAndFilesFromHTTP(r, bodyBytes)
+
 	obj := ObjectValue{
 		"path":          NewNative(r.URL.Path),
 		"url":           NewNative(r.URL.String()),
 		"method":        NewNative(r.Method),
 		"body":          NewNative(body),
+		"bodyBytes":     NewNative(&BufferValue{Bytes: bodyBytes}),
 		"params":        NewNative(params),
 		"contentLength": NewNative(r.ContentLength),
 		"remoteAddr":    NewNative(r.RemoteAddr),
+		"form":          NewNative(form),
+		"formAll":       NewNative(formAll),
+		"files":         NewNative(files),
+		"multipart":     NewNative(isMultipart),
 	}
 
 	var queryMap ObjectValue
@@ -470,6 +514,103 @@ func requestObjectFromHTTP(r *http.Request, body string, params ObjectValue) Obj
 	obj["headers"] = NewNative(headers)
 
 	return obj
+}
+
+func requestFormAndFilesFromHTTP(r *http.Request, bodyBytes []byte) (ObjectValue, ObjectValue, ObjectValue, bool) {
+	form := ObjectValue{}
+	formAll := ObjectValue{}
+	files := ObjectValue{}
+
+	contentType := r.Header.Get("Content-Type")
+	if contentType == "" {
+		return form, formAll, files, false
+	}
+
+	mediaType, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return form, formAll, files, false
+	}
+
+	switch mediaType {
+	case "multipart/form-data":
+		boundary := params["boundary"]
+		if boundary == "" {
+			return form, formAll, files, true
+		}
+		readMultipartParts(multipart.NewReader(bytes.NewReader(bodyBytes), boundary), form, formAll, files)
+		return form, formAll, files, true
+
+	case "application/x-www-form-urlencoded":
+		values, err := url.ParseQuery(string(bodyBytes))
+		if err != nil {
+			return form, formAll, files, false
+		}
+		for key, vals := range values {
+			addFormValues(form, formAll, key, vals)
+		}
+	}
+
+	return form, formAll, files, false
+}
+
+func readMultipartParts(reader *multipart.Reader, form ObjectValue, formAll ObjectValue, files ObjectValue) {
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			return
+		}
+		if err != nil {
+			return
+		}
+
+		name := part.FormName()
+		if name == "" {
+			continue
+		}
+
+		data, err := io.ReadAll(part)
+		if err != nil {
+			continue
+		}
+
+		if filename := part.FileName(); filename != "" {
+			file := ObjectValue{
+				"field":       NewNative(name),
+				"filename":    NewNative(filename),
+				"contentType": NewNative(part.Header.Get("Content-Type")),
+				"size":        NewInt(len(data)),
+				"bytes":       NewNative(&BufferValue{Bytes: data}),
+				"text":        NewNative(string(data)),
+			}
+			appendObjectArray(files, name, NewNative(file))
+			continue
+		}
+
+		addFormValues(form, formAll, name, []string{string(data)})
+	}
+}
+
+func addFormValues(form ObjectValue, formAll ObjectValue, name string, values []string) {
+	if len(values) == 0 {
+		return
+	}
+	if _, exists := form[name]; !exists {
+		form[name] = NewNative(values[0])
+	}
+	for _, value := range values {
+		appendObjectArray(formAll, name, NewNative(value))
+	}
+}
+
+func appendObjectArray(object ObjectValue, name string, value TinyValue) {
+	if existing, ok := object[name]; ok {
+		if arr, ok := existing.Value.(*ArrayValue); ok {
+			arr.Elements = append(arr.Elements, value)
+			return
+		}
+	}
+
+	object[name] = NewNative(&ArrayValue{Elements: []TinyValue{value}})
 }
 
 func matchRoute(pattern string, actualPath string) (bool, ObjectValue) {

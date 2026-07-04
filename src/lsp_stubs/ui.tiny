@@ -1,5 +1,5 @@
 // Represents an HTML-based user interface window (WebView).
-class WebView {
+export class WebView {
   // Sets the title window of the WebView.
   fn setTitle(title: string): null
   // Sets the width and height dimensions of the WebView window.
@@ -34,7 +34,7 @@ class WebView {
   fn close(): null
 }
 
-interface WebViewOptions {
+export interface WebViewOptions {
     debug?: bool
     hidden?: bool
     frameless?: bool
@@ -42,3 +42,15 @@ interface WebViewOptions {
 
 // Creates a new WebView instance, optionally with debugging enabled.
 export fn new(options?: bool | WebViewOptions): WebView
+
+// Prompts the user with a native dialog to open a file.
+// Returns the selected file path, or null if cancelled.
+export fn openFileDialog(title?: string, filter?: string): string | null
+
+// Prompts the user with a native dialog to save a file.
+// Returns the chosen file path, or null if cancelled.
+export fn saveFileDialog(title?: string, defaultName?: string): string | null
+
+// Prompts the user with a native dialog to select a directory.
+// Returns the selected directory path, or null if cancelled.
+export fn selectFolderDialog(title?: string): string | null

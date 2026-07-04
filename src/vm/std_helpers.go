@@ -198,6 +198,12 @@ func (vm *VM) valueAsObjectForRead(value TinyValue) (ObjectValue, bool) {
 	}
 
 	switch obj := value.Value.(type) {
+	case *InstanceValue:
+		if obj == nil {
+			return nil, false
+		}
+		return obj.Fields, true
+
 	case ObjectValue:
 		return obj, true
 
@@ -237,6 +243,7 @@ func (vm *VM) valueAsObjectForRead(value TinyValue) (ObjectValue, bool) {
 type objectWriteTarget struct {
 	vm     *VM
 	native ObjectValue
+	inst   *InstanceValue
 	wasm   *WasmObjectValue
 }
 
@@ -246,6 +253,11 @@ func (vm *VM) valueAsObjectForWrite(value TinyValue) (objectWriteTarget, bool) {
 	}
 
 	switch obj := value.Value.(type) {
+	case *InstanceValue:
+		if obj == nil {
+			return objectWriteTarget{}, false
+		}
+		return objectWriteTarget{vm: vm, native: obj.Fields, inst: obj}, true
 	case ObjectValue:
 		return objectWriteTarget{vm: vm, native: obj}, true
 	case *ObjectValue:
@@ -285,6 +297,10 @@ func (target objectWriteTarget) isWasm() bool {
 	return target.wasm != nil
 }
 
+func (target objectWriteTarget) isInstance() bool {
+	return target.inst != nil
+}
+
 func (target objectWriteTarget) materialize() ObjectValue {
 	if target.wasm != nil {
 		if target.vm == nil {
@@ -295,6 +311,9 @@ func (target objectWriteTarget) materialize() ObjectValue {
 			return nil
 		}
 		return obj
+	}
+	if target.inst != nil {
+		return target.inst.Fields
 	}
 	return target.native
 }

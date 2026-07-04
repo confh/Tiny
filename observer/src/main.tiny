@@ -3,8 +3,20 @@ import std "http"
 import std "json"
 import std "ui"
 import std "url"
+import std "tray";
 
 embedfolder "./ui" const assets
+embedbytes "../observer.png" const icon
+
+try {
+    const singleInstance = http.server(49321)
+    singleInstance.get("/ping", fn(req) {
+        return http.response(200, "ok")
+    })
+    singleInstance.start(true)
+} catch err {
+    throw "App already open"
+}
 
 const combinedHtml = `<!doctype html>
 <html>
@@ -175,12 +187,25 @@ ${assets["app.js"]}
 </body>
 </html>`
 
+const tra = tray.new()
+
+tra.setIcon(icon)
+
 const splash = ui.new({
     frameless: true,
     width: 1040,
     height: 720
 })
 splash.setTitle("Tiny Observer - Loading")
+
+tra.add("quit", fn() {
+  splash.close()
+  tra.quit()
+})
+
+tra.onClick(fn() {
+  splash.show()
+})
 
 fn normalizeEndpoint(value: string): string {
     let endpoint = value
@@ -323,7 +348,7 @@ splash.callback("observerWindowAction", fn(action: string) {
             splash.toggleMaximize()
         }
         "close" {
-            splash.close()
+            splash.hide()
         }
     }
     return "ok"
@@ -331,6 +356,8 @@ splash.callback("observerWindowAction", fn(action: string) {
 
 splash.callback("observerRequest", observerRequestCallback)
 splash.setHtml(combinedHtml)
+
+tra.show()
 
 io.println("Tiny Observer ready")
 splash.run()

@@ -352,6 +352,7 @@ func writeMultiCharOperator(out *strings.Builder, runes []rune, index int) (bool
 		"&^=",
 		"<<=",
 		">>=",
+		"??",
 		"==",
 		"!=",
 		"<=",
@@ -361,6 +362,9 @@ func writeMultiCharOperator(out *strings.Builder, runes []rune, index int) (bool
 		"*=",
 		"/=",
 		"%=",
+		"&=",
+		"^=",
+		"|=",
 		"&&",
 		"||",
 		"=>",
@@ -369,6 +373,7 @@ func writeMultiCharOperator(out *strings.Builder, runes []rune, index int) (bool
 		"&^",
 		"<<",
 		">>",
+		"**",
 	}
 
 	for _, op := range spacedOperators {
@@ -635,6 +640,13 @@ func normalizePunctuationOutsideStrings(code string) string {
 				}
 			}
 
+			if !needsSpace && len(trimmed) > 0 {
+				last := trimmed[len(trimmed)-1]
+				if last == '=' || last == '?' || last == ':' || last == '!' || last == '&' || last == '|' {
+					needsSpace = true
+				}
+			}
+
 			trimTrailingSpaces(&out)
 			if needsSpace {
 				out.WriteRune(' ')
@@ -645,6 +657,36 @@ func normalizePunctuationOutsideStrings(code string) string {
 
 		case '[':
 			trimTrailingSpaces(&out)
+
+			if out.Len() > 0 {
+				last := lastRune(out.String())
+				if last == ')' || last == ']' {
+					// fn()[0] or [[1]] — no space
+				} else if isIdentifierPart(last) {
+					// arr[0] — no space unless keyword like "return"
+					s := out.String()
+					r := []rune(s)
+					j := len(r) - 1
+					for j >= 0 && isIdentifierPart(r[j]) {
+						j--
+					}
+					word := string(r[j+1:])
+					keywords := []string{"return", "export", "const", "let", "field", "fn"}
+					isKeyword := false
+					for _, kw := range keywords {
+						if word == kw {
+							isKeyword = true
+							break
+						}
+					}
+					if isKeyword {
+						out.WriteRune(' ')
+					}
+				} else if last != '{' && last != '(' && last != '[' {
+					out.WriteRune(' ')
+				}
+			}
+
 			out.WriteRune(ch)
 			i = skipSpacesAfter(runes, i)
 			continue
@@ -666,7 +708,7 @@ func normalizePunctuationOutsideStrings(code string) string {
 
 			out.WriteRune(ch)
 
-			if i+1 < len(runes) && !unicode.IsSpace(runes[i+1]) && runes[i+1] != '}' {
+			if i+1 < len(runes) && runes[i+1] != '}' {
 				out.WriteRune(' ')
 			}
 
@@ -718,7 +760,6 @@ func normalizePunctuationOutsideStrings(code string) string {
 				continue
 			}
 
-			trimTrailingSpaces(&out)
 			out.WriteRune(ch)
 
 			if !isGenericColon(runes, i) && shouldWriteSpaceAfterColon(runes, i+1) {
@@ -729,7 +770,6 @@ func normalizePunctuationOutsideStrings(code string) string {
 			continue
 
 		case '.':
-			trimTrailingSpaces(&out)
 			out.WriteRune(ch)
 			i = skipSpacesAfter(runes, i)
 			continue
@@ -1040,7 +1080,7 @@ func buildCollapsedLine(prefix string, openChar byte, inner string, closeChar by
 	between := ""
 	if len(prefix) > 0 {
 		last := prefix[len(prefix)-1]
-		if openChar == '[' && (last == '=' || last == ',' || last == ':' || last == ' ') {
+		if openChar == '[' && (last == '=' || last == ',' || last == ':') {
 			between = " "
 		}
 	}

@@ -7,7 +7,7 @@ export enum Signal {
 }
 
 // Represents a running subprocess instance.
-class Process {
+export class Process {
     // Returns the process ID (PID) of the subprocess.
     fn pid(): number
     // Waits for the subprocess to finish executing.

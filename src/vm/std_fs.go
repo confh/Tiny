@@ -3,6 +3,7 @@ package vm
 import (
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -23,6 +24,7 @@ func init() {
 	stdFsMethods = map[string]StdModuleFunc{
 		"open":       stdFsOpen,
 		"readFile":   stdFsReadFile,
+		"readBytes":  stdFsReadBytes,
 		"writeFile":  stdFsWriteFile,
 		"writeBytes": stdFsWriteBytes,
 		"exists":     stdFsExists,
@@ -55,6 +57,19 @@ func stdFsOpen(vm *VM, args []TinyValue) {
 	vm.push(NewNative(&NativeFileValue{
 		File: file,
 		Path: path,
+	}))
+}
+
+func stdFsReadBytes(vm *VM, args []TinyValue) {
+	expectArgs(vm, "fs.readBytes", args, 1)
+	fileName := argString(vm, "fs.readFile", args, 0)
+	data, err := os.ReadFile(fileName)
+	if err != nil {
+		vm.runtimeError(ErrorRuntime, "error reading file: %s", err)
+	}
+
+	vm.push(NewNative(&BufferValue{
+		Bytes: data,
 	}))
 }
 
@@ -238,4 +253,38 @@ func stdFsRemove(vm *VM, args []TinyValue) {
 	}
 
 	vm.push(NewNull())
+}
+
+func stdFsIsDir(vm *VM, args []TinyValue) {
+	expectArgs(vm, "fs.isDir", args, 1)
+
+	path := argString(vm, "fs.isDir", args, 0)
+
+	fileInfo, err := os.Stat(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			vm.runtimeError(ErrorRuntime, "path '%s' does not exist", path)
+		} else {
+			vm.runtimeError(ErrorRuntime, "error while getting path stats: %s", err)
+		}
+	}
+
+	vm.push(NewNative(fileInfo.IsDir()))
+}
+
+func stdFsIsFile(vm *VM, args []TinyValue) {
+	expectArgs(vm, "fs.isFile", args, 1)
+
+	path := argString(vm, "fs.isFile", args, 0)
+
+	fileInfo, err := os.Stat(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			vm.runtimeError(ErrorRuntime, "path '%s' does not exist", path)
+		} else {
+			vm.runtimeError(ErrorRuntime, "error while getting path stats: %s", err)
+		}
+	}
+
+	vm.push(NewNative(fileInfo.Mode().IsRegular()))
 }

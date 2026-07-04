@@ -1,0 +1,11 @@
+export enum Algorithms {
+    SHA256 = "sha256",
+    SHA512 = "sha512",
+    SHA1 = "sha1",
+    MD5 = "md5",
+}
+
+// Computes a hash of the given value.
+export fn hash(method: Algorithms, value: string | buffer): buffer
+// Generates a UUID v4 string.
+export fn uuid(): string

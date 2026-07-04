@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	. "language.com/src/tinyerrors"
+	. "language.com/src/version"
 )
 
 func runtimeFilenameForTarget(target string) (string, error) {

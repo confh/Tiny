@@ -2,101 +2,101 @@ export interface MemoryStats {
     alloc: number,
     totalAlloc: number,
     sys: number,
-    numGC: number
+    numGC: number,
 }
 
+// Controls which standard library modules are enabled in a VM instance.
 export interface VMStdlibOptions {
-    array: bool,
-    math: bool,
-    strings: bool,
-    json: bool,
-    fs: bool,
-    app: bool,
-    buffer: bool,
-    regex: bool,
-    io: bool,
-    process: bool,
-    time: bool,
-    error: bool,
-    http: bool,
-    os: bool,
-    runtime: bool,
-    net: bool,
-    path: bool,
-    object: bool,
-    observer: bool,
-    desktop: bool,
-    sync: bool,
-    tests: bool,
-    ui: bool,
-    websocket: bool,
-    tray: bool,
-    validate: bool,
-    url: bool
+    array?: bool,
+    math?: bool,
+    strings?: bool,
+    json?: bool,
+    fs?: bool,
+    app?: bool,
+    buffer?: bool,
+    regex?: bool,
+    io?: bool,
+    process?: bool,
+    time?: bool,
+    error?: bool,
+    http?: bool,
+    os?: bool,
+    runtime?: bool,
+    net?: bool,
+    path?: bool,
+    object?: bool,
+    observer?: bool,
+    desktop?: bool,
+    sync?: bool,
+    tests?: bool,
+    ui?: bool,
+    websocket?: bool,
+    tray?: bool,
+    validate?: bool,
+    url?: bool,
 }
 
+// Options for creating a new VM instance.
 export interface VMOptions {
-    isolated: bool,
-    allowedStdlib: VMStdlibOptions,
-    cliArgs: array,
-    globals: object,
-    disableJIT: bool,
-    runMainOnLoad: bool
+// Run the VM in isolated mode.
+    isolated?: bool,
+// Controls which standard library modules are enabled.
+    allowedStdlib?: VMStdlibOptions,
+// Command-line arguments for the VM.
+    cliArgs?: array,
+// Global variables available in the VM.
+    globals?: object,
+// Disable the JIT compiler.
+    disableJIT?: bool,
+// Run the main function on load.
+    runMainOnLoad?: bool,
 }
 
-// Represents an isolated in-process Tiny VM.
+// Represents a sandboxed virtual machine instance.
 export class VM {
-    // Loads Tiny bytecode into this VM.
-    fn loadBytecode(bytes: buffer | string): VM { }
-
-    // Compiles and loads Tiny source code into this VM.
-    fn loadSource(source: string, file?: string): VM { }
-
-    // Runs the loaded bytecode top-level program.
-    fn run(): null { }
-
-    // Calls a function in the loaded VM.
-    fn call(name: string, args?: array): any { }
-
-    // Clears transient execution state so the VM can be reused.
-    fn reset(): VM { }
-
-    // Injects or replaces a global value in this VM.
-    fn setGlobal(name: string, value: any): VM { }
-
-    // Exposes a host Tiny function as a callable global inside this VM.
-    fn exposeFunction(name: string, func: function): VM { }
-
-    // Returns information about this VM.
-    fn info(): object { }
+// Loads compiled bytecode into the VM.
+    fn loadBytecode(bytes: buffer | string): VM
+// Loads and compiles source code into the VM.
+    fn loadSource(source: string, file?: string): VM
+// Runs the loaded program.
+    fn run(): null
+// Calls a function by name.
+    fn call(name: string, args?: array): any
+// Checks if a function exists in the VM.
+    fn functionExists(name: string): bool
+// Lists all defined function names.
+    fn listFunctions(): array:string
+// Stops the VM.
+    fn stop(): VM
+// Resets the VM state.
+    fn reset(): VM
+// Sets a global variable.
+    fn setGlobal(name: string, value: any): VM
+// Exposes a Go function to the VM.
+    fn exposeFunction(name: string, func: function): VM
+// Returns information about the VM.
+    fn info(): object
 }
 
-// Creates a new in-process Tiny VM.
+// Creates a new VM instance.
 export fn newVM(options?: VMOptions): VM
-
-// Locks the current OS thread to the active goroutine/execution state.
+// Locks the current goroutine to the OS thread.
 export fn lockThread(): null
-
-// Unlocks the current OS thread from the active goroutine/execution state.
+// Unlocks the current goroutine from the OS thread.
 export fn unlockThread(): null
-
-// Registers a callback to run when a fatal runtime error occurs.
+// Registers a handler for fatal errors.
 export fn onFatal(callback: function): null
-
-// Clears the registered fatal runtime error callback handler.
+// Clears the fatal error handler.
 export fn clearFatalHandler(): null
-
-// Returns an object containing memory allocation statistics.
+// Returns memory allocation statistics.
 export fn memoryStats(): MemoryStats
-
-// Triggers a garbage collection run to reclaim unused memory.
+// Triggers garbage collection.
 export fn gc(): null
-
-// Returns whether or not the running app was packed by `tiny pack`
+// Returns true if running from a packed binary.
 export fn isPacked(): bool
-
-// Compiles a string of Tiny source code to a bytecode buffer.
+// Compiles source code to bytecode.
 export fn compileSource(source: string, file?: string): buffer
-
-// Compiles a Tiny file path to a bytecode buffer, resolving its imports.
+// Compiles a file to bytecode.
 export fn compileFile(path: string): buffer
+// Returns the runtime version string.
+export fn version(): string

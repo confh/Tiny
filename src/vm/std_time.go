@@ -3,27 +3,39 @@ package vm
 import (
 	"fmt"
 	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	. "language.com/src/tinyerrors"
 )
 
+var stdTimeMetadata = StdModuleInfo{
+	Name: "time",
+}
+
 var stdTimeMethods map[string]StdModuleFunc
 
 func init() {
 	stdTimeMethods = map[string]StdModuleFunc{
-		"sleep":    stdTimeSleep,
-		"nowNs":    stdTimeNowNs,
-		"nowMs":    stdTimeNowMs,
-		"nowSec":   stdTimeNowSec,
-		"clock":    stdTimeClock,
-		"timeout":  stdTimeTimeout,
-		"interval": stdTimeInterval,
+		"sleep":     stdTimeSleep,
+		"nowNs":     stdTimeNowNs,
+		"nowMs":     stdTimeNowMs,
+		"nowSec":    stdTimeNowSec,
+		"parseUnix": stdTimeParseUnix,
+		"clock":     stdTimeClock,
+		"timeout":   stdTimeTimeout,
+		"interval":  stdTimeInterval,
 	}
+	registerStdModule(stdTimeMetadata)
 	registerStdEnum("time", "TimerType", ObjectValue{
 		"Timer":  NewNative("Timer"),
 		"Ticker": NewNative("Ticker"),
+	})
+	registerStdEnum("time", "TimeUnit", ObjectValue{
+		"Seconds":      NewNative("s"),
+		"Milliseconds": NewNative("ms"),
+		"Nanoseconds":  NewNative("ns"),
 	})
 }
 
@@ -58,9 +70,33 @@ func stdTimeNowSec(vm *VM, args []TinyValue) {
 	vm.push(NewInt(int(time.Now().Unix())))
 }
 
+func stdTimeParseUnix(vm *VM, args []TinyValue) {
+	expectArgs(vm, "time.parseUnix", args, 2)
+
+	timestamp := argString(vm, "time.parseUnix", args, 0)
+	unit := strings.ToLower(argString(vm, "time.parseUnix", args, 1))
+
+	parsed, err := time.Parse(time.RFC3339Nano, timestamp)
+	if err != nil {
+		vm.runtimeError(ErrorRuntime, "time.parseUnix could not parse timestamp %q: %v", timestamp, err)
+		return
+	}
+
+	switch unit {
+	case "s", "sec", "secs", "second", "seconds":
+		vm.push(NewInt(int(parsed.Unix())))
+	case "ms", "milli", "millis", "millisecond", "milliseconds":
+		vm.push(NewInt(int(parsed.UnixMilli())))
+	case "ns", "nano", "nanos", "nanosecond", "nanoseconds":
+		vm.push(NewInt(int(parsed.UnixNano())))
+	default:
+		vm.runtimeError(ErrorRuntime, "time.parseUnix unit must be one of sec, ms, or ns, got %q", unit)
+	}
+}
+
 func stdTimeClock(vm *VM, args []TinyValue) {
 	dontExpectArgs(vm, "time.clock", args)
-	vm.push(NewNative(int(time.Now().UnixMilli() - vm.start)))
+	vm.push(NewInt(int(time.Now().UnixMilli() - vm.start)))
 }
 
 func handleAsyncTimerPanic(where string, r any) {

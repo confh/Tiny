@@ -10,17 +10,18 @@ var stdValidateMethods map[string]StdModuleFunc
 
 func init() {
 	stdValidateMethods = map[string]StdModuleFunc{
-		"string": validateString,
-		"number": validateNumber,
-		"bool":   validateBool,
-		"array":  validateArray,
-		"object": validateObject,
-		"enum":   validateEnum,
-		"union":  validateUnion,
-		"any":    validateAny,
-		"body":   validateBody,
-		"query":  validateQuery,
-		"params": validateParams,
+		"string":      validateString,
+		"number":      validateNumber,
+		"bool":        validateBool,
+		"array":       validateArray,
+		"object":      validateObject,
+		"enum":        validateEnum,
+		"union":       validateUnion,
+		"any":         validateAny,
+		"body":        validateBody,
+		"query":       validateQuery,
+		"params":      validateParams,
+		"interfaceOf": validateInterfaceOf,
 	}
 	registerStdModule(stdValidateMetadata)
 }
@@ -99,6 +100,42 @@ func validateQuery(vm *VM, args []TinyValue) {
 
 func validateParams(vm *VM, args []TinyValue) {
 	validateWebSource(vm, "validate.params", "params", args)
+}
+
+func validateInterfaceOf(vm *VM, args []TinyValue) {
+	expectArgs(vm, "validate.interfaceOf", args, 2)
+	result := validateInterfaceValue(vm, "validate.interfaceOf", args[0], args[1])
+	vm.push(NewNative(result.ok))
+}
+
+func validateInterfaceValue(vm *VM, fnName string, value TinyValue, interfaceValue TinyValue) validateResult {
+	interfaceName := ""
+	switch v := interfaceValue.Value.(type) {
+	case InterfaceValue:
+		interfaceName = v.Name
+	case *InterfaceValue:
+		if v != nil {
+			interfaceName = v.Name
+		}
+	case string:
+		interfaceName = v
+	}
+	if interfaceName == "" {
+		vm.runtimeError(ErrorType, "%s expects an interface value", fnName)
+		return validateResult{ok: false, err: "expected interface value"}
+	}
+
+	hint := TypeHint{Name: interfaceName, Types: []string{interfaceName}}
+	ok, reason := vm.checkTypeHint(value, hint)
+	if !ok {
+		message := "expected value to match interface '" + interfaceName + "'"
+		if reason != "" {
+			message += reason
+		}
+		return validateResult{ok: false, err: message}
+	}
+
+	return validateResult{ok: true, value: value}
 }
 
 func validateWebSource(vm *VM, fnName string, source string, args []TinyValue) {

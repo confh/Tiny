@@ -1,5 +1,5 @@
 // Represents a mutual exclusion lock for synchronization.
-class Mutex {
+export class Mutex {
     // Acquires the lock, blocking if the lock is already held.
     fn lock(): null
     // Releases the lock.

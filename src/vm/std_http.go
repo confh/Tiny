@@ -3,9 +3,13 @@ package vm
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -21,6 +25,16 @@ var stdHttpMetadata = StdModuleInfo{
 }
 
 var stdHttpMethods map[string]StdModuleFunc
+
+var stdHTTPClient = &http.Client{
+	Transport: &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		ForceAttemptHTTP2:     true,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+	},
+}
 
 func init() {
 	stdHttpMethods = map[string]StdModuleFunc{
@@ -166,6 +180,9 @@ func requestBodyBytes(vm *VM, body TinyValue) ([]byte, string, error) {
 
 	case WasmObjectValue:
 		obj, _ := vm.valueAsObjectForRead(body)
+		if isMultipartRequestObject(obj) {
+			return multipartRequestBodyBytes(vm, obj)
+		}
 		cleaned := cleanValueForJSON(NewNative(obj))
 
 		jsonData, err := json.Marshal(cleaned)
@@ -175,7 +192,20 @@ func requestBodyBytes(vm *VM, body TinyValue) ([]byte, string, error) {
 
 		return jsonData, "application/json", nil
 
-	case ObjectValue, ArrayValue, *ArrayValue:
+	case ObjectValue:
+		if isMultipartRequestObject(v) {
+			return multipartRequestBodyBytes(vm, v)
+		}
+		cleaned := cleanValueForJSON(body)
+
+		jsonData, err := json.Marshal(cleaned)
+		if err != nil {
+			return nil, "", err
+		}
+
+		return jsonData, "application/json", nil
+
+	case ArrayValue, *ArrayValue:
 		cleaned := cleanValueForJSON(body)
 
 		jsonData, err := json.Marshal(cleaned)
@@ -188,6 +218,158 @@ func requestBodyBytes(vm *VM, body TinyValue) ([]byte, string, error) {
 	default:
 		return []byte(valueToString(body)), "text/plain; charset=utf-8", nil
 	}
+}
+
+func isMultipartRequestObject(obj ObjectValue) bool {
+	if multipartValue, ok := obj["multipart"]; ok {
+		if b, ok := multipartValue.Value.(bool); ok && b {
+			return true
+		}
+	}
+	_, hasForm := obj["form"]
+	_, hasFiles := obj["files"]
+	return hasForm || hasFiles
+}
+
+func multipartRequestBodyBytes(vm *VM, obj ObjectValue) ([]byte, string, error) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+
+	if formValue, ok := obj["form"]; ok && !isNullish(formValue) {
+		form, ok := vm.valueAsObjectForRead(formValue)
+		if !ok {
+			return nil, "", fmt.Errorf("multipart form must be an object")
+		}
+		for key, value := range form {
+			field := valueToString(ToValue(key))
+			if arr, ok := value.Value.(*ArrayValue); ok {
+				for _, elem := range arr.Elements {
+					if err := writer.WriteField(field, valueToString(elem)); err != nil {
+						return nil, "", err
+					}
+				}
+				continue
+			}
+			if err := writer.WriteField(field, valueToString(value)); err != nil {
+				return nil, "", err
+			}
+		}
+	}
+
+	if filesValue, ok := obj["files"]; ok && !isNullish(filesValue) {
+		if err := writeMultipartFiles(vm, writer, filesValue); err != nil {
+			return nil, "", err
+		}
+	}
+
+	if err := writer.Close(); err != nil {
+		return nil, "", err
+	}
+	return body.Bytes(), writer.FormDataContentType(), nil
+}
+
+func writeMultipartFiles(vm *VM, writer *multipart.Writer, filesValue TinyValue) error {
+	switch files := filesValue.Value.(type) {
+	case *ArrayValue:
+		for _, fileValue := range files.Elements {
+			if err := writeMultipartFile(vm, writer, "", fileValue); err != nil {
+				return err
+			}
+		}
+		return nil
+	case ArrayValue:
+		for _, fileValue := range files.Elements {
+			if err := writeMultipartFile(vm, writer, "", fileValue); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	filesObject, ok := vm.valueAsObjectForRead(filesValue)
+	if !ok {
+		return fmt.Errorf("multipart files must be an array or object")
+	}
+	for fieldKey, fieldValue := range filesObject {
+		field := valueToString(ToValue(fieldKey))
+		if arr, ok := fieldValue.Value.(*ArrayValue); ok {
+			for _, fileValue := range arr.Elements {
+				if err := writeMultipartFile(vm, writer, field, fileValue); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		if err := writeMultipartFile(vm, writer, field, fieldValue); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeMultipartFile(vm *VM, writer *multipart.Writer, fallbackField string, fileValue TinyValue) error {
+	file, ok := vm.valueAsObjectForRead(fileValue)
+	if !ok {
+		return fmt.Errorf("multipart file entries must be objects")
+	}
+
+	field := objectString(file, "field", fallbackField)
+	if field == "" {
+		return fmt.Errorf("multipart file entry requires field")
+	}
+
+	filename := objectString(file, "filename", "")
+	contentType := objectString(file, "contentType", "")
+	var data []byte
+
+	if pathValue, ok := file["path"]; ok && !isNullish(pathValue) {
+		path := valueToString(pathValue)
+		if filename == "" {
+			filename = filepath.Base(path)
+		}
+		read, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		data = read
+	} else if bytesValue, ok := file["bytes"]; ok && !isNullish(bytesValue) {
+		switch v := bytesValue.Value.(type) {
+		case *BufferValue:
+			data = v.Bytes
+		case BufferValue:
+			data = v.Bytes
+		case []byte:
+			data = v
+		case string:
+			data = []byte(v)
+		default:
+			return fmt.Errorf("multipart file bytes must be buffer, bytes, or string")
+		}
+	} else if textValue, ok := file["text"]; ok && !isNullish(textValue) {
+		data = []byte(valueToString(textValue))
+	} else {
+		return fmt.Errorf("multipart file entry requires path, bytes, or text")
+	}
+
+	if filename == "" {
+		filename = field
+	}
+
+	var part io.Writer
+	var err error
+	if contentType == "" {
+		part, err = writer.CreateFormFile(field, filename)
+	} else {
+		header := make(textproto.MIMEHeader)
+		header.Set("Content-Disposition", fmt.Sprintf(`form-data; name=%q; filename=%q`, field, filename))
+		header.Set("Content-Type", contentType)
+		part, err = writer.CreatePart(header)
+	}
+	if err != nil {
+		return err
+	}
+	_, err = part.Write(data)
+	return err
 }
 
 func doHTTPRequest(vm *VM, name string, method string, url string, body TinyValue, options ObjectValue) TinyValue {
@@ -237,22 +419,7 @@ func doHTTPRequest(vm *VM, name string, method string, url string, body TinyValu
 		req.Header.Set("Content-Type", contentType)
 	}
 
-	transport := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		ForceAttemptHTTP2:     false,
-		DisableKeepAlives:     true,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: timeout,
-		ExpectContinueTimeout: 1 * time.Second,
-		IdleConnTimeout:       30 * time.Second,
-	}
-
-	client := &http.Client{
-		Timeout:   timeout,
-		Transport: transport,
-	}
-
-	resp, err := client.Do(req)
+	resp, err := stdHTTPClient.Do(req)
 	if err != nil {
 		vm.runtimeError(ErrorRuntime, "%s failed: %s", name, err.Error())
 		return NewNull()

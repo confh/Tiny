@@ -7,12 +7,20 @@ import (
 
 func TestCheckTypeHintStdHttpRequestObject(t *testing.T) {
 	request := NewNative(ObjectValue{
-		"path":    NewNative("/test"),
-		"method":  NewNative("GET"),
-		"body":    NewNative(""),
-		"params":  NewNative(ObjectValue{}),
-		"query":   NewNative(ObjectValue{}),
-		"headers": NewNative(ObjectValue{}),
+		"path":          NewNative("/test"),
+		"url":           NewNative("/test"),
+		"method":        NewNative("GET"),
+		"body":          NewNative(""),
+		"bodyBytes":     NewNative(&BufferValue{}),
+		"params":        NewNative(ObjectValue{}),
+		"query":         NewNative(ObjectValue{}),
+		"headers":       NewNative(ObjectValue{}),
+		"form":          NewNative(ObjectValue{}),
+		"formAll":       NewNative(ObjectValue{}),
+		"files":         NewNative(ObjectValue{}),
+		"multipart":     NewNative(false),
+		"contentLength": NewInt(0),
+		"remoteAddr":    NewNative(""),
 	})
 
 	ok, reason := CheckTypeHint(request, stdTypeHint("http.RequestObject"), map[string]Interface{})
@@ -34,7 +42,7 @@ func TestCheckTypeHintStdHttpRequestObjectRejectsMissingField(t *testing.T) {
 	if ok {
 		t.Fatal("expected http.RequestObject to reject request object without headers")
 	}
-	if reason != " (missing field 'headers')" {
+	if !strings.HasPrefix(reason, " (missing field '") {
 		t.Fatalf("unexpected rejection reason: %q", reason)
 	}
 }
@@ -146,5 +154,125 @@ func TestCheckTypeHintNamespacedInterface(t *testing.T) {
 	ok, reason = CheckTypeHint(badVal, stdTypeHint("Results.ConnectResult"), interfaces)
 	if ok {
 		t.Fatal("expected Results.ConnectResult to reject value due to field type mismatch")
+	}
+}
+
+func TestRuntimeVMTypeHintAcceptsNonIsolatedClassAlias(t *testing.T) {
+	value := NewNative(&InstanceValue{ClassName: "Discord.Client"})
+	hint := stdTypeHint("Gateway.Client")
+
+	vm := NewVM(VMInfo{
+		Classes: map[string]Class{
+			"Gateway.Client": {
+				Name: "Gateway.Client",
+				Fields: []ClassField{
+					{Name: "latency"},
+				},
+			},
+		},
+	})
+	value.Value.(*InstanceValue).Fields = ObjectValue{
+		"latency": NewInt(42),
+	}
+
+	ok, reason := vm.checkTypeHint(value, hint)
+	if !ok {
+		t.Fatalf("expected non-isolated VM to accept class alias: %s", reason)
+	}
+
+	isolated := NewVM(VMInfo{
+		Isolated: true,
+		Classes: map[string]Class{
+			"Gateway.Client": {Name: "Gateway.Client"},
+		},
+	})
+
+	ok, _ = isolated.checkTypeHint(value, hint)
+	if ok {
+		t.Fatal("expected isolated VM to reject class alias")
+	}
+
+	differentShape := NewVM(VMInfo{
+		Classes: map[string]Class{
+			"Gateway.Client": {
+				Name: "Gateway.Client",
+				Fields: []ClassField{
+					{Name: "token"},
+				},
+			},
+		},
+	})
+
+	ok, _ = differentShape.checkTypeHint(value, hint)
+	if ok {
+		t.Fatal("expected non-isolated VM to reject unrelated class with different shape")
+	}
+
+	unresolvedAliasVM := NewVM(VMInfo{})
+	ok, reason = unresolvedAliasVM.checkTypeHint(NewNative(&InstanceValue{ClassName: "Discord.CommandsModule.CommandBuilder"}), stdTypeHint("Discord.CommandBuilder"))
+	if !ok {
+		t.Fatalf("expected unresolved namespace class alias with matching basename to be accepted: %s", reason)
+	}
+}
+
+func TestCheckTypeHintInterfaceExtends(t *testing.T) {
+	interfaces := map[string]Interface{
+		"Base": {
+			Name: "Base",
+			Fields: map[string]TypeHint{
+				"id": stdTypeHint("number"),
+			},
+		},
+		"User": {
+			Name:    "User",
+			Extends: []string{"Base"},
+			Fields: map[string]TypeHint{
+				"name": stdTypeHint("string"),
+			},
+		},
+	}
+
+	okValue := NewNative(ObjectValue{
+		"id":   NewInt(1),
+		"name": NewNative("Ada"),
+	})
+	ok, reason := CheckTypeHint(okValue, stdTypeHint("User"), interfaces)
+	if !ok {
+		t.Fatalf("expected User to accept inherited and own fields: %s", reason)
+	}
+
+	missingBase := NewNative(ObjectValue{
+		"name": NewNative("Ada"),
+	})
+	ok, reason = CheckTypeHint(missingBase, stdTypeHint("User"), interfaces)
+	if ok {
+		t.Fatal("expected User to reject missing inherited field")
+	}
+	if reason != " (missing field 'id')" {
+		t.Fatalf("unexpected rejection reason: %q", reason)
+	}
+}
+
+func TestCheckTypeHintStructuralUnionField(t *testing.T) {
+	value := NewNative(ObjectValue{"name": NewNative("Ada")})
+	hint := TypeHintFromString("{name: string | null}")
+	ok, reason := CheckTypeHint(value, hint, map[string]Interface{})
+	if !ok {
+		t.Fatalf("expected structural union field to accept string: %s", reason)
+	}
+
+	bad := NewNative(ObjectValue{"name": NewInt(42)})
+	ok, _ = CheckTypeHint(bad, hint, map[string]Interface{})
+	if ok {
+		t.Fatal("expected structural union field to reject number")
+	}
+}
+
+func TestCheckTypeHintUsesFieldsRepresentation(t *testing.T) {
+	value := NewNative(ObjectValue{"id": NewInt(1)})
+	hint := TypeHint{Fields: map[string]TypeHint{"id": stdTypeHint("number")}}
+	ok, reason := CheckTypeHint(value, hint, map[string]Interface{})
+	if !ok {
+		t.Fatalf("expected TypeHint.Fields structural hint to be checked: %s", reason)
 	}
 }

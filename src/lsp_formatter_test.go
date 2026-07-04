@@ -96,9 +96,9 @@ func TestFormatTinyDocumentKeepsBinaryPlusMinusSpaced(t *testing.T) {
 }
 
 func TestFormatTinyDocumentMatchesLongestOperatorsFirst(t *testing.T) {
-	input := "flags&^=mask\nvalue<<=1\nvalue>>=1\n"
+	input := "flags&^=mask\nvalue<<=1\nvalue>>=1\nvalue&=mask\nvalue^=mask\nvalue|=mask\nfallback=a??b\n"
 	got := formatTinyDocument(input)
-	want := "flags &^= mask\nvalue <<= 1\nvalue >>= 1\n"
+	want := "flags &^= mask\nvalue <<= 1\nvalue >>= 1\nvalue &= mask\nvalue ^= mask\nvalue |= mask\nfallback = a ?? b\n"
 
 	if got != want {
 		t.Fatalf("unexpected formatted assignment operators:\nwant:\n%q\ngot:\n%q", want, got)

@@ -1,0 +1,11 @@
+fn trimAndLower(value) {
+    return value.trim().toLowerCase()
+}
+
+export fn slug(value) {
+    return trimAndLower(value).replaceAll(" ", "-").replaceAll("_", "-")
+}
+
+export fn sentence(words) {
+    return words.join(" ") + "."
+}

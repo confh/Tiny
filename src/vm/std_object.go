@@ -20,6 +20,7 @@ func init() {
 		"delete":   objectDelete,
 		"keys":     objectKeys,
 		"values":   objectValues,
+		"entries":  objectEntries,
 		"enteries": objectEnteries,
 		"length":   objectLength,
 		"clear":    objectClear,
@@ -144,7 +145,17 @@ func objectValues(vm *VM, args []TinyValue) {
 func objectEnteries(vm *VM, args []TinyValue) {
 	expectArgs(vm, "object.enteries", args, 1)
 
-	obj := argObject(vm, "object.enteries", args, 0)
+	objectEntriesForName(vm, "object.enteries", args)
+}
+
+func objectEntries(vm *VM, args []TinyValue) {
+	expectArgs(vm, "object.entries", args, 1)
+
+	objectEntriesForName(vm, "object.entries", args)
+}
+
+func objectEntriesForName(vm *VM, fnName string, args []TinyValue) {
+	obj := argObject(vm, fnName, args, 0)
 
 	entries := make([]TinyValue, 0, len(obj))
 	keys := make([]string, 0, len(obj))
@@ -221,16 +232,20 @@ func objectPick(vm *VM, args []TinyValue) {
 func objectOmit(vm *VM, args []TinyValue) {
 	expectArgs(vm, "object.omit", args, 2)
 
-	obj, ok := vm.valueAsObjectForWrite(args[0])
-	if !ok {
-		vm.runtimeError(ErrorType, "object.omit argument 1 expected object, got %s", TypeName(args[0]))
-		return
-	}
+	obj := argObject(vm, "object.omit", args, 0)
 	arr := argArray(vm, "object.omit", args, 1)
 
+	omitted := make(map[string]struct{}, len(arr.Elements))
 	for _, v := range arr.Elements {
-		obj.delete(valueToString(v))
+		omitted[valueToString(v)] = struct{}{}
 	}
 
-	vm.push(NewNative(obj.materialize()))
+	values := ObjectValue{}
+	for key, val := range obj {
+		if _, skip := omitted[valueToString(ToValue(key))]; !skip {
+			values[key] = val
+		}
+	}
+
+	vm.push(NewNative(values))
 }

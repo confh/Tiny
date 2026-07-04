@@ -1,10 +1,10 @@
-package main
+package version
 
 import "fmt"
 
-const TinyVersion = "0.2.9"
-const BytecodeCacheVersion = 29
+const TinyVersion = "0.3.0"
+const BytecodeCacheVersion = 30
 
-func versionCommand() {
+func VersionCommand() {
 	fmt.Printf("Tiny Version: %s\nBytecode Version: %d\n", TinyVersion, BytecodeCacheVersion)
 }

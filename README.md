@@ -51,7 +51,7 @@ For compilation from source instructions, see the online documentation.
 
 ### Dynamic Typing with Optional Hints
 
-Tiny is dynamically typed by default. You can write untyped code for rapid prototyping, or apply optional static type hints to variables, parameters, and function returns. The type system supports unions and generics.
+Tiny is dynamically typed by default. You can write untyped code for rapid prototyping, or apply optional static type hints to variables, parameters, and function returns. The type system supports unions, generics, and inline structural types.
 
 ```ts
 import std "io";
@@ -70,26 +70,76 @@ fn calculatePayout(base: number, multiplier: number): number {
 io.println(calculatePayout(100, 1.5));
 ```
 
-### Structural Interfaces and Shape Validation
+### Arrow Functions
 
-Tiny uses structural typing (shape-based validation). Objects are validated against interfaces at runtime based on their properties and methods. The JIT engine optimizes these checks by tracking object shapes and utilizing linear memory field offsets.
+Arrow functions provide concise single-expression and multi-parameter syntax. Typed parameters are supported.
 
 ```ts
 import std "io";
 
-interface Task {
-    title: string
-    done: bool
+const double = x => x * 2;
+const add = (a: number, b: number) => a + b;
+const greet = (name: string) => `Hello, ${name}`;
+
+io.println(greet("Tiny"));
+```
+
+### Structural Interfaces and Shape Validation
+
+Tiny uses structural typing (shape-based validation). Objects are validated against interfaces at runtime based on their properties and methods. The JIT engine optimizes these checks by tracking object shapes and utilizing linear memory field offsets.
+
+Classes can explicitly declare which interfaces they implement using the `implements` keyword. The compiler verifies at build time that the class satisfies every field and method the interface requires.
+
+```ts
+import std "io";
+
+interface Greeter {
+    greet: function(string)
 }
 
-fn printTask(t: Task) {
-    let status = t.done ? "Completed" : "Pending";
-    io.println(`${t.title} - Status: ${status}`);
+class Human implements Greeter {
+    fn greet(name: string): string {
+        return `Hello, ${name}`
+    }
 }
 
-// Valid structural matches
-printTask({ title: "Write Compiler Tests", done: true });
-printTask({ title: "Optimize VM Dispatcher", done: false, priority: 1 });
+fn welcome(g: Greeter) {
+    io.println(g.greet("world"));
+}
+
+welcome(Human());
+```
+
+Interfaces can extend other interfaces:
+
+```ts
+interface Base {
+    id: number
+}
+
+interface User extends Base {
+    name: string
+}
+```
+
+Function parameters and return types support inline structural types directly:
+
+```ts
+fn process(input: { name: string, age: number }): { ok: bool } {
+    return { ok: true }
+}
+```
+
+The binary `in` expression tests whether a key exists in an object at runtime:
+
+```ts
+import std "io";
+
+const config = { host: "localhost", port: 8080 };
+
+if "host" in config {
+    io.println(config["host"]);
+}
 ```
 
 ### Destructuring Assignment
@@ -347,7 +397,7 @@ io.println(`SHA256: ${calculateSha256(text)}`);
 Tiny ships with modules for command-line tools, servers, desktop apps, automation, testing, networking, data validation, and runtime embedding.
 
 ### `validate` (Schema Validation)
-A chainable API for defining and enforcing data schemas. Supports objects, arrays, unions, and transformations.
+A chainable API for defining and enforcing data schemas. Supports objects, arrays, unions, transformations, and runtime interface validation.
 
 ```ts
 import std "validate";
@@ -363,6 +413,22 @@ const result = userSchema.safeParse({ username: "  alice  " });
 if result.success {
     io.println(result.data.username); // "alice"
 }
+
+interface User {
+    id: number
+    name: string
+}
+
+// Runtime interface validation
+const user = { id: 1, name: "Alice" };
+if validate.interfaceOf(user, User) {
+    io.println("valid user");
+}
+
+const user2 = { id: "1", name: "Alice" };
+if !validate.interfaceOf(user2, User) {
+    io.println("invalid user");
+}
 ```
 
 ---
@@ -374,7 +440,7 @@ Encode & Decode URL
 Core scripting modules for console IO, JSON parsing/formatting, file and directory operations, path helpers, and operating-system metadata.
 
 ### `time` (Timers and Measurement)
-Support for execution delays, performance measurement, and managed timers.
+Support for execution delays, performance measurement, managed timers, and timestamp parsing.
 
 ```ts
 import std "io";
@@ -387,6 +453,9 @@ let timer = time.interval(1000, fn() {
 
 time.sleep(5000);
 timer.cancel();
+
+// Parse RFC3339 timestamp to Unix seconds
+let ts = time.parseUnix("2025-01-15T10:30:00Z", time.TimeUnit.Seconds);
 ```
 
 ---
@@ -400,7 +469,7 @@ String helpers cover case conversion, trimming, replacement, splitting, containm
 ---
 
 ### `http` (High-Throughput Web Services)
-Fully concurrent web server and client. The server supports route-based multiplexing and optimized JSON serialization.
+Fully concurrent web server and client. The server supports route-based multiplexing and optimized JSON serialization. The client supports multipart/form-data file uploads.
 
 ```ts
 import std "http";
@@ -419,13 +488,23 @@ io.println("Web server listening on port 8080");
 server.start();
 ```
 
+Multipart file uploads:
+
+```ts
+const res = http.post("https://example.com/upload", {
+    multipart: true,
+    form: { username: "tiny" },
+    files: [{ field: "file", path: "./photo.png" }]
+});
+```
+
 ### `websocket`, `net`, and `process`
 Network modules include WebSocket clients/servers and TCP servers/connections. The process module exposes CLI args, working directory helpers, environment variables, foreground/background process execution, and signals.
 
 ---
 
 ### `ui` (WebView Desktop Applications)
-Lightweight desktop containers using HTML/CSS/JS with direct bindings to Tiny functions.
+Lightweight desktop containers using HTML/CSS/JS with direct bindings to Tiny functions. Includes native OS file and folder dialogs.
 
 ```ts
 import std "ui";
@@ -442,6 +521,15 @@ win.setHtml("<h1>Hello Tiny</h1>");
 win.run();
 ```
 
+Native file dialogs:
+
+```ts
+const path = ui.openFileDialog("Select a file", "*.tiny");
+if path {
+    const content = fs.readFile(path);
+}
+```
+
 ---
 
 ### `desktop` (OS Automation)
@@ -455,15 +543,15 @@ desktop.click();
 desktop.type("Tiny Automation");
 ```
 
-### `app`, `tray`, `observer`, `sync`, `runtime`, and `tests`
-Tiny includes app-command wiring, native tray support, live process telemetry, mutexes, runtime memory/GC/fatal-handler tools, child VM creation, source/bytecode compilation at runtime, and a small test assertion module. The desktop application interface for process telemetry can be downloaded from the [Observer Tool Release](https://github.com/confh/Tiny/releases/tag/observer-tool).
+### `app`, `tray`, `observer`, `sync`, `runtime`, `sqlite`, `crypto`, and `tests`
+Tiny includes app-command wiring, native tray support, live process telemetry, mutexes, runtime memory/GC/fatal-handler tools, child VM creation, source/bytecode compilation at runtime, embedded SQLite database access, cryptographic helpers, and a small test assertion module. The desktop application interface for process telemetry can be downloaded from the [Observer Tool Release](https://github.com/confh/Tiny/releases/tag/observer-tool).
 
 ***
 
 ## Tooling and Ecosystem
 
 ### Command Line Interface (CLI)
-- **`tiny <file.tiny>`**: Compiles and runs a source file directly.
+- **`tiny <file.tiny/file.tbc>`**: Compiles and runs a source file directly or runs compiled bytecode if the file ends with **.tbc**.
 - **`tiny`**: Runs the `entry` from `tiny.json` when a project config exists.
 - **`tiny build <file> -o <file.tbc>`**: Compiles source to bytecode.
 - **`tiny run <file.tbc>`**: Runs compiled bytecode.
@@ -473,6 +561,7 @@ Tiny includes app-command wiring, native tray support, live process telemetry, m
 - **`tiny init [dir]`**: Creates a project with `tiny.json`, `src/main.tiny`, `plugins`, and `dist`.
 - **`tiny add/install/remove/deps`**: Manages GitHub-backed Tiny dependencies and lock metadata.
 - **`tiny task [name]`**: Runs scripts from `tiny.json`.
+- **`tiny fmt <file.tiny>`**: Formats a source file in place using the built-in document formatter.
 - **`tiny update`**: Updates the Tiny binary from the latest GitHub release.
 - **`tiny lsp`**: Starts the Language Server.
 

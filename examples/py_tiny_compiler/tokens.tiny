@@ -1,0 +1,32 @@
+export enum TokenType {
+    EOF = "eof",
+    NUMBER = "number",
+    STRING = "string",
+    IDENT = "ident",
+    NEWLINE = "newline",
+    INDENT = "indent",
+    DEDENT = "dedent",
+
+    // Keywords
+    DEF = "def",
+    RETURN = "return",
+    PRINT = "print",
+
+    // Operators
+    PLUS = "+",
+    MINUS = "-",
+    STAR = "*",
+    SLASH = "/",
+    EQUAL = "=",
+
+    // Punctuation
+    COLON = ":",
+    COMMA = ",",
+    LPAREN = "(",
+    RPAREN = ")"
+}
+
+export class Token {
+    field type: string;
+    field value: any;
+}

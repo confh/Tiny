@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	. "language.com/src/version"
 )
 
 var tinyImportRegex = regexp.MustCompile(`import\s+(?:(lib|library|std|plugin)\s+)?"([^"]+)"(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?\s*;?`)

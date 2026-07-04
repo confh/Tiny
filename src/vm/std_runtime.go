@@ -5,6 +5,7 @@ import (
 	"runtime"
 
 	. "language.com/src/tinyerrors"
+	"language.com/src/version"
 )
 
 var stdRuntimeMetadata = StdModuleInfo{
@@ -39,6 +40,7 @@ func init() {
 		"isPacked":          stdIsPacked,
 		"compileSource":     stdRuntimeCompileSource,
 		"compileFile":       stdRuntimeCompileFile,
+		"version":           stdRuntimeVersion,
 	}
 	registerStdModule(stdRuntimeMetadata)
 }
@@ -294,4 +296,9 @@ func stdRuntimeCompileFile(vm *VM, args []TinyValue) {
 
 	bytes := CompileFile(path)
 	vm.push(NewNative(&BufferValue{Bytes: bytes}))
+}
+
+func stdRuntimeVersion(vm *VM, args []TinyValue) {
+	dontExpectArgs(vm, "runtime.version", args)
+	vm.push(NewNative(version.TinyVersion))
 }

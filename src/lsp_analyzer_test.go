@@ -276,6 +276,43 @@ func TestLSPHoverCallbackParameterFromArrayFindMethod(t *testing.T) {
 	}
 }
 
+func TestLSPHoverAnonymousFnParamResolvesTypeFromCaller(t *testing.T) {
+	text := strings.Join([]string{
+		`const arr = [""]`,
+		`arr.forEach(fn(i, item) {`,
+		`    item`,
+		`})`,
+	}, "\n")
+
+	result := getHover("file:///anon_fn_hover.tiny", text, Position{
+		Line:      2,
+		Character: 6,
+	})
+	hover, ok := result.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover for item in anonymous fn, got %#v", result)
+	}
+	if !strings.Contains(hover.Contents.Value, "string") {
+		t.Fatalf("expected hover to show string type for item, got %q", hover.Contents.Value)
+	}
+}
+
+func TestLSPObjectForEachIgnoresCallbackStatementReturn(t *testing.T) {
+	text := strings.Join([]string{
+		`import std "object"`,
+		`const commandsData = { ping: { name: "ping" } }`,
+		`const commands = []`,
+		`object.forEach(commandsData, fn(_, cmd) {`,
+		`    commands.push(cmd)`,
+		`})`,
+	}, "\n")
+
+	diagnostics := semanticDiagnostics("file:///object_foreach_callback.tiny", text)
+	if diagnosticsContain(diagnostics, "cannot pass type") {
+		t.Fatalf("unexpected callback type diagnostic: %#v", diagnostics)
+	}
+}
+
 func TestLSPCallbackParameterCountDiagnostics(t *testing.T) {
 	t.Run("too few callback parameters", func(t *testing.T) {
 		text := strings.Join([]string{
@@ -611,7 +648,7 @@ func TestLSPHoverPrefersClassMethodDeclarationOverFunctionNameCollision(t *testi
 	}
 }
 
-func TestLSPInlayHintsInferVariableAndParameterNames(t *testing.T) {
+func TestLSPInlayHintsDisabledForLatency(t *testing.T) {
 	text := strings.Join([]string{
 		`fn greet(name: string, excited: bool): string {`,
 		`    return name;`,
@@ -623,27 +660,12 @@ func TestLSPInlayHintsInferVariableAndParameterNames(t *testing.T) {
 		Start: Position{Line: 0, Character: 0},
 		End:   Position{Line: 3, Character: len(`const message = greet("Tiny", true);`)},
 	})
-
-	labels := []string{}
-	for _, hint := range hints {
-		labels = append(labels, hint.Label)
-	}
-
-	for _, want := range []string{": string", "name:", "excited:"} {
-		found := false
-		for _, label := range labels {
-			if label == want {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Fatalf("expected inlay hint %q in %#v", want, labels)
-		}
+	if len(hints) != 0 {
+		t.Fatalf("expected inlay hints to be disabled, got %#v", hints)
 	}
 }
 
-func TestLSPInlayHintsParameterNamesForMultilineMemberCall(t *testing.T) {
+func TestLSPInlayHintsDisabledForMultilineMemberCall(t *testing.T) {
 	text := strings.Join([]string{
 		`namespace newJwt {`,
 		`    export fn sign(payload: object, ttl: number): string {`,
@@ -660,21 +682,12 @@ func TestLSPInlayHintsParameterNamesForMultilineMemberCall(t *testing.T) {
 		Start: Position{Line: 0, Character: 0},
 		End:   Position{Line: 8, Character: len(`}, 10);`)},
 	})
-
-	labelsByLine := map[string]int{}
-	for _, hint := range hints {
-		labelsByLine[hint.Label] = hint.Position.Line
-	}
-
-	if labelsByLine["payload:"] != 6 {
-		t.Fatalf("payload hint line = %d, want 6; hints %#v", labelsByLine["payload:"], hints)
-	}
-	if labelsByLine["ttl:"] != 8 {
-		t.Fatalf("ttl hint line = %d, want 8; hints %#v", labelsByLine["ttl:"], hints)
+	if len(hints) != 0 {
+		t.Fatalf("expected inlay hints to be disabled, got %#v", hints)
 	}
 }
 
-func TestLSPInlayHintsInlineFunctionParameterTypesFromExpectedFunctionType(t *testing.T) {
+func TestLSPInlayHintsDisabledForInlineFunctionParameterTypes(t *testing.T) {
 	text := strings.Join([]string{
 		`fn test(callback: function(number, string)) {`,
 		`}`,
@@ -688,26 +701,12 @@ func TestLSPInlayHintsInlineFunctionParameterTypesFromExpectedFunctionType(t *te
 		Start: Position{Line: 0, Character: 0},
 		End:   Position{Line: 5, Character: len(`});`)},
 	})
-
-	want := map[string]Position{
-		": number": {Line: 2, Character: len(`test(fn(i`)},
-		": string": {Line: 2, Character: len(`test(fn(i, v`)},
-	}
-	for label, pos := range want {
-		found := false
-		for _, hint := range hints {
-			if hint.Label == label && hint.Position == pos {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Fatalf("expected inlay hint %q at %#v, got %#v", label, pos, hints)
-		}
+	if len(hints) != 0 {
+		t.Fatalf("expected inlay hints to be disabled, got %#v", hints)
 	}
 }
 
-func TestLSPInlayHintsHideInternalTypePrefixes(t *testing.T) {
+func TestLSPInlayHintsDisabledForInternalTypePrefixes(t *testing.T) {
 	text := strings.Join([]string{
 		`interface Request {`,
 		`    path: string`,
@@ -726,27 +725,8 @@ func TestLSPInlayHintsHideInternalTypePrefixes(t *testing.T) {
 		Start: Position{Line: 0, Character: 0},
 		End:   Position{Line: 10, Character: len(`});`)},
 	})
-
-	labels := []string{}
-	for _, hint := range hints {
-		labels = append(labels, hint.Label)
-	}
-
-	hasUser := false
-	hasRequest := false
-	for _, label := range labels {
-		if label == ": User" {
-			hasUser = true
-		}
-		if label == ": Request" {
-			hasRequest = true
-		}
-		if strings.Contains(label, "class:") || strings.Contains(label, "interface:") {
-			t.Fatalf("expected no internal type prefixes in inlay hints, got %#v", labels)
-		}
-	}
-	if !hasUser || !hasRequest {
-		t.Fatalf("expected class and interface type hints without prefixes, got %#v", labels)
+	if len(hints) != 0 {
+		t.Fatalf("expected inlay hints to be disabled, got %#v", hints)
 	}
 }
 
@@ -870,6 +850,97 @@ func TestLSPDefinitionOnLibraryImportString(t *testing.T) {
 	}
 	if loc.URI != pathToFileURI(entry) {
 		t.Fatalf("definition URI = %q, want %q", loc.URI, pathToFileURI(entry))
+	}
+}
+
+func TestLSPDefinitionOnStdImportUsesVirtualStub(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TINY_STDLIB_STUB_DIR", dir)
+
+	text := `import std "http" as http;`
+	result := getDefinition("file:///project/main.tiny", text, Position{
+		Line:      0,
+		Character: len(`import std "ht`),
+	})
+	loc, ok := result.(Location)
+	if !ok {
+		t.Fatalf("expected std import definition location, got %#v", result)
+	}
+	if loc.URI != "tiny-stdlib:/http.tiny" {
+		t.Fatalf("definition URI = %q, want tiny-stdlib:/http.tiny", loc.URI)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "http.tiny")); err != nil {
+		t.Fatalf("expected stdlib stub to be written to env dir: %v", err)
+	}
+}
+
+func TestLSPDefinitionOnSingleQuotedStdImportUsesVirtualStub(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TINY_STDLIB_STUB_DIR", dir)
+
+	text := `import std 'http' as http;`
+	result := getDefinition("file:///project/main.tiny", text, Position{
+		Line:      0,
+		Character: len(`import std 'ht`),
+	})
+	loc, ok := result.(Location)
+	if !ok {
+		t.Fatalf("expected std import definition location, got %#v", result)
+	}
+	if loc.URI != "tiny-stdlib:/http.tiny" {
+		t.Fatalf("definition URI = %q, want tiny-stdlib:/http.tiny", loc.URI)
+	}
+}
+
+func TestLSPStdModuleLocationParsingIsStrict(t *testing.T) {
+	if _, ok := stdModuleFromLocationURI("file:///tmp/not-std:http/main.tiny"); ok {
+		t.Fatal("did not expect arbitrary URI containing std: to be treated as stdlib")
+	}
+	if module, ok := stdModuleFromLocationURI("std:http"); !ok || module != "http" {
+		t.Fatalf("expected std:http to parse as http, got %q ok=%v", module, ok)
+	}
+	if module, ok := stdModuleFromLocationURI("tiny-stdlib:/http.tiny"); !ok || module != "http" {
+		t.Fatalf("expected virtual URI to parse as http, got %q ok=%v", module, ok)
+	}
+}
+
+func TestLSPDefinitionOnStdFunctionUsesVirtualStub(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TINY_STDLIB_STUB_DIR", dir)
+
+	text := strings.Join([]string{
+		`import std "http" as http`,
+		`http.post("", {})`,
+	}, "\n")
+	result := getDefinition("file:///project/main.tiny", text, Position{
+		Line:      1,
+		Character: len(`http.po`),
+	})
+	loc, ok := result.(Location)
+	if !ok {
+		t.Fatalf("expected std function definition location, got %#v", result)
+	}
+	if loc.URI != "tiny-stdlib:/http.tiny" {
+		t.Fatalf("definition URI = %q, want tiny-stdlib:/http.tiny", loc.URI)
+	}
+	if loc.Range.Start.Line != 155 {
+		t.Fatalf("expected http.post definition line 155, got %#v", loc.Range.Start)
+	}
+}
+
+func TestLSPVirtualStdlibDocsDoNotPolluteOpenDocs(t *testing.T) {
+	oldDocs := lspDocs
+	defer func() { lspDocs = oldDocs }()
+	lspDocs = map[string]string{}
+
+	refreshLSPDocument("tiny-stdlib:/http.tiny", "bad")
+	if len(lspDocs) != 0 {
+		t.Fatalf("expected virtual stdlib refresh to be ignored, got %#v", lspDocs)
+	}
+
+	text := lspDocumentText("tiny-stdlib:/http.tiny")
+	if !strings.Contains(text, "export fn post") {
+		t.Fatalf("expected virtual stdlib document text from embedded stub, got %q", text)
 	}
 }
 
@@ -1168,6 +1239,100 @@ func TestLSPEmbeddedClassMethodsFromAssignedEmbedField(t *testing.T) {
 	}
 }
 
+func TestLSPEmbeddedClassMethodsFromImportedTypedEmbedField(t *testing.T) {
+	dir := t.TempDir()
+	testingPath := filepath.Join(dir, "testing.tiny")
+	mainPath := filepath.Join(dir, "main.tiny")
+
+	err := os.WriteFile(testingPath, []byte(strings.Join([]string{
+		"import std \"io\";",
+		"export class Test {",
+		"    fn tt() {",
+		"        io.println(\"hi\")",
+		"    }",
+		"}",
+	}, "\n")), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	text := strings.Join([]string{
+		"import std \"http\";",
+		"import \"testing.tiny\" as Testing;",
+		"",
+		"class Tester {",
+		"    field test: Testing.Test",
+		"    embed test",
+		"",
+		"    fn init() {",
+		"        this.test = Testing.Test()",
+		"    }",
+		"}",
+		"",
+		"const testClass = Tester()",
+		"",
+		"testClass.tt()",
+	}, "\n")
+
+	uri := pathToFileURI(mainPath)
+	diagnostics := semanticDiagnostics(uri, text)
+	if diagnosticsContain(diagnostics, "undefined method or property: tt") {
+		t.Fatalf("expected imported typed embed method tt to be accepted, got %#v", diagnostics)
+	}
+
+	items := getCompletions(uri, text+"\ntestClass.", Position{
+		Line:      15,
+		Character: len("testClass."),
+	})
+	if !completionLabelsContain(items, "tt") {
+		t.Fatalf("expected testClass. completions to include embedded method tt, got %#v", completionLabels(items))
+	}
+}
+
+func TestLSPCompletionsInsideMatchCaseBody(t *testing.T) {
+	text := strings.Join([]string{
+		"class Splash {",
+		"    fn show() {",
+		"        return null",
+		"    }",
+		"    fn setTitle(title: string) {",
+		"        return null",
+		"    }",
+		"}",
+		"",
+		"let action = \"ready\"",
+		"let splash = Splash()",
+		"",
+		"match action {",
+		"    \"ready\" {",
+		"        splash.",
+		"    }",
+		"    \"load_main\" {",
+		"        ",
+		"    }",
+		"}",
+	}, "\n")
+
+	memberItems := getCompletions("file:///match_completion.tiny", text, Position{
+		Line:      14,
+		Character: len("        splash."),
+	})
+	if !completionLabelsContain(memberItems, "show") {
+		t.Fatalf("expected splash. completions inside match case to include show, got %#v", completionLabels(memberItems))
+	}
+	if !completionLabelsContain(memberItems, "setTitle") {
+		t.Fatalf("expected splash. completions inside match case to include setTitle, got %#v", completionLabels(memberItems))
+	}
+
+	scopeItems := getCompletions("file:///match_completion.tiny", text, Position{
+		Line:      17,
+		Character: len("        "),
+	})
+	if !completionLabelsContain(scopeItems, "splash") {
+		t.Fatalf("expected scope completions inside match case to include splash, got %#v", completionLabels(scopeItems))
+	}
+}
+
 func TestLSPImportedClassCompletionAndDiagnostics(t *testing.T) {
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "models.tiny")
@@ -1207,6 +1372,70 @@ func TestLSPImportedClassCompletionAndDiagnostics(t *testing.T) {
 	}
 	if !completionLabelsContain(items, "greet") {
 		t.Fatalf("expected imported class completions to include method greet, got %#v", completionLabels(items))
+	}
+}
+
+func TestLSPImportedReExportedClassAliasCompletionAndDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	commandsPath := filepath.Join(dir, "commands.tiny")
+	messagePath := filepath.Join(dir, "message.tiny")
+	gatewayPath := filepath.Join(dir, "gateway.tiny")
+	mainPath := filepath.Join(dir, "main.tiny")
+
+	if err := os.WriteFile(commandsPath, []byte(strings.Join([]string{
+		"export class CommandBuilder {",
+		"    field name = \"\";",
+		"    fn setName(name: string) {",
+		"        this.name = name;",
+		"    }",
+		"    fn setDescription(description: string) { }",
+		"}",
+	}, "\n")), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(messagePath, []byte(strings.Join([]string{
+		"export class Message {",
+		"    field content: string = \"\";",
+		"    fn reply(text: string) { }",
+		"}",
+	}, "\n")), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gatewayPath, []byte(strings.Join([]string{
+		"import \"commands.tiny\" as CommandsModule;",
+		"import \"message.tiny\" as MessageModule;",
+		"export const CommandBuilder = CommandsModule.CommandBuilder;",
+		"export const Message = MessageModule.Message;",
+	}, "\n")), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	text := strings.Join([]string{
+		"import \"gateway.tiny\" as Discord;",
+		"const pingCmd = Discord.CommandBuilder();",
+		"pingCmd.",
+		"fn boot(bot) {",
+		"    bot.onMessage(fn(msg: Discord.Message, client) {",
+		"        msg.reply(\"Pong\");",
+		"    });",
+		"}",
+	}, "\n")
+
+	uri := pathToFileURI(mainPath)
+	diagnostics := semanticDiagnostics(uri, text)
+	if diagnosticsContain(diagnostics, "unknown type: Discord.Message") {
+		t.Fatalf("expected re-exported class alias type to resolve, got diagnostics %#v", diagnostics)
+	}
+
+	items := getCompletions(uri, text, Position{
+		Line:      2,
+		Character: len("pingCmd."),
+	})
+	if !completionLabelsContain(items, "setName") {
+		t.Fatalf("expected re-exported CommandBuilder completions to include setName, got %#v", completionLabels(items))
+	}
+	if !completionLabelsContain(items, "setDescription") {
+		t.Fatalf("expected re-exported CommandBuilder completions to include setDescription, got %#v", completionLabels(items))
 	}
 }
 
@@ -1563,6 +1792,474 @@ func TestLSPImportedExternalGlobalExport(t *testing.T) {
 	}
 }
 
+func TestLSPImportedFunctionUsesInferredReturnType(t *testing.T) {
+	dir := t.TempDir()
+	libPath := filepath.Join(dir, "lib.tiny")
+	mainPath := filepath.Join(dir, "main.tiny")
+
+	if err := os.WriteFile(libPath, []byte(strings.Join([]string{
+		`export fn answer() {`,
+		`    return 123;`,
+		`}`,
+	}, "\n")), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mainText := strings.Join([]string{
+		`import "lib.tiny" as Lib;`,
+		`const value = Lib.answer();`,
+	}, "\n")
+
+	scope := fileBaseScope(pathToFileURI(mainPath), mainText)
+	sym, ok := scope.Resolve("value")
+	if !ok {
+		t.Fatalf("expected imported call result to be defined")
+	}
+	if sym.Type != "number" {
+		t.Fatalf("expected imported inferred return type number, got %q", sym.Type)
+	}
+
+	exports := loadTinyFileExports(libPath, map[string]bool{})
+	answer, ok := exports["answer"]
+	if !ok {
+		t.Fatalf("expected answer export, got %#v", exports)
+	}
+	if answer.Returns != "number" {
+		t.Fatalf("expected exported answer return type number, got %q", answer.Returns)
+	}
+}
+
+func TestLSPImportedNamespaceInterfaceArgMatchesQualifiedReturn(t *testing.T) {
+	dir := t.TempDir()
+	commandsPath := filepath.Join(dir, "commands.tiny")
+	mainPath := filepath.Join(dir, "main.tiny")
+
+	if err := os.WriteFile(commandsPath, []byte(strings.Join([]string{
+		`export interface ButtonComponent {`,
+		`    type: number,`,
+		`    label: string`,
+		`}`,
+		``,
+		`export fn primaryButton(label: string): ButtonComponent {`,
+		`    return { type: 2, label: label };`,
+		`}`,
+		``,
+		`export fn disabled(component: ButtonComponent): ButtonComponent {`,
+		`    return component;`,
+		`}`,
+	}, "\n")), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	text := strings.Join([]string{
+		`import "commands.tiny" as CommandsModule;`,
+		`const button = CommandsModule.disabled(CommandsModule.primaryButton("Click"));`,
+		`button.label;`,
+	}, "\n")
+
+	diagnostics := semanticDiagnostics(pathToFileURI(mainPath), text)
+	if diagnosticsContain(diagnostics, "cannot pass type 'interface:CommandsModule.ButtonComponent'") {
+		t.Fatalf("expected qualified interface return to match unqualified namespace parameter, got %#v", diagnostics)
+	}
+	if len(diagnostics) > 0 {
+		t.Fatalf("expected no diagnostics, got %#v", diagnostics)
+	}
+}
+
+func TestLSPTruthyPropertyNarrowingRemovesNull(t *testing.T) {
+	text := strings.Join([]string{
+		`interface User {`,
+		`    id: string`,
+		`}`,
+		`interface Member {`,
+		`    user: User | null`,
+		`}`,
+		`class Client {`,
+		`    fn cacheUser(user: User) {}`,
+		`    fn cacheMember(member: Member) {`,
+		`        if member.user { this.cacheUser(member.user) }`,
+		`    }`,
+		`}`,
+		`const client = Client()`,
+		`client.cacheMember({ user: null })`,
+	}, "\n")
+
+	diagnostics := semanticDiagnostics("file:///truthy_property_narrowing.tiny", text)
+	if diagnosticsContain(diagnostics, "cannot pass type 'interface:User | null'") {
+		t.Fatalf("expected truthy member.user guard to narrow away null, got %#v", diagnostics)
+	}
+	if len(diagnostics) > 0 {
+		t.Fatalf("expected no diagnostics, got %#v", diagnostics)
+	}
+}
+
+func TestLSPImportedReExportedClassAliasAsTypeHint(t *testing.T) {
+	dir := t.TempDir()
+	commandsPath := filepath.Join(dir, "commands.tiny")
+	gatewayPath := filepath.Join(dir, "gateway.tiny")
+	pingPath := filepath.Join(dir, "commands", "ping.tiny")
+	if err := os.MkdirAll(filepath.Dir(pingPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(commandsPath, []byte(strings.Join([]string{
+		`export class Interaction {`,
+		`    fn reply(text: string) {}`,
+		`}`,
+	}, "\n")), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gatewayPath, []byte(strings.Join([]string{
+		`import "commands.tiny" as CommandsModule;`,
+		`export const Interaction = CommandsModule.Interaction;`,
+	}, "\n")), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	text := strings.Join([]string{
+		`import "../gateway.tiny" as Discord;`,
+		`export fn run(interaction: Discord.Interaction) {`,
+		`    interaction.reply("pong");`,
+		`}`,
+	}, "\n")
+
+	diagnostics := semanticDiagnostics(pathToFileURI(pingPath), text)
+	if diagnosticsContain(diagnostics, "unknown type: Discord.Interaction") {
+		t.Fatalf("expected Discord.Interaction re-export alias to resolve as a type, got %#v", diagnostics)
+	}
+	if len(diagnostics) > 0 {
+		t.Fatalf("expected no diagnostics, got %#v", diagnostics)
+	}
+}
+
+func TestLSPHoverImportedReExportedMethodWithoutOpeningImport(t *testing.T) {
+	dir := t.TempDir()
+	commandsPath := filepath.Join(dir, "commands.tiny")
+	gatewayPath := filepath.Join(dir, "gateway.tiny")
+	pingPath := filepath.Join(dir, "commands", "ping.tiny")
+	if err := os.MkdirAll(filepath.Dir(pingPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(commandsPath, []byte(strings.Join([]string{
+		`export class Interaction {`,
+		`    fn replyComponents(components: array) {}`,
+		`}`,
+		`export fn container(children: array): object { return {} }`,
+		`export fn textDisplay(content: string): object { return {} }`,
+	}, "\n")), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gatewayPath, []byte(strings.Join([]string{
+		`import "commands.tiny" as CommandsModule;`,
+		`export const Interaction = CommandsModule.Interaction;`,
+		`export const container = CommandsModule.container;`,
+		`export const textDisplay = CommandsModule.textDisplay;`,
+	}, "\n")), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	text := strings.Join([]string{
+		`import "../gateway.tiny" as Discord;`,
+		`export fn run(interaction: Discord.Interaction) {`,
+		`    interaction.replyComponents([`,
+		`        Discord.container([`,
+		"            Discord.textDisplay(`## **Ping:** ${client.latency}ms`)",
+		`        ])`,
+		`    ])`,
+		`}`,
+	}, "\n")
+
+	line := `    interaction.replyComponents([`
+	result := getHover(pathToFileURI(pingPath), text, Position{
+		Line:      2,
+		Character: strings.Index(line, "replyComponents") + 3,
+	})
+	hover, ok := result.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover for imported re-exported method, got %#v", result)
+	}
+	if !strings.Contains(hover.Contents.Value, "replyComponents") {
+		t.Fatalf("expected replyComponents hover, got %q", hover.Contents.Value)
+	}
+}
+
+func TestLSPDiagnosticsEagerlyIndexReExportedDiscordTypes(t *testing.T) {
+	dir := t.TempDir()
+	commandsPath := filepath.Join(dir, "commands.tiny")
+	messagePath := filepath.Join(dir, "message.tiny")
+	gatewayPath := filepath.Join(dir, "gateway.tiny")
+	pingPath := filepath.Join(dir, "commands", "ping.tiny")
+	if err := os.MkdirAll(filepath.Dir(pingPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(commandsPath, []byte(strings.Join([]string{
+		`export class Interaction {`,
+		`    fn replyComponents(components: array) {}`,
+		`}`,
+		`export class CommandBuilder {`,
+		`    fn setName(name: string): CommandBuilder { return this }`,
+		`    fn setDescription(description: string): CommandBuilder { return this }`,
+		`}`,
+		`export class EmbedBuilder {}`,
+		`export fn container(children: array): object { return {} }`,
+		`export fn textDisplay(content: string): object { return {} }`,
+	}, "\n")), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(messagePath, []byte(strings.Join([]string{
+		`import "commands.tiny" as CommandsModule;`,
+		`export class Message {`,
+		`    field interaction: CommandsModule.Interaction | null = null`,
+		`}`,
+	}, "\n")), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gatewayPath, []byte(strings.Join([]string{
+		`import "message.tiny" as MessageModule;`,
+		`import "commands.tiny" as CommandsModule;`,
+		`export const Message = MessageModule.Message;`,
+		`export const Interaction = CommandsModule.Interaction;`,
+		`export const CommandBuilder = CommandsModule.CommandBuilder;`,
+		`export const EmbedBuilder = CommandsModule.EmbedBuilder;`,
+		`export const container = CommandsModule.container;`,
+		`export const textDisplay = CommandsModule.textDisplay;`,
+		`export fn newEmbed(): CommandsModule.EmbedBuilder { return CommandsModule.EmbedBuilder() }`,
+		`export class Client {`,
+		`    field latency: number = 0`,
+		`}`,
+	}, "\n")), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	text := strings.Join([]string{
+		`import "../gateway.tiny" as Discord;`,
+		`import "../commands.tiny" as Commands;`,
+		``,
+		`export fn info() {`,
+		`    const cmd = Discord.CommandBuilder()`,
+		`    cmd.setName("ping")`,
+		`    cmd.setDescription("Replies with Pong!")`,
+		`    return cmd`,
+		`}`,
+		``,
+		`export fn run(interaction: Discord.Interaction, client: Discord.Client) {`,
+		`    Discord.newEmbed()`,
+		`    interaction.replyComponents([`,
+		`        Discord.container([`,
+		"            Discord.textDisplay(`## **Ping:** ${client.latency}ms`)",
+		`        ])`,
+		`    ])`,
+		`}`,
+	}, "\n")
+
+	invalidateLSPFastCaches()
+	lspImportExportCache = map[string]lspImportCacheEntry{}
+	diagnostics := semanticDiagnostics(pathToFileURI(pingPath), text)
+	if diagnosticsContain(diagnostics, "unknown type: Discord.Interaction") || diagnosticsContain(diagnostics, "unknown type: Discord.Client") {
+		t.Fatalf("expected cold diagnostics to eagerly index Discord re-exported types, got %#v", diagnostics)
+	}
+	if len(diagnostics) > 0 {
+		t.Fatalf("expected no diagnostics, got %#v", diagnostics)
+	}
+}
+
+func TestLSPCompletionAfterMultilineFluentCall(t *testing.T) {
+	dir := t.TempDir()
+	discordPath := filepath.Join(dir, "discord.tiny")
+	mainPath := filepath.Join(dir, "main.tiny")
+
+	if err := os.WriteFile(discordPath, []byte(strings.Join([]string{
+		`export class EmbedBuilder {`,
+		`    fn setAuthor(name: string): EmbedBuilder { return this }`,
+		`    fn setTitle(title: string): EmbedBuilder { return this }`,
+		`}`,
+		`export fn newEmbed(): EmbedBuilder { return EmbedBuilder() }`,
+	}, "\n")), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	text := strings.Join([]string{
+		`import "discord.tiny" as Discord;`,
+		`Discord.newEmbed().`,
+		`    `,
+	}, "\n")
+
+	items := getCompletions(pathToFileURI(mainPath), text, Position{
+		Line:      2,
+		Character: len(`    `),
+	})
+	if !completionLabelsContain(items, "setAuthor") {
+		t.Fatalf("expected fluent newline completions to include setAuthor, got %#v", completionLabels(items))
+	}
+	if !completionLabelsContain(items, "setTitle") {
+		t.Fatalf("expected fluent newline completions to include setTitle, got %#v", completionLabels(items))
+	}
+}
+
+func TestLSPCompletionAndHoverAfterTypedMultilineFluentCall(t *testing.T) {
+	dir := t.TempDir()
+	commandsPath := filepath.Join(dir, "commands.tiny")
+	mainPath := filepath.Join(dir, "main.tiny")
+
+	if err := os.WriteFile(commandsPath, []byte(strings.Join([]string{
+		`export class EmbedBuilder {`,
+		`    fn setAuthor(name: string): EmbedBuilder { return this }`,
+		`    fn setTitle(title: string): EmbedBuilder { return this }`,
+		`}`,
+		`export fn newEmbed(): EmbedBuilder { return EmbedBuilder() }`,
+	}, "\n")), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	completionText := strings.Join([]string{
+		`import "commands.tiny" as CommandsModule;`,
+		`CommandsModule.newEmbed().`,
+		`    set`,
+	}, "\n")
+	items := getCompletions(pathToFileURI(mainPath), completionText, Position{
+		Line:      2,
+		Character: len(`    set`),
+	})
+	if !completionLabelsContain(items, "setAuthor") {
+		t.Fatalf("expected typed multiline fluent completions to include setAuthor, got %#v", completionLabels(items))
+	}
+
+	hoverText := strings.Join([]string{
+		`import "commands.tiny" as CommandsModule;`,
+		`CommandsModule.newEmbed().`,
+		`    setAuthor()`,
+	}, "\n")
+	result := getHover(pathToFileURI(mainPath), hoverText, Position{
+		Line:      2,
+		Character: len(`    setA`),
+	})
+	hover, ok := result.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover for multiline fluent method, got %#v", result)
+	}
+	if !strings.Contains(hover.Contents.Value, "setAuthor(name: string)") {
+		t.Fatalf("expected setAuthor signature hover, got %q", hover.Contents.Value)
+	}
+}
+
+func TestLSPImportedClassMethodCallbackParamInferenceAndHover(t *testing.T) {
+	dir := t.TempDir()
+	gatewayPath := filepath.Join(dir, "gateway.tiny")
+	mainPath := filepath.Join(dir, "main.tiny")
+
+	if err := os.WriteFile(gatewayPath, []byte(strings.Join([]string{
+		`export interface Interaction {`,
+		`    id: string`,
+		`}`,
+		`export interface ButtonComponent {`,
+		`    type: number`,
+		`}`,
+		`export class Client {`,
+		`    field latency: number = 0`,
+		`    fn tempPrimaryButton(label: string, handler: function(Interaction, Client), ttlMs?: number): ButtonComponent {`,
+		`        return { type: 2 }`,
+		`    }`,
+		`}`,
+	}, "\n")), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	text := strings.Join([]string{
+		`import "gateway.tiny" as Discord;`,
+		`export fn run(interaction: Discord.Interaction, client: Discord.Client) {`,
+		`    client.tempPrimaryButton("test", fn(i, v) {`,
+		`        i`,
+		`        v`,
+		`    })`,
+		`}`,
+	}, "\n")
+
+	uri := pathToFileURI(mainPath)
+	iHover := getHover(uri, text, Position{Line: 3, Character: len(`        i`)})
+	iResult, ok := iHover.(HoverResult)
+	if !ok || !strings.Contains(iResult.Contents.Value, "Interaction") {
+		t.Fatalf("expected i hover to infer Interaction, got %#v", iHover)
+	}
+
+	vHover := getHover(uri, text, Position{Line: 4, Character: len(`        v`)})
+	vResult, ok := vHover.(HoverResult)
+	if !ok || !strings.Contains(vResult.Contents.Value, "Client") {
+		t.Fatalf("expected v hover to infer Client, got %#v", vHover)
+	}
+
+	methodHover := getHover(uri, text, Position{Line: 2, Character: strings.Index(getLine(text, 2), "tempPrimaryButton") + len("temp")})
+	methodResult, ok := methodHover.(HoverResult)
+	if !ok || !strings.Contains(methodResult.Contents.Value, "tempPrimaryButton") {
+		t.Fatalf("expected tempPrimaryButton hover, got %#v", methodHover)
+	}
+}
+
+func TestLSPHoverOneLineFunctionParameterInBody(t *testing.T) {
+	dir := t.TempDir()
+	commandsPath := filepath.Join(dir, "commands.tiny")
+	gatewayPath := filepath.Join(dir, "gateway.tiny")
+
+	if err := os.WriteFile(commandsPath, []byte(strings.Join([]string{
+		`export class EmbedBuilder {}`,
+		`export fn embedPayload(card: EmbedBuilder | object): object { return {} }`,
+	}, "\n")), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	text := `import "commands.tiny" as CommandsModule;
+export fn embedPayload(card: CommandsModule.EmbedBuilder | object): object { return CommandsModule.embedPayload(card) }`
+
+	line := `export fn embedPayload(card: CommandsModule.EmbedBuilder | object): object { return CommandsModule.embedPayload(card) }`
+	bodyCard := strings.LastIndex(line, "card")
+	result := getHover(pathToFileURI(gatewayPath), text, Position{
+		Line:      1,
+		Character: bodyCard + 1,
+	})
+	hover, ok := result.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover for one-line body parameter, got %#v", result)
+	}
+	if !strings.Contains(hover.Contents.Value, "CommandsModule.EmbedBuilder | object") {
+		t.Fatalf("expected card parameter type in hover, got %q", hover.Contents.Value)
+	}
+
+	def := getDefinition(pathToFileURI(gatewayPath), text, Position{
+		Line:      1,
+		Character: bodyCard + 1,
+	})
+	loc, ok := def.(Location)
+	if !ok {
+		t.Fatalf("expected definition for one-line body parameter, got %#v", def)
+	}
+	if loc.Range.Start.Line != 1 || loc.Range.Start.Character >= bodyCard {
+		t.Fatalf("expected definition to point at parameter declaration, got %#v", loc)
+	}
+}
+
+func TestLSPDidChangeDoesNotRunDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gateway.tiny")
+	uri := pathToFileURI(path)
+	text := strings.Join([]string{
+		`import "commands.tiny" as CommandsModule`,
+		`export fn embedPayload(card: CommandsModule.EmbedBuilder | object): object {`,
+		`    return CommandsModule.embedPayload(card)`,
+		`}`,
+	}, "\n")
+
+	invalidateLSPFastCaches()
+	oldDocs := lspDocs
+	defer func() { lspDocs = oldDocs }()
+	lspDocs = map[string]string{}
+	start := time.Now()
+	refreshLSPDocumentFast(uri, text)
+	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+		t.Fatalf("expected didChange refresh to avoid diagnostics work, took %s", elapsed)
+	}
+}
+
 func TestLSPNamespaceCompletionIncludesExportedEnumsAndClasses(t *testing.T) {
 	dir := t.TempDir()
 	todoPath := filepath.Join(dir, "todo.tiny")
@@ -1894,8 +2591,8 @@ func TestLSPStdPrivateReturnTypeCompletion(t *testing.T) {
 		Character: len("http."),
 	})
 
-	if completionLabelsContain(namespaceItems, "Server") {
-		t.Fatalf("expected private Server type to stay hidden, got %#v", completionLabels(namespaceItems))
+	if !completionLabelsContain(namespaceItems, "Server") {
+		t.Fatalf("expected exported Server type to be visible, got %#v", completionLabels(namespaceItems))
 	}
 }
 
@@ -1919,7 +2616,32 @@ func TestLSPStdHttpRouteHandlerRequestCompletion(t *testing.T) {
 	}
 }
 
+func TestLSPVariableInferenceFromHttpRequestBodyProperty(t *testing.T) {
+	text := strings.Join([]string{
+		`import std "http" as http`,
+		`const server = http.server(3000)`,
+		`server.get("/update", fn(i) {`,
+		`    const ID = i.body`,
+		`})`,
+	}, "\n")
+
+	scope := scopeAtPosition("file:///test_http_request_body_var.tiny", text, Position{
+		Line:      3,
+		Character: len(`    const ID = i.body`),
+	})
+	sym, ok := scope.Resolve("ID")
+	if !ok {
+		t.Fatalf("expected ID variable to be in scope")
+	}
+	if sym.Type != "string" {
+		t.Fatalf("expected ID to infer string from i.body, got %q", sym.Type)
+	}
+}
+
 func TestLSPFileAutoImportCompletion(t *testing.T) {
+	lspEnableHeavyAutoImportCompletions = true
+	defer func() { lspEnableHeavyAutoImportCompletions = false }()
+
 	dir := t.TempDir()
 	todoPath := filepath.Join(dir, "todo.tiny")
 	mainPath := filepath.Join(dir, "main.tiny")
@@ -1952,6 +2674,9 @@ func TestLSPFileAutoImportCompletion(t *testing.T) {
 }
 
 func TestLSPLibraryAutoImportCompletion(t *testing.T) {
+	lspEnableHeavyAutoImportCompletions = true
+	defer func() { lspEnableHeavyAutoImportCompletions = false }()
+
 	dir := t.TempDir()
 	withWorkingDir(t, dir)
 	t.Setenv("TINY_HOME", filepath.Join(dir, "tiny-home"))
@@ -3382,6 +4107,15 @@ func TestLSPAutocompleteSuppressionAndQuotedKeys(t *testing.T) {
 		t.Fatalf("expected no completions inside normal string, got %#v", completionLabels(completionsString))
 	}
 
+	textEmptyString := `const s = "";`
+	completionsEmptyString := getCompletions("file:///test_empty_string.tiny", textEmptyString, Position{
+		Line:      0,
+		Character: len("const s = \""),
+	})
+	if len(completionsEmptyString) > 0 {
+		t.Fatalf("expected no completions inside empty string, got %#v", completionLabels(completionsEmptyString))
+	}
+
 	// 2. Inside backtick interpolation: verify autocomplete items are present
 	textBacktick := strings.Join([]string{
 		`const name = "Tiny";`,
@@ -4396,7 +5130,7 @@ func TestLSPEnumMemberAutoCompleteAndValidation(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected hover result on StringEnum definition tester, got %#v", resDef1)
 	}
-	if !strings.Contains(hDef1.Contents.Value, "Type: `string`") || !strings.Contains(hDef1.Contents.Value, "StringEnum.tester") {
+	if !strings.Contains(hDef1.Contents.Value, "```tiny\nStringEnum.tester: string = \"tester\"\n```") {
 		t.Fatalf("expected hover on StringEnum definition to contain Type: string, got %q", hDef1.Contents.Value)
 	}
 
@@ -4406,7 +5140,7 @@ func TestLSPEnumMemberAutoCompleteAndValidation(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected hover result on NumberEnum definition val, got %#v", resDef2)
 	}
-	if !strings.Contains(hDef2.Contents.Value, "Type: `number`") || !strings.Contains(hDef2.Contents.Value, "NumberEnum.val") {
+	if !strings.Contains(hDef2.Contents.Value, "```tiny\nNumberEnum.val: number = 42\n```") {
 		t.Fatalf("expected hover on NumberEnum definition to contain Type: number, got %q", hDef2.Contents.Value)
 	}
 
@@ -4416,7 +5150,7 @@ func TestLSPEnumMemberAutoCompleteAndValidation(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected hover result on IotaEnum definition val, got %#v", resDef3)
 	}
-	if !strings.Contains(hDef3.Contents.Value, "Type: `number`") || !strings.Contains(hDef3.Contents.Value, "IotaEnum.val") {
+	if !strings.Contains(hDef3.Contents.Value, "```tiny\nIotaEnum.val: number = 0\n```") {
 		t.Fatalf("expected hover on IotaEnum definition to contain Type: number, got %q", hDef3.Contents.Value)
 	}
 
@@ -4426,7 +5160,7 @@ func TestLSPEnumMemberAutoCompleteAndValidation(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected hover result on StringEnum.tester, got %#v", res1)
 	}
-	if !strings.Contains(h1.Contents.Value, "Type: `string`") {
+	if !strings.Contains(h1.Contents.Value, "```tiny\nStringEnum.tester: string = \"tester\"\n```") {
 		t.Fatalf("expected hover to contain Type: string, got %q", h1.Contents.Value)
 	}
 
@@ -4436,7 +5170,7 @@ func TestLSPEnumMemberAutoCompleteAndValidation(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected hover result on NumberEnum.val, got %#v", res2)
 	}
-	if !strings.Contains(h2.Contents.Value, "Type: `number`") {
+	if !strings.Contains(h2.Contents.Value, "```tiny\nNumberEnum.val: number = 42\n```") {
 		t.Fatalf("expected hover to contain Type: number, got %q", h2.Contents.Value)
 	}
 
@@ -4446,7 +5180,7 @@ func TestLSPEnumMemberAutoCompleteAndValidation(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected hover result on IotaEnum.val, got %#v", res3)
 	}
-	if !strings.Contains(h3.Contents.Value, "Type: `number`") {
+	if !strings.Contains(h3.Contents.Value, "```tiny\nIotaEnum.val: number = 0\n```") {
 		t.Fatalf("expected hover to contain Type: number, got %q", h3.Contents.Value)
 	}
 
@@ -5156,6 +5890,88 @@ func TestLSPInterfaceImplements(t *testing.T) {
 	}
 }
 
+func TestLSPInterpolatedStringUndefinedVariableDiagnostic(t *testing.T) {
+	text := strings.Join([]string{
+		`import std "io";`,
+		`interface Logger {`,
+		`    logError: function(string)`,
+		`    logInfo: function(string)`,
+		`}`,
+		`class CustomLogger implements Logger {`,
+		`    fn logError() {`,
+		"        io.println(`[ERROR]: ${text}`)",
+		`    }`,
+		`    fn logInfo(text) {`,
+		"        io.println(`[INFO]: ${text}`)",
+		`    }`,
+		`}`,
+	}, "\n")
+
+	diagnostics := semanticDiagnostics("file:///interpolated_undefined.tiny", text)
+	if !diagnosticsContain(diagnostics, "undefined variable: text") {
+		t.Fatalf("expected undefined variable diagnostic inside interpolation, got %#v", diagnostics)
+	}
+}
+
+func TestLSPClassImplementsFunctionSignatureMismatch(t *testing.T) {
+	text := strings.Join([]string{
+		`interface Logger {`,
+		`    logError: function(string)`,
+		`    logInfo: function(string)`,
+		`}`,
+		`class CustomLogger implements Logger {`,
+		`    fn logError() {}`,
+		`    fn logInfo(text) {}`,
+		`}`,
+	}, "\n")
+
+	diagnostics := semanticDiagnostics("file:///implements_signature.tiny", text)
+	if !diagnosticsContain(diagnostics, "class 'CustomLogger' property 'logError' does not match interface 'Logger'") {
+		t.Fatalf("expected implements signature diagnostic, got %#v", diagnostics)
+	}
+}
+
+func TestLSPClassImplementsExtendedInterface(t *testing.T) {
+	text := strings.Join([]string{
+		`interface Entity {`,
+		`    id: number`,
+		`}`,
+		`interface User extends Entity {`,
+		`    name: string`,
+		`}`,
+		`class MissingId implements User {`,
+		`    field name: string = "Ada"`,
+		`}`,
+	}, "\n")
+
+	diagnostics := semanticDiagnostics("file:///implements_extends.tiny", text)
+	if !diagnosticsContain(diagnostics, "class 'MissingId' is missing property 'id' from interface 'User'") {
+		t.Fatalf("expected missing inherited interface property diagnostic, got %#v", diagnostics)
+	}
+}
+
+func TestLSPClassAssignableToExtendedInterfaceParent(t *testing.T) {
+	text := strings.Join([]string{
+		`interface Entity {`,
+		`    id: number`,
+		`}`,
+		`interface User extends Entity {`,
+		`    name: string`,
+		`}`,
+		`class Person implements User {`,
+		`    field id: number = 1`,
+		`    field name: string = "Ada"`,
+		`}`,
+		`fn acceptEntity(entity: Entity) {}`,
+		`acceptEntity(Person())`,
+	}, "\n")
+
+	diagnostics := semanticDiagnostics("file:///implements_extends_assign.tiny", text)
+	if len(diagnostics) > 0 {
+		t.Fatalf("expected class implementing child interface to satisfy parent interface, got %#v", diagnostics)
+	}
+}
+
 func TestLSPClassImplementsAutocomplete(t *testing.T) {
 	text := strings.Join([]string{
 		`export interface Reader {`,
@@ -5246,7 +6062,439 @@ func TestLSPObjectLiteralStructuralDiagnostics(t *testing.T) {
 	}
 }
 
-func TestLSPInlayHintsStripNamespaces(t *testing.T) {
+func TestLSPObjectVariableStructuralDiagnostics(t *testing.T) {
+	text1 := strings.Join([]string{
+		`interface Data {`,
+		`    test: string`,
+		`}`,
+		`fn ret(): Data {`,
+		`    const data = { text: "x" }`,
+		`    return data`,
+		`}`,
+	}, "\n")
+
+	diagnostics1 := semanticDiagnostics("file:///test_object_var_return_missing.tiny", text1)
+	if !diagnosticsContain(diagnostics1, "object literal is missing property 'test' from 'Data'") {
+		t.Fatalf("expected diagnostic for object variable missing interface field, got %#v", diagnostics1)
+	}
+
+	text2 := strings.Join([]string{
+		`interface Data {`,
+		`    test: string`,
+		`}`,
+		`fn ret(): Data {`,
+		`    const data = { test: 1 }`,
+		`    return data`,
+		`}`,
+	}, "\n")
+
+	diagnostics2 := semanticDiagnostics("file:///test_object_var_return_mismatch.tiny", text2)
+	if !diagnosticsContain(diagnostics2, "type mismatch for property 'test': expected 'string', got 'number'") {
+		t.Fatalf("expected diagnostic for object variable field mismatch, got %#v", diagnostics2)
+	}
+}
+
+func TestLSPObjectLiteralOptionalInterfaceFieldsAreNotRequired(t *testing.T) {
+	text := strings.Join([]string{
+		`export interface User {`,
+		`    id: string,`,
+		`    name?: string`,
+		`}`,
+		`export fn test(): User {`,
+		`    return {`,
+		`        id: "1"`,
+		`    }`,
+		`}`,
+	}, "\n")
+
+	diagnostics := semanticDiagnostics("file:///test_optional_interface_return.tiny", text)
+	if diagnosticsContain(diagnostics, "missing property 'name'") {
+		t.Fatalf("did not expect optional field diagnostic, got %#v", diagnostics)
+	}
+	if diagnosticsContain(diagnostics, "cannot return type 'object'") || diagnosticsContain(diagnostics, "expected 'User'") {
+		t.Fatalf("did not expect object/interface return diagnostic, got %#v", diagnostics)
+	}
+}
+
+func TestLSPRuntimeNewVMOptionsArePartial(t *testing.T) {
+	text := strings.Join([]string{
+		`import std "runtime" as runtime`,
+		`const vm = runtime.newVM({`,
+		`    disableJIT: true,`,
+		`    runMainOnLoad: false`,
+		`})`,
+	}, "\n")
+
+	diagnostics := semanticDiagnostics("file:///test_runtime_newvm_partial.tiny", text)
+	for _, field := range []string{"globals", "isolated", "allowedStdlib", "cliArgs"} {
+		if diagnosticsContain(diagnostics, "missing property '"+field+"'") {
+			t.Fatalf("did not expect missing %s diagnostic, got %#v", field, diagnostics)
+		}
+	}
+}
+
+func TestLSPRuntimeNewVMEmptyQuotedKeyCompletions(t *testing.T) {
+	text := strings.Join([]string{
+		`import std "runtime" as runtime`,
+		`const vm = runtime.newVM({`,
+		`    ""`,
+		`})`,
+	}, "\n")
+
+	items := getCompletions("file:///test_runtime_newvm_empty_key.tiny", text, Position{
+		Line:      2,
+		Character: len(`    "`),
+	})
+	for _, label := range []string{`"disableJIT": `, `"runMainOnLoad": `, `"allowedStdlib": `} {
+		if !completionLabelsContain(items, label) {
+			t.Fatalf("expected runtime.newVM empty quoted key completions to include %q, got %#v", label, completionLabels(items))
+		}
+	}
+	for _, item := range items {
+		if item.Label == `"disableJIT": ` && item.FilterText != "disableJIT" {
+			t.Fatalf("expected quoted key completion to filter by raw field name, got %#v", item)
+		}
+	}
+}
+
+func TestLSPRuntimeNewVMUnclosedQuotedKeyCompletions(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+		line int
+		char int
+	}{
+		{
+			name: "empty object",
+			text: strings.Join([]string{
+				`import std "runtime" as runtime`,
+				`const vm = runtime.newVM({`,
+				`    "`,
+				`})`,
+			}, "\n"),
+			line: 2,
+			char: len(`    "`),
+		},
+		{
+			name: "after existing fields",
+			text: strings.Join([]string{
+				`import std "runtime" as runtime`,
+				`const vm = runtime.newVM({`,
+				`    disableJIT: true,`,
+				`    runMainOnLoad: false,`,
+				`    "`,
+				`})`,
+			}, "\n"),
+			line: 4,
+			char: len(`    "`),
+		},
+	}
+
+	for _, tc := range cases {
+		items := getCompletions("file:///test_runtime_newvm_unclosed_key.tiny", tc.text, Position{
+			Line:      tc.line,
+			Character: tc.char,
+		})
+		for _, label := range []string{`"disableJIT": `, `"runMainOnLoad": `, `"allowedStdlib": `} {
+			if !completionLabelsContain(items, label) {
+				t.Fatalf("%s: expected runtime.newVM unclosed quoted key completions to include %q, got %#v", tc.name, label, completionLabels(items))
+			}
+		}
+	}
+}
+
+func TestLSPRuntimeNewVMInlineQuotedKeyCompletions(t *testing.T) {
+	line := `const vm = runtime.newVM({""})`
+	text := strings.Join([]string{
+		`import std "runtime" as runtime`,
+		line,
+	}, "\n")
+
+	quoteIndex := strings.Index(line, `""`)
+	positions := []struct {
+		name      string
+		character int
+	}{
+		{name: "between quotes", character: quoteIndex + 1},
+		{name: "after closing quote", character: quoteIndex + 2},
+	}
+
+	for _, pos := range positions {
+		items := getCompletions("file:///test_runtime_newvm_inline_key.tiny", text, Position{
+			Line:      1,
+			Character: pos.character,
+		})
+		for _, label := range []string{`"disableJIT": `, `"runMainOnLoad": `, `"allowedStdlib": `} {
+			if !completionLabelsContain(items, label) {
+				t.Fatalf("%s: expected inline runtime.newVM quoted key completions to include %q, got %#v", pos.name, label, completionLabels(items))
+			}
+		}
+	}
+}
+
+func TestLSPFunctionCompletionTriggersParameterHints(t *testing.T) {
+	text := strings.Join([]string{
+		`fn send(name: string, count: number) {}`,
+		`se`,
+	}, "\n")
+
+	items := getCompletions("file:///test_function_completion_parameter_hints.tiny", text, Position{
+		Line:      1,
+		Character: len(`se`),
+	})
+	item, ok := completionItemByLabel(items, "send")
+	if !ok {
+		t.Fatalf("expected function completion for send, got %#v", completionLabels(items))
+	}
+	if item.Command == nil || item.Command.Command != "editor.action.triggerParameterHints" {
+		t.Fatalf("expected function completion to trigger parameter hints, got %#v", item)
+	}
+}
+
+func TestLSPHoverInterfaceShowsFields(t *testing.T) {
+	text := strings.Join([]string{
+		`interface User {`,
+		`    id: string,`,
+		`    name?: string`,
+		`}`,
+		`let user: User = { id: "1" }`,
+	}, "\n")
+
+	result := getHover("file:///test_interface_hover_fields.tiny", text, Position{
+		Line:      4,
+		Character: len(`let user: U`),
+	})
+	hover, ok := result.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover for interface type, got %#v", result)
+	}
+	if !strings.Contains(hover.Contents.Value, "id: string") || !strings.Contains(hover.Contents.Value, "name: string | null") {
+		t.Fatalf("expected interface hover to include fields, got %q", hover.Contents.Value)
+	}
+}
+
+func TestLSPDiagnosticsDeduplicateIdenticalMessages(t *testing.T) {
+	analyzer := &astSemanticAnalyzer{uri: "file:///dedupe.tiny", text: "const x = 1"}
+	analyzer.addDiagnostic(1, 7, "duplicate diagnostic")
+	analyzer.addDiagnostic(1, 7, "duplicate diagnostic")
+	analyzer.addError(1, 7, "duplicate error")
+	analyzer.addError(1, 7, "duplicate error")
+
+	if len(analyzer.diagnostics) != 2 {
+		t.Fatalf("expected duplicate diagnostics to be collapsed, got %#v", analyzer.diagnostics)
+	}
+}
+
+func TestLSPDeduplicateDiagnosticsKeepsDifferentRanges(t *testing.T) {
+	d1 := makeRangeDiagnostic(1, 1, 2, 2, "same")
+	d2 := makeRangeDiagnostic(2, 1, 2, 2, "same")
+	d3 := makeRangeDiagnostic(1, 1, 2, 2, "same")
+	diagnostics := dedupeDiagnostics([]map[string]any{d1, d2, d3})
+	if len(diagnostics) != 2 {
+		t.Fatalf("expected same-message diagnostics on different ranges to be preserved, got %#v", diagnostics)
+	}
+}
+
+func TestLSPObjectLiteralMissingFieldsAreCollapsed(t *testing.T) {
+	text := strings.Join([]string{
+		`interface Config {`,
+		`    host: string,`,
+		`    port: number,`,
+		`    secure: bool`,
+		`}`,
+		`fn configure(config: Config) {}`,
+		`configure({})`,
+	}, "\n")
+
+	diagnostics := semanticDiagnostics("file:///test_missing_fields_collapsed.tiny", text)
+	count := 0
+	for _, diagnostic := range diagnostics {
+		msg, _ := diagnostic["message"].(string)
+		if strings.Contains(msg, "object literal is missing") {
+			count++
+			if !strings.Contains(msg, "'host'") || !strings.Contains(msg, "'port'") || !strings.Contains(msg, "'secure'") {
+				t.Fatalf("expected collapsed missing fields message, got %q", msg)
+			}
+			if strings.Contains(msg, "Config | null") {
+				t.Fatalf("expected structural type name in diagnostic, got %q", msg)
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected one collapsed missing-fields diagnostic, got %d diagnostics: %#v", count, diagnostics)
+	}
+}
+
+func TestLSPHttpRequestQuotedObjectKeyCompletions(t *testing.T) {
+	text := strings.Join([]string{
+		`import std "http" as http`,
+		`http.request({`,
+		`    ""`,
+		`})`,
+	}, "\n")
+
+	completions := getCompletions("file:///test_http_request_completion.tiny", text, Position{
+		Line:      2,
+		Character: len(`    "`),
+	})
+	if !completionLabelsContain(completions, `"url": `) {
+		t.Fatalf("expected http.request object completions to include quoted url, got %#v", completionLabels(completions))
+	}
+}
+
+func TestLSPHttpMultipartNestedFileCompletionsAndHover(t *testing.T) {
+	text := strings.Join([]string{
+		`import std "http" as http`,
+		`http.post("", {`,
+		`    files: [`,
+		`        {`,
+		`            `,
+		`        }`,
+		`    ]`,
+		`})`,
+	}, "\n")
+
+	items := getCompletions("file:///test_http_multipart_nested_file.tiny", text, Position{
+		Line:      4,
+		Character: len(`            `),
+	})
+	if !completionLabelsContain(items, "filename: ") {
+		t.Fatalf("expected MultipartFile nested completions to include filename, got %#v", completionLabels(items))
+	}
+
+	hoverText := strings.Join([]string{
+		`import std "http" as http`,
+		`http.post("", {`,
+		`    files: [`,
+		`        {`,
+		`            filename: ""`,
+		`        }`,
+		`    ]`,
+		`})`,
+	}, "\n")
+
+	filesHoverResult := getHover("file:///test_http_multipart_hover.tiny", hoverText, Position{
+		Line:      2,
+		Character: len(`    fi`),
+	})
+	filesHover, ok := filesHoverResult.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover for MultipartBody.files, got %#v", filesHoverResult)
+	}
+	if !strings.Contains(filesHover.Contents.Value, "```tiny\nMultipartBody.files: array:interface:MultipartFile | object | null\n```") {
+		t.Fatalf("expected files hover to use Tiny declaration markdown, got %q", filesHover.Contents.Value)
+	}
+	if strings.Contains(filesHover.Contents.Value, "Type: `") {
+		t.Fatalf("expected files hover not to use Type line, got %q", filesHover.Contents.Value)
+	}
+
+	filenameHoverResult := getHover("file:///test_http_multipart_hover.tiny", hoverText, Position{
+		Line:      4,
+		Character: len(`            file`),
+	})
+	filenameHover, ok := filenameHoverResult.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover for MultipartFile.filename, got %#v", filenameHoverResult)
+	}
+	if !strings.Contains(filenameHover.Contents.Value, "```tiny\nMultipartFile.filename: string | null\n```") {
+		t.Fatalf("expected filename hover to use Tiny declaration markdown, got %q", filenameHover.Contents.Value)
+	}
+}
+
+func TestLSPNestedArrayObjectFieldTypeMismatch(t *testing.T) {
+	text := strings.Join([]string{
+		`import std "http" as http`,
+		`http.post("https://example.com/upload", {`,
+		`    multipart: true,`,
+		`    form: { username: "tiny" },`,
+		`    files: [{ field: "file", path: 4 }]`,
+		`})`,
+	}, "\n")
+
+	diagnostics := semanticDiagnostics("file:///test_nested_arr.tiny", text)
+	if !diagnosticsContain(diagnostics, "type mismatch for property 'path': expected 'string | null', got 'number'") {
+		t.Fatalf("expected nested array object field type mismatch diagnostic, got %#v", diagnostics)
+	}
+}
+
+func TestLSPQuotedObjectKeyCompletionsForStructuralAndNestedTypes(t *testing.T) {
+	cases := []struct {
+		name      string
+		text      string
+		line      int
+		character int
+		want      string
+	}{
+		{
+			name: "double quoted structural key",
+			text: strings.Join([]string{
+				`fn send(payload: {name: string, age: number}) {}`,
+				`send({`,
+				`    "`,
+				`})`,
+			}, "\n"),
+			line:      2,
+			character: len(`    "`),
+			want:      `"name": `,
+		},
+		{
+			name: "single quoted structural key",
+			text: strings.Join([]string{
+				`fn send(payload: {name: string, age: number}) {}`,
+				`send({`,
+				`    '`,
+				`})`,
+			}, "\n"),
+			line:      2,
+			character: len(`    '`),
+			want:      `'name': `,
+		},
+		{
+			name: "double quoted nested array object key",
+			text: strings.Join([]string{
+				`import std "http" as http`,
+				`http.post("", {`,
+				`    files: [`,
+				`        {`,
+				`            "`,
+				`        }`,
+				`    ]`,
+				`})`,
+			}, "\n"),
+			line:      4,
+			character: len(`            "`),
+			want:      `"filename": `,
+		},
+		{
+			name: "single quoted nested array object key",
+			text: strings.Join([]string{
+				`import std "http" as http`,
+				`http.post("", {`,
+				`    files: [`,
+				`        {`,
+				`            '`,
+				`        }`,
+				`    ]`,
+				`})`,
+			}, "\n"),
+			line:      4,
+			character: len(`            '`),
+			want:      `'filename': `,
+		},
+	}
+
+	for _, tc := range cases {
+		items := getCompletions("file:///test_quoted_object_key_"+tc.name+".tiny", tc.text, Position{
+			Line:      tc.line,
+			Character: tc.character,
+		})
+		if !completionLabelsContain(items, tc.want) {
+			t.Fatalf("%s: expected quoted object key completions to include %q, got %#v", tc.name, tc.want, completionLabels(items))
+		}
+	}
+}
+
+func TestLSPInlayHintsDisabledForNamespaceTypes(t *testing.T) {
 	text := strings.Join([]string{
 		`namespace io {`,
 		`    export interface Reader {`,
@@ -5265,21 +6513,8 @@ func TestLSPInlayHintsStripNamespaces(t *testing.T) {
 		Start: Position{Line: 10, Character: 0},
 		End:   Position{Line: 10, Character: len(`const r = io.getReader();`)},
 	})
-
-	labels := []string{}
-	for _, hint := range hints {
-		labels = append(labels, hint.Label)
-	}
-
-	found := false
-	for _, label := range labels {
-		if label == ": Reader" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("expected inlay hint for variable r to be ': Reader', got %#v", labels)
+	if len(hints) != 0 {
+		t.Fatalf("expected inlay hints to be disabled, got %#v", hints)
 	}
 }
 
@@ -5406,6 +6641,316 @@ func TestLSPSemanticTokensFilterStrings(t *testing.T) {
 	}
 }
 
+func TestLSPSemanticTokensSoftKeywordsContext(t *testing.T) {
+	text := strings.Join([]string{
+		`const embed = fn(v) { return v }`,
+		`embed(1)`,
+		`const match = fn(v) { return v }`,
+		`match(1)`,
+		`match 1 {`,
+		`    1 {}`,
+		`}`,
+		`class Box {`,
+		`    embed logger`,
+		`}`,
+	}, "\n")
+
+	tokens := collectSemanticTokens("file:///soft_keywords.tiny", text)
+	tokenTypeAt := func(line int, word string) string {
+		lineText := getLine(text, line)
+		start := strings.Index(lineText, word)
+		if start < 0 {
+			t.Fatalf("word %q not found on line %d", word, line)
+		}
+		end := start + len(word)
+		for _, tok := range tokens {
+			if tok.Line == line && tok.Start == start && tok.End == end {
+				return tok.Type
+			}
+		}
+		return ""
+	}
+
+	if got := tokenTypeAt(0, "embed"); got != "variable" {
+		t.Fatalf("expected const embed to be variable, got %q", got)
+	}
+	if got := tokenTypeAt(1, "embed"); got != "function" {
+		t.Fatalf("expected embed() to be function, got %q", got)
+	}
+	if got := tokenTypeAt(2, "match"); got != "variable" {
+		t.Fatalf("expected const match to be variable, got %q", got)
+	}
+	if got := tokenTypeAt(3, "match"); got != "function" {
+		t.Fatalf("expected match() to be function, got %q", got)
+	}
+	if got := tokenTypeAt(4, "match"); got != "keyword" {
+		t.Fatalf("expected match statement to be keyword, got %q", got)
+	}
+	if got := tokenTypeAt(8, "embed"); got != "keyword" {
+		t.Fatalf("expected class embed declaration to be keyword, got %q", got)
+	}
+}
+
+func TestLSPSoftKeywordCallsReportUndefinedWhenUndeclared(t *testing.T) {
+	text := strings.Join([]string{
+		`import std "io" as io`,
+		`embed()`,
+		`match()`,
+		`field()`,
+		`native()`,
+		`external()`,
+		`private()`,
+		`public()`,
+		`iota()`,
+		`implements()`,
+		`extends()`,
+	}, "\n")
+	diagnostics := semanticDiagnostics("file:///soft_keyword_undefined.tiny", text)
+	for _, kw := range []string{"embed", "match", "field", "native", "external", "private", "public", "iota", "implements", "extends"} {
+		if !diagnosticsContain(diagnostics, "undefined variable: "+kw) {
+			t.Fatalf("expected undefined %s diagnostic, got %#v", kw, diagnostics)
+		}
+	}
+}
+
+func TestLSPCrossFileCallbackParamDottedTypeResolution(t *testing.T) {
+	dir := t.TempDir()
+	messagePath := filepath.Join(dir, "message.tiny")
+	gatewayPath := filepath.Join(dir, "gateway.tiny")
+	mainPath := filepath.Join(dir, "main.tiny")
+
+	err := os.WriteFile(messagePath, []byte(strings.Join([]string{
+		`export class Message {`,
+		`    field content = ""`,
+		`    field author: object`,
+		`    fn reply(textContent: string) {}`,
+		`}`,
+	}, "\n")), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = os.WriteFile(gatewayPath, []byte(strings.Join([]string{
+		`import "message.tiny" as MessageModule`,
+		``,
+		`export class Client {`,
+		`    fn onMessage(handler: function(MessageModule.Message, Client)) {}`,
+		`}`,
+	}, "\n")), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mainText := strings.Join([]string{
+		`import "gateway.tiny" as Discord`,
+		`import "message.tiny" as Message`,
+		``,
+		`const bot = Discord.Client()`,
+		``,
+		`bot.onMessage(fn(msg, client) {`,
+		`    msg.content`,
+		`    msg.author`,
+		`})`,
+	}, "\n")
+
+	uri := pathToFileURI(mainPath)
+	diagnostics := semanticDiagnostics(uri, mainText)
+	if diagnosticsContain(diagnostics, "undefined method or property: content") {
+		t.Fatalf("expected msg.content to resolve across files, got diagnostics: %#v", diagnostics)
+	}
+	if diagnosticsContain(diagnostics, "undefined method or property: author") {
+		t.Fatalf("expected msg.author to resolve across files, got diagnostics: %#v", diagnostics)
+	}
+}
+
+func TestLSPCrossFileCallbackParamCompletions(t *testing.T) {
+	dir := t.TempDir()
+	messagePath := filepath.Join(dir, "message.tiny")
+	gatewayPath := filepath.Join(dir, "gateway.tiny")
+	mainPath := filepath.Join(dir, "main.tiny")
+
+	err := os.WriteFile(messagePath, []byte(strings.Join([]string{
+		`export class Message {`,
+		`    field content = ""`,
+		`    field author: object`,
+		`    fn reply(textContent: string) {}`,
+		`}`,
+	}, "\n")), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = os.WriteFile(gatewayPath, []byte(strings.Join([]string{
+		`import "message.tiny" as MessageModule`,
+		``,
+		`export class Client {`,
+		`    fn onMessage(handler: function(MessageModule.Message, Client)) {}`,
+		`}`,
+	}, "\n")), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mainText := strings.Join([]string{
+		`import "gateway.tiny" as Discord`,
+		`import "message.tiny" as Message`,
+		``,
+		`const bot = Discord.Client()`,
+		``,
+		`bot.onMessage(fn(msg, client) {`,
+		`    msg.`,
+		`})`,
+	}, "\n")
+
+	uri := pathToFileURI(mainPath)
+	items := getCompletions(uri, mainText, Position{
+		Line:      6,
+		Character: len("    msg."),
+	})
+
+	labels := completionLabels(items)
+	t.Logf("msg. completions: %#v", labels)
+
+	if !completionLabelsContain(items, "content") {
+		t.Fatalf("expected msg. completions to include 'content', got %#v", labels)
+	}
+	if !completionLabelsContain(items, "author") {
+		t.Fatalf("expected msg. completions to include 'author', got %#v", labels)
+	}
+	if !completionLabelsContain(items, "reply") {
+		t.Fatalf("expected msg. completions to include 'reply', got %#v", labels)
+	}
+}
+
+func TestLSPCrossFileCallbackParamCompletionsRealProject(t *testing.T) {
+	dir := t.TempDir()
+
+	err := os.WriteFile(filepath.Join(dir, "constants.tiny"), []byte(strings.Join([]string{
+		`export const GATEWAY_URL = "wss://gateway.discord.gg/"`,
+		`export enum GatewayOpcode {`,
+		`    Dispatch = 0,`,
+		`    Heartbeat = 1,`,
+		`    Identify = 2,`,
+		`    PresenceUpdate = 3,`,
+		`    Resume = 6,`,
+		`    Reconnect = 7,`,
+		`    Hello = 10,`,
+		`    HeartbeatAck = 11`,
+		`}`,
+	}, "\n")), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = os.WriteFile(filepath.Join(dir, "rest.tiny"), []byte(strings.Join([]string{
+		`import "constants.tiny" as Constants`,
+		`export fn request(token: string, method: string, route: string, body: any): any { return null }`,
+		`export fn get(token: string, route: string): any { return null }`,
+		`export fn post(token: string, route: string, body: any): any { return null }`,
+		`export fn patch(token: string, route: string, body: any): any { return null }`,
+		`export fn put(token: string, route: string, body: any): any { return null }`,
+		`export fn delete(token: string, route: string): any { return null }`,
+		`export fn sendMessage(token: string, channelId: string, payload: object): any { return null }`,
+		`export fn editMessage(token: string, channelId: string, messageId: string, payload: object): any { return null }`,
+		`export fn deleteMessage(token: string, channelId: string, messageId: string): any { return null }`,
+		`export fn addReaction(token: string, channelId: string, messageId: string, emoji: string): any { return null }`,
+		`export fn removeOwnReaction(token: string, channelId: string, messageId: string, emoji: string): any { return null }`,
+		`export fn triggerTyping(token: string, channelId: string): any { return null }`,
+		`export fn pinMessage(token: string, channelId: string, messageId: string): any { return null }`,
+		`export fn unpinMessage(token: string, channelId: string, messageId: string): any { return null }`,
+	}, "\n")), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = os.WriteFile(filepath.Join(dir, "message.tiny"), []byte(strings.Join([]string{
+		`export class Message {`,
+		`    field id = ""`,
+		`    field content = ""`,
+		`    field author: object`,
+		`    field client: any`,
+		`    fn init(data: object, client: any) {`,
+		`        this.id = data.id`,
+		`        this.content = data.content`,
+		`        this.author = data.author`,
+		`        this.client = client`,
+		`    }`,
+		`    fn reply(textContent: string) {}`,
+		`}`,
+	}, "\n")), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = os.WriteFile(filepath.Join(dir, "gateway.tiny"), []byte(strings.Join([]string{
+		`import "constants.tiny" as Constants`,
+		`import "rest.tiny" as Rest`,
+		`import "message.tiny" as MessageModule`,
+		``,
+		`export interface BotConfig {`,
+		`    token: string,`,
+		`    logging?: bool`,
+		`}`,
+		``,
+		`export interface User {`,
+		`    id: string,`,
+		`    username: string,`,
+		`    bot?: bool`,
+		`}`,
+		``,
+		`export class Client {`,
+		`    field token = ""`,
+		`    field logging = false`,
+		`    field readyCallback = null`,
+		`    field messageCallback = null`,
+		`    fn init(config: BotConfig) {}`,
+		`    fn onReady(handler: function) { this.readyCallback = handler }`,
+		`    fn onMessage(handler: function(MessageModule.Message, Client)) { this.messageCallback = handler }`,
+		`    fn start() {}`,
+		`}`,
+	}, "\n")), 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mainText := strings.Join([]string{
+		`import "gateway.tiny" as Discord`,
+		`import "message.tiny" as Message`,
+		``,
+		`const bot = Discord.Client({`,
+		`    token: "test",`,
+		`    logging: true`,
+		`})`,
+		``,
+		`bot.onReady(fn(user) {`,
+		`    io.println("ready")`,
+		`})`,
+		``,
+		`bot.onMessage(fn(msg, client) {`,
+		`    msg.`,
+		`})`,
+	}, "\n")
+
+	uri := pathToFileURI(filepath.Join(dir, "main.tiny"))
+	items := getCompletions(uri, mainText, Position{
+		Line:      13,
+		Character: len("    msg."),
+	})
+
+	labels := completionLabels(items)
+	t.Logf("msg. completions: %#v", labels)
+
+	if !completionLabelsContain(items, "content") {
+		t.Fatalf("expected msg. completions to include 'content', got %#v", labels)
+	}
+	if !completionLabelsContain(items, "author") {
+		t.Fatalf("expected msg. completions to include 'author', got %#v", labels)
+	}
+	if !completionLabelsContain(items, "reply") {
+		t.Fatalf("expected msg. completions to include 'reply', got %#v", labels)
+	}
+}
+
 func lineOffsetForTest(text string, lineIndex int) int {
 	lines := strings.Split(text, "\n")
 	offset := 0
@@ -5413,4 +6958,444 @@ func lineOffsetForTest(text string, lineIndex int) int {
 		offset += len(lines[i]) + 1
 	}
 	return offset
+}
+
+func TestLSPVariableHoverUsesTinyDeclarationMarkdown(t *testing.T) {
+	text := strings.Join([]string{
+		`const name = "Ada"`,
+		`let count = 1`,
+		`name`,
+		`count`,
+	}, "\n")
+
+	constResult := getHover("file:///test_var_hover_decl.tiny", text, Position{Line: 2, Character: len(`na`)})
+	constHover, ok := constResult.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover result for const variable, got %#v", constResult)
+	}
+	if !strings.Contains(constHover.Contents.Value, "```tiny\nconst name: string\n```") {
+		t.Fatalf("expected const hover to use Tiny declaration markdown, got %q", constHover.Contents.Value)
+	}
+
+	letResult := getHover("file:///test_var_hover_decl.tiny", text, Position{Line: 3, Character: len(`co`)})
+	letHover, ok := letResult.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover result for let variable, got %#v", letResult)
+	}
+	if !strings.Contains(letHover.Contents.Value, "```tiny\nlet count: number\n```") {
+		t.Fatalf("expected let hover to use Tiny declaration markdown, got %q", letHover.Contents.Value)
+	}
+}
+
+func TestLSPParameterHoverUsesTinyDeclarationMarkdown(t *testing.T) {
+	text := strings.Join([]string{
+		`fn greet(name: string) {`,
+		`    name`,
+		`}`,
+	}, "\n")
+
+	result := getHover("file:///test_param_hover_decl.tiny", text, Position{Line: 1, Character: len(`    na`)})
+	hover, ok := result.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover result for parameter, got %#v", result)
+	}
+	if !strings.Contains(hover.Contents.Value, "```tiny\nname: string\n```") {
+		t.Fatalf("expected parameter hover to use Tiny declaration markdown, got %q", hover.Contents.Value)
+	}
+	if strings.Contains(hover.Contents.Value, "Type: `") {
+		t.Fatalf("expected parameter hover not to use Type line, got %q", hover.Contents.Value)
+	}
+}
+
+func TestLSPStructuralTypeAnnotations(t *testing.T) {
+	text := strings.Join([]string{
+		`fn printName(person: {name: string, age: number}) {`,
+		`    io.println(person.name)`,
+		`    io.println(person.age)`,
+		`}`,
+		``,
+		`let getAge = (person: {name: string, age: number}) => person.age`,
+	}, "\n")
+
+	diagnostics := semanticDiagnostics("file:///test_struct.tiny", text)
+	if diagnosticsContain(diagnostics, "unknown type") {
+		t.Fatalf("should not get 'unknown type' for structural type annotations, got: %#v", diagnostics)
+	}
+}
+
+func TestLSPStructuralTypeMemberCompletion(t *testing.T) {
+	text := strings.Join([]string{
+		`fn printName(person: {name: string, age: number}) {`,
+		`    person.`,
+		`}`,
+	}, "\n")
+
+	uri := "file:///test_struct_member.tiny"
+	items := getCompletions(uri, text, Position{Line: 1, Character: 11})
+	labels := completionLabels(items)
+	if !completionLabelsContain(items, "name") {
+		t.Fatalf("expected person. completions to include 'name', got %#v", labels)
+	}
+	if !completionLabelsContain(items, "age") {
+		t.Fatalf("expected person. completions to include 'age', got %#v", labels)
+	}
+}
+
+func TestLSPArrowFnParamCompletion(t *testing.T) {
+	text := strings.Join([]string{
+		`let getAge = (person: {name: string, age: number}) => person.`,
+	}, "\n")
+
+	uri := "file:///test_arrow_param.tiny"
+	items := getCompletions(uri, text, Position{Line: 0, Character: 61})
+	labels := completionLabels(items)
+	if !completionLabelsContain(items, "name") {
+		t.Fatalf("expected arrow param completions to include 'name', got %#v", labels)
+	}
+	if !completionLabelsContain(items, "age") {
+		t.Fatalf("expected arrow param completions to include 'age', got %#v", labels)
+	}
+}
+
+func TestLSPArrowFnParamHover(t *testing.T) {
+	text := strings.Join([]string{
+		`let getAge = (person: {name: string, age: number}) => person.age`,
+	}, "\n")
+
+	uri := "file:///test_arrow_hover.tiny"
+	result := getHover(uri, text, Position{Line: 0, Character: 55})
+	hover, ok := result.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover for person.age in arrow fn, got %#v", result)
+	}
+	if !strings.Contains(hover.Contents.Value, "number") {
+		t.Fatalf("expected hover to show 'number' type, got %q", hover.Contents.Value)
+	}
+}
+
+func TestLSPStructuralPropertyHoverUsesTinyDeclarationMarkdown(t *testing.T) {
+	text := strings.Join([]string{
+		`fn printName(person: {name: string, age: number}) {`,
+		`    io.println(person.name)`,
+		`    io.println(person.age)`,
+		`}`,
+	}, "\n")
+
+	result := getHover("file:///test_struct_property_hover.tiny", text, Position{Line: 2, Character: len(`    io.println(person.ag`)})
+	hover, ok := result.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover for person.age, got %#v", result)
+	}
+	if !strings.Contains(hover.Contents.Value, "```tiny\nperson.age: number\n```") {
+		t.Fatalf("expected structural property hover to use Tiny declaration markdown, got %q", hover.Contents.Value)
+	}
+	if strings.Contains(hover.Contents.Value, "Type: `") {
+		t.Fatalf("expected structural property hover not to use Type line, got %q", hover.Contents.Value)
+	}
+}
+
+func TestLSPDefinitionOnStructuralTypeFieldAccess(t *testing.T) {
+	text := strings.Join([]string{
+		`fn printName(person: {name: string, age: number}) {`,
+		`    io.println(person.name)`,
+		`    io.println(person.age)`,
+		`}`,
+	}, "\n")
+
+	nameResult := getDefinition("file:///test_struct_field_def.tiny", text, Position{Line: 1, Character: strings.Index(getLine(text, 1), "name") + 1})
+	nameLoc, ok := nameResult.(Location)
+	if !ok {
+		t.Fatalf("expected definition for person.name, got %#v", nameResult)
+	}
+	if nameLoc.Range.Start.Line != 0 || nameLoc.Range.Start.Character != strings.Index(getLine(text, 0), "name") {
+		t.Fatalf("expected person.name definition to point at structural field, got %#v", nameLoc)
+	}
+
+	ageResult := getDefinition("file:///test_struct_field_def.tiny", text, Position{Line: 2, Character: strings.Index(getLine(text, 2), "age") + 1})
+	ageLoc, ok := ageResult.(Location)
+	if !ok {
+		t.Fatalf("expected definition for person.age, got %#v", ageResult)
+	}
+	if ageLoc.Range.Start.Line != 0 || ageLoc.Range.Start.Character != strings.Index(getLine(text, 0), "age") {
+		t.Fatalf("expected person.age definition to point at structural field, got %#v", ageLoc)
+	}
+}
+
+func TestLSPDefinitionOnInterfaceFieldAccess(t *testing.T) {
+	text := strings.Join([]string{
+		`interface Person {`,
+		`    name: string,`,
+		`    age: number`,
+		`}`,
+		`fn printName(person: Person) {`,
+		`    io.println(person.name)`,
+		`    io.println(person.age)`,
+		`}`,
+	}, "\n")
+
+	nameResult := getDefinition("file:///test_interface_field_def.tiny", text, Position{Line: 5, Character: strings.Index(getLine(text, 5), "name") + 1})
+	nameLoc, ok := nameResult.(Location)
+	if !ok {
+		t.Fatalf("expected definition for person.name, got %#v", nameResult)
+	}
+	if nameLoc.Range.Start.Line != 1 || nameLoc.Range.Start.Character != strings.Index(getLine(text, 1), "name") {
+		t.Fatalf("expected person.name definition to point at interface field, got %#v", nameLoc)
+	}
+
+	ageResult := getDefinition("file:///test_interface_field_def.tiny", text, Position{Line: 6, Character: strings.Index(getLine(text, 6), "age") + 1})
+	ageLoc, ok := ageResult.(Location)
+	if !ok {
+		t.Fatalf("expected definition for person.age, got %#v", ageResult)
+	}
+	if ageLoc.Range.Start.Line != 2 || ageLoc.Range.Start.Character != strings.Index(getLine(text, 2), "age") {
+		t.Fatalf("expected person.age definition to point at interface field, got %#v", ageLoc)
+	}
+}
+
+func TestLSPArrowFunctionExpressionBodyReturnInference(t *testing.T) {
+	text := `let getAge = (person: {name: any, age: number}) => person.age`
+
+	result := getHover("file:///test_arrow_return_inference.tiny", text, Position{Line: 0, Character: len(`let get`)})
+	hover, ok := result.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover for getAge, got %#v", result)
+	}
+	if !strings.Contains(hover.Contents.Value, "getAge(person: {age: number, name: any}): number") {
+		t.Fatalf("expected arrow function hover to infer number return, got %q", hover.Contents.Value)
+	}
+}
+
+func TestLSPEntityLiteralCompletionWithStructuralType(t *testing.T) {
+	text := strings.Join([]string{
+		`fn printName(person: {name: string, age: number}) {`,
+		`    io.println(person.name)`,
+		`}`,
+		`printName({})`,
+	}, "\n")
+
+	uri := "file:///test_obj_completion.tiny"
+	items := getCompletions(uri, text, Position{Line: 3, Character: 11})
+	labels := completionLabels(items)
+	if !completionLabelsContain(items, "name: ") {
+		t.Fatalf("expected {} completions to include 'name: ', got %#v", labels)
+	}
+	if !completionLabelsContain(items, "age: ") {
+		t.Fatalf("expected {} completions to include 'age: ', got %#v", labels)
+	}
+}
+
+func TestLSPEntityLiteralPartialKeyCompletion(t *testing.T) {
+	text := strings.Join([]string{
+		`fn printName(person: {name: string, age: number}) {`,
+		`    io.println(person.name)`,
+		`}`,
+		`printName({ag})`,
+	}, "\n")
+
+	uri := "file:///test_obj_partial.tiny"
+	items := getCompletions(uri, text, Position{Line: 3, Character: 13})
+	labels := completionLabels(items)
+	if !completionLabelsContain(items, "age: ") {
+		t.Fatalf("expected {ag} completions to include 'age: ', got %#v", labels)
+	}
+}
+
+func TestLSFScopeDoesNotLeakFunctionParams(t *testing.T) {
+	text := strings.Join([]string{
+		`fn printName(person: { name: string, age: number }) {`,
+		`    io.println(person.name)`,
+		`    io.println(person.age)`,
+		`}`,
+		`let person = 42`,
+		`person.age`,
+	}, "\n")
+
+	// Hovering over 'person' outside the function should NOT show the function param type
+	hoverPerson := getHover("file:///test_scope_leak.tiny", text, Position{Line: 5, Character: len("person")})
+	if hoverPerson == nil {
+		t.Fatal("expected hover result for person outside function")
+	}
+	if h, ok := hoverPerson.(HoverResult); ok {
+		if strings.Contains(h.Contents.Value, "{ name: string, age: number }") {
+			t.Fatalf("hover on 'person' outside function should NOT show function param type, got %q", h.Contents.Value)
+		}
+		if !strings.Contains(h.Contents.Value, "number") {
+			t.Fatalf("hover on 'person' outside function should show 'number' type from let person = 42, got %q", h.Contents.Value)
+		}
+	}
+}
+
+func TestLSFScopeDoesNotLeakFunctionParamsCompletion(t *testing.T) {
+	text := strings.Join([]string{
+		`fn printName(person: { name: string, age: number }) {`,
+		`    io.println(person.name)`,
+		`    io.println(person.age)`,
+		`}`,
+		`let person = { fullName: "outer", score: 99 }`,
+		`person.`,
+	}, "\n")
+
+	items := getCompletions("file:///test_scope_leak.tiny", text, Position{Line: 5, Character: len("person.")})
+
+	for _, item := range items {
+		if item.Label == "name" || item.Label == "age" {
+			t.Fatalf("completion outside function should NOT include function param fields, got %q", item.Label)
+		}
+	}
+	if !completionLabelsContain(items, "fullName") {
+		t.Fatalf("completion outside function should include outer person's fields, got %v", completionLabels(items))
+	}
+}
+
+func TestLSPDefinitionDoesNotLeakFunctionParam(t *testing.T) {
+	text := strings.Join([]string{
+		`fn printName(person: { name: string, age: number }) {`,
+		`    io.println(person.name)`,
+		`    io.println(person.age)`,
+		`}`,
+		``,
+		`person.age`,
+	}, "\n")
+
+	// Go-to-definition on 'age' in person.age outside the function should NOT
+	// navigate to the function parameter 'person' in printName.
+	result := getDefinition("file:///test_def_scope_leak.tiny", text, Position{Line: 5, Character: strings.Index(getLine(text, 5), "age") + 1})
+
+	if result == nil {
+		// nil is acceptable — it means no definition found, which is correct
+		// because 'person' isn't defined at top level in this test.
+		return
+	}
+
+	if loc, ok := result.(Location); ok {
+		// The function param 'person' is on line 0. If definition goes there, it leaked.
+		if loc.Range.Start.Line == 0 {
+			t.Fatalf("go-to-definition on 'age' outside function should NOT point to line 0 (function param), got line %d", loc.Range.Start.Line)
+		}
+	}
+}
+
+func TestLSPMultilineMethodChainHover(t *testing.T) {
+	text := strings.Join([]string{
+		`fn printName(): string {`,
+		`    return "hello"`,
+		`}`,
+		`printName().`,
+		`    split("").`,
+		`    length()`,
+	}, "\n")
+
+	result := getHover("file:///multiline_chain.tiny", text, Position{
+		Line:      5,
+		Character: 7,
+	})
+	hover, ok := result.(HoverResult)
+	if !ok {
+		t.Fatalf("expected hover for length in multiline chain, got %#v", result)
+	}
+	if !strings.Contains(hover.Contents.Value, "length") && !strings.Contains(hover.Contents.Value, "number") {
+		t.Fatalf("expected hover to show length/number info, got %q", hover.Contents.Value)
+	}
+}
+
+func TestLSPMultilineMethodChainCompletion(t *testing.T) {
+	text := strings.Join([]string{
+		`fn printName(): string {`,
+		`    return "hello"`,
+		`}`,
+		`printName().`,
+		`    split("").`,
+		`    `,
+	}, "\n")
+
+	items := getCompletions("file:///multiline_chain_comp.tiny", text, Position{
+		Line:      5,
+		Character: 4,
+	})
+	hasLength := false
+	for _, item := range items {
+		if item.Label == "length" {
+			hasLength = true
+			break
+		}
+	}
+	if !hasLength {
+		t.Fatalf("expected completion to include 'length' for string method chain, got %v", completionLabels(items))
+	}
+}
+
+func symbolFieldNames(fields map[string]SymbolInfo) []string {
+	var names []string
+	for k := range fields {
+		names = append(names, k)
+	}
+	return names
+}
+
+func TestLSPThisFieldGoToDefinition(t *testing.T) {
+	text := strings.Join([]string{
+		"class Parser {",
+		"    field currentToken: any",
+		"",
+		"    fn parse() {",
+		"        this.currentToken",
+		"    }",
+		"}",
+	}, "\n")
+
+	uri := "file:///this_field_def.tiny"
+	result := getDefinition(uri, text, Position{Line: 4, Character: 14})
+	if result == nil {
+		t.Fatalf("expected go-to-definition for this.currentToken to resolve")
+	}
+	loc, ok := result.(Location)
+	if !ok {
+		t.Fatalf("expected Location, got %#v", result)
+	}
+	if loc.URI == "" {
+		t.Fatalf("expected definition location with URI")
+	}
+}
+
+func TestLSPThisFieldGoToDefinitionAcrossFiles(t *testing.T) {
+	text := strings.Join([]string{
+		"class Token {",
+		"    field type: string",
+		"    field value: any",
+		"}",
+		"class Parser {",
+		"    field currentToken: Token",
+		"",
+		"    fn parse() {",
+		"        this.currentToken.value",
+		"    }",
+		"}",
+	}, "\n")
+
+	uri := "file:///this_field_cross.tiny"
+	scope := scopeAtPosition(uri, text, Position{Line: 9, Character: 14})
+
+	// Check what class:Token resolves to
+	classSym, classOk := resolveClassSymbol(scope, "Token")
+	t.Logf("resolveClassSymbol('Token'): ok=%v fields=%v", classOk, symbolFieldNames(classSym.Fields))
+	if valField, exists := classSym.Fields["value"]; exists {
+		t.Logf("  value field: Type=%q Detail=%q", valField.Type, valField.Detail)
+	}
+
+	// Resolve via receiver path
+	_, typ, ok := resolveReceiverPath(scope, text, Position{Line: 9, Character: 14}, "this.currentToken")
+	if !ok {
+		t.Fatalf("expected to resolve this.currentToken via receiver path")
+	}
+	t.Logf("this.currentToken type: %q", typ)
+
+	// Resolve this.currentToken.value
+	fieldSym, memberType, memberOk := resolveMemberFromStaticType(scope, typ, "value")
+	t.Logf("this.currentToken.value type: %q ok=%v sym=%v", memberType, memberOk, fieldSym)
+	if memberType == "null" {
+		t.Fatalf("expected this.currentToken.value to resolve to 'any', got 'null'")
+	}
+	if memberType != "any" {
+		t.Fatalf("expected this.currentToken.value type to be 'any', got %q", memberType)
+	}
 }

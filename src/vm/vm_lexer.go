@@ -1,6 +1,7 @@
 package vm
 
 import (
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -162,6 +163,8 @@ func (l *Lexer) scanToken() Token {
 			tok.Type = TOKEN_CLASS
 		case "implements":
 			tok.Type = TOKEN_IMPLEMENTS
+		case "extends":
+			tok.Type = TOKEN_EXTENDS
 		case "enum":
 			tok.Type = TOKEN_ENUM
 		case "export":
@@ -210,7 +213,7 @@ func (l *Lexer) scanToken() Token {
 	}
 
 	if unicode.IsDigit(ch) {
-		num := l.readNumber()
+		num := l.readRadixNumber()
 		return l.tokenAt(start, TOKEN_NUMBER, num)
 	}
 
@@ -278,6 +281,11 @@ func (l *Lexer) scanToken() Token {
 		return tok
 
 	case '=':
+		if l.peek() == '>' {
+			l.pos += 2
+			l.column += 2
+			return l.tokenAt(start, TOKEN_ARROW, "=>")
+		}
 		if l.peek() == '=' {
 			l.pos += 2
 			l.column += 2
@@ -704,6 +712,82 @@ func (l *Lexer) readNumber() string {
 
 	raw := string(l.input[start:l.pos])
 	return strings.ReplaceAll(raw, "_", "")
+}
+
+func (l *Lexer) readRadixNumber() string {
+	start := l.pos
+
+	if l.pos+1 < len(l.input) && l.input[l.pos] == '0' {
+		ch := l.input[l.pos+1]
+		if ch == 'x' || ch == 'X' {
+			return l.readHexNumber(start)
+		}
+		if ch == 'b' || ch == 'B' {
+			return l.readBinaryNumber(start)
+		}
+		if ch == 'o' || ch == 'O' {
+			return l.readOctalNumber(start)
+		}
+	}
+
+	return l.readNumber()
+}
+
+func (l *Lexer) readHexNumber(start int) string {
+	l.pos += 2
+	l.column += 2
+
+	for l.pos < len(l.input) {
+		ch := l.input[l.pos]
+		if (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F') || ch == '_' {
+			l.advance()
+			continue
+		}
+		break
+	}
+
+	raw := string(l.input[start:l.pos])
+	cleaned := strings.ReplaceAll(strings.TrimPrefix(strings.TrimPrefix(raw, "0x"), "0X"), "_", "")
+	val, _ := strconv.ParseInt(cleaned, 16, 64)
+	return strconv.FormatInt(val, 10)
+}
+
+func (l *Lexer) readBinaryNumber(start int) string {
+	l.pos += 2
+	l.column += 2
+
+	for l.pos < len(l.input) {
+		ch := l.input[l.pos]
+		if ch == '0' || ch == '1' || ch == '_' {
+			l.advance()
+			continue
+		}
+		break
+	}
+
+	raw := string(l.input[start:l.pos])
+	cleaned := strings.ReplaceAll(strings.TrimPrefix(strings.TrimPrefix(raw, "0b"), "0B"), "_", "")
+	val, _ := strconv.ParseInt(cleaned, 2, 64)
+	return strconv.FormatInt(val, 10)
+}
+
+func (l *Lexer) readOctalNumber(start int) string {
+	l.pos += 2
+	l.column += 2
+
+	for l.pos < len(l.input) {
+		ch := l.input[l.pos]
+		if (ch >= '0' && ch <= '7') || ch == '_' {
+			l.advance()
+			continue
+		}
+		break
+	}
+
+	raw := string(l.input[start:l.pos])
+	cleaned := strings.ReplaceAll(strings.TrimPrefix(strings.TrimPrefix(raw, "0o"), "0O"), "_", "")
+	val, _ := strconv.ParseInt(cleaned, 8, 64)
+	return strconv.FormatInt(val, 10)
 }
 
 func (l *Lexer) readString() string {

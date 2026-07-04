@@ -1,0 +1,15 @@
+export const defaultStep = 1
+
+export fn sum(values): number {
+    let total = 0
+
+    for value in values {
+        total += value
+    }
+
+    return total
+}
+
+export fn average(values) {
+    return sum(values) / values.length()
+}

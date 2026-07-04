@@ -1,146 +1,182 @@
 // Represents an incoming HTTP request object.
 export interface RequestObject {
-    // The requested URL path.
+// The requested URL path.
     path: string,
-    // The path plus query string.
+// The path plus query string.
     url: string,
-    // The HTTP method used, such as "GET", "POST", "PUT", "PATCH", or "DELETE".
+// The HTTP method used, such as "GET", "POST", "PUT", "PATCH", or "DELETE".
     method: string,
-    // The request body content as a string.
+// The request body content as a string.
     body: string,
-    // Route parameters parsed from paths like "/users/:id".
+// The raw request body as a byte buffer.
+    bodyBytes?: buffer,
+// Route parameters parsed from paths like "/users/:id".
     params: object,
-    // Query parameters parsed from the URL search query.
+// Query parameters parsed from the URL search query.
     query: object,
-    // HTTP headers associated with the request.
+// HTTP headers associated with the request.
     headers: object,
-    // The request content length.
+// First value for each submitted form field.
+    form: object,
+// All values for each submitted form field as arrays.
+    formAll: object,
+// Uploaded files grouped by field name as arrays of UploadedFile objects.
+    files: object,
+// True when the request Content-Type is multipart/form-data.
+    multipart: bool,
+// The request content length.
     contentLength: number,
-    // The remote network address.
-    remoteAddr: string
+// The remote network address.
+    remoteAddr: string,
+}
+
+// Represents one uploaded multipart/form-data file.
+export interface UploadedFile {
+// Form field name that carried this file.
+    field: string,
+// Original filename from the multipart part.
+    filename: string,
+// Content-Type header for this file part.
+    contentType: string,
+// File size in bytes.
+    size: number,
+// Raw file contents.
+    bytes: buffer,
+// File contents decoded as a string.
+    text: string,
 }
 
 // Represents an HTTP response returned by a client request.
 export interface HttpResponse {
-    // The HTTP status code.
+// The HTTP status code.
     status: number,
-    // The status line text.
+// The status line text.
     statusText: string,
-    // The response body content.
+// The response body content.
     body: string,
-    // HTTP headers associated with the response.
-    headers: object
+// HTTP headers associated with the response.
+    headers: object,
 }
 
 // Options accepted by http.server().
 export interface ServerOptions {
-    // Port to listen on.
+// Port to listen on.
     port: number,
-    // Host interface to bind. Use "127.0.0.1" for local-only servers.
+// Host interface to bind. Use "127.0.0.1" for local-only servers.
     host?: string,
-    // Request read timeout in milliseconds.
+// Request read timeout in milliseconds.
     readTimeoutMs?: number,
-    // Response write timeout in milliseconds.
+// Response write timeout in milliseconds.
     writeTimeoutMs?: number,
-    // Maximum request body size in bytes.
-    maxBodySize?: number
+// Maximum request body size in bytes.
+    maxBodySize?: number,
 }
 
 // Options accepted by client request helpers.
 export interface RequestOptions {
-    // HTTP headers to send.
+// HTTP headers to send.
     headers?: object,
-    // Request timeout in milliseconds.
+// Request timeout in milliseconds.
     timeoutMs?: number,
-    // Return response body as bytes instead of string.
-    bytes?: bool
+// Return response body as bytes instead of string.
+    bytes?: bool,
 }
 
 // Options accepted by http.request().
 export interface FullRequestOptions {
-    // HTTP method to use.
+// HTTP method to use.
     method?: string,
-    // Request URL.
+// Request URL.
     url: string,
-    // HTTP headers to send.
+// HTTP headers to send.
     headers?: object,
-    // Request body.
+// Request body.
     body?: any,
-    // Request timeout in milliseconds.
+// Request timeout in milliseconds.
     timeoutMs?: number,
-    // Return response body as bytes instead of string.
-    bytes?: bool
+// Return response body as bytes instead of string.
+    bytes?: bool,
+}
+
+// One file part for a multipart/form-data client request.
+export interface MultipartFile {
+// Form field name for this file. Required when files is an array.
+    field?: string,
+// Filename sent to the server. Defaults to basename(path) or field name.
+    filename?: string,
+// Content-Type for this file part.
+    contentType?: string,
+// File path to read and upload.
+    path?: string,
+// Raw bytes to upload.
+    bytes?: buffer,
+// Text content to upload.
+    text?: string,
+}
+
+// Multipart/form-data request body accepted by http.post/put/patch/request.
+export interface MultipartBody {
+// Regular form fields. Array values are sent as repeated fields.
+    form?: object,
+// Files to upload. Use an array of MultipartFile or an object keyed by field name.
+    files?: array:MultipartFile | object,
+// Forces multipart encoding even when form/files is empty.
+    multipart?: bool,
 }
 
 // Represents an HTTP server instance.
-class Server {
-    // Registers a GET request handler for the specified path.
+export class Server {
+// Registers a GET request handler for the specified path.
     fn get(path: string, handler: string | function(RequestObject))
-    // Registers a POST request handler for the specified path.
+// Registers a POST request handler for the specified path.
     fn post(path: string, handler: string | function(RequestObject))
-    // Registers a PUT request handler for the specified path.
+// Registers a PUT request handler for the specified path.
     fn put(path: string, handler: string | function(RequestObject))
-    // Registers a PATCH request handler for the specified path.
+// Registers a PATCH request handler for the specified path.
     fn patch(path: string, handler: string | function(RequestObject))
-    // Registers a DELETE request handler for the specified path.
+// Registers a DELETE request handler for the specified path.
     fn delete(path: string, handler: string | function(RequestObject))
-    // Registers a generic request handler for all incoming requests.
+// Registers a generic request handler for all incoming requests.
     fn onRequest(handler: string | function(RequestObject))
-    // Serves static files from dir under prefix.
+// Serves static files from dir under prefix.
     fn static(prefix: string, dir: string)
-    // Stops the HTTP server.
+// Stops the HTTP server.
     fn stop()
-    // Starts the HTTP server, optionally in asynchronous mode.
+// Starts the HTTP server, optionally in asynchronous mode.
     fn start(isAsync?: bool)
 }
 
 // Creates a new Server instance from a port or options object.
 export fn server(port: number | ServerOptions): Server
-
 // Performs a fully configurable HTTP client request.
 export fn request(options: FullRequestOptions): HttpResponse
-
 // Performs an HTTP GET request to the specified URL.
 export fn get(url: string, options?: RequestOptions): HttpResponse
-
-// Performs an HTTP POST request to the specified URL with a body.
-export fn post(url: string, body: any, options?: RequestOptions): HttpResponse
-
-// Performs an HTTP PUT request to the specified URL with a body.
-export fn put(url: string, body: any, options?: RequestOptions): HttpResponse
-
-// Performs an HTTP PATCH request to the specified URL with a body.
-export fn patch(url: string, body: any, options?: RequestOptions): HttpResponse
-
+// Performs an HTTP POST request to the specified URL with a body. MultipartBody sends multipart/form-data.
+export fn post(url: string, body: any | MultipartBody, options?: RequestOptions): HttpResponse
+// Performs an HTTP PUT request to the specified URL with a body. MultipartBody sends multipart/form-data.
+export fn put(url: string, body: any | MultipartBody, options?: RequestOptions): HttpResponse
+// Performs an HTTP PATCH request to the specified URL with a body. MultipartBody sends multipart/form-data.
+export fn patch(url: string, body: any | MultipartBody, options?: RequestOptions): HttpResponse
 // Performs an HTTP DELETE request to the specified URL.
 export fn delete(url: string, options?: RequestOptions): HttpResponse
-
 // Downloads a file from the specified URL and saves it to filePath.
 export fn downloadFile(filePath: string, url: string): any
-
 // Helper function to return a JSON response object.
 export fn json(data: object): any
-
 // Helper function to return a plain text response object.
 export fn text(data: string): any
-
 // Helper function to return an HTML response object.
 export fn html(data: string): any
-
 // Creates a response with a status code and body.
 export fn status(code: number, body: any): any
-
 // Creates a response with status, body, and headers.
 export fn response(status: number, body: any, headers?: object): any
-
 // Creates an HTTP redirect response.
 export fn redirect(url: string, status?: number): any
-
 // Creates a 204 No Content response.
 export fn noContent(): any
-
 // Sends a file as the response body.
 export fn file(path: string): any
-
 // Sends a file as an attachment.
 export fn download(path: string, filename?: string): any

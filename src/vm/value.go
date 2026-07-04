@@ -2,6 +2,8 @@ package vm
 
 import (
 	"bufio"
+	"bytes"
+	"database/sql"
 	"fmt"
 	"net"
 	"net/http"
@@ -49,6 +51,21 @@ func (ov ObjectValue) MarshalJSON() ([]byte, error) {
 	}
 
 	return json.Marshal(cleanMap)
+}
+
+type InstanceValue struct {
+	ClassName      string
+	Fields         ObjectValue
+	ConstFields    map[string]bool
+	PrivateFields  map[string]bool
+	PrivateMethods map[string]bool
+}
+
+func (v *InstanceValue) TinyTypeName() string {
+	if v == nil {
+		return "class::<nil>"
+	}
+	return "class::" + v.ClassName
 }
 
 type NativeTaskValue struct {
@@ -111,6 +128,11 @@ type NativeServerValue struct {
 	httpServer     *http.Server
 	closed         bool
 	Workers        *VMPool
+}
+
+type NativeSqliteValue struct {
+	DB     *sql.DB
+	Closed bool
 }
 
 type NativeTimerType byte
@@ -311,6 +333,7 @@ type NativeVMValue struct {
 	VM             *VM
 	Isolated       bool
 	RunMainOnLoad  bool
+	MainRan        bool
 	Loaded         bool
 	AllowedStdlib  map[string]bool
 	InjectedGlobal ObjectValue
@@ -321,13 +344,24 @@ func (v *NativeVMValue) TinyTypeName() string {
 }
 
 type HostFunctionValue struct {
-	VM       *VM
-	Function FunctionValue
-	Name     string
+	VM          *VM
+	Function    FunctionValue
+	Name        string
+	Receiver    TinyValue
+	HasReceiver bool
 }
 
 func (v *HostFunctionValue) TinyTypeName() string {
 	return "host function"
+}
+
+type CallbackFunctionValue struct {
+	Name     string
+	Callback func([]TinyValue) (TinyValue, error)
+}
+
+func (v *CallbackFunctionValue) TinyTypeName() string {
+	return "callback function"
 }
 
 type NamespaceValue struct {
@@ -337,6 +371,10 @@ type NamespaceValue struct {
 
 type NamespaceMemberRef struct {
 	GlobalName string
+}
+
+type InterfaceValue struct {
+	Name string
 }
 
 type TinyTyped interface {
@@ -517,12 +555,9 @@ func TypeNameStandard(value TinyValue) string {
 	case NullValue, NullExpr:
 		return "null"
 	case ObjectValue:
-		if classNameVal, exists := v["__class"]; exists {
-			if className, ok := classNameVal.Value.(string); ok {
-				return "class::" + className
-			}
-		}
 		return "object"
+	case *InstanceValue:
+		return v.TinyTypeName()
 	case nil:
 		return "nil"
 	case FunctionValue:
@@ -537,6 +572,8 @@ func TypeNameStandard(value TinyValue) string {
 		return "schema type"
 	case *NativeServerValue:
 		return "server"
+	case *NativeSqliteValue:
+		return "sqlite"
 	case *NativeTimerValue:
 		return "<" + v.Type.String() + ">"
 	case *NativeTcpServerValue:
@@ -581,6 +618,10 @@ func TypeNameStandard(value TinyValue) string {
 		return "namespace member ref"
 	case *NamespaceMemberRef:
 		return "namespace member ref"
+	case InterfaceValue:
+		return "interface"
+	case *InterfaceValue:
+		return "interface"
 	default:
 		return fmt.Sprintf("%T", value.Value)
 	}
@@ -614,6 +655,12 @@ func valueToJSONCompatible(value TinyValue) any {
 		}
 
 		return result
+
+	case *InstanceValue:
+		if v == nil {
+			return nil
+		}
+		return valueToJSONCompatible(NewNative(v.Fields))
 
 	case *ObjectValue:
 		if v == nil {
@@ -780,28 +827,29 @@ func prettyIndentText(level int) string {
 }
 
 func formatPrettyObject(v ObjectValue, indent int, forPrint bool) string {
+	return formatPrettyObjectFields(v, "", indent, forPrint)
+}
+
+func formatPrettyInstance(v *InstanceValue, indent int, forPrint bool) string {
+	if v == nil {
+		return "null"
+	}
+	return formatPrettyObjectFields(v.Fields, v.ClassName, indent, forPrint)
+}
+
+func formatPrettyObjectFields(v ObjectValue, classNameText string, indent int, forPrint bool) string {
 	type objectEntry struct {
 		keyText string
 		value   TinyValue
 	}
 
-	className, isClass := v["__class"]
-
-	hiddenClassFields := map[string]bool{
-		"__class":          true,
-		"__constFields":    true,
-		"__privateFields":  true,
-		"__privateMethods": true,
-	}
+	className := NewNative(classNameText)
+	isClass := classNameText != ""
 
 	entries := make([]objectEntry, 0, len(v))
 
 	for key, item := range v {
 		keyText := valueToString(ToValue(key), false)
-
-		if isClass && hiddenClassFields[keyText] {
-			continue
-		}
 
 		entries = append(entries, objectEntry{
 			keyText: keyText,
@@ -976,6 +1024,9 @@ func valueToString(value TinyValue, forPrint ...bool) string {
 		}
 		return formatPrettyObject(*v, 0, isForPrint())
 
+	case *InstanceValue:
+		return formatPrettyInstance(v, 0, isForPrint())
+
 	case WasmObjectValue:
 		return v.String()
 
@@ -991,6 +1042,8 @@ func valueToString(value TinyValue, forPrint ...bool) string {
 		return "<server :" + strconv.Itoa(v.Port) + ">"
 	case *NativeServerValue:
 		return "<server :" + strconv.Itoa(v.Port) + ">"
+	case *NativeSqliteValue:
+		return "<sqlite>"
 	case *NativeTimerValue:
 		return "<" + v.Type.String() + ">"
 	case *NativeTcpServerValue:
@@ -1019,6 +1072,10 @@ func valueToString(value TinyValue, forPrint ...bool) string {
 		return "<namespace ref " + v.GlobalName + ">"
 	case *NamespaceMemberRef:
 		return "<namespace ref " + v.GlobalName + ">"
+	case InterfaceValue:
+		return "<interface " + v.Name + ">"
+	case *InterfaceValue:
+		return "<interface " + v.Name + ">"
 	case BufferValue:
 		return "<buffer " + string(v.Bytes) + ">"
 	case *NativeStringBuilderValue:
@@ -1111,6 +1168,9 @@ func valuesEqual(a TinyValue, b TinyValue) bool {
 	}
 
 	switch left := a.Value.(type) {
+	case *BufferValue:
+		right, ok := b.Value.(*BufferValue)
+		return ok && bytes.Equal(left.Bytes, right.Bytes)
 	case float64:
 		if b.IsInt {
 			return left == float64(b.AsInt)
@@ -1159,6 +1219,16 @@ func NewInt(val int) TinyValue {
 func NewNull() TinyValue {
 	return TinyValue{
 		Value: NullValue{},
+		IsInt: false,
+		AsInt: 0,
+	}
+}
+
+func NewArray(arr []TinyValue) TinyValue {
+	return TinyValue{
+		Value: &ArrayValue{
+			Elements: arr,
+		},
 		IsInt: false,
 		AsInt: 0,
 	}

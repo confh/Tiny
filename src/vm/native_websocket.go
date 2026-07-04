@@ -2,6 +2,7 @@ package vm
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 
@@ -471,16 +472,29 @@ func websocketServerStart(vm *VM, server *NativeWebsocketServerValue, args []Tin
 		Handler: mux,
 	}
 	server.server = s
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		vm.runtimeError(ErrorRuntime, "websocket server failed: %v", err)
+		return
+	}
+
 	server.Running = true
 
 	if async {
 		go func() {
-			_ = s.ListenAndServe()
+			err := s.Serve(listener)
+			if err != nil && err != http.ErrServerClosed {
+				fmt.Printf("[websocket server error] %v\n", err)
+			}
 			server.Running = false
 		}()
 	} else {
-		_ = s.ListenAndServe()
+		err := s.Serve(listener)
 		server.Running = false
+		if err != nil && err != http.ErrServerClosed {
+			vm.runtimeError(ErrorRuntime, "websocket server failed: %v", err)
+			return
+		}
 	}
 
 	vm.push(NewNull())

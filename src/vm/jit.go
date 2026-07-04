@@ -1543,80 +1543,7 @@ func inferParamTypes(vm *VM, fn Function, currentReturnTypes []stackType, curren
 	}
 
 	// Run a basic type propagation pass on the stack
-	spArray := make([]int, len(fn.Instructions))
-	sp := 0
-	for idx, instr := range fn.Instructions {
-		spArray[idx] = sp
-		switch instr.Op {
-		case OP_CONST, OP_LOAD_LOCAL,
-			OP_LOAD_LOCAL_0, OP_LOAD_LOCAL_1, OP_LOAD_LOCAL_2, OP_LOAD_LOCAL_3,
-			OP_MUL_LOCAL_CONST, OP_GET_PROPERTY_LOCAL, OP_LOAD_GLOBAL,
-			OP_LOCAL_CONST_OP:
-			sp++
-		case OP_MATH_POW:
-			sp--
-		case OP_PRINT:
-			info := instr.Value.(PrintInfo)
-			sp = sp - info.ArgCount + 1
-		case OP_STORE_LOCAL, OP_ASSIGN_LOCAL, OP_POP,
-			OP_JUMP_IF_FALSE, OP_JUMP_IF_TRUE, OP_THROW:
-			sp--
-		case OP_JUMP_PROPERTY_LOCAL_FALSE, OP_JUMP_PROPERTY_LOCAL_TRUE:
-			// no stack effect
-		case OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
-			OP_EQ, OP_NEQ,
-			OP_LT, OP_LTE, OP_GT, OP_GTE,
-			OP_AND, OP_OR, OP_COALESCE_JUMP:
-			sp--
-		case OP_RETURN:
-			sp--
-		case OP_CALL_DIRECT:
-			info, ok := instr.Value.(DirectCallInfo)
-			if ok {
-				sp = sp - info.ArgCount + 1
-			}
-		case OP_CALL_DIRECT_SUB_CONST:
-			sp++
-		case OP_OBJECT:
-			if info, ok := instr.Value.(ObjectInfo); ok {
-				count := len(info.Names)
-				if count > 0 {
-					sp -= count - 1
-				} else {
-					sp++
-				}
-			}
-		case OP_ARRAY:
-			if info, ok := instr.Value.(ArrayInfo); ok {
-				if info.Count > 0 {
-					sp -= info.Count - 1
-				} else {
-					sp++
-				}
-			}
-		case OP_INDEX:
-			sp--
-		case OP_STRING_JOIN:
-			count := getStringJoinCount(instr)
-			if count > 0 {
-				sp -= count - 1
-			} else {
-				sp++
-			}
-		case OP_SET_INDEX:
-			sp -= 3
-		case OP_LEN:
-			// net change is 0 (pop 1, push 1)
-		case OP_ARRAY_LEN_LOCAL, OP_ARRAY_GET_LOCAL, OP_ARRAY_PUSH_LOCAL, OP_ARRAY_PUSH_LOCAL_MUL_CONST:
-			sp++
-		case OP_SET_PROPERTY:
-			sp -= 2
-		case OP_METHOD_CALL:
-			if info, ok := instr.Value.(MethodCallInfo); ok {
-				sp -= info.ArgCount
-			}
-		}
-	}
+	spArray := computeJitSpArray(fn)
 	maxSp := 0
 	for _, s := range spArray {
 		if s > maxSp {
@@ -1632,9 +1559,8 @@ func inferParamTypes(vm *VM, fn Function, currentReturnTypes []stackType, curren
 		localTypes[i] = stackType(10 + i) // stackTypeParam0 + i
 	}
 
-	sp = 0
 	for idx, instr := range fn.Instructions {
-		sp = spArray[idx]
+		sp := spArray[idx]
 		switch instr.Op {
 		case OP_MATH_FLOOR, OP_MATH_CEIL, OP_MATH_SQRT, OP_MATH_ABS:
 			if sp >= 1 {
@@ -2023,80 +1949,7 @@ func inferReturnType(vm *VM, fn Function, currentReturnTypes []stackType) stackT
 			queue = append(queue, pc+1)
 		}
 	}
-	spArray := make([]int, len(fn.Instructions))
-	sp := 0
-	for idx, instr := range fn.Instructions {
-		spArray[idx] = sp
-		switch instr.Op {
-		case OP_CONST, OP_LOAD_LOCAL,
-			OP_LOAD_LOCAL_0, OP_LOAD_LOCAL_1, OP_LOAD_LOCAL_2, OP_LOAD_LOCAL_3,
-			OP_MUL_LOCAL_CONST, OP_GET_PROPERTY_LOCAL, OP_LOAD_GLOBAL,
-			OP_LOCAL_CONST_OP:
-			sp++
-		case OP_MATH_POW:
-			sp--
-		case OP_PRINT:
-			info := instr.Value.(PrintInfo)
-			sp = sp - info.ArgCount + 1
-		case OP_STORE_LOCAL, OP_ASSIGN_LOCAL, OP_POP,
-			OP_JUMP_IF_FALSE, OP_JUMP_IF_TRUE, OP_THROW:
-			sp--
-		case OP_JUMP_PROPERTY_LOCAL_FALSE, OP_JUMP_PROPERTY_LOCAL_TRUE:
-			// no stack effect
-		case OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
-			OP_EQ, OP_NEQ,
-			OP_LT, OP_LTE, OP_GT, OP_GTE,
-			OP_AND, OP_OR, OP_COALESCE_JUMP:
-			sp--
-		case OP_RETURN:
-			sp--
-		case OP_CALL_DIRECT:
-			info, ok := instr.Value.(DirectCallInfo)
-			if ok {
-				sp = sp - info.ArgCount + 1
-			}
-		case OP_CALL_DIRECT_SUB_CONST:
-			sp++
-		case OP_OBJECT:
-			if info, ok := instr.Value.(ObjectInfo); ok {
-				count := len(info.Names)
-				if count > 0 {
-					sp -= count - 1
-				} else {
-					sp++
-				}
-			}
-		case OP_ARRAY:
-			if info, ok := instr.Value.(ArrayInfo); ok {
-				if info.Count > 0 {
-					sp -= info.Count - 1
-				} else {
-					sp++
-				}
-			}
-		case OP_INDEX:
-			sp--
-		case OP_STRING_JOIN:
-			count := getStringJoinCount(instr)
-			if count > 0 {
-				sp -= count - 1
-			} else {
-				sp++
-			}
-		case OP_SET_INDEX:
-			sp -= 3
-		case OP_LEN:
-			// net change is 0 (pop 1, push 1)
-		case OP_ARRAY_LEN_LOCAL, OP_ARRAY_GET_LOCAL, OP_ARRAY_PUSH_LOCAL, OP_ARRAY_PUSH_LOCAL_MUL_CONST:
-			sp++
-		case OP_SET_PROPERTY:
-			sp -= 2
-		case OP_METHOD_CALL:
-			if info, ok := instr.Value.(MethodCallInfo); ok {
-				sp -= info.ArgCount
-			}
-		}
-	}
+	spArray := computeJitSpArray(fn)
 	maxSp := 0
 	for _, s := range spArray {
 		if s > maxSp {
@@ -2117,9 +1970,8 @@ func inferReturnType(vm *VM, fn Function, currentReturnTypes []stackType) stackT
 	var finalType stackType = stackTypeUnknown
 	firstReturn := true
 
-	sp = 0
 	for idx, instr := range fn.Instructions {
-		sp = spArray[idx]
+		sp := spArray[idx]
 
 		switch instr.Op {
 		case OP_MATH_FLOOR, OP_MATH_CEIL, OP_MATH_SQRT, OP_MATH_ABS:
@@ -2495,74 +2347,7 @@ func inferReturnPropertyTypes(vm *VM, fn Function, currentReturnTypes []stackTyp
 	visiting[fn.ID] = true
 	defer delete(visiting, fn.ID)
 
-	spArray := make([]int, len(fn.Instructions))
-	sp := 0
-	for idx, instr := range fn.Instructions {
-		spArray[idx] = sp
-		switch instr.Op {
-		case OP_CONST, OP_LOAD_LOCAL,
-			OP_LOAD_LOCAL_0, OP_LOAD_LOCAL_1, OP_LOAD_LOCAL_2, OP_LOAD_LOCAL_3,
-			OP_MUL_LOCAL_CONST, OP_GET_PROPERTY_LOCAL, OP_LOAD_GLOBAL,
-			OP_LOCAL_CONST_OP:
-			sp++
-		case OP_MATH_POW:
-			sp--
-		case OP_PRINT:
-			info := instr.Value.(PrintInfo)
-			sp = sp - info.ArgCount + 1
-		case OP_STORE_LOCAL, OP_ASSIGN_LOCAL, OP_POP,
-			OP_JUMP_IF_FALSE, OP_JUMP_IF_TRUE, OP_THROW:
-			sp--
-		case OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
-			OP_EQ, OP_NEQ,
-			OP_LT, OP_LTE, OP_GT, OP_GTE,
-			OP_AND, OP_OR, OP_COALESCE_JUMP:
-			sp--
-		case OP_RETURN:
-			sp--
-		case OP_CALL_DIRECT:
-			if info, ok := instr.Value.(DirectCallInfo); ok {
-				sp = sp - info.ArgCount + 1
-			}
-		case OP_CALL_DIRECT_SUB_CONST:
-			sp++
-		case OP_OBJECT:
-			if info, ok := instr.Value.(ObjectInfo); ok {
-				if len(info.Names) > 0 {
-					sp -= len(info.Names) - 1
-				} else {
-					sp++
-				}
-			}
-		case OP_ARRAY:
-			if info, ok := instr.Value.(ArrayInfo); ok {
-				if info.Count > 0 {
-					sp -= info.Count - 1
-				} else {
-					sp++
-				}
-			}
-		case OP_INDEX:
-			sp--
-		case OP_STRING_JOIN:
-			count := getStringJoinCount(instr)
-			if count > 0 {
-				sp -= count - 1
-			} else {
-				sp++
-			}
-		case OP_SET_INDEX:
-			sp -= 3
-		case OP_ARRAY_LEN_LOCAL, OP_ARRAY_GET_LOCAL, OP_ARRAY_PUSH_LOCAL, OP_ARRAY_PUSH_LOCAL_MUL_CONST:
-			sp++
-		case OP_SET_PROPERTY:
-			sp -= 2
-		case OP_METHOD_CALL:
-			if info, ok := instr.Value.(MethodCallInfo); ok {
-				sp -= info.ArgCount
-			}
-		}
-	}
+	spArray := computeJitSpArray(fn)
 
 	maxSp := 0
 	for _, s := range spArray {
@@ -2584,7 +2369,7 @@ func inferReturnPropertyTypes(vm *VM, fn Function, currentReturnTypes []stackTyp
 	firstReturn := true
 
 	for idx, instr := range fn.Instructions {
-		sp = spArray[idx]
+		sp := spArray[idx]
 		switch instr.Op {
 		case OP_CONST:
 			if sp < len(typeStack) {
@@ -3413,6 +3198,132 @@ func getStringJoinCount(instr Instruction) int {
 	return instr.IntArg
 }
 
+func computeJitSpArray(fn Function) []int {
+	n := len(fn.Instructions)
+	spArray := make([]int, n)
+	for i := range spArray {
+		spArray[i] = -1
+	}
+
+	if n == 0 {
+		return spArray
+	}
+
+	queue := []int{0}
+	spArray[0] = 0
+
+	for len(queue) > 0 {
+		curr := queue[0]
+		queue = queue[1:]
+
+		sp := spArray[curr]
+		instr := fn.Instructions[curr]
+
+		// Calculate stack height after the instruction executes
+		nextSp := sp
+		switch instr.Op {
+		case OP_CONST, OP_LOAD_LOCAL, OP_LOAD_LOCAL_0, OP_LOAD_LOCAL_1, OP_LOAD_LOCAL_2, OP_LOAD_LOCAL_3, OP_MUL_LOCAL_CONST, OP_GET_PROPERTY_LOCAL, OP_LOAD_GLOBAL,
+			OP_LOCAL_CONST_OP:
+			nextSp++
+		case OP_MATH_POW:
+			nextSp--
+		case OP_PRINT:
+			if info, ok := instr.Value.(PrintInfo); ok {
+				nextSp = nextSp - info.ArgCount + 1
+			}
+		case OP_STORE_LOCAL, OP_ASSIGN_LOCAL, OP_POP, OP_JUMP_IF_FALSE, OP_JUMP_IF_TRUE, OP_THROW:
+			nextSp--
+		case OP_JUMP_PROPERTY_LOCAL_FALSE, OP_JUMP_PROPERTY_LOCAL_TRUE:
+			// no stack effect
+		case OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
+			OP_EQ, OP_NEQ,
+			OP_LT, OP_LTE, OP_GT, OP_GTE, OP_AND, OP_OR, OP_COALESCE_JUMP:
+			nextSp--
+		case OP_RETURN:
+			nextSp--
+		case OP_CALL_DIRECT:
+			if info, ok := instr.Value.(DirectCallInfo); ok {
+				nextSp = nextSp - info.ArgCount + 1
+			}
+		case OP_CALL_DIRECT_SUB_CONST:
+			nextSp++
+		case OP_OBJECT:
+			if info, ok := instr.Value.(ObjectInfo); ok {
+				count := len(info.Names)
+				if count > 0 {
+					nextSp -= count - 1
+				} else {
+					nextSp++
+				}
+			}
+		case OP_ARRAY:
+			if info, ok := instr.Value.(ArrayInfo); ok {
+				if info.Count > 0 {
+					nextSp -= info.Count - 1
+				} else {
+					nextSp++
+				}
+			}
+		case OP_INDEX:
+			nextSp--
+		case OP_STRING_JOIN:
+			count := getStringJoinCount(instr)
+			if count > 0 {
+				nextSp -= count - 1
+			} else {
+				nextSp++
+			}
+		case OP_SET_INDEX:
+			nextSp -= 3
+		case OP_LEN:
+			// net change is 0 (pop 1, push 1)
+		case OP_ARRAY_LEN_LOCAL, OP_ARRAY_GET_LOCAL, OP_ARRAY_PUSH_LOCAL, OP_ARRAY_PUSH_LOCAL_MUL_CONST:
+			nextSp++
+		case OP_SET_PROPERTY:
+			nextSp -= 2
+		case OP_METHOD_CALL:
+			if info, ok := instr.Value.(MethodCallInfo); ok {
+				nextSp -= info.ArgCount
+			}
+		}
+
+		// Propagate nextSp to successors
+		var successors []int
+
+		isUnconditionalJump := instr.Op == OP_JUMP
+		isTerminator := instr.Op == OP_RETURN || instr.Op == OP_HALT || instr.Op == OP_THROW
+
+		if !isTerminator && !isUnconditionalJump {
+			successors = append(successors, curr+1)
+		}
+
+		if target, ok := getJumpTarget(instr); ok {
+			successors = append(successors, target)
+		}
+
+		for _, succ := range successors {
+			if succ >= 0 && succ < n {
+				if spArray[succ] == -1 {
+					spArray[succ] = nextSp
+					queue = append(queue, succ)
+				}
+			}
+		}
+	}
+
+	// Fallback for any unreachable code to ensure no negative or -1 values.
+	lastSp := 0
+	for i := 0; i < n; i++ {
+		if spArray[i] == -1 {
+			spArray[i] = lastSp
+		} else {
+			lastSp = spArray[i]
+		}
+	}
+
+	return spArray
+}
+
 func jitLocalConstOpResultType(info LocalConstOpInfo) stackType {
 	if info.Op == OP_ADD {
 		if _, ok := info.Const.(string); ok {
@@ -3546,80 +3457,7 @@ func checkCallArgumentsSafe(vm *VM, fn Function, currentReturnTypes []stackType,
 		return true
 	}
 
-	spArray := make([]int, len(fn.Instructions))
-	sp := 0
-	for idx, instr := range fn.Instructions {
-		spArray[idx] = sp
-		switch instr.Op {
-		case OP_CONST, OP_LOAD_LOCAL,
-			OP_LOAD_LOCAL_0, OP_LOAD_LOCAL_1, OP_LOAD_LOCAL_2, OP_LOAD_LOCAL_3,
-			OP_MUL_LOCAL_CONST, OP_GET_PROPERTY_LOCAL, OP_LOAD_GLOBAL,
-			OP_LOCAL_CONST_OP:
-			sp++
-		case OP_MATH_POW:
-			sp--
-		case OP_PRINT:
-			info := instr.Value.(PrintInfo)
-			sp = sp - info.ArgCount + 1
-		case OP_STORE_LOCAL, OP_ASSIGN_LOCAL, OP_POP,
-			OP_JUMP_IF_FALSE, OP_JUMP_IF_TRUE, OP_THROW:
-			sp--
-		case OP_JUMP_PROPERTY_LOCAL_FALSE, OP_JUMP_PROPERTY_LOCAL_TRUE:
-			// no stack effect
-		case OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
-			OP_EQ, OP_NEQ,
-			OP_LT, OP_LTE, OP_GT, OP_GTE,
-			OP_AND, OP_OR, OP_COALESCE_JUMP:
-			sp--
-		case OP_RETURN:
-			sp--
-		case OP_CALL_DIRECT:
-			info, ok := instr.Value.(DirectCallInfo)
-			if ok {
-				sp = sp - info.ArgCount + 1
-			}
-		case OP_CALL_DIRECT_SUB_CONST:
-			sp++
-		case OP_OBJECT:
-			if info, ok := instr.Value.(ObjectInfo); ok {
-				count := len(info.Names)
-				if count > 0 {
-					sp -= count - 1
-				} else {
-					sp++
-				}
-			}
-		case OP_ARRAY:
-			if info, ok := instr.Value.(ArrayInfo); ok {
-				if info.Count > 0 {
-					sp -= info.Count - 1
-				} else {
-					sp++
-				}
-			}
-		case OP_INDEX:
-			sp--
-		case OP_STRING_JOIN:
-			count := getStringJoinCount(instr)
-			if count > 0 {
-				sp -= count - 1
-			} else {
-				sp++
-			}
-		case OP_SET_INDEX:
-			sp -= 3
-		case OP_LEN:
-			// net change is 0 (pop 1, push 1)
-		case OP_ARRAY_LEN_LOCAL, OP_ARRAY_GET_LOCAL, OP_ARRAY_PUSH_LOCAL, OP_ARRAY_PUSH_LOCAL_MUL_CONST:
-			sp++
-		case OP_SET_PROPERTY:
-			sp -= 2
-		case OP_METHOD_CALL:
-			if info, ok := instr.Value.(MethodCallInfo); ok {
-				sp -= info.ArgCount
-			}
-		}
-	}
+	spArray := computeJitSpArray(fn)
 	maxSp := 0
 	for _, s := range spArray {
 		if s > maxSp {
@@ -3638,9 +3476,8 @@ func checkCallArgumentsSafe(vm *VM, fn Function, currentReturnTypes []stackType,
 		}
 	}
 
-	sp = 0
 	for idx, instr := range fn.Instructions {
-		sp = spArray[idx]
+		sp := spArray[idx]
 		switch instr.Op {
 		case OP_MATH_FLOOR, OP_MATH_CEIL, OP_MATH_SQRT, OP_MATH_ABS:
 			if sp >= 1 {
@@ -3940,76 +3777,11 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool, currentReturnTypes
 		return funcBodySec.buf
 	}
 
-	spArray := make([]int, len(fn.Instructions))
-	sp := 0
+	spArray := computeJitSpArray(fn)
 	maxSp := 0
-	for idx, instr := range fn.Instructions {
-		spArray[idx] = sp
-		if sp > maxSp {
-			maxSp = sp
-		}
-		switch instr.Op {
-		case OP_CONST, OP_LOAD_LOCAL, OP_LOAD_LOCAL_0, OP_LOAD_LOCAL_1, OP_LOAD_LOCAL_2, OP_LOAD_LOCAL_3, OP_MUL_LOCAL_CONST, OP_GET_PROPERTY_LOCAL, OP_LOAD_GLOBAL,
-			OP_LOCAL_CONST_OP:
-			sp++
-		case OP_MATH_POW:
-			sp--
-		case OP_PRINT:
-			info := instr.Value.(PrintInfo)
-			sp = sp - info.ArgCount + 1
-		case OP_STORE_LOCAL, OP_ASSIGN_LOCAL, OP_POP, OP_JUMP_IF_FALSE, OP_JUMP_IF_TRUE, OP_THROW:
-			sp--
-		case OP_JUMP_PROPERTY_LOCAL_FALSE, OP_JUMP_PROPERTY_LOCAL_TRUE:
-			// no stack effect
-		case OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
-			OP_EQ, OP_NEQ,
-			OP_LT, OP_LTE, OP_GT, OP_GTE, OP_AND, OP_OR, OP_COALESCE_JUMP:
-			sp--
-		case OP_RETURN:
-			sp--
-		case OP_CALL_DIRECT:
-			info := instr.Value.(DirectCallInfo)
-			sp = sp - info.ArgCount + 1
-		case OP_CALL_DIRECT_SUB_CONST:
-			sp++
-		case OP_OBJECT:
-			if info, ok := instr.Value.(ObjectInfo); ok {
-				count := len(info.Names)
-				if count > 0 {
-					sp -= count - 1
-				} else {
-					sp++
-				}
-			}
-		case OP_ARRAY:
-			if info, ok := instr.Value.(ArrayInfo); ok {
-				if info.Count > 0 {
-					sp -= info.Count - 1
-				} else {
-					sp++
-				}
-			}
-		case OP_INDEX:
-			sp--
-		case OP_STRING_JOIN:
-			count := getStringJoinCount(instr)
-			if count > 0 {
-				sp -= count - 1
-			} else {
-				sp++
-			}
-		case OP_SET_INDEX:
-			sp -= 3
-		case OP_LEN:
-			// net change is 0 (pop 1, push 1)
-		case OP_ARRAY_LEN_LOCAL, OP_ARRAY_GET_LOCAL, OP_ARRAY_PUSH_LOCAL, OP_ARRAY_PUSH_LOCAL_MUL_CONST:
-			sp++
-		case OP_SET_PROPERTY:
-			sp -= 2
-		case OP_METHOD_CALL:
-			if info, ok := instr.Value.(MethodCallInfo); ok {
-				sp -= info.ArgCount
-			}
+	for _, s := range spArray {
+		if s > maxSp {
+			maxSp = s
 		}
 	}
 
@@ -6086,7 +5858,6 @@ func compileFunctionBodyBytes(vm *VM, fn Function, safe bool, currentReturnTypes
 		//     return +Inf
 		//
 		// This is safe because 20000^72 is bigger than max float64.
-		// It catches your benchmark around i = 144.
 		body.WriteByte(0x20) // local.get base
 		body.WriteVarUint(uint32(leftSlot))
 		body.WriteByte(0x44) // f64.const
@@ -8450,6 +8221,12 @@ func (vm *VM) planPackedObjectArray(arr *ArrayValue) (jitPackedObjectArrayPlan, 
 		return jitPackedObjectArrayPlan{}, false
 	}
 
+	for _, elem := range arr.Elements {
+		if _, ok := elem.Value.(*InstanceValue); ok {
+			return jitPackedObjectArrayPlan{}, false
+		}
+	}
+
 	first, ok := jitTinyObjectValue(arr.Elements[0])
 	if !ok || len(first) == 0 {
 		return jitPackedObjectArrayPlan{}, false
@@ -8458,9 +8235,6 @@ func (vm *VM) planPackedObjectArray(arr *ArrayValue) (jitPackedObjectArrayPlan, 
 	names := make([]string, 0, len(first))
 	for k := range first {
 		name := jitObjectKeyString(k)
-		if name == "__class" {
-			return jitPackedObjectArrayPlan{}, false
-		}
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -8550,9 +8324,6 @@ func (vm *VM) packWasmObjectArray(mod api.Module, arrayAddr uint32) bool {
 	fields := make([]jitPackedObjectArrayField, 0, len(names))
 	var maxTableIndex uint32
 	for _, name := range names {
-		if name == "__class" {
-			return false
-		}
 		offset := vm.getPropertyOffset(name)
 		if offset < 16 {
 			continue
