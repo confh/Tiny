@@ -37,4 +37,10 @@ export fn stat(path: string): object
 export fn copy(src: string, dst: string): null
 
 // Removes the file or directory at the specified path.
-export fn remove(path: string): null
+export fn remove(path: string, force?: bool): null
+
+// Returns whether or not the specified path is a directory.
+export fn isDir(path: string): bool
+
+// Returns whether or not the specified path is a fuke.
+export fn isFile(path: string): bool

@@ -211,6 +211,7 @@ export class Lexer {
                 "print"  { tok.type = tokens.TokenType.PRINT; }
                 "def"    { tok.type = tokens.TokenType.DEF; }
                 "return" { tok.type = tokens.TokenType.RETURN; }
+                "while"  { tok.type = tokens.TokenType.WHILE; }
                 _        { tok.type = tokens.TokenType.IDENT; }
             }
             tok.value = text;
@@ -248,6 +249,8 @@ export class Lexer {
             "*" { tok.type = tokens.TokenType.STAR; }
             "/" { tok.type = tokens.TokenType.SLASH; }
             "=" { tok.type = tokens.TokenType.EQUAL; }
+            "<" { tok.type = tokens.TokenType.LT; }
+            ">" { tok.type = tokens.TokenType.GT; }
             ":" { tok.type = tokens.TokenType.COLON; }
             "," { tok.type = tokens.TokenType.COMMA; }
             "(" { tok.type = tokens.TokenType.LPAREN; }

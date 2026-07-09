@@ -10,7 +10,7 @@ import (
 
 func TestBytecodeRoundTripPreservesFunctionMetadata(t *testing.T) {
 	main := []vm.Instruction{
-		{Op: vm.OP_CALL_DIRECT, Value: vm.DirectCallInfo{ID: 99, Name: "answer", ArgCount: 0}, File: `C:\Users\confis\Desktop\project\main.tiny`, Line: 1, Column: 1},
+		{Op: vm.OP_CALL_DIRECT, Value: vm.DirectCallInfo{ID: 99, Name: "answer", ArgCount: 0}},
 		{Op: vm.OP_HALT},
 	}
 
@@ -54,7 +54,7 @@ func TestBytecodeRoundTripPreservesFunctionMetadata(t *testing.T) {
 		},
 	}
 
-	_, loadedFunctions, loadedClasses, loadedInterfaces, _ := LoadBytecodeFromBytes(SaveBytecodeToBytes(main, functions, classes, interfaces, nil, true, false))
+	_, _, loadedFunctions, loadedClasses, loadedInterfaces, _ := LoadBytecodeFromBytes(SaveBytecodeToBytes(main, nil, functions, classes, interfaces, nil, true, false))
 
 	// if len(loadedMain) != len(main) || loadedMain[0].File != bytecodeSourceLabel || loadedMain[0].Line != 1 {
 	// 	t.Fatalf("main instructions did not round trip: %#v", loadedMain)
@@ -81,7 +81,7 @@ func TestBytecodeRoundTripPreservesFunctionMetadata(t *testing.T) {
 }
 
 func TestSaveBytecodeToBytesUsesBinaryFormat(t *testing.T) {
-	data := SaveBytecodeToBytes([]vm.Instruction{{Op: vm.OP_HALT}}, nil, nil, nil, nil, false, false)
+	data := SaveBytecodeToBytes([]vm.Instruction{{Op: vm.OP_HALT}}, nil, nil, nil, nil, nil, false, false)
 
 	if !bytes.HasPrefix(data, bytecodeMagic) {
 		t.Fatalf("bytecode missing binary magic header: %q", data[:min(len(data), len(bytecodeMagic))])
@@ -95,8 +95,8 @@ func TestSaveBytecodeToBytesUsesBinaryFormat(t *testing.T) {
 func TestSaveBytecodeToBytesHidesSourcePaths(t *testing.T) {
 	sourcePath := `C:\Users\confis\Desktop\Programming\Go\compiler\core.tiny`
 	data := SaveBytecodeToBytes([]vm.Instruction{
-		{Op: vm.OP_HALT, File: sourcePath, Line: 12, Column: 3},
-	}, nil, nil, nil, nil, false, false)
+		{Op: vm.OP_HALT},
+	}, nil, nil, nil, nil, nil, false, false)
 
 	if bytes.Contains(data, []byte(sourcePath)) {
 		t.Fatal("bytecode leaked absolute source path")
@@ -115,7 +115,7 @@ func TestSaveBytecodeToBytesHidesSourcePaths(t *testing.T) {
 func TestLoadBytecodeFromBytesSupportsLegacyJSON(t *testing.T) {
 	file := BytecodeFile{
 		Version:   BytecodeVersion,
-		Main:      serializeInstructions([]vm.Instruction{{Op: vm.OP_HALT}}, false),
+		Main:      serializeInstructions([]vm.Instruction{{Op: vm.OP_HALT}}, []vm.DebugInfo{}, false),
 		Functions: map[string]SerializableFunction{},
 		Classes:   map[string]SerializableClass{},
 	}
@@ -125,7 +125,7 @@ func TestLoadBytecodeFromBytesSupportsLegacyJSON(t *testing.T) {
 		t.Fatalf("marshal legacy bytecode: %v", err)
 	}
 
-	main, functions, classes, interfaces, _ := LoadBytecodeFromBytes(data)
+	main, _, functions, classes, interfaces, _ := LoadBytecodeFromBytes(data)
 	if len(main) != 1 || main[0].Op != vm.OP_HALT {
 		t.Fatalf("legacy main did not load: %#v", main)
 	}
@@ -226,10 +226,10 @@ func TestBytecodeObfuscation(t *testing.T) {
 	}
 
 	// Compile with obfuscation enabled
-	data := SaveBytecodeToBytes(main, functions, classes, interfaces, globalIndex, false, true)
+	data := SaveBytecodeToBytes(main, nil, functions, classes, interfaces, globalIndex, false, true)
 
 	// Load it back
-	loadedMain, loadedFunctions, loadedClasses, loadedInterfaces, loadedGlobals := LoadBytecodeFromBytes(data)
+	loadedMain, _, loadedFunctions, loadedClasses, loadedInterfaces, loadedGlobals := LoadBytecodeFromBytes(data)
 
 	// Check main instruction call to myFunction got obfuscated
 	if len(loadedMain) < 1 || loadedMain[0].Op != vm.OP_CALL_DIRECT {

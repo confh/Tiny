@@ -252,7 +252,7 @@ func TestFormatTinyDocumentDoesNotCollapseLongArgs(t *testing.T) {
 	longArg := strings.Repeat("a", 90)
 	input := "fn main() {\n    function(\n        " + longArg + "\n    )\n}\n"
 	got := formatTinyDocument(input)
-	want := "fn main() {\n    function(\n    " + longArg + "\n    )\n}\n"
+	want := "fn main() {\n    function(\n        " + longArg + "\n    )\n}\n"
 
 	if got != want {
 		t.Fatalf("unexpected formatted long args should not collapse:\nwant:\n%q\ngot:\n%q", want, got)

@@ -14,10 +14,11 @@ func main() {
 
 	bytecode := readAppendedBytecode()
 
-	mainBytecode, functions, classes, interfaces, _ := LoadBytecodeFromBytes(bytecode)
+	mainBytecode, mainDebugInfo, functions, classes, interfaces, _ := LoadBytecodeFromBytes(bytecode)
 
 	vm := NewVM(VMInfo{
 		MainInstructions: mainBytecode,
+		MainDebugInfo:    mainDebugInfo,
 		Functions:        functions,
 		Classes:          classes,
 		Interfaces:       interfaces,

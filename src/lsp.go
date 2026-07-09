@@ -5697,21 +5697,26 @@ func scopeCompletions(scope *Scope, uri string, text string, hasParens bool) []C
 				InsertText:       completionInsertText(sym, hasParens),
 				InsertTextFormat: completionInsertTextFormat(sym, hasParens),
 			})
+		}
 
-			if sym.Kind == SymbolNamespace {
-				for _, memberSym := range sym.Members {
-					mName := memberSym.Name
-					if seen[mName] {
-						continue
-					}
-					items = append(items, CompletionItem{
-						Label:            mName,
-						Kind:             symbolKindToCompletionKind(memberSym.Kind),
-						Detail:           sym.Name + "." + mName + " (from " + sym.Name + ")",
-						InsertText:       sym.Name + "." + completionInsertText(memberSym, hasParens),
-						InsertTextFormat: completionInsertTextFormat(memberSym, hasParens),
-					})
+		for _, name := range names {
+			sym := s.Symbols[name]
+			if sym.Kind != SymbolNamespace {
+				continue
+			}
+			for _, memberSym := range sym.Members {
+				mName := memberSym.Name
+				if seen[mName] {
+					continue
 				}
+				seen[mName] = true
+				items = append(items, CompletionItem{
+					Label:            mName,
+					Kind:             symbolKindToCompletionKind(memberSym.Kind),
+					Detail:           sym.Name + "." + mName + " (from " + sym.Name + ")",
+					InsertText:       sym.Name + "." + completionInsertText(memberSym, hasParens),
+					InsertTextFormat: completionInsertTextFormat(memberSym, hasParens),
+				})
 			}
 		}
 	}
@@ -6226,7 +6231,7 @@ func completionItemWithParameterHintCommand(item CompletionItem) CompletionItem 
 }
 
 func completionRank(item CompletionItem) string {
-	if strings.Contains(item.Detail, "parameter") || strings.HasPrefix(item.Detail, "variable") {
+	if strings.Contains(item.Detail, "parameter") || strings.Contains(item.Detail, "variable") || strings.Contains(item.Detail, "constant") {
 		return "01_"
 	}
 	if item.Kind == 5 {
@@ -6945,12 +6950,12 @@ func addAdditionalTextEditToCompletions(items []CompletionItem, edit TextEdit) [
 	return items
 }
 
-func completionItemsForReceiver(scope *Scope, text string, pos Position, receiver string, hasParens bool) []CompletionItem {
+func completionItemsForReceiver(scope *Scope, text string, pos Position, receiver string, hasParens bool, uri string) []CompletionItem {
 	sym, typ, ok := resolveReceiverPath(scope, text, pos, receiver)
 
 	if !ok || typ == "" || typ == "any" || typ == "unknown" {
-		if smTyp, smOK := resolveTypeForReceiver("", text, receiver, pos); smOK && smTyp != "" {
-			items := completionItemsFromSemanticModelMembers("", text, smTyp, hasParens)
+		if smTyp, smOK := resolveTypeForReceiver(uri, text, receiver, pos); smOK && smTyp != "" {
+			items := completionItemsFromSemanticModelMembers(uri, text, smTyp, hasParens)
 			if len(items) > 0 {
 				return rankedCompletionItems(items)
 			}
@@ -6962,7 +6967,7 @@ func completionItemsForReceiver(scope *Scope, text string, pos Position, receive
 	}
 
 	if (typ == "any" || typ == "unknown") && receiver != "" {
-		stmts, _ := parseTinyForLSP("", text)
+		stmts, _ := parseTinyForLSP(uri, text)
 		if ifStmt := findEnclosingIfStmt(stmts, pos.Line+1); ifStmt != nil {
 			isInElse := isInIfElseBranch(ifStmt, pos.Line+1)
 			narrowedScope := cloneScope(scope)
@@ -7333,7 +7338,7 @@ func getCompletions(uri string, text string, pos Position) []CompletionItem {
 
 	receiverType, smOK := resolveTypeForReceiver(uri, text, receiver, pos)
 
-	items := completionItemsForReceiver(scope, text, pos, receiver, hasParens)
+	items := completionItemsForReceiver(scope, text, pos, receiver, hasParens, uri)
 	if len(items) > 0 {
 		return rankedCompletionItems(items)
 	}

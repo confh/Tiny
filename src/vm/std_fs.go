@@ -33,6 +33,8 @@ func init() {
 		"stat":       stdFsStat,
 		"copy":       stdFsCopy,
 		"remove":     stdFsRemove,
+		"isDir":      stdFsIsDir,
+		"isFile":     stdFsIsFile,
 	}
 	registerStdModule(stdFsMetadata)
 }
@@ -243,11 +245,24 @@ func stdFsCopy(vm *VM, args []TinyValue) {
 }
 
 func stdFsRemove(vm *VM, args []TinyValue) {
-	expectArgs(vm, "fs.remove", args, 1)
+	expectArgsRange(vm, "fs.remove", args, 1, 2)
 
 	path := argString(vm, "fs.remove", args, 0)
 
-	err := os.Remove(path)
+	force := false
+
+	if len(args) == 2 {
+		force = argBool(vm, "fs.remove", args, 1)
+	}
+
+	var err error
+
+	if force {
+		err = os.RemoveAll(path)
+	} else {
+		err = os.Remove(path)
+	}
+
 	if err != nil {
 		vm.runtimeError(ErrorRuntime, "error while removing file: %s", err)
 	}

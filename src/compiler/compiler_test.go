@@ -35,7 +35,7 @@ export external const hostValue: string
 	program := parser.ParseProgram()
 
 	compiler := NewCompiler()
-	_, _, _, _, globalIndex := compiler.CompileProgram(program)
+	_, _, _, _, _, globalIndex := compiler.CompileProgram(program)
 
 	if _, ok := globalIndex["hostCall"]; !ok {
 		t.Fatalf("expected exported external function global")
@@ -61,7 +61,7 @@ collect("prefix", ...values);
 	program := parser.ParseProgram()
 
 	compiler := NewCompiler()
-	mainInstructions, _, _, _, _ := compiler.CompileProgram(program)
+	mainInstructions, _, _, _, _, _ := compiler.CompileProgram(program)
 
 	found := false
 	for _, instr := range mainInstructions {
@@ -86,7 +86,7 @@ func TestCompilerStdPrintSpreadCall(t *testing.T) {
 	program := parser.ParseProgram()
 
 	compiler := NewCompiler()
-	_, functions, _, _, _ := compiler.CompileProgram(program)
+	_, _, functions, _, _, _ := compiler.CompileProgram(program)
 
 	logFn, ok := functions["log"]
 	if !ok {
@@ -128,7 +128,7 @@ func TestCompilerNamespaceExportsExternalDeclarations(t *testing.T) {
 	}
 
 	compiler := NewCompiler()
-	_, _, _, _, globalIndex := compiler.CompileProgram(program)
+	_, _, _, _, _, globalIndex := compiler.CompileProgram(program)
 
 	if _, ok := globalIndex["Host.call"]; !ok {
 		t.Fatalf("expected namespaced external function global")
@@ -185,7 +185,7 @@ func TestCompilerNamespaceImportResolution(t *testing.T) {
 
 	compiler := NewCompiler()
 	// This should not panic or trigger semantic errors like "undefined variable: http"
-	_, _, _, _, globalIndex := compiler.CompileProgram(program)
+	_, _, _, _, _, globalIndex := compiler.CompileProgram(program)
 
 	if _, ok := globalIndex["Testing.ass"]; !ok {
 		t.Fatalf("expected Testing.ass to be compiled successfully")
@@ -253,7 +253,7 @@ func TestCompilerNamespaceEmbedAndExternalResolution(t *testing.T) {
 	}
 
 	compiler := NewCompiler()
-	_, _, _, _, globalIndex := compiler.CompileProgram(program)
+	_, _, _, _, _, globalIndex := compiler.CompileProgram(program)
 
 	if _, ok := globalIndex["Testing.authToken"]; !ok {
 		t.Fatalf("expected Testing.authToken to be compiled successfully")
@@ -379,7 +379,7 @@ func TestCompilerNamespaceNestedDestructure(t *testing.T) {
 	}
 
 	compiler := NewCompiler()
-	_, _, _, _, globalIndex := compiler.CompileProgram(program)
+	_, _, _, _, _, globalIndex := compiler.CompileProgram(program)
 
 	if _, ok := globalIndex["Parent.Child.valX"]; !ok {
 		t.Fatalf("expected Parent.Child.valX to be compiled successfully")

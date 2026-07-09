@@ -1,0 +1,15 @@
+// Represents an instantiated WebAssembly module.
+export class Module {
+    // Calls an exported WASM function with arguments and returns the result.
+    fn call(funcName: string, args: array): any { }
+
+    // Reads a sequence of bytes from the WASM module's memory.
+    fn readMemory(offset: number, length: number): buffer { }
+
+    // Writes a buffer to the WASM module's memory.
+    fn writeMemory(offset: number, buf: buffer): null { }
+}
+
+// Instantiates a WebAssembly binary.
+// Optionally takes an imports object defining host functions.
+export fn instantiate(wasmBytes: buffer, imports?: object): Module

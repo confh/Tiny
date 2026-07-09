@@ -2004,11 +2004,33 @@ func inferReturnTypeFromFunctionStmt(scope *Scope, fn FunctionStmt, uri string, 
 	}
 
 	analyzer := &astSemanticAnalyzer{uri: uri, text: text, root: scope, scope: fnScope}
+	collectLocalVarDefsWithInference(analyzer, fn.Body)
+
 	returns := collectReturnTypesFromStmts(analyzer, fn.Body)
 	if len(returns) == 0 {
 		return "null"
 	}
 	return strings.Join(dedupeStrings(returns), " | ")
+}
+
+func collectLocalVarDefsWithInference(analyzer *astSemanticAnalyzer, stmts []Stmt) {
+	for _, raw := range stmts {
+		switch s := raw.(type) {
+		case VariableStmt:
+			typ := "unknown"
+			if !s.TypeHint.IsEmpty() {
+				typ = normalizeLSPType(analyzer.scope, s.TypeHint.Name)
+			} else if s.Value != nil {
+				typ = analyzer.inferExprType(s.Value)
+			}
+			analyzer.scope.Define(SymbolInfo{Name: s.Name, Kind: SymbolVariable, Type: typ, SourceURI: analyzer.uri})
+		case ReturnStmt:
+			return
+		case IfStmt:
+			collectLocalVarDefsWithInference(analyzer, s.ThenBody)
+			collectLocalVarDefsWithInference(analyzer, s.ElseBody)
+		}
+	}
 }
 
 func collectReturnTypesFromStmts(analyzer *astSemanticAnalyzer, statements []Stmt) []string {
@@ -2279,6 +2301,8 @@ func exprLineFromExpr(e Expr) int {
 		return v.Line
 	case EnumVariantExpr:
 		return v.Line
+	case PropertyExpr:
+		return v.Line
 	}
 	return 0
 }
@@ -2439,6 +2463,29 @@ func lineInsideBlock(line int, blockStartLine int, blockEndLine int) bool {
 	return line >= blockStartLine && line <= blockEndLine
 }
 
+func findBlockEndLine(text string, openLine int) int {
+	offset := offsetAtLine(text, openLine)
+	if offset < 0 || offset >= len(text) {
+		return openLine
+	}
+	braceCount := 0
+	foundOpen := false
+	for i := offset; i < len(text); i++ {
+		if text[i] == '{' {
+			braceCount++
+			foundOpen = true
+		} else if text[i] == '}' {
+			braceCount--
+			if foundOpen && braceCount == 0 {
+				rest := text[:i+1]
+				lines := strings.Split(rest, "\n")
+				return len(lines)
+			}
+		}
+	}
+	return openLine
+}
+
 type astSymbolCollector struct {
 	scope          *Scope
 	analyzer       *astSemanticAnalyzer
@@ -2550,7 +2597,7 @@ func (c *astSymbolCollector) collectFromStmt(stmt Stmt) {
 		c.collectNestedClass(s)
 
 	case ForInStmt:
-		forEndLine := stmtEndLine(s)
+		forEndLine := findBlockEndLine(c.text, s.Line)
 		if c.cursorLine > 0 && lineInsideBlock(c.cursorLine, s.Line, forEndLine) {
 			iterableType := c.analyzer.inferExprType(s.Iterable)
 			itemType := "any"
@@ -2583,7 +2630,7 @@ func (c *astSymbolCollector) collectFromStmt(stmt Stmt) {
 		}
 
 	case TryCatchStmt:
-		tryCatchEndLine := stmtEndLine(s)
+		tryCatchEndLine := findBlockEndLine(c.text, s.Line)
 		if c.cursorLine > 0 && lineInsideBlock(c.cursorLine, s.Line, tryCatchEndLine) {
 			if s.ErrorName != "" {
 				c.scope.Define(SymbolInfo{
@@ -2605,7 +2652,7 @@ func (c *astSymbolCollector) collectFromStmt(stmt Stmt) {
 		}
 
 	case MatchStmt:
-		matchEndLine := stmtEndLine(s)
+		matchEndLine := findBlockEndLine(c.text, s.Line)
 		cursorInMatch := c.cursorLine > 0 && lineInsideBlock(c.cursorLine, s.Line, matchEndLine)
 		for _, mc := range s.Cases {
 			if cursorInMatch && mc.BindName != "" {
@@ -2627,7 +2674,7 @@ func (c *astSymbolCollector) collectFromStmt(stmt Stmt) {
 		c.collectFromStmts(s.ElseBody)
 
 	case ForStmt:
-		forEndLine := stmtEndLine(s)
+		forEndLine := findBlockEndLine(c.text, s.Line)
 		if c.cursorLine > 0 && lineInsideBlock(c.cursorLine, s.Line, forEndLine) {
 			c.collectFromStmt(s.Init)
 			c.collectFromStmts(s.Body)
@@ -2795,6 +2842,7 @@ func (c *astSymbolCollector) collectNestedAnonymousFunction(fn FunctionExpr) {
 			SourceURI: c.uri,
 		})
 	}
+
 	prevScope := c.analyzer.scope
 	c.analyzer.scope = c.scope
 	c.collectFromStmts(fn.Body)
@@ -5593,20 +5641,7 @@ func loadTinyFileExports(path string, visited map[string]bool) map[string]Symbol
 }
 
 func cloneSymbolMap(in map[string]SymbolInfo) map[string]SymbolInfo {
-	out := make(map[string]SymbolInfo, len(in))
-	for name, sym := range in {
-		if sym.Fields != nil {
-			sym.Fields = cloneSymbolMap(sym.Fields)
-		}
-		if sym.Methods != nil {
-			sym.Methods = cloneSymbolMap(sym.Methods)
-		}
-		if sym.Members != nil {
-			sym.Members = cloneSymbolMap(sym.Members)
-		}
-		out[name] = sym
-	}
-	return out
+	return in
 }
 
 func collectExportsFromAST(scope *Scope, text string, exports map[string]SymbolInfo, uri string) {
@@ -7991,7 +8026,7 @@ func getHover(uri string, text string, pos Position) any {
 
 func formatVariableHover(sym SymbolInfo) string {
 	keyword := "let"
-	if strings.HasPrefix(sym.Detail, "constant ") {
+	if strings.Contains(sym.Detail, "constant ") {
 		keyword = "const"
 	}
 
@@ -9785,10 +9820,34 @@ func (a *astSemanticAnalyzer) visitFunction(fn FunctionStmt) {
 		a.define(paramSymbol(a.scope, p, a.uri, fn.Line, fn.Column))
 	}
 	a.visitStatements(fn.Body)
-	a.popScope()
 
 	retType := a.currentReturnType
-	if !fn.ReturnType.IsEmpty() && retType != "any" && retType != "null" {
+	if (retType == "" || retType == "any") && fn.ReturnType.IsEmpty() {
+		var retStmt ReturnStmt
+		if len(fn.Body) == 1 {
+			if rs, ok := fn.Body[0].(ReturnStmt); ok && rs.HasValue {
+				retStmt = rs
+			}
+		} else if len(fn.Body) > 1 {
+			if rs, ok := fn.Body[len(fn.Body)-1].(ReturnStmt); ok && rs.HasValue {
+				retStmt = rs
+			}
+		}
+		if retStmt.Value != nil {
+			bodyType := a.inferExprType(retStmt.Value)
+			if bodyType != "any" && bodyType != "unknown" {
+				retType = bodyType
+				if existing, ok := a.root.Resolve(fn.Name); ok {
+					existing.Returns = retType
+					a.root.Define(existing)
+				}
+			}
+		}
+	}
+
+	a.popScope()
+
+	if !fn.ReturnType.IsEmpty() && !typeContainsAnyOf(retType, "any", "null") {
 		if !alwaysReturnsOrThrowsBlock(fn.Body) {
 			a.addDiagnostic(fn.Line, fn.Column, fmt.Sprintf("missing return: function '%s' expects return type '%s'", fn.Name, retType))
 		}
@@ -9840,10 +9899,30 @@ func (a *astSemanticAnalyzer) visitMethod(className string, fn FunctionStmt) {
 		}
 	}
 	a.visitStatements(fn.Body)
-	a.popScope()
 
 	retType := a.currentReturnType
-	if !fn.ReturnType.IsEmpty() && retType != "any" && retType != "null" {
+	if (retType == "" || retType == "any") && fn.ReturnType.IsEmpty() {
+		var retStmt ReturnStmt
+		if len(fn.Body) == 1 {
+			if rs, ok := fn.Body[0].(ReturnStmt); ok && rs.HasValue {
+				retStmt = rs
+			}
+		} else if len(fn.Body) > 1 {
+			if rs, ok := fn.Body[len(fn.Body)-1].(ReturnStmt); ok && rs.HasValue {
+				retStmt = rs
+			}
+		}
+		if retStmt.Value != nil {
+			bodyType := a.inferExprType(retStmt.Value)
+			if bodyType != "any" && bodyType != "unknown" {
+				retType = bodyType
+			}
+		}
+	}
+
+	a.popScope()
+
+	if !fn.ReturnType.IsEmpty() && !typeContainsAnyOf(retType, "any", "null") {
 		if !alwaysReturnsOrThrowsBlock(fn.Body) {
 			a.addDiagnostic(fn.Line, fn.Column, fmt.Sprintf("missing return: function '%s' expects return type '%s'", fn.Name, retType))
 		}
@@ -10573,6 +10652,27 @@ func isCallableLSPType(typ string) bool {
 	return typ == "function" || strings.HasPrefix(typ, "function(")
 }
 
+func typeContains(typ string, target string) bool {
+	if typ == target {
+		return true
+	}
+	for _, part := range splitUnionType(typ) {
+		if strings.TrimSpace(part) == target {
+			return true
+		}
+	}
+	return false
+}
+
+func typeContainsAnyOf(typ string, targets ...string) bool {
+	for _, t := range targets {
+		if typeContains(typ, t) {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *astSemanticAnalyzer) checkCallableTypeCall(name string, callableType string, args []Expr, line int, column int) string {
 	if !isCallableLSPType(callableType) || callableType == "any" || callableType == "unknown" || callableType == "" {
 		return inferredCallResultType(callableType)
@@ -10824,6 +10924,17 @@ func (a *astSemanticAnalyzer) inferExprType(expr Expr) string {
 						}
 					}
 				}
+
+				objType := a.inferExprType(instObj.Object)
+				if memberSym, _, ok := resolveMemberFromStaticType(a.scope, objType, instObj.Name); ok {
+					if len(memberSym.TypeParameters) > 0 || len(callee.TypeArgs) > 0 {
+						return a.checkCall(instObj.Name, e.Args, memberSym, callee.TypeArgs, callLine, callColumn)
+					}
+					if isCallableLSPType(memberSym.Type) {
+						return a.checkCallableTypeCall(instObj.Name, memberSym.Type, e.Args, callLine, callColumn)
+					}
+					return firstNonEmpty(memberSym.Returns, memberSym.Type, "any")
+				}
 			}
 
 		case IdentExpr:
@@ -10837,10 +10948,10 @@ func (a *astSemanticAnalyzer) inferExprType(expr Expr) string {
 					return a.checkCall(callee.Name, e.Args, sym, nil, callLine, callColumn)
 				}
 
-				if !isCallableLSPType(sym.Type) && sym.Type != "any" && sym.Type != "unknown" && sym.Type != "" {
+				if !isCallableLSPType(sym.Type) && !typeContainsAnyOf(sym.Type, "any", "unknown") && sym.Type != "" {
 					a.addError(callLine, callColumn, fmt.Sprintf("cannot call non-function type '%s'", sym.Type))
 				}
-				if isCallableLSPType(sym.Type) {
+				if isCallableLSPType(sym.Type) || typeContainsAnyOf(sym.Type, "any", "unknown") {
 					return a.checkCallableTypeCall(callee.Name, sym.Type, e.Args, callLine, callColumn)
 				}
 				return inferredCallResultType(sym.Type)
@@ -10865,31 +10976,43 @@ func (a *astSemanticAnalyzer) inferExprType(expr Expr) string {
 						return qualifyNamespaceType(ident.Name, firstNonEmpty(ret, "any"), ns.Members)
 					}
 
-					if !isCallableLSPType(memberSym.Type) && memberSym.Type != "any" && memberSym.Type != "unknown" && memberSym.Type != "" {
+					if !isCallableLSPType(memberSym.Type) && !typeContainsAnyOf(memberSym.Type, "any", "unknown") && memberSym.Type != "" {
 						a.addError(callLine, callColumn, fmt.Sprintf("cannot call non-function type '%s'", memberSym.Type))
 					}
-					if isCallableLSPType(memberSym.Type) {
+					if isCallableLSPType(memberSym.Type) || typeContainsAnyOf(memberSym.Type, "any", "unknown") {
 						return a.checkCallableTypeCall(ident.Name+"."+callee.Name, memberSym.Type, e.Args, callLine, callColumn)
 					}
 					return inferredCallResultType(memberSym.Type)
 				}
 			}
 
+			if memberSym, memberTy, ok := resolveMemberFromStaticType(a.scope, objType, callee.Name); ok {
+				if len(memberSym.TypeParameters) > 0 {
+					return a.checkCall(callee.Name, e.Args, memberSym, nil, callLine, callColumn)
+				}
+				if !isCallableLSPType(memberTy) && !typeContainsAnyOf(memberTy, "any", "unknown") && memberTy != "" {
+					a.addError(callLine, callColumn, fmt.Sprintf("cannot call non-function type '%s'", memberTy))
+				}
+				if isCallableLSPType(memberTy) || typeContainsAnyOf(memberTy, "any", "unknown") {
+					return a.checkCallableTypeCall(callee.Name, memberTy, e.Args, callLine, callColumn)
+				}
+				return inferredCallResultType(memberTy)
+			}
 			mType := a.memberType(objType, callee.Name)
-			if !isCallableLSPType(mType) && mType != "any" && mType != "unknown" && mType != "" {
+			if !isCallableLSPType(mType) && !typeContainsAnyOf(mType, "any", "unknown") && mType != "" {
 				a.addError(callLine, callColumn, fmt.Sprintf("cannot call non-function type '%s'", mType))
 			}
-			if isCallableLSPType(mType) {
+			if isCallableLSPType(mType) || typeContainsAnyOf(mType, "any", "unknown") {
 				return a.checkCallableTypeCall(callee.Name, mType, e.Args, callLine, callColumn)
 			}
 			return inferredCallResultType(mType)
 		}
 
 		calleeType := a.inferExprType(e.Callee)
-		if !isCallableLSPType(calleeType) && calleeType != "any" && calleeType != "unknown" && calleeType != "" {
+		if !isCallableLSPType(calleeType) && !typeContainsAnyOf(calleeType, "any", "unknown") && calleeType != "" {
 			a.addError(callLine, callColumn, fmt.Sprintf("cannot call non-function type '%s'", calleeType))
 		}
-		if isCallableLSPType(calleeType) {
+		if isCallableLSPType(calleeType) || typeContainsAnyOf(calleeType, "any", "unknown") {
 			return a.checkCallableTypeCall("(call)", calleeType, e.Args, callLine, callColumn)
 		}
 		return inferredCallResultType(calleeType)
@@ -10971,6 +11094,15 @@ func (a *astSemanticAnalyzer) inferExprType(expr Expr) string {
 		}
 		a.checkKnownMemberCall(objType, e.Method, e.Args, e.Line, e.Column)
 
+		if memberSym, memberTy, ok := resolveMemberFromStaticType(a.scope, objType, e.Method); ok {
+			if len(memberSym.TypeParameters) > 0 {
+				return a.checkCall(e.Method, e.Args, memberSym, nil, e.Line, e.Column)
+			}
+			if isCallableLSPType(memberTy) {
+				return a.checkCallableTypeCall(e.Method, memberTy, e.Args, e.Line, e.Column)
+			}
+			return memberTy
+		}
 		mType := a.memberType(objType, e.Method)
 		if isCallableLSPType(mType) {
 			return a.checkCallableTypeCall(e.Method, mType, e.Args, e.Line, e.Column)
@@ -11030,8 +11162,18 @@ func (a *astSemanticAnalyzer) inferExprType(expr Expr) string {
 		if returnType == "any" && !e.ReturnType.IsEmpty() {
 			returnType = normalizeLSPType(a.root, returnTypeNameScoped(a.root, e.ReturnType))
 		}
-		if returnType == "any" && len(e.Body) == 1 {
-			if retStmt, ok := e.Body[0].(ReturnStmt); ok && retStmt.HasValue {
+		if returnType == "any" {
+			var retStmt ReturnStmt
+			if len(e.Body) == 1 {
+				if rs, ok := e.Body[0].(ReturnStmt); ok && rs.HasValue {
+					retStmt = rs
+				}
+			} else if len(e.Body) > 1 {
+				if rs, ok := e.Body[len(e.Body)-1].(ReturnStmt); ok && rs.HasValue {
+					retStmt = rs
+				}
+			}
+			if retStmt.Value != nil {
 				bodyType := a.inferExprType(retStmt.Value)
 				if bodyType != "any" && bodyType != "unknown" {
 					returnType = bodyType
@@ -11077,7 +11219,7 @@ func (a *astSemanticAnalyzer) inferExprType(expr Expr) string {
 		case TOKEN_AMP, TOKEN_PIPE, TOKEN_CARET, TOKEN_LSHIFT, TOKEN_RSHIFT:
 			return "number"
 		case TOKEN_PLUS:
-			if lt == "string" || rt == "string" {
+			if typeContains(lt, "string") || typeContains(rt, "string") {
 				return "string"
 			}
 			return "number"
@@ -12473,6 +12615,115 @@ func (a *astSemanticAnalyzer) parseStructuralTypeParts(typ string) []LSPType {
 	return nil
 }
 
+func (a *astSemanticAnalyzer) resolveLSPTypeSymbol(prefix string, name string) (SymbolInfo, bool) {
+	if prefix == "" {
+		if sym, ok := resolveClassSymbol(a.scope, name); ok {
+			return sym, true
+		}
+		if sym, ok := resolveInterfaceSymbol(a.scope, name); ok {
+			return sym, true
+		}
+		if sym, ok := resolveEnumSymbol(a.scope, name); ok {
+			return sym, true
+		}
+		return SymbolInfo{}, false
+	}
+	switch prefix {
+	case "class:":
+		return resolveClassSymbol(a.scope, name)
+	case "interface:":
+		return resolveInterfaceSymbol(a.scope, name)
+	case "enum:":
+		return resolveEnumSymbol(a.scope, name)
+	}
+	return SymbolInfo{}, false
+}
+
+func (a *astSemanticAnalyzer) structurallyEqualClassOrInterface(got SymbolInfo, expected SymbolInfo) bool {
+	if len(got.Fields) != len(expected.Fields) {
+		return false
+	}
+	for name, gotField := range got.Fields {
+		expectedField, ok := expected.Fields[name]
+		if !ok {
+			return false
+		}
+		if !a.compareLSPTypes(gotField.Type, expectedField.Type) {
+			return false
+		}
+	}
+	if len(got.Methods) != len(expected.Methods) {
+		return false
+	}
+	for name, gotMethod := range got.Methods {
+		expectedMethod, ok := expected.Methods[name]
+		if !ok {
+			return false
+		}
+		if len(gotMethod.Params) != len(expectedMethod.Params) {
+			return false
+		}
+		for i := range gotMethod.Params {
+			if !a.compareLSPTypes(gotMethod.Params[i].Type, expectedMethod.Params[i].Type) {
+				return false
+			}
+		}
+		if gotMethod.Returns != "" && expectedMethod.Returns != "" {
+			if !a.compareLSPTypes(gotMethod.Returns, expectedMethod.Returns) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (a *astSemanticAnalyzer) sameLSPTypeSymbol(gotPrefix, gotName, expectedPrefix, expectedName string) bool {
+	gotName = strings.TrimSpace(gotName)
+	expectedName = strings.TrimSpace(expectedName)
+	if gotName == expectedName {
+		return true
+	}
+
+	gotSym, gotOK := a.resolveLSPTypeSymbol(gotPrefix, gotName)
+	expectedSym, expectedOK := a.resolveLSPTypeSymbol(expectedPrefix, expectedName)
+
+	if gotOK && expectedOK {
+		if gotSym.Name == expectedSym.Name && gotSym.SourceURI == expectedSym.SourceURI {
+			return true
+		}
+		if gotSym.SourceURI != "" && expectedSym.SourceURI != "" && gotSym.SourceURI == expectedSym.SourceURI {
+			return true
+		}
+		if a.structurallyEqualClassOrInterface(gotSym, expectedSym) {
+			return true
+		}
+		return false
+	}
+
+	gotShort := gotName
+	if idx := strings.LastIndex(gotName, "."); idx >= 0 {
+		gotShort = gotName[idx+1:]
+	}
+	expectedShort := expectedName
+	if idx := strings.LastIndex(expectedName, "."); idx >= 0 {
+		expectedShort = expectedName[idx+1:]
+	}
+	if gotShort == expectedShort {
+		gotSym2, gotOK2 := a.resolveLSPTypeSymbol(gotPrefix, gotShort)
+		expectedSym2, expectedOK2 := a.resolveLSPTypeSymbol(expectedPrefix, expectedShort)
+		if gotOK2 && expectedOK2 {
+			if gotSym2.SourceURI == expectedSym2.SourceURI {
+				return true
+			}
+			if a.structurallyEqualClassOrInterface(gotSym2, expectedSym2) {
+				return true
+			}
+		}
+	}
+
+	return sameLSPStructuredTypeName(gotPrefix, gotName, expectedName)
+}
+
 func (a *astSemanticAnalyzer) compareParsedLSPType(got LSPType, expected LSPType) bool {
 	if got.Name == "any" || got.Name == "unknown" || expected.Name == "any" || expected.Name == "unknown" {
 		return true
@@ -12601,19 +12852,19 @@ func (a *astSemanticAnalyzer) compareParsedLSPType(got LSPType, expected LSPType
 	}
 
 	if got.Prefix != "" && expected.Prefix != "" && got.Prefix == expected.Prefix {
-		if sameLSPStructuredTypeName(got.Prefix, got.Name, expected.Name) {
+		if a.sameLSPTypeSymbol(got.Prefix, got.Name, expected.Prefix, expected.Name) {
 			return a.compareLSPTypeStruct(got, expected)
 		}
 	}
 
 	if expected.Prefix != "" && got.Prefix == "" {
-		if sameLSPStructuredTypeName(expected.Prefix, got.Name, expected.Name) {
+		if a.sameLSPTypeSymbol(expected.Prefix, got.Name, expected.Prefix, expected.Name) {
 			return true
 		}
 	}
 
 	if got.Prefix != "" && expected.Prefix == "" {
-		if sameLSPStructuredTypeName(got.Prefix, got.Name, expected.Name) {
+		if a.sameLSPTypeSymbol(got.Prefix, got.Name, got.Prefix, expected.Name) {
 			return true
 		}
 	}
@@ -12622,7 +12873,7 @@ func (a *astSemanticAnalyzer) compareParsedLSPType(got LSPType, expected LSPType
 		return true
 	}
 	if got.Prefix == "" && expected.Prefix == "" && (strings.Contains(got.Name, ".") || strings.Contains(expected.Name, ".")) {
-		if sameQualifiedLSPName(got.Name, expected.Name) {
+		if a.sameLSPTypeSymbol("", got.Name, "", expected.Name) {
 			return true
 		}
 	}
@@ -12856,7 +13107,7 @@ func (a *astSemanticAnalyzer) compareLSPTypeStruct(got LSPType, expected LSPType
 		return true
 	}
 
-	if got.Prefix != expected.Prefix || !sameLSPStructuredTypeName(got.Prefix, got.Name, expected.Name) {
+	if got.Prefix != expected.Prefix || !a.sameLSPTypeSymbol(got.Prefix, got.Name, expected.Prefix, expected.Name) {
 		return false
 	}
 
@@ -13185,12 +13436,12 @@ func classImplementsInterface(classSym SymbolInfo, ifaceSym SymbolInfo) bool {
 			return false
 		}
 		if hasMethod {
-			if ifaceField.Type != "function" && ifaceField.Type != "" && ifaceField.Type != "any" {
+			if !typeContainsAnyOf(ifaceField.Type, "function", "", "any") {
 				return false
 			}
 		}
 		if hasField {
-			if ifaceField.Type == "function" && classField.Type != "function" {
+			if typeContains(ifaceField.Type, "function") && !typeContainsAnyOf(classField.Type, "function", "any") {
 				return false
 			}
 		}

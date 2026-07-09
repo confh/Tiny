@@ -57,6 +57,7 @@ type LoopContext struct {
 
 type Compiler struct {
 	mainInstructions       []Instruction
+	mainDebugInfo          []DebugInfo
 	functions              map[string]Function
 	nativeFunctions        map[string]string
 	externalFunctions      map[string]Function
@@ -109,6 +110,7 @@ type Compiler struct {
 	outerScopes []map[string]Binding
 
 	currentInstructions *[]Instruction
+	currentDebugInfo    *[]DebugInfo
 
 	scopes  []map[string]Binding
 	scopeID int
@@ -124,6 +126,7 @@ type Compiler struct {
 	inlineDepth      int
 
 	enumVariants map[string]map[string][]Param
+	enumConstants map[string]TinyValue
 
 	jitRegionCount int
 
@@ -594,6 +597,7 @@ func (c *Compiler) optimizeExpr(expr Expr) Expr {
 func NewCompiler() *Compiler {
 	c := &Compiler{
 		mainInstructions:        []Instruction{},
+		mainDebugInfo:           []DebugInfo{},
 		functions:               map[string]Function{},
 		interfaces:              map[string]Interface{},
 		nativeFunctions:         map[string]string{},
@@ -614,10 +618,12 @@ func NewCompiler() *Compiler {
 		stdImportModules:        map[string]string{},
 		inlineCandidates:        map[string]FunctionStmt{},
 		enumVariants:            map[string]map[string][]Param{},
+		enumConstants:           map[string]TinyValue{},
 		namespacePrivateMembers: map[string]bool{},
 	}
 
 	c.currentInstructions = &c.mainInstructions
+	c.currentDebugInfo = &c.mainDebugInfo
 	c.beginScope()
 
 	return c
@@ -793,6 +799,7 @@ func (c *Compiler) compileFunctionLiteral(stmt FunctionStmt) {
 	outerBindings := c.collectCapturableBindings()
 
 	oldInstructions := c.currentInstructions
+	oldDebugInfo := c.currentDebugInfo
 	oldScopes := c.scopes
 	oldLocalCount := c.localCount
 	oldInMethod := c.inMethod
@@ -803,8 +810,10 @@ func (c *Compiler) compileFunctionLiteral(stmt FunctionStmt) {
 	oldColumn := c.currentColumn
 
 	functionInstructions := []Instruction{}
+	functionDebugInfo := []DebugInfo{}
 
 	c.currentInstructions = &functionInstructions
+	c.currentDebugInfo = &functionDebugInfo
 	c.scopes = []map[string]Binding{}
 	c.localCount = 0
 	c.setLocation(stmt.File, stmt.Line, stmt.Column)
@@ -856,6 +865,7 @@ func (c *Compiler) compileFunctionLiteral(stmt FunctionStmt) {
 		Params:         stmt.Params,
 		ReturnType:     stmt.ReturnType,
 		Instructions:   functionInstructions,
+		DebugInfo:      functionDebugInfo,
 		StatementCount: len(stmt.Body),
 		LocalCount:     localCount,
 		Captures:       captures,
@@ -865,6 +875,7 @@ func (c *Compiler) compileFunctionLiteral(stmt FunctionStmt) {
 	}
 
 	c.currentInstructions = oldInstructions
+	c.currentDebugInfo = oldDebugInfo
 	c.scopes = oldScopes
 	c.localCount = oldLocalCount
 	c.inMethod = oldInMethod
@@ -988,6 +999,16 @@ func (c *Compiler) resolveFullyQualifiedName(expr Expr) (string, bool) {
 				return fullName, true
 			}
 		}
+		if c.currentNamespaceEnums != nil {
+			if fullName, exists := c.currentNamespaceEnums[name]; exists {
+				return fullName, true
+			}
+		}
+		if c.currentNamespaceClasses != nil {
+			if fullName, exists := c.currentNamespaceClasses[name]; exists {
+				return fullName, true
+			}
+		}
 		return name, true
 
 	case PropertyExpr:
@@ -1053,7 +1074,7 @@ func getStatementFile(stmt Stmt) string {
 	return ""
 }
 
-func (c *Compiler) CompileProgram(program Program) ([]Instruction, map[string]Function, map[string]Class, map[string]Interface, map[string]int) {
+func (c *Compiler) CompileProgram(program Program) ([]Instruction, []DebugInfo, map[string]Function, map[string]Class, map[string]Interface, map[string]int) {
 	abortOnCompilerSemanticErrors(c.currentFile, program.Statements)
 
 	c.virtualObjects = map[VarNodeKey]map[string]int{}
@@ -1100,7 +1121,7 @@ func (c *Compiler) CompileProgram(program Program) ([]Instruction, map[string]Fu
 
 	c.eraseFunctionGenericsForVM()
 
-	return c.mainInstructions, c.functions, c.classes, c.interfaces, c.globalIndexes
+	return c.mainInstructions, c.mainDebugInfo, c.functions, c.classes, c.interfaces, c.globalIndexes
 }
 
 func (c *Compiler) CompileDiagnostic(program Program) SemanticModel {
@@ -1657,7 +1678,9 @@ func (c *Compiler) compileNamespace(stmt NamespaceStmt) {
 				c.fatalError(ErrorName, "duplicate enum member %s.%s", enumStmt.Name, member.Name)
 			}
 
-			obj[member.Name] = c.evalConstantExpr(member.Value, "enum member must be constant.")
+			val := c.evalConstantExpr(member.Value, "enum member must be constant.")
+			obj[member.Name] = val
+			c.enumConstants[fullName+"."+member.Name] = val
 
 			if len(member.VariantParams) > 0 {
 				variants[member.Name] = member.VariantParams
@@ -2805,7 +2828,9 @@ func (c *Compiler) compileEnum(stmt EnumStmt) {
 			c.fatalError(ErrorName, "duplicate enum member %s.%s", stmt.Name, member.Name)
 		}
 
-		obj[member.Name] = c.evalConstantExpr(member.Value, "enum member must be constant.")
+		val := c.evalConstantExpr(member.Value, "enum member must be constant.")
+		obj[member.Name] = val
+		c.enumConstants[stmt.Name+"."+member.Name] = val
 
 		if len(member.VariantParams) > 0 {
 			variants[member.Name] = member.VariantParams
@@ -3642,6 +3667,7 @@ func (c *Compiler) compileFunction(stmt FunctionStmt) {
 	}
 
 	oldInstructions := c.currentInstructions
+	oldDebugInfo := c.currentDebugInfo
 	oldScopes := c.scopes
 	oldLocalCount := c.localCount
 	oldInMethod := c.inMethod
@@ -3649,8 +3675,10 @@ func (c *Compiler) compileFunction(stmt FunctionStmt) {
 	oldCurrentCaptures := c.currentCaptures
 
 	functionInstructions := []Instruction{}
+	functionDebugInfo := []DebugInfo{}
 
 	c.currentInstructions = &functionInstructions
+	c.currentDebugInfo = &functionDebugInfo
 	c.scopes = []map[string]Binding{}
 	c.localCount = 0
 
@@ -3701,6 +3729,7 @@ func (c *Compiler) compileFunction(stmt FunctionStmt) {
 		TypeParameters: stmt.TypeParameters,
 		Params:         stmt.Params,
 		Instructions:   functionInstructions,
+		DebugInfo:      functionDebugInfo,
 		StatementCount: len(stmt.Body),
 		LocalCount:     localCount,
 		HasDefaults:    hasDefaults,
@@ -3710,6 +3739,7 @@ func (c *Compiler) compileFunction(stmt FunctionStmt) {
 	}
 
 	c.currentInstructions = oldInstructions
+	c.currentDebugInfo = oldDebugInfo
 	c.scopes = oldScopes
 	c.localCount = oldLocalCount
 	c.inMethod = oldInMethod
@@ -6155,6 +6185,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 		outerBindings := c.collectCapturableBindings()
 
 		oldInstructions := c.currentInstructions
+		oldDebugInfo := c.currentDebugInfo
 		oldScopes := c.scopes
 		oldLocalCount := c.localCount
 		oldInMethod := c.inMethod
@@ -6167,8 +6198,10 @@ func (c *Compiler) compileExpr(expr Expr) {
 		oldColumn := c.currentColumn
 
 		functionInstructions := []Instruction{}
+		functionDebugInfo := []DebugInfo{}
 
 		c.currentInstructions = &functionInstructions
+		c.currentDebugInfo = &functionDebugInfo
 		c.scopes = []map[string]Binding{}
 		c.localCount = 0
 		c.inMethod = false
@@ -6206,6 +6239,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 			Params:         e.Params,
 			ReturnType:     e.ReturnType,
 			Instructions:   functionInstructions,
+			DebugInfo:      functionDebugInfo,
 			StatementCount: len(e.Body),
 			LocalCount:     localCount,
 			Captures:       captures,
@@ -6215,6 +6249,7 @@ func (c *Compiler) compileExpr(expr Expr) {
 		}
 
 		c.currentInstructions = oldInstructions
+		c.currentDebugInfo = oldDebugInfo
 		c.scopes = oldScopes
 		c.localCount = oldLocalCount
 		c.inMethod = oldInMethod
@@ -6264,6 +6299,13 @@ func (c *Compiler) compileExpr(expr Expr) {
 		c.emit(OP_COALESCE_JUMP, nil)
 
 	case PropertyExpr:
+		if fullName, ok := c.resolveFullyQualifiedName(e); ok {
+			if val, exists := c.enumConstants[fullName]; exists {
+				c.emit(OP_CONST, val)
+				return
+			}
+		}
+
 		if ident, ok := e.Object.(IdentExpr); ok {
 			if binding, exists := c.resolveVariable(ident.Name); exists && binding.VirtualFields != nil {
 				if slot, exists := binding.VirtualFields[e.Name]; exists {
@@ -7062,6 +7104,7 @@ func (c *Compiler) compileMethod(className string, stmt FunctionStmt) {
 	}()
 
 	oldInstructions := c.currentInstructions
+	oldDebugInfo := c.currentDebugInfo
 	oldScopes := c.scopes
 	oldLocalCount := c.localCount
 	oldInMethod := c.inMethod
@@ -7069,8 +7112,10 @@ func (c *Compiler) compileMethod(className string, stmt FunctionStmt) {
 	oldCurrentCaptures := c.currentCaptures
 
 	functionInstructions := []Instruction{}
+	functionDebugInfo := []DebugInfo{}
 
 	c.currentInstructions = &functionInstructions
+	c.currentDebugInfo = &functionDebugInfo
 
 	globalScope := map[string]Binding{}
 	if len(oldScopes) > 0 {
@@ -7136,6 +7181,7 @@ func (c *Compiler) compileMethod(className string, stmt FunctionStmt) {
 		Params:         params,
 		ReturnType:     stmt.ReturnType,
 		Instructions:   functionInstructions,
+		DebugInfo:      functionDebugInfo,
 		StatementCount: len(stmt.Body),
 		LocalCount:     c.localCount,
 		HasDefaults:    hasDefaults,
@@ -7144,6 +7190,7 @@ func (c *Compiler) compileMethod(className string, stmt FunctionStmt) {
 	}
 
 	c.currentInstructions = oldInstructions
+	c.currentDebugInfo = oldDebugInfo
 	c.scopes = oldScopes
 	c.localCount = oldLocalCount
 	c.inMethod = oldInMethod
@@ -7166,6 +7213,8 @@ func (c *Compiler) emit(op OpCode, value any) {
 		Value:  value,
 		IntArg: intVal,
 		IsInt:  hasInt,
+	})
+	*c.currentDebugInfo = append(*c.currentDebugInfo, DebugInfo{
 		File:   c.currentFile,
 		Line:   c.currentLine,
 		Column: c.currentColumn,
@@ -7392,31 +7441,69 @@ func (c *Compiler) isEnumType(name string) bool {
 	return true
 }
 
+func (c *Compiler) resolveTypeStringNamespaces(t string) string {
+	var sb strings.Builder
+	runes := []rune(t)
+	n := len(runes)
+	i := 0
+	for i < n {
+		r := runes[i]
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+			start := i
+			for i < n {
+				ch := runes[i]
+				if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' {
+					i++
+				} else {
+					break
+				}
+			}
+			id := string(runes[start:i])
+			if i < n && runes[i] == '.' {
+				i++ // skip '.'
+				if i < n {
+					r2 := runes[i]
+					if (r2 >= 'a' && r2 <= 'z') || (r2 >= 'A' && r2 <= 'Z') || (r2 >= '0' && r2 <= '9') || r2 == '_' {
+						startSuffix := i
+						for i < n {
+							ch2 := runes[i]
+							if (ch2 >= 'a' && ch2 <= 'z') || (ch2 >= 'A' && ch2 <= 'Z') || (ch2 >= '0' && ch2 <= '9') || ch2 == '_' {
+								i++
+							} else {
+								break
+							}
+						}
+						suffix := string(runes[startSuffix:i])
+						prefix := id
+						if c.currentNamespaceVariables != nil {
+							if resolvedPrefix, exists := c.currentNamespaceVariables[prefix]; exists {
+								prefix = resolvedPrefix
+							}
+						}
+						if module, ok := c.stdImportModules[prefix]; ok {
+							prefix = module
+						}
+						sb.WriteString(prefix + "." + suffix)
+						continue
+					}
+				}
+				sb.WriteString(id + ".")
+				continue
+			} else {
+				sb.WriteString(id)
+				continue
+			}
+		} else {
+			sb.WriteRune(r)
+			i++
+		}
+	}
+	return sb.String()
+}
+
 func (c *Compiler) compareCompileTimeTypes(got string, expected string) bool {
-	if dot := strings.Index(expected, "."); dot >= 0 {
-		prefix := expected[:dot]
-		suffix := expected[dot+1:]
-		if c.currentNamespaceVariables != nil {
-			if resolvedPrefix, exists := c.currentNamespaceVariables[prefix]; exists {
-				expected = resolvedPrefix + "." + suffix
-			}
-		}
-		if module, ok := c.stdImportModules[prefix]; ok {
-			expected = module + "." + suffix
-		}
-	}
-	if dot := strings.Index(got, "."); dot >= 0 {
-		prefix := got[:dot]
-		suffix := got[dot+1:]
-		if c.currentNamespaceVariables != nil {
-			if resolvedPrefix, exists := c.currentNamespaceVariables[prefix]; exists {
-				got = resolvedPrefix + "." + suffix
-			}
-		}
-		if module, ok := c.stdImportModules[prefix]; ok {
-			got = module + "." + suffix
-		}
-	}
+	expected = c.resolveTypeStringNamespaces(expected)
+	got = c.resolveTypeStringNamespaces(got)
 
 	if got == "array" {
 		got = "array:any"

@@ -318,7 +318,7 @@ func deleteTinyCacheContent(entryFile string) {
 }
 
 func runBytecodeFile(path string, disableJit bool) {
-	mainBytecode, functions, classes, interfaces, _ := LoadBytecode(path)
+	mainBytecode, mainDebugInfo, functions, classes, interfaces, _ := LoadBytecode(path)
 
 	mainBytecode = OptimizeBytecode(mainBytecode)
 
@@ -329,6 +329,7 @@ func runBytecodeFile(path string, disableJit bool) {
 
 	vm := NewVM(VMInfo{
 		MainInstructions: mainBytecode,
+		MainDebugInfo:    mainDebugInfo,
 		Functions:        functions,
 		Classes:          classes,
 		Interfaces:       interfaces,
@@ -347,7 +348,7 @@ func saveBytecodeFile(entryFile string, outFile string, cache bool, preserveAllF
 	if len(preserveAllFunctions) > 0 && preserveAllFunctions[0] {
 		compiler.SetPreserveAllFunctions(true)
 	}
-	mainBytecode, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
+	mainBytecode, mainDebugInfo, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
 
 	mainBytecode = OptimizeBytecode(mainBytecode)
 
@@ -356,14 +357,14 @@ func saveBytecodeFile(entryFile string, outFile string, cache bool, preserveAllF
 		functions[name] = fn
 	}
 
-	SaveBytecode(outFile, mainBytecode, functions, classes, interfaces, globalIndex, cache, !cache)
+	SaveBytecode(outFile, mainBytecode, mainDebugInfo, functions, classes, interfaces, globalIndex, cache, !cache)
 }
 
 func compileAndRun(entryFile string, cliArgs []string, disableJit bool) {
 	program := tinyloader.LoadProgram(entryFile)
 
 	compiler := tinycompiler.NewCompiler()
-	mainBytecode, functions, classes, interfaces, _ := compiler.CompileProgram(program)
+	mainBytecode, mainDebugInfo, functions, classes, interfaces, _ := compiler.CompileProgram(program)
 
 	mainBytecode = OptimizeBytecode(mainBytecode)
 
@@ -374,6 +375,7 @@ func compileAndRun(entryFile string, cliArgs []string, disableJit bool) {
 
 	vm := NewVM(VMInfo{
 		MainInstructions: mainBytecode,
+		MainDebugInfo:    mainDebugInfo,
 		Functions:        functions,
 		Classes:          classes,
 		Interfaces:       interfaces,

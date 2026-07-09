@@ -27,7 +27,7 @@ func runTinyFile(t *testing.T, path string, args ...string) (res rootTinyRunResu
 
 	program := tinyloader.LoadProgram(path)
 	compiler := tinycompiler.NewCompiler()
-	mainInstructions, functions, classes, interfaces, _ := compiler.CompileProgram(program)
+	mainInstructions, _, functions, classes, interfaces, _ := compiler.CompileProgram(program)
 	mainInstructions = vm.OptimizeBytecode(mainInstructions)
 	for name, fn := range functions {
 		fn.Instructions = vm.OptimizeBytecode(fn.Instructions)
@@ -77,7 +77,7 @@ func runTinyCode(t *testing.T, code string, args ...string) (res rootTinyRunResu
 	program := parser.ParseProgramTolerant()
 
 	compiler := tinycompiler.NewCompiler()
-	mainInstructions, functions, classes, interfaces, _ := compiler.CompileProgram(vm.Program{Statements: program.Statements})
+	mainInstructions, _, functions, classes, interfaces, _ := compiler.CompileProgram(vm.Program{Statements: program.Statements})
 	mainInstructions = vm.OptimizeBytecode(mainInstructions)
 	for name, fn := range functions {
 		fn.Instructions = vm.OptimizeBytecode(fn.Instructions)

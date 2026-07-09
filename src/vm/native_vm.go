@@ -10,6 +10,7 @@ import (
 
 type RuntimeBytecodeProgram struct {
 	MainInstructions []Instruction
+	MainDebugInfo    []DebugInfo
 	Functions        map[string]Function
 	Classes          map[string]Class
 	Interfaces       map[string]Interface
@@ -167,12 +168,16 @@ func loadRuntimeVMProgram(child *NativeVMValue, program RuntimeBytecodeProgram) 
 					if i > 0 && program.MainInstructions[i-1].Op == OP_CONST {
 						if name, ok := program.MainInstructions[i-1].Value.(string); ok {
 							if !child.AllowedStdlib[name] {
+								dbg := DebugInfo{}
+								if i < len(program.MainDebugInfo) {
+									dbg = program.MainDebugInfo[i]
+								}
 								panic(LangErrorType{
 									Kind:    ErrorRuntime,
 									Message: fmt.Sprintf("standard module '%s' is not allowed in this VM", name),
-									File:    instr.File,
-									Line:    instr.Line,
-									Column:  instr.Column,
+									File:    dbg.File,
+									Line:    dbg.Line,
+									Column:  dbg.Column,
 								})
 							}
 						}
@@ -185,6 +190,7 @@ func loadRuntimeVMProgram(child *NativeVMValue, program RuntimeBytecodeProgram) 
 	child.VM.Close()
 	child.VM = NewVM(VMInfo{
 		MainInstructions: program.MainInstructions,
+		MainDebugInfo:    program.MainDebugInfo,
 		Functions:        program.Functions,
 		Classes:          program.Classes,
 		Interfaces:       program.Interfaces,

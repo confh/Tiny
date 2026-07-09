@@ -656,6 +656,15 @@ func isIdentifierLikeToken(tokenType TokenType) bool {
 	}
 }
 
+func isStatementStartKeyword(tokenType TokenType) bool {
+	switch tokenType {
+	case TOKEN_IF, TOKEN_WHILE, TOKEN_FOR, TOKEN_TRY, TOKEN_MATCH,
+		TOKEN_BREAK, TOKEN_CONTINUE, TOKEN_RETURN, TOKEN_THROW:
+		return true
+	}
+	return false
+}
+
 func isSoftIdentifierToken(tokenType TokenType) bool {
 	switch tokenType {
 	case TOKEN_IDENT,
@@ -3537,6 +3546,10 @@ func (p *Parser) consumeTerminator() {
 		return
 	}
 
+	if p.ErrorTolerant && isStatementStartKeyword(p.current.Type) {
+		return
+	}
+
 	p.expect(TOKEN_SEMI)
 }
 
@@ -3777,7 +3790,7 @@ func (p *Parser) parsePostfix() Expr {
 			dotTok := p.current
 			p.advance()
 
-			if !isIdentifierLikeToken(p.current.Type) {
+			if !isIdentifierLikeToken(p.current.Type) || (p.ErrorTolerant && isStatementStartKeyword(p.current.Type) && p.current.Line > dotTok.Line) {
 				if p.ErrorTolerant {
 					objFile, objLine, objCol := exprSourcePosition(expr)
 					if objLine <= 0 || objCol <= 0 {

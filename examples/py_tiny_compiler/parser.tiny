@@ -17,6 +17,11 @@ enum OpCode {
     OP_RETURN = 31,
     OP_POP = 33,
     OP_HALT = 34,
+    OP_CALL_DIRECT = 42,
+    OP_LT = 49,
+    OP_GT = 50,
+    OP_JUMP = 68,
+    OP_JUMP_IF_FALSE = 69,
     OP_PRINT = 103
 }
 
@@ -59,15 +64,15 @@ class FunctionContext {
 export class Parser {
     field lex: lexer.Lexer;
     field currentToken: tokens.Token;
-    
+
     // Output Bytecode Structures
     field instructions: array; // Main program
-    field functions: object;    // Declared functions
-    
+    field functions: object; // Declared functions
+
     // Globals Context
     field globalIndex: object;
     field globalCount: number;
-    
+
     // Current Active Function Context (null if global scope)
     field currentFuncCtx: FunctionContext;
     field funcIdCounter: number;
@@ -101,7 +106,23 @@ export class Parser {
         }
     }
 
-    fn emit(instr: object) {
+    fn getCurrentInstructionCount(): number {
+        if this.currentFuncCtx != null {
+            return this.currentFuncCtx.instructions.length();
+        } else {
+            return this.instructions.length();
+        }
+    }
+
+    fn getInstructionsArray(): array {
+        if this.currentFuncCtx != null {
+            return this.currentFuncCtx.instructions;
+        } else {
+            return this.instructions;
+        }
+    }
+
+    fn emit(instr: {op: OpCode}) {
         if this.currentFuncCtx != null {
             this.currentFuncCtx.instructions.push(instr);
         } else {
@@ -117,12 +138,12 @@ export class Parser {
 
         while this.currentToken.type != tokens.TokenType.EOF {
             this.parseStatement();
-            
+
             // Expect statement terminator (newline or EOF)
             if this.currentToken.type == tokens.TokenType.NEWLINE {
                 this.consume(tokens.TokenType.NEWLINE);
             }
-            
+
             // Skip empty lines
             while this.currentToken.type == tokens.TokenType.NEWLINE {
                 this.advance();
@@ -139,135 +160,211 @@ export class Parser {
     }
 
     fn parseStatement() {
-        if this.currentToken.type == tokens.TokenType.PRINT {
-            this.consume(tokens.TokenType.PRINT);
-            this.consume(tokens.TokenType.LPAREN);
-            this.parseExpr();
-            this.consume(tokens.TokenType.RPAREN);
-
-            // Emit OP_PRINT
-            this.emit({
-                "op": OpCode.OP_PRINT,
-                "value": {
-                    "type": "print",
-                    "data": {
-                        "ArgCount": 1,
-                        "NewLine": true,
-                        "SpreadArgs": []
-                    }
-                }
-            });
-        } else if this.currentToken.type == tokens.TokenType.DEF {
-            this.parseFunctionDefinition();
-        } else if this.currentToken.type == tokens.TokenType.RETURN {
-            if this.currentFuncCtx == null {
-                this.error("return statement outside function");
-            }
-            this.consume(tokens.TokenType.RETURN);
-            
-            // check if there is an expression
-            let hasExpr = true;
-            if (this.currentToken.type == tokens.TokenType.NEWLINE or 
-                this.currentToken.type == tokens.TokenType.EOF or 
-                this.currentToken.type == tokens.TokenType.DEDENT) {
-                hasExpr = false;
-            }
-            
-            if hasExpr {
-                this.parseExpr();
-            } else {
-                // push nil
-                this.emit({
-                    "op": OpCode.OP_CONST,
-                    "value": {
-                        "type": "nil"
-                    }
-                });
-            }
-            
-            this.emit({
-                "op": OpCode.OP_RETURN,
-                "value": {
-                    "type": "nil"
-                }
-            });
-        } else if this.currentToken.type == tokens.TokenType.IDENT {
-            let name = this.currentToken.value;
-            this.consume(tokens.TokenType.IDENT);
-            
-            if this.currentToken.type == tokens.TokenType.EQUAL {
-                this.consume(tokens.TokenType.EQUAL);
-                this.parseExpr();
-                
-                // Store in scope
-                if this.currentFuncCtx != null {
-                    let slot = 0;
-                    if (name in this.currentFuncCtx.localIndex) {
-                        slot = this.currentFuncCtx.localIndex[name];
-                    } else {
-                        slot = this.currentFuncCtx.localCount;
-                        this.currentFuncCtx.localIndex[name] = slot;
-                        this.currentFuncCtx.localCount = this.currentFuncCtx.localCount + 1;
-                    }
-                    
-                    this.emit({
-                        "op": OpCode.OP_STORE_LOCAL,
-                        "value": makeVariableInfo(name, slot)
-                    });
-                } else {
-                    let slot = 0;
-                    if (name in this.globalIndex) {
-                        slot = this.globalIndex[name];
-                    } else {
-                        slot = this.globalCount;
-                        this.globalIndex[name] = slot;
-                        this.globalCount = this.globalCount + 1;
-                    }
-                    
-                    this.emit({
-                        "op": OpCode.OP_STORE_GLOBAL,
-                        "value": makeVariableInfo(name, slot)
-                    });
-                }
-            } else if this.currentToken.type == tokens.TokenType.LPAREN {
-                // Expression Statement (Function Call)
+        match this.currentToken.type {
+            tokens.TokenType.PRINT {
+                this.consume(tokens.TokenType.PRINT);
                 this.consume(tokens.TokenType.LPAREN);
-                let argCount = 0;
-                if this.currentToken.type != tokens.TokenType.RPAREN {
-                    this.parseExpr();
-                    argCount = 1;
-                    while this.currentToken.type == tokens.TokenType.COMMA {
-                        this.consume(tokens.TokenType.COMMA);
-                        this.parseExpr();
-                        argCount = argCount + 1;
-                    }
-                }
+                this.parseExpr();
                 this.consume(tokens.TokenType.RPAREN);
-                
-                // Emit OP_CALL
+
+                // Emit OP_PRINT
                 this.emit({
-                    "op": OpCode.OP_CALL,
+                    "op": OpCode.OP_PRINT,
                     "value": {
-                        "type": "call",
+                        "type": "print",
                         "data": {
-                            "Name": name,
-                            "ArgCount": argCount
+                            "ArgCount": 1,
+                            "NewLine": true,
+                            "SpreadArgs": []
                         }
                     }
                 });
-                
-                // Since this call is used as a statement, discard the pushed return value
+            }
+
+            tokens.TokenType.DEF {
+                this.parseFunctionDefinition();
+            }
+
+            tokens.TokenType.WHILE {
+                this.consume(tokens.TokenType.WHILE);
+
+                let loopStart = this.getCurrentInstructionCount();
+
+                this.parseExpr();
+
+                this.consume(tokens.TokenType.COLON);
+                this.consume(tokens.TokenType.NEWLINE);
+                this.consume(tokens.TokenType.INDENT);
+
+                let jumpIfFalseAddr = this.getCurrentInstructionCount();
                 this.emit({
-                    "op": OpCode.OP_POP,
+                    "op": OpCode.OP_JUMP_IF_FALSE,
+                    "value": {
+                        "type": "int",
+                        "data": 0
+                    }
+                });
+
+                while (this.currentToken.type != tokens.TokenType.DEDENT and this.currentToken.type != tokens.TokenType.EOF) {
+                    this.parseStatement();
+                    if this.currentToken.type == tokens.TokenType.NEWLINE {
+                        this.consume(tokens.TokenType.NEWLINE);
+                    }
+                    while this.currentToken.type == tokens.TokenType.NEWLINE {
+                        this.advance();
+                    }
+                }
+
+                this.consume(tokens.TokenType.DEDENT);
+
+                this.emit({
+                    "op": OpCode.OP_JUMP,
+                    "value": {
+                        "type": "int",
+                        "data": loopStart
+                    }
+                });
+
+                let loopEnd = this.getCurrentInstructionCount();
+                let instrs = this.getInstructionsArray();
+                instrs[jumpIfFalseAddr].value.data = loopEnd;
+            }
+
+            tokens.TokenType.RETURN {
+                if this.currentFuncCtx == null {
+                    this.error("return statement outside function");
+                }
+                this.consume(tokens.TokenType.RETURN);
+
+                // check if there is an expression
+                let hasExpr = true;
+                if (this.currentToken.type == tokens.TokenType.NEWLINE or
+                this.currentToken.type == tokens.TokenType.EOF or
+                this.currentToken.type == tokens.TokenType.DEDENT) {
+                    hasExpr = false;
+                }
+
+                if hasExpr {
+                    this.parseExpr();
+                } else {
+                    // push nil
+                    this.emit({
+                        "op": OpCode.OP_CONST,
+                        "value": {
+                            "type": "nil"
+                        }
+                    });
+                }
+
+                this.emit({
+                    "op": OpCode.OP_RETURN,
                     "value": {
                         "type": "nil"
                     }
                 });
-            } else {
-                this.error("Expected assignment or function call, got " + this.currentToken.type);
             }
-        } else {
-            this.error("Expected statement, got " + this.currentToken.type);
+
+            tokens.TokenType.IDENT {
+                let name = this.currentToken.value;
+                this.consume(tokens.TokenType.IDENT);
+
+                if this.currentToken.type == tokens.TokenType.EQUAL {
+                    this.consume(tokens.TokenType.EQUAL);
+                    this.parseExpr();
+
+                    // Store in scope
+                    if this.currentFuncCtx != null {
+                        let slot = 0;
+                        if (name in this.currentFuncCtx.localIndex) {
+                            slot = this.currentFuncCtx.localIndex[name];
+                        } else {
+                            slot = this.currentFuncCtx.localCount;
+                            this.currentFuncCtx.localIndex[name] = slot;
+                            this.currentFuncCtx.localCount = this.currentFuncCtx.localCount + 1;
+                        }
+
+                        this.emit({
+                            "op": OpCode.OP_STORE_LOCAL,
+                            "value": makeVariableInfo(name, slot)
+                        });
+                    } else {
+                        let slot = 0;
+                        if (name in this.globalIndex) {
+                            slot = this.globalIndex[name];
+                        } else {
+                            slot = this.globalCount;
+                            this.globalIndex[name] = slot;
+                            this.globalCount = this.globalCount + 1;
+                        }
+
+                        this.emit({
+                            "op": OpCode.OP_STORE_GLOBAL,
+                            "value": makeVariableInfo(name, slot)
+                        });
+                    }
+                } else if this.currentToken.type == tokens.TokenType.LPAREN {
+                    // Expression Statement (Function Call)
+                    this.consume(tokens.TokenType.LPAREN);
+                    let argCount = 0;
+                    if this.currentToken.type != tokens.TokenType.RPAREN {
+                        this.parseExpr();
+                        argCount = 1;
+                        while this.currentToken.type == tokens.TokenType.COMMA {
+                            this.consume(tokens.TokenType.COMMA);
+                            this.parseExpr();
+                            argCount = argCount + 1;
+                        }
+                    }
+                    this.consume(tokens.TokenType.RPAREN);
+
+                    let isDirect = false;
+                    let fnID = -1;
+                    if (name in this.functions) {
+                        isDirect = true;
+                        fnID = this.functions[name].id;
+                    }
+
+                    if isDirect {
+                        this.emit({
+                            "op": OpCode.OP_CALL_DIRECT,
+                            "value": {
+                                "type": "directCall",
+                                "data": {
+                                    "ID": fnID,
+                                    "Name": name,
+                                    "ArgCount": argCount
+                                }
+                            }
+                        });
+                    } else {
+                        // Emit OP_CALL
+                        this.emit({
+                            "op": OpCode.OP_CALL,
+                            "value": {
+                                "type": "call",
+                                "data": {
+                                    "Name": name,
+                                    "ArgCount": argCount
+                                }
+                            }
+                        });
+                    }
+
+                    // Since this call is used as a statement, discard the pushed return value
+                    this.emit({
+                        "op": OpCode.OP_POP,
+                        "value": {
+                            "type": "nil"
+                        }
+                    });
+                } else {
+                    this.error("Expected assignment or function call, got " + this.currentToken.type);
+                }
+            }
+
+            _ {
+                this.error("Expected statement, got " + this.currentToken.type);
+            }
         }
     }
 
@@ -275,19 +372,19 @@ export class Parser {
         this.consume(tokens.TokenType.DEF);
         let funcName = this.currentToken.value;
         this.consume(tokens.TokenType.IDENT);
-        
+
         let funcCtx = FunctionContext();
         funcCtx.name = funcName;
         funcCtx.instructions = [];
         funcCtx.localIndex = {};
         funcCtx.localCount = 0;
         funcCtx.params = [];
-        
+
         this.consume(tokens.TokenType.LPAREN);
         if this.currentToken.type == tokens.TokenType.IDENT {
             let paramName = this.currentToken.value;
             this.consume(tokens.TokenType.IDENT);
-            
+
             funcCtx.localIndex[paramName] = funcCtx.localCount;
             funcCtx.localCount = funcCtx.localCount + 1;
             funcCtx.params.push({
@@ -297,12 +394,12 @@ export class Parser {
                 "defaultValue": { "type": "nil" },
                 "variadic": false
             });
-            
+
             while this.currentToken.type == tokens.TokenType.COMMA {
                 this.consume(tokens.TokenType.COMMA);
                 let nextParam = this.currentToken.value;
                 this.consume(tokens.TokenType.IDENT);
-                
+
                 funcCtx.localIndex[nextParam] = funcCtx.localCount;
                 funcCtx.localCount = funcCtx.localCount + 1;
                 funcCtx.params.push({
@@ -316,15 +413,15 @@ export class Parser {
         }
         this.consume(tokens.TokenType.RPAREN);
         this.consume(tokens.TokenType.COLON);
-        
+
         // Skip newline and consume INDENT
         this.consume(tokens.TokenType.NEWLINE);
         this.consume(tokens.TokenType.INDENT);
-        
+
         // Swap context
         let prevCtx = this.currentFuncCtx;
         this.currentFuncCtx = funcCtx;
-        
+
         while (this.currentToken.type != tokens.TokenType.DEDENT and this.currentToken.type != tokens.TokenType.EOF) {
             this.parseStatement();
             if this.currentToken.type == tokens.TokenType.NEWLINE {
@@ -334,9 +431,9 @@ export class Parser {
                 this.advance();
             }
         }
-        
+
         this.consume(tokens.TokenType.DEDENT);
-        
+
         // Add default implicit return
         this.emit({
             "op": OpCode.OP_CONST,
@@ -350,7 +447,7 @@ export class Parser {
                 "type": "nil"
             }
         });
-        
+
         // Register the function
         this.functions[funcName] = {
             "id": this.funcIdCounter,
@@ -365,14 +462,36 @@ export class Parser {
             "hasDefaults": false,
             "hasTypeHints": false
         };
-        
+
         this.funcIdCounter = this.funcIdCounter + 1;
-        
+
         // Restore context
         this.currentFuncCtx = prevCtx;
     }
 
     fn parseExpr() {
+        this.parseComparison();
+    }
+
+    fn parseComparison() {
+        this.parseSum();
+
+        match this.currentToken.type {
+            tokens.TokenType.LT {
+                this.advance();
+                this.parseSum();
+                this.emit({ "op": OpCode.OP_LT, "value": { "type": "nil" } });
+            }
+
+            tokens.TokenType.GT {
+                this.advance()
+                this.parseSum()
+                this.emit({op: OpCode.OP_GT, value: {type: "nil"}})
+            }
+        }
+    }
+
+    fn parseSum() {
         this.parseTerm();
         while (this.currentToken.type == tokens.TokenType.PLUS or this.currentToken.type == tokens.TokenType.MINUS) {
             let op = this.currentToken.type;
@@ -429,7 +548,7 @@ export class Parser {
         } else if this.currentToken.type == tokens.TokenType.IDENT {
             let name = this.currentToken.value;
             this.consume(tokens.TokenType.IDENT);
-            
+
             // Check if it's a function call inside an expression
             if this.currentToken.type == tokens.TokenType.LPAREN {
                 this.consume(tokens.TokenType.LPAREN);
@@ -444,17 +563,38 @@ export class Parser {
                     }
                 }
                 this.consume(tokens.TokenType.RPAREN);
-                
-                this.emit({
-                    "op": OpCode.OP_CALL,
-                    "value": {
-                        "type": "call",
-                        "data": {
-                            "Name": name,
-                            "ArgCount": argCount
+
+                let isDirect = false;
+                let fnID = -1;
+                if (name in this.functions) {
+                    isDirect = true;
+                    fnID = this.functions[name].id;
+                }
+
+                if isDirect {
+                    this.emit({
+                        "op": OpCode.OP_CALL_DIRECT,
+                        "value": {
+                            "type": "directCall",
+                            "data": {
+                                "ID": fnID,
+                                "Name": name,
+                                "ArgCount": argCount
+                            }
                         }
-                    }
-                });
+                    });
+                } else {
+                    this.emit({
+                        "op": OpCode.OP_CALL,
+                        "value": {
+                            "type": "call",
+                            "data": {
+                                "Name": name,
+                                "ArgCount": argCount
+                            }
+                        }
+                    });
+                }
             } else {
                 // Variable load
                 if this.currentFuncCtx != null {

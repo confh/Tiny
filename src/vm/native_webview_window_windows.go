@@ -201,6 +201,9 @@ func cbtHookProc(code, wparam, lparam uintptr) uintptr {
 			cbt := (*cbtCreateWnd)(unsafe.Pointer(lparam))
 
 			cbt.Lpcs.DwExStyle |= uint32(wsExLayered)
+			if activeWebViewCreating.userWantedHidden {
+				cbt.Lpcs.DwExStyle |= 0x00000080 // WS_EX_TOOLWINDOW
+			}
 
 			oldProc, _, _ := procSetWindowLongPtrW.Call(hwnd, gwlpWndProc, windowProc)
 			if oldProc != 0 {

@@ -153,10 +153,10 @@ func deserializeParams(params []SerializableParam) []Param {
 	return result
 }
 
-func SaveBytecode(path string, main []Instruction, functions map[string]Function, classes map[string]Class, interfaces map[string]Interface, globalIndex map[string]int, cache bool, obfuscate bool) {
+func SaveBytecode(path string, main []Instruction, mainDebugInfo []DebugInfo, functions map[string]Function, classes map[string]Class, interfaces map[string]Interface, globalIndex map[string]int, cache bool, obfuscate bool) {
 	file := BytecodeFile{
 		Version:     BytecodeVersion,
-		Main:        serializeInstructions(main, cache),
+		Main:        serializeInstructions(main, mainDebugInfo, cache),
 		Functions:   map[string]SerializableFunction{},
 		Interfaces:  map[string]SerializableInterface{},
 		Classes:     serializeClasses(classes),
@@ -171,7 +171,7 @@ func SaveBytecode(path string, main []Instruction, functions map[string]Function
 			ReturnType:     fn.ReturnType,
 			LocalCount:     fn.LocalCount,
 			Captures:       fn.Captures,
-			Instructions:   serializeInstructions(fn.Instructions, cache),
+			Instructions:   serializeInstructions(fn.Instructions, fn.DebugInfo, cache),
 			StatementCount: fn.StatementCount,
 			HasDefaults:    fn.HasDefaults,
 			HasTypeHints:   fn.HasTypeHints,
@@ -198,10 +198,10 @@ func SaveBytecode(path string, main []Instruction, functions map[string]Function
 	}
 }
 
-func SaveBytecodeToBytes(main []Instruction, functions map[string]Function, classes map[string]Class, interfaces map[string]Interface, globalIndex map[string]int, cache bool, obfuscate bool) []byte {
+func SaveBytecodeToBytes(main []Instruction, mainDebugInfo []DebugInfo, functions map[string]Function, classes map[string]Class, interfaces map[string]Interface, globalIndex map[string]int, cache bool, obfuscate bool) []byte {
 	file := BytecodeFile{
 		Version:     BytecodeVersion,
-		Main:        serializeInstructions(main, cache),
+		Main:        serializeInstructions(main, mainDebugInfo, cache),
 		Functions:   map[string]SerializableFunction{},
 		Interfaces:  map[string]SerializableInterface{},
 		Classes:     serializeClasses(classes),
@@ -216,7 +216,7 @@ func SaveBytecodeToBytes(main []Instruction, functions map[string]Function, clas
 			ReturnType:     fn.ReturnType,
 			LocalCount:     fn.LocalCount,
 			Captures:       fn.Captures,
-			Instructions:   serializeInstructions(fn.Instructions, cache),
+			Instructions:   serializeInstructions(fn.Instructions, fn.DebugInfo, cache),
 			StatementCount: fn.StatementCount,
 			HasDefaults:    fn.HasDefaults,
 			HasTypeHints:   fn.HasTypeHints,
@@ -240,7 +240,7 @@ func SaveBytecodeToBytes(main []Instruction, functions map[string]Function, clas
 	return encodeBytecodeFile(file)
 }
 
-func LoadBytecode(path string) ([]Instruction, map[string]Function, map[string]Class, map[string]Interface, map[string]int) {
+func LoadBytecode(path string) ([]Instruction, []DebugInfo, map[string]Function, map[string]Class, map[string]Interface, map[string]int) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		LangError(ErrorRuntime, "failed to read bytecode file: %v", err)
@@ -249,7 +249,7 @@ func LoadBytecode(path string) ([]Instruction, map[string]Function, map[string]C
 	return LoadBytecodeFromBytes(data)
 }
 
-func LoadBytecodeFromBytes(data []byte) ([]Instruction, map[string]Function, map[string]Class, map[string]Interface, map[string]int) {
+func LoadBytecodeFromBytes(data []byte) ([]Instruction, []DebugInfo, map[string]Function, map[string]Class, map[string]Interface, map[string]int) {
 	var file BytecodeFile
 
 	decodeBytecodeFile(data, &file)
@@ -258,12 +258,13 @@ func LoadBytecodeFromBytes(data []byte) ([]Instruction, map[string]Function, map
 		LangError(ErrorRuntime, "unsupported bytecode version: %d", file.Version)
 	}
 
-	main := deserializeInstructions(file.Main)
+	main, mainDebugInfo := deserializeInstructions(file.Main)
 
 	functions := map[string]Function{}
 	interfaces := map[string]Interface{}
 
 	for name, fn := range file.Functions {
+		instructions, debugInfo := deserializeInstructions(fn.Instructions)
 		functions[name] = Function{
 			ID:             fn.ID,
 			Name:           fn.Name,
@@ -271,7 +272,8 @@ func LoadBytecodeFromBytes(data []byte) ([]Instruction, map[string]Function, map
 			ReturnType:     fn.ReturnType,
 			LocalCount:     fn.LocalCount,
 			Captures:       fn.Captures,
-			Instructions:   deserializeInstructions(fn.Instructions),
+			Instructions:   instructions,
+			DebugInfo:      debugInfo,
 			StatementCount: fn.StatementCount,
 			HasDefaults:    fn.HasDefaults,
 			HasTypeHints:   fn.HasTypeHints,
@@ -288,7 +290,7 @@ func LoadBytecodeFromBytes(data []byte) ([]Instruction, map[string]Function, map
 		}
 	}
 
-	return main, functions, deserializeClasses(file.Classes), interfaces, file.GlobalIndex
+	return main, mainDebugInfo, functions, deserializeClasses(file.Classes), interfaces, file.GlobalIndex
 }
 
 func obfuscateBytecodeFile(file *BytecodeFile) {
@@ -883,24 +885,29 @@ func deserializeClasses(classes map[string]SerializableClass) map[string]Class {
 	return result
 }
 
-func serializeInstructions(instructions []Instruction, cache bool) []SerializableInstruction {
+func serializeInstructions(instructions []Instruction, debugInfo []DebugInfo, cache bool) []SerializableInstruction {
 	result := make([]SerializableInstruction, len(instructions))
 
 	for i, instr := range instructions {
 		var filePath string
+		var line, column int
+
+		dbg := getDebugInfoAt(debugInfo, i)
 
 		if !cache {
-			sanitizeBytecodeFilePath(instr.File)
+			sanitizeBytecodeFilePath(dbg.File)
 		} else {
-			filePath = instr.File
+			filePath = dbg.File
 		}
+		line = dbg.Line
+		column = dbg.Column
 
 		result[i] = SerializableInstruction{
 			Op:     instr.Op,
 			Value:  EncodeValue(instr.Value),
 			File:   filePath,
-			Line:   instr.Line,
-			Column: instr.Column,
+			Line:   line,
+			Column: column,
 		}
 	}
 
@@ -915,8 +922,16 @@ func sanitizeBytecodeFilePath(file string) string {
 	return bytecodeSourceLabel
 }
 
-func deserializeInstructions(instructions []SerializableInstruction) []Instruction {
+func getDebugInfoAt(debugInfo []DebugInfo, index int) DebugInfo {
+	if index >= 0 && index < len(debugInfo) {
+		return debugInfo[index]
+	}
+	return DebugInfo{}
+}
+
+func deserializeInstructions(instructions []SerializableInstruction) ([]Instruction, []DebugInfo) {
 	result := make([]Instruction, len(instructions))
+	debugInfo := make([]DebugInfo, len(instructions))
 
 	for i, instr := range instructions {
 		val := DecodeValue(instr.Value)
@@ -927,13 +942,15 @@ func deserializeInstructions(instructions []SerializableInstruction) []Instructi
 			Value:  val,
 			IntArg: intVal,
 			IsInt:  hasInt,
+		}
+		debugInfo[i] = DebugInfo{
 			File:   instr.File,
 			Line:   instr.Line,
 			Column: instr.Column,
 		}
 	}
 
-	return result
+	return result, debugInfo
 }
 
 func EncodeValue(value any) EncodedValue {

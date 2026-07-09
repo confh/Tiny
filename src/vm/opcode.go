@@ -163,6 +163,9 @@ type Instruction struct {
 	Value  any
 	IntArg int
 	IsInt  bool
+}
+
+type DebugInfo struct {
 	File   string
 	Line   int
 	Column int
@@ -175,6 +178,7 @@ type Function struct {
 	Params         []Param       `json:"params"`
 	ReturnType     TypeHint      `json:"returnType"`
 	Instructions   []Instruction `json:"instructions"`
+	DebugInfo      []DebugInfo   `json:"-"`
 	StatementCount int           `json:"statementCount"`
 	LocalCount     int           `json:"localCount"`
 	Captures       []CapturedVar

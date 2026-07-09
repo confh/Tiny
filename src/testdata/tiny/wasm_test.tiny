@@ -1,0 +1,49 @@
+import std "wasm"
+import std "fs"
+import std "io"
+import std "buffer"
+
+fn loadWasmBytes(): buffer {
+    if fs.exists("test_module.wasm") {
+        return fs.readBytes("test_module.wasm")
+    }
+    if fs.exists("src/testdata/tiny/test_module.wasm") {
+        return fs.readBytes("src/testdata/tiny/test_module.wasm")
+    }
+    throw "test_module.wasm not found. Please run Go unit tests first to generate it."
+}
+
+fn runWasmTest() {
+    let wasmBytes = loadWasmBytes()
+    
+    let hostCalls = 0
+    let imports = {
+        env: {
+            host_func: fn(x: number): number {
+                hostCalls = hostCalls + 1
+                return x * 2.0
+            }
+        }
+    }
+
+    let module = wasm.instantiate(wasmBytes, imports)
+
+    // Test call exported functions
+    let sum = module.call("add", [10.5, 20.25])
+    io.println(sum)
+
+    // Test call exported function calling host callback
+    let val = module.call("call_host", [50.0])
+    io.println(val)
+    io.println(hostCalls)
+
+    // Test memory write and read
+    let writeBuf = buffer.fromString("AB")
+    module.writeMemory(100, writeBuf)
+
+    let readBuf = module.readMemory(100, 2)
+    io.println(readBuf.getU8(0))
+    io.println(readBuf.getU8(1))
+}
+
+runWasmTest()

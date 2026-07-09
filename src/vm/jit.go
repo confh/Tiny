@@ -91,6 +91,7 @@ func printJitCallDebugSummary() {
 
 const jitDeoptSnapshotBase = 2 * 1024 * 1024
 const jitDeoptSnapshotSize = 1 * 1024 * 1024
+const jitMaxLinearHeapTop = 128 * 1024 * 1024
 
 type JitExceptionThrownError struct{}
 
@@ -759,6 +760,9 @@ func (jf *JitFunction) Call(ctx context.Context, args []TinyValue) (res TinyValu
 				}
 
 				newTop := addr + size
+				if newTop > jitMaxLinearHeapTop || newTop < addr {
+					return TinyValue{}, errors.New("jit heap allocation limit exceeded")
+				}
 				currentPages := jf.vm.jitModule.Memory().Size() / 65536
 				newPagesNeeded := (newTop + 65535) / 65536
 				if newPagesNeeded > currentPages {
@@ -3333,39 +3337,216 @@ func jitLocalConstOpResultType(info LocalConstOpInfo) stackType {
 	return stackTypeNumber
 }
 
+func jitInstructionLoopMap(instructions []Instruction) []bool {
+	inLoop := make([]bool, len(instructions))
+	for i, instr := range instructions {
+		target, ok := getJumpTarget(instr)
+		if !ok || target < 0 || target > i || target >= len(instructions) {
+			continue
+		}
+		for j := target; j <= i; j++ {
+			inLoop[j] = true
+		}
+	}
+	return inLoop
+}
+
+func jitHasLoopStringConcat(fn Function, inLoop []bool) bool {
+	hotRegion := strings.HasPrefix(fn.Name, "__jit_region_")
+	unsafeStringAlloc := func(idx int) bool {
+		return hotRegion || (idx < len(inLoop) && inLoop[idx])
+	}
+
+	spArray := computeJitSpArray(fn)
+	maxSp := 0
+	for _, sp := range spArray {
+		if sp > maxSp {
+			maxSp = sp
+		}
+	}
+	typeStack := make([]stackType, maxSp+16)
+	localTypes := make([]stackType, fn.LocalCount)
+
+	setStack := func(index int, typ stackType) {
+		if index >= 0 && index < len(typeStack) {
+			typeStack[index] = typ
+		}
+	}
+	loadSlot := func(instr Instruction) int {
+		switch instr.Op {
+		case OP_LOAD_LOCAL_0:
+			return 0
+		case OP_LOAD_LOCAL_1:
+			return 1
+		case OP_LOAD_LOCAL_2:
+			return 2
+		case OP_LOAD_LOCAL_3:
+			return 3
+		case OP_LOAD_LOCAL:
+			if instr.IsInt {
+				return instr.IntArg
+			}
+			if slot, ok := AsIntInternal(instr.Value); ok {
+				return slot
+			}
+		}
+		return -1
+	}
+	storeSlot := func(instr Instruction) int {
+		if instr.IsInt {
+			return instr.IntArg
+		}
+		if slot, ok := AsIntInternal(instr.Value); ok {
+			return slot
+		}
+		if info, ok := instr.Value.(VariableInfo); ok {
+			return info.Slot
+		}
+		return -1
+	}
+
+	for idx, instr := range fn.Instructions {
+		sp := 0
+		if idx < len(spArray) {
+			sp = spArray[idx]
+		}
+		switch instr.Op {
+		case OP_CONST:
+			if _, ok := instr.Value.(string); ok {
+				setStack(sp, stackTypeString)
+			} else if instr.IsInt {
+				setStack(sp, stackTypeNumber)
+			} else if _, ok := getFloat64Constant(instr.Value); ok {
+				setStack(sp, stackTypeNumber)
+			} else {
+				setStack(sp, stackTypeUnknown)
+			}
+
+		case OP_LOAD_LOCAL, OP_LOAD_LOCAL_0, OP_LOAD_LOCAL_1, OP_LOAD_LOCAL_2, OP_LOAD_LOCAL_3:
+			slot := loadSlot(instr)
+			if slot >= 0 && slot < len(localTypes) {
+				setStack(sp, localTypes[slot])
+			}
+
+		case OP_STORE_LOCAL, OP_ASSIGN_LOCAL:
+			slot := storeSlot(instr)
+			if slot >= 0 && slot < len(localTypes) && sp >= 1 && sp-1 < len(typeStack) {
+				localTypes[slot] = typeStack[sp-1]
+			}
+
+		case OP_LOCAL_CONST_OP_STORE:
+			info, ok := instr.Value.(LocalConstOpInfo)
+			if !ok {
+				continue
+			}
+			if info.Op == OP_ADD {
+				if _, isString := info.Const.(string); isString {
+					if unsafeStringAlloc(idx) {
+						return true
+					}
+					if info.Slot >= 0 && info.Slot < len(localTypes) {
+						localTypes[info.Slot] = stackTypeString
+					}
+				}
+			}
+
+		case OP_LOCAL_CONST_OP:
+			info, ok := instr.Value.(LocalConstOpInfo)
+			if !ok {
+				continue
+			}
+			if info.Op == OP_ADD {
+				if _, isString := info.Const.(string); isString {
+					if unsafeStringAlloc(idx) {
+						return true
+					}
+					setStack(sp, stackTypeString)
+				}
+			}
+
+		case OP_ADD:
+			if sp >= 2 && sp-1 < len(typeStack) && sp-2 < len(typeStack) {
+				left := typeStack[sp-2]
+				right := typeStack[sp-1]
+				if (left == stackTypeString || right == stackTypeString) && unsafeStringAlloc(idx) {
+					return true
+				}
+				if left == stackTypeString || right == stackTypeString {
+					typeStack[sp-2] = stackTypeString
+				} else {
+					typeStack[sp-2] = stackTypeNumber
+				}
+			}
+
+		case OP_STRING_JOIN:
+			if unsafeStringAlloc(idx) {
+				return true
+			}
+			setStack(sp, stackTypeString)
+
+		case OP_SUB, OP_MUL, OP_DIV, OP_MOD, OP_LT, OP_LTE, OP_GT, OP_GTE, OP_EQ, OP_NEQ:
+			if sp >= 2 {
+				setStack(sp-2, stackTypeNumber)
+			}
+		case OP_LEN, OP_ARRAY_LEN_LOCAL:
+			setStack(sp, stackTypeNumber)
+		case OP_INDEX:
+			if sp >= 2 {
+				setStack(sp-2, stackTypeUnknown)
+			}
+		case OP_GET_PROPERTY, OP_GET_PROPERTY_SAFE, OP_GET_PROPERTY_LOCAL:
+			if sp >= 1 {
+				setStack(sp-1, stackTypeUnknown)
+			}
+		}
+	}
+
+	return false
+}
+
 func isFunctionJitSafe(vm *VM, fn Function) bool {
 	if !isTinyFunctionWorthJit(fn) {
+		// fmt.Fprintf(os.Stderr, "[JIT REJECT] %s: not worth JIT\n", fn.Name)
 		return false
 	}
 	if fn.Async {
+		// fmt.Fprintf(os.Stderr, "[JIT REJECT] %s: async\n", fn.Name)
 		return false
 	}
 	if len(fn.Captures) > 0 {
+		// /fmt.Fprintf(os.Stderr, "[JIT REJECT] %s: has captures\n", fn.Name)
 		return false
 	}
 	if len(fn.Params) > 0 && fn.Params[len(fn.Params)-1].Variadic {
+		// fmt.Fprintf(os.Stderr, "[JIT REJECT] %s: variadic\n", fn.Name)
 		return false
 	}
 
 	if _, ok := functionHasRuntimeGlobalLoadInLoop(vm, fn); ok {
-		// fmt.Fprintf(
-		// 	os.Stderr,
-		// 	"[JIT DEBUG] function %s is not JIT-safe: %s performs VM global loads inside a loop; interpreter superinstruction is faster than Wasm host calls\n",
-		// 	fn.Name,
-		// 	op.String(),
-		// )
+		//fmt.Fprintf(os.Stderr, "[JIT REJECT] %s: runtime global load in loop\n", fn.Name)
 		return false
 	}
 
 	if !stdlibCallsAreJitSafe(vm, fn) {
+		//fmt.Fprintf(os.Stderr, "[JIT REJECT] %s: stdlibCallsAreJitSafe returned false\n", fn.Name)
 		return false
 	}
 
-	for _, instr := range fn.Instructions {
+	inLoop := jitInstructionLoopMap(fn.Instructions)
+	if jitHasLoopStringConcat(fn, inLoop) {
+		return false
+	}
+
+	for idx, instr := range fn.Instructions {
+		if jitCallDebugEnabled() {
+			fmt.Fprintf(os.Stderr, "[JIT DEBUG] %s: checking instr %d: op=%s, val=%T(%v)\n", fn.Name, idx, instr.Op.String(), instr.Value, instr.Value)
+		}
 		switch instr.Op {
 		case OP_CONST:
 			if !instr.IsInt {
 				if _, ok := instr.Value.(string); ok {
+					break
+				} else if isNullConstant(instr.Value) {
 					break
 				} else if _, ok := getFloat64Constant(instr.Value); !ok {
 					// fmt.Fprintf(os.Stderr, "[JIT DEBUG] function %s is not JIT-safe: unsupported constant value type %T (%v)\n", fn.Name, instr.Value, instr.Value)
@@ -3378,14 +3559,15 @@ func isFunctionJitSafe(vm *VM, fn Function) bool {
 				// fmt.Fprintf(os.Stderr, "[JIT DEBUG] function %s is not JIT-safe: bad LocalConstOpInfo in %s\n", fn.Name, instr.Op.String())
 				return false
 			}
-			if _, isString := info.Const.(string); !isString {
+			if _, isString := info.Const.(string); isString {
+				if info.Op != OP_ADD {
+					return false
+				}
+			} else {
 				if _, ok := getFloat64Constant(info.Const); !ok {
 					// fmt.Fprintf(os.Stderr, "[JIT DEBUG] function %s is not JIT-safe: non-numeric const in %s (%T)\n", fn.Name, instr.Op.String(), info.Const)
 					return false
 				}
-			} else if info.Op != OP_ADD {
-				// fmt.Fprintf(os.Stderr, "[JIT DEBUG] function %s is not JIT-safe: non-numeric const in %s (%T)\n", fn.Name, instr.Op.String(), info.Const)
-				return false
 			}
 			if info.Op != OP_ADD && info.Op != OP_SUB && info.Op != OP_MUL && info.Op != OP_DIV && info.Op != OP_MOD {
 				// fmt.Fprintf(os.Stderr, "[JIT DEBUG] function %s is not JIT-safe: unsupported op %s inside %s\n", fn.Name, info.Op.String(), instr.Op.String())
@@ -3411,6 +3593,51 @@ func isFunctionJitSafe(vm *VM, fn Function) bool {
 			OP_ADD_PROPERTY_LOCAL_CONST, OP_ADD_PROPERTY_LOCAL_PROPERTY, OP_ADD_LOCAL_PROPERTIES_STORE, OP_ARRAY_INDEX_LOCAL_STORE:
 			// Safe superinstructions lowered from already-JIT-safe bytecode shapes.
 
+		case OP_CALL_DIRECT:
+			info, ok := instr.Value.(DirectCallInfo)
+			if !ok {
+				return false
+			}
+			var target Function
+			var targetOK bool
+			if info.ID >= 0 && info.ID < len(vm.functionList) {
+				target = vm.functionList[info.ID]
+				targetOK = true
+			} else if target, targetOK = vm.functions[info.Name]; targetOK {
+			}
+			if targetOK {
+				if info.Name != "" {
+					target.Name = info.Name
+				}
+				if jitHasLoopStringConcat(target, jitInstructionLoopMap(target.Instructions)) {
+					return false
+				}
+			}
+
+		case OP_CALL_DIRECT_SUB_CONST:
+			info, ok := instr.Value.(CallDirectSubConstInfo)
+			if !ok {
+				return false
+			}
+			var target Function
+			var targetOK bool
+			if info.FnID >= 0 && info.FnID < len(vm.functionList) {
+				target = vm.functionList[info.FnID]
+				targetOK = true
+			} else if target, targetOK = vm.functions[info.FnName]; targetOK {
+			}
+			if targetOK {
+				if info.FnName != "" {
+					target.Name = info.FnName
+				}
+				if jitHasLoopStringConcat(target, jitInstructionLoopMap(target.Instructions)) {
+					return false
+				}
+			}
+
+		case OP_STRING_JOIN:
+			// Safe outside loops. Looped joins are rejected by jitHasLoopStringConcat.
+
 		case OP_RETURN, OP_POP,
 			OP_LOAD_LOCAL, OP_STORE_LOCAL, OP_ASSIGN_LOCAL,
 			OP_LOAD_LOCAL_0, OP_LOAD_LOCAL_1, OP_LOAD_LOCAL_2, OP_LOAD_LOCAL_3,
@@ -3426,14 +3653,13 @@ func isFunctionJitSafe(vm *VM, fn Function) bool {
 			OP_JUMP_LOCAL_GT_CONST, OP_JUMP_LOCAL_GE_CONST,
 			OP_JUMP_LOCAL_GT_LOCAL, OP_JUMP_LOCAL_GE_LOCAL,
 			OP_JUMP_MOD_LOCAL_CONST_NOT_ZERO, OP_JUMP_MOD_LOCAL_LOCAL_NOT_ZERO,
-			OP_CALL_DIRECT, OP_CALL_DIRECT_SUB_CONST,
 			OP_OBJECT, OP_GET_PROPERTY, OP_GET_PROPERTY_SAFE, OP_SET_PROPERTY,
 			OP_GET_PROPERTY_LOCAL, OP_ADD_PROPERTY_LOCAL_LOCAL,
 			OP_ARRAY, OP_INDEX, OP_SET_INDEX, OP_LEN,
 			OP_ARRAY_LEN_LOCAL, OP_ARRAY_GET_LOCAL, OP_ARRAY_PUSH_LOCAL, OP_MATH_CEIL, OP_MATH_FLOOR,
 			OP_MATH_SQRT, OP_MATH_ABS, OP_MATH_POW, OP_PRINT,
 			OP_COALESCE_JUMP, OP_TYPEOF, OP_THROW,
-			OP_STRING_JOIN, OP_LOAD_GLOBAL: // Safe
+			OP_LOAD_GLOBAL: // Safe
 
 		case OP_METHOD_CALL:
 			// All method calls are permitted up to 3 args: push/get/length are compiled inline;
@@ -3443,9 +3669,7 @@ func isFunctionJitSafe(vm *VM, fn Function) bool {
 				return false
 			}
 		default:
-			if strings.HasPrefix(fn.Name, "__jit_region_string_hot_") {
-				// fmt.Fprintf(os.Stderr, "[JIT DEBUG] function %s is not JIT-safe: unsupported opcode %s\n", fn.Name, instr.Op.String())
-			}
+			// fmt.Fprintf(os.Stderr, "[JIT REJECT] %s: unsupported opcode %s\n", fn.Name, instr.Op.String())
 			return false
 		}
 	}
@@ -8119,6 +8343,9 @@ func (vm *VM) allocateJitMemory(mod api.Module, size uint32) uint32 {
 	}
 
 	newTop := addr + size
+	if newTop > jitMaxLinearHeapTop || newTop < addr {
+		panic("jit heap allocation limit exceeded")
+	}
 	currentPages := mod.Memory().Size() / 65536
 	newPagesNeeded := (newTop + 65535) / 65536
 	if newPagesNeeded > currentPages {
@@ -8824,6 +9051,9 @@ func (vm *VM) setupJitRuntimeAndEnv(jitStringConstCache map[uint32]uint32) bool 
 				mod.Memory().Write(byteIdx, buf)
 			}
 			newTop := addr + size
+			if newTop > jitMaxLinearHeapTop || newTop < addr {
+				panic("jit heap allocation limit exceeded")
+			}
 			currentPages := mod.Memory().Size() / 65536
 			newPagesNeeded := (newTop + 65535) / 65536
 			if newPagesNeeded > currentPages {
@@ -9025,6 +9255,9 @@ func (vm *VM) setupJitRuntimeAndEnv(jitStringConstCache map[uint32]uint32) bool 
 			}
 
 			newTop := addr + size
+			if newTop > jitMaxLinearHeapTop || newTop < addr {
+				panic("jit heap allocation limit exceeded")
+			}
 			currentPages := mod.Memory().Size() / 65536
 			newPagesNeeded := (newTop + 65535) / 65536
 			if newPagesNeeded > currentPages {
@@ -9261,6 +9494,9 @@ func (vm *VM) InstantiateJitModule() {
 
 	compiled, err := vm.wazeroRuntime.InstantiateWithConfig(vm.wazeroCtx, vm.jitWasmBytes, config)
 	if err != nil {
+		if jitCallDebugEnabled() {
+			fmt.Fprintf(os.Stderr, "[JIT DEBUG] Instantiate JIT module failed: %v\n", err)
+		}
 		return
 	}
 	vm.jitModule = compiled
@@ -9290,6 +9526,9 @@ func (vm *VM) InstantiateJitModule() {
 	vm.jitFunctions = map[string]*JitFunction{}
 	for _, meta := range vm.jitMetas {
 		jitFn := compiled.ExportedFunction(meta.Name)
+		if jitCallDebugEnabled() {
+			fmt.Fprintf(os.Stderr, "[JIT DEBUG] ExportedFunction lookup: name=%s, found=%v\n", meta.Name, jitFn != nil)
+		}
 		if jitFn == nil {
 			continue
 		}
@@ -9368,6 +9607,9 @@ func isJitFunctionMemoizable(fn Function, paramMutated []bool) bool {
 }
 
 func (vm *VM) CompileAllJit() {
+	if jitCallDebugEnabled() {
+		fmt.Fprintf(os.Stderr, "[JIT DEBUG] CompileAllJit called: jitDisabled=%v, N=%d\n", vm.jitDisabled, len(vm.functionList))
+	}
 	const bitsetRange = 128 * 1024 * 1024
 	const bitsetSize = bitsetRange / 64 // 2MB
 	const heapStart = bitsetSize + jitDeoptSnapshotSize
@@ -9381,7 +9623,7 @@ func (vm *VM) CompileAllJit() {
 		fn := vm.functionList[i]
 		isSafe[i] = isFunctionJitSafe(vm, fn)
 		if jitCallDebugEnabled() {
-			// fmt.Fprintf(os.Stderr, "[JIT PLAN initial] fn=%s id=%d safe=%v stmts=%d instrs=%d params=%d defaults=%v return=%s\n", fn.Name, fn.ID, isSafe[i], fn.StatementCount, len(fn.Instructions), len(fn.Params), fn.HasDefaults, fn.ReturnType.Name)
+			fmt.Fprintf(os.Stderr, "[JIT DEBUG] initial safeness: name=%s, isSafe=%v, stmts=%d, instrs=%d\n", fn.Name, isSafe[i], fn.StatementCount, len(fn.Instructions))
 		}
 	}
 	changed := true
@@ -9446,7 +9688,7 @@ func (vm *VM) CompileAllJit() {
 				continue
 			}
 			fn := vm.functionList[i]
-			if fn.ReturnType.Name != "" {
+			if fn.ReturnType.Name != "" && fn.ReturnType.Name != "any" {
 				continue
 			}
 			newRetType := inferReturnType(vm, fn, inferredReturnTypes)
@@ -10000,6 +10242,13 @@ func (vm *VM) CompileAllJit() {
 	vm.jitStringAddrs = make(map[string]uint32, len(jitStringAddr))
 	for strVal, addr := range jitStringAddr {
 		vm.jitStringAddrs[strVal] = addr
+	}
+
+	if jitCallDebugEnabled() {
+		for i := 0; i < N; i++ {
+			fn := vm.functionList[i]
+			fmt.Fprintf(os.Stderr, "[JIT DEBUG] final function status: name=%s, isSafe=%v, inferredReturnType=%v\n", fn.Name, isSafe[i], inferredReturnTypes[i])
+		}
 	}
 
 	vm.InstantiateJitModule()

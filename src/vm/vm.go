@@ -7,6 +7,7 @@ import (
 	"maps"
 	"math"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -55,6 +56,7 @@ type NativeCallFrame struct {
 	Column int
 }
 
+
 type TryHandler struct {
 	CatchIP int
 	Name    string
@@ -84,6 +86,7 @@ type Frame struct {
 	locals       []*Cell
 	instructions []Instruction
 	methodClass  string
+	methodCache  []MethodCallCache
 
 	lockedMutexes []*NativeMutexValue
 
@@ -97,6 +100,7 @@ type Frame struct {
 
 type VMInfo struct {
 	MainInstructions []Instruction
+	MainDebugInfo    []DebugInfo
 	Functions        map[string]Function
 	Classes          map[string]Class
 	Interfaces       map[string]Interface
@@ -109,6 +113,7 @@ type VMInfo struct {
 type VM struct {
 	start            int64
 	mainInstructions []Instruction
+	mainDebugInfo    []DebugInfo
 	functions        map[string]Function
 	classes          map[string]Class
 	interfaces       map[string]Interface
@@ -127,6 +132,8 @@ type VM struct {
 	isolated    bool
 
 	allowedStdlib map[string]bool
+
+	mainMethodCache []MethodCallCache
 
 	jitFunctions map[string]*JitFunction
 
@@ -155,9 +162,7 @@ type VM struct {
 
 	top int
 
-	lastInstruction      Instruction
-	lastInstructionIndex int
-	lastFunctionName     string
+	stoppedCheckCounter int
 
 	globalTypes map[string]TypeHint
 
@@ -251,6 +256,20 @@ func FloatToString(val float64) string {
 	return strconv.FormatFloat(val, 'f', 6, 64)
 }
 
+func (vm *VM) mainDebugInfoAt(ip int) DebugInfo {
+	if ip >= 0 && ip < len(vm.mainDebugInfo) {
+		return vm.mainDebugInfo[ip]
+	}
+	return DebugInfo{}
+}
+
+func frameDebugInfo(frame *Frame, ip int) DebugInfo {
+	if frame != nil && ip >= 0 && ip < len(frame.function.DebugInfo) {
+		return frame.function.DebugInfo[ip]
+	}
+	return DebugInfo{}
+}
+
 func instanceValue(value TinyValue) (*InstanceValue, bool) {
 	if value.IsInt {
 		return nil, false
@@ -261,23 +280,26 @@ func instanceValue(value TinyValue) (*InstanceValue, bool) {
 
 func NewVM(info VMInfo) *VM {
 	mainInstructions := info.MainInstructions
+	mainDebugInfo := info.MainDebugInfo
 	functions := info.Functions
 	classes := info.Classes
 	interfaces := info.Interfaces
 	packed := info.Packed
 	jitDisabled := info.JITDisabled
-	mainInstructions, functions, functionList := normalizeFunctionIDs(mainInstructions, functions)
+	mainInstructions, functions, functionList, mainDebugInfo := normalizeFunctionIDs(mainInstructions, functions, mainDebugInfo)
 
 	globalsSlice := make([]TinyValue, 0, 256)
 
 	vm := &VM{
 		start:                time.Now().UnixMilli(),
 		mainInstructions:     mainInstructions,
+		mainDebugInfo:        mainDebugInfo,
 		functions:            functions,
 		interfaces:           interfaces,
 		functionList:         functionList,
 		classes:              classes,
 		globals:              &globalsSlice,
+		mainMethodCache:      make([]MethodCallCache, len(mainInstructions)),
 		jitFunctions:         map[string]*JitFunction{},
 		jitArrayMirrorCache:  map[*ArrayValue]jitArrayMirror{},
 		jitObjectMirrorCache: map[uintptr]jitObjectMirror{},
@@ -308,6 +330,8 @@ func NewVM(info VMInfo) *VM {
 		jitStringMap:         map[string]uint32{},
 		jitStringAddrs:       map[string]uint32{},
 	}
+
+	EnsureStdModuleMethods()
 
 	if !jitDisabled {
 		vm.CompileAllJit()
@@ -349,7 +373,8 @@ func (vm *VM) RegisterJitString(s string) float64 {
 func normalizeFunctionIDs(
 	mainInstructions []Instruction,
 	functions map[string]Function,
-) ([]Instruction, map[string]Function, []Function) {
+	mainDebugInfo []DebugInfo,
+) ([]Instruction, map[string]Function, []Function, []DebugInfo) {
 	names := make([]string, 0, len(functions))
 
 	for name := range functions {
@@ -365,6 +390,9 @@ func normalizeFunctionIDs(
 		ids[name] = id
 
 		fn := functions[name]
+		if fn.Name == "" || strings.HasPrefix(name, "__jit_region_") {
+			fn.Name = name
+		}
 		fn.ID = id
 		functions[name] = fn
 	}
@@ -380,7 +408,7 @@ func normalizeFunctionIDs(
 		functionList[id] = fn
 	}
 
-	return mainInstructions, functions, functionList
+	return mainInstructions, functions, functionList, mainDebugInfo
 }
 
 func remapDirectCallIDs(instructions []Instruction, ids map[string]int) {
@@ -588,13 +616,13 @@ func (vm *VM) currentMainCallSite() (NativeCallFrame, bool) {
 		return NativeCallFrame{}, false
 	}
 
-	instr := vm.mainInstructions[ip]
+	dbg := vm.mainDebugInfoAt(ip)
 
 	return NativeCallFrame{
 		Name:   "<main>",
-		File:   instr.File,
-		Line:   instr.Line,
-		Column: instr.Column,
+		File:   dbg.File,
+		Line:   dbg.Line,
+		Column: dbg.Column,
 	}, true
 }
 
@@ -629,6 +657,14 @@ func (vm *VM) getFrame(fn Function) *Frame {
 		frame.hasReturnOverride = false
 		frame.hasEscapedLocals = false
 
+		if len(frame.methodCache) != len(frame.instructions) {
+			frame.methodCache = make([]MethodCallCache, len(frame.instructions))
+		} else {
+			for i := range frame.methodCache {
+				frame.methodCache[i] = MethodCallCache{}
+			}
+		}
+
 		return frame
 	}
 
@@ -643,6 +679,7 @@ func (vm *VM) getFrame(fn Function) *Frame {
 		locals:       locals,
 		function:     fn,
 		instructions: fn.Instructions,
+		methodCache:  make([]MethodCallCache, len(fn.Instructions)),
 	}
 
 	return frame
@@ -714,6 +751,7 @@ func (vm *VM) CloneForTask() *VM {
 	task := &VM{
 		start:            vm.start,
 		mainInstructions: vm.mainInstructions,
+		mainDebugInfo:    vm.mainDebugInfo,
 		functions:        vm.functions,
 		classes:          vm.classes,
 		interfaces:       vm.interfaces,
@@ -736,7 +774,7 @@ func (vm *VM) CloneForTask() *VM {
 		globalTypes:     vm.globalTypes,
 
 		packed:      vm.packed,
-		jitDisabled: vm.jitDisabled,
+		jitDisabled: true, // Force JIT disabled for spawned tasks to avoid deadlocks on wasmMu with long-running main thread JIT calls
 
 		mu: vm.mu,
 
@@ -1975,6 +2013,12 @@ func (vm *VM) setGlobalUnlocked(slot int, value TinyValue) {
 }
 
 func (vm *VM) getGlobal(slot int) TinyValue {
+	if vm.isolated {
+		if slot < 0 || slot >= len(*vm.globals) {
+			return NewNull()
+		}
+		return (*vm.globals)[slot]
+	}
 	vm.mu.RLock()
 	if slot < 0 || slot >= len(*vm.globals) {
 		vm.mu.RUnlock()
@@ -1986,6 +2030,10 @@ func (vm *VM) getGlobal(slot int) TinyValue {
 }
 
 func (vm *VM) setGlobal(slot int, value TinyValue) {
+	if vm.isolated {
+		vm.setGlobalUnlocked(slot, value)
+		return
+	}
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
 
@@ -2645,17 +2693,14 @@ func (vm *VM) stackTrace() string {
 	if len(vm.frames) == 0 {
 		location := ""
 
-		var instr Instruction
 		ip := vm.ip - 1
-		if ip >= 0 && ip < len(vm.mainInstructions) {
-			instr = vm.mainInstructions[ip]
-		}
+		dbg := vm.mainDebugInfoAt(ip)
 
-		if instr.File != "" && instr.Line > 0 {
-			location = fmt.Sprintf(" (%s:%d", instr.File, instr.Line)
+		if dbg.File != "" && dbg.Line > 0 {
+			location = fmt.Sprintf(" (%s:%d", dbg.File, dbg.Line)
 
-			if instr.Column > 0 {
-				location += fmt.Sprintf(":%d", instr.Column)
+			if dbg.Column > 0 {
+				location += fmt.Sprintf(":%d", dbg.Column)
 			}
 
 			location += ")"
@@ -2676,18 +2721,16 @@ func (vm *VM) stackTrace() string {
 		location := ""
 
 		ip := frame.ip - 1
-		if ip >= 0 && ip < len(frame.instructions) {
-			instr := frame.instructions[ip]
+		dbg := frameDebugInfo(frame, ip)
 
-			if instr.File != "" && instr.Line > 0 {
-				location = fmt.Sprintf(" (%s:%d", instr.File, instr.Line)
+		if dbg.File != "" && dbg.Line > 0 {
+			location = fmt.Sprintf(" (%s:%d", dbg.File, dbg.Line)
 
-				if instr.Column > 0 {
-					location += fmt.Sprintf(":%d", instr.Column)
-				}
-
-				location += ")"
+			if dbg.Column > 0 {
+				location += fmt.Sprintf(":%d", dbg.Column)
 			}
+
+			location += ")"
 		}
 
 		lines = append(lines, "  at "+name+location)
@@ -2844,10 +2887,25 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 	isVariadic := expected > 0 && fn.Params[expected-1].Variadic
 
 	if !vm.jitDisabled && !isVariadic {
-		vm.ensureJitReadyFor(fn.Name)
-		jitFn := vm.jitFunctions[fn.Name]
+		jitName := fn.Name
+		if strings.HasPrefix(callableName, "function __jit_region_") {
+			jitName = strings.TrimPrefix(callableName, "function ")
+		}
+		jitCheckFn := fn
+		jitCheckFn.Name = jitName
+		jitUnsafe := jitHasLoopStringConcat(jitCheckFn, jitInstructionLoopMap(jitCheckFn.Instructions))
+		if !jitUnsafe {
+			vm.ensureJitReadyFor(jitName)
+		}
+		var jitFn *JitFunction
+		if !jitUnsafe {
+			jitFn = vm.jitFunctions[jitName]
+		}
 
 		if jitFn != nil && argCount == jitFn.paramCount && vm.stackArgsMatchJit(jitFn, argCount) {
+			if jitCallDebugEnabled() {
+				fmt.Fprintf(os.Stderr, "[JIT DEBUG] Calling JIT function %s directly!\n", fn.Name)
+			}
 			args := vm.popArgs(argCount)
 			res, err := jitFn.Call(vm.wazeroCtx, args)
 			if err == nil {
@@ -2918,7 +2976,7 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 
 			if fn.HasTypeHints && !param.TypeHint.IsEmpty() {
 				if ok, reason := vm.checkFunctionTypeHint(fn, arg, param.TypeHint); !ok {
-					vm.fatalError(
+					vm.runtimeError(
 						ErrorType,
 						"function %s parameter %s expected %s, got %s%s",
 						fn.Name,
@@ -2947,7 +3005,7 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 
 			if fn.HasTypeHints && !restParam.TypeHint.IsEmpty() {
 				if ok, reason := vm.checkFunctionTypeHint(fn, arg, restParam.TypeHint); !ok {
-					vm.fatalError(
+					vm.runtimeError(
 						ErrorType,
 						"function %s rest parameter %s expected %s, got %s%s",
 						fn.Name,
@@ -2979,7 +3037,7 @@ func (vm *VM) callFunctionDirectFromStack(fn Function, argCount int, callableNam
 
 			if !param.TypeHint.IsEmpty() {
 				if ok, reason := vm.checkFunctionTypeHint(fn, arg, param.TypeHint); !ok {
-					vm.fatalError(
+					vm.runtimeError(
 						ErrorType,
 						"function %s parameter %s expected %s, got %s%s",
 						fn.Name,
@@ -3148,6 +3206,9 @@ func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []TinyValue)
 		jitFn := vm.jitFunctions[fn.Name]
 
 		if !vm.jitDisabled && jitFn != nil && vm.argsMatchJit(jitFn, args) {
+			if jitCallDebugEnabled() {
+				fmt.Fprintf(os.Stderr, "[JIT DEBUG] Calling JIT function %s!\n", fn.Name)
+			}
 			res, err := jitFn.Call(vm.wazeroCtx, args)
 			if err == nil {
 				vm.push(res)
@@ -3214,6 +3275,12 @@ func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []TinyValue)
 
 	frame := vm.getFrame(fn)
 
+	// Restore the class context from the closure so private field access works
+	// even when the closure is called from a spawned goroutine or outside the class.
+	if frame.methodClass == "" && fnValue.MethodClass != "" {
+		frame.methodClass = fnValue.MethodClass
+	}
+
 	if len(fnValue.Captures) > 0 {
 		frame.hasEscapedLocals = true
 	}
@@ -3250,7 +3317,7 @@ func (vm *VM) callFunctionValueWithArgs(fnValue FunctionValue, args []TinyValue)
 
 			if fn.HasTypeHints && !param.TypeHint.IsEmpty() {
 				if ok, reason := vm.checkFunctionTypeHint(fn, arg, param.TypeHint); !ok {
-					vm.fatalError(
+					vm.runtimeError(
 						ErrorType,
 						"function %s parameter %s expected %s, got %s%s",
 						fn.Name,
@@ -3396,6 +3463,7 @@ func (vm *VM) Run() {
 }
 
 func (vm *VM) Close() {
+	CleanupHotKeysForVM(vm)
 	if vm.wazeroRuntime != nil {
 		vm.wazeroRuntime.Close(vm.wazeroCtx)
 	}
@@ -3423,9 +3491,7 @@ func (vm *VM) ResetForRequest() {
 	vm.deferHandlers = vm.deferHandlers[:0]
 	vm.nativeFrames = vm.nativeFrames[:0]
 	vm.currentInstr = Instruction{}
-	vm.lastInstruction = Instruction{}
-	vm.lastInstructionIndex = 0
-	vm.lastFunctionName = ""
+	vm.stoppedCheckCounter = 0
 
 	if vm.jitModule != nil {
 		if vm.jitHeapTop > vm.jitInitialHeapTop {
@@ -3485,16 +3551,19 @@ func (vm *VM) execute(targetDepth int) bool {
 	var cfFrame *Frame
 	var cfInstructions []Instruction
 	var cfIP int
+	var cfMethodCache []MethodCallCache
 
 	loadState := func() {
 		if len(vm.frames) == 0 {
 			cfFrame = nil
 			cfInstructions = vm.mainInstructions
 			cfIP = vm.ip
+			cfMethodCache = vm.mainMethodCache
 		} else {
 			cfFrame = vm.frames[len(vm.frames)-1]
 			cfInstructions = cfFrame.instructions
 			cfIP = cfFrame.ip
+			cfMethodCache = cfFrame.methodCache
 		}
 	}
 
@@ -3509,10 +3578,14 @@ func (vm *VM) execute(targetDepth int) bool {
 	loadState()
 
 	for {
-		if vm.IsStopped() {
-			saveState()
-			vm.runDefersAboveDepth(targetDepth)
-			return len(vm.frames) == 0
+		vm.stoppedCheckCounter++
+		if vm.stoppedCheckCounter >= 1024 {
+			vm.stoppedCheckCounter = 0
+			if vm.IsStopped() {
+				saveState()
+				vm.runDefersAboveDepth(targetDepth)
+				return len(vm.frames) == 0
+			}
 		}
 
 		// Sync local state at the start of loop iteration
@@ -3557,12 +3630,6 @@ func (vm *VM) execute(targetDepth int) bool {
 			cfFrame.ip = cfIP
 		} else {
 			vm.ip = cfIP
-		}
-
-		if len(vm.frames) > 0 {
-			vm.lastFunctionName = vm.frames[len(vm.frames)-1].function.Name
-		} else {
-			vm.lastFunctionName = "<main>"
 		}
 
 		switch instr.Op {
@@ -4264,8 +4331,9 @@ func (vm *VM) execute(targetDepth int) bool {
 			}
 
 			vm.push(NewNative(FunctionValue{
-				Name:     info.Name,
-				Captures: captures,
+				Name:        info.Name,
+				Captures:    captures,
+				MethodClass: vm.currentMethodClass(), // inherit enclosing class for private field access
 			}))
 
 		case OP_CONST:
@@ -5168,11 +5236,124 @@ func (vm *VM) execute(targetDepth int) bool {
 		case OP_METHOD_CALL:
 			info := instr.Value.(MethodCallInfo)
 
+			cacheIdx := cfIP - 1
+			var cache *MethodCallCache
+			if cacheIdx >= 0 && cacheIdx < len(cfMethodCache) {
+				cache = &cfMethodCache[cacheIdx]
+			}
+
+			if cache != nil && cache.CachedFunc != nil {
+				if len(info.SpreadArgs) > 0 {
+					args := vm.popCallArgs(info.ArgCount, info.SpreadArgs)
+					objectValue := vm.popFast()
+					if stdVal, ok := objectValue.Value.(*StandardModuleValue); ok && stdVal.Name == cache.CachedModule {
+						popNative := vm.pushNativeFrame(stdVal.Name + "." + cache.Method)
+						cache.CachedFunc(vm, args)
+						popNative()
+						break
+					}
+					vm.callMethodResolved(info.Method, objectValue, args)
+				} else {
+					switch info.ArgCount {
+					case 0:
+						objectValue := vm.popFast()
+						if stdVal, ok := objectValue.Value.(*StandardModuleValue); ok && stdVal.Name == cache.CachedModule {
+							popNative := vm.pushNativeFrame(stdVal.Name + "." + cache.Method)
+							cache.CachedFunc(vm, nil)
+							popNative()
+							break
+						}
+						if !vm.callZeroArgNativeMethod(info.Method, objectValue) {
+							vm.callMethodResolved(info.Method, objectValue, nil)
+						}
+					case 1:
+						arg0 := vm.popFast()
+						objectValue := vm.popFast()
+						if stdVal, ok := objectValue.Value.(*StandardModuleValue); ok && stdVal.Name == cache.CachedModule {
+							popNative := vm.pushNativeFrame(stdVal.Name + "." + cache.Method)
+							cache.CachedFunc(vm, []TinyValue{arg0})
+							popNative()
+							break
+						}
+						if !vm.callStdObjectFast1(info.Method, objectValue, arg0) {
+							if !vm.callOneArgNativeMethod(info.Method, objectValue, arg0) {
+								vm.callMethodResolved(info.Method, objectValue, []TinyValue{arg0})
+							}
+						}
+					case 2:
+						arg1 := vm.popFast()
+						arg0 := vm.popFast()
+						objectValue := vm.popFast()
+						if stdVal, ok := objectValue.Value.(*StandardModuleValue); ok && stdVal.Name == cache.CachedModule {
+							popNative := vm.pushNativeFrame(stdVal.Name + "." + cache.Method)
+							cache.CachedFunc(vm, []TinyValue{arg0, arg1})
+							popNative()
+							break
+						}
+						if !vm.callStdObjectFast2(info.Method, objectValue, arg0, arg1) {
+							if !vm.callTwoArgNativeMethod(info.Method, objectValue, arg0, arg1) {
+								vm.callMethodResolved(info.Method, objectValue, []TinyValue{arg0, arg1})
+							}
+						}
+					case 3:
+						arg2 := vm.popFast()
+						arg1 := vm.popFast()
+						arg0 := vm.popFast()
+						objectValue := vm.popFast()
+						if stdVal, ok := objectValue.Value.(*StandardModuleValue); ok && stdVal.Name == cache.CachedModule {
+							popNative := vm.pushNativeFrame(stdVal.Name + "." + cache.Method)
+							cache.CachedFunc(vm, []TinyValue{arg0, arg1, arg2})
+							popNative()
+							break
+						}
+						if !vm.callStdObjectFast3(info.Method, objectValue, arg0, arg1, arg2) {
+							vm.callMethodResolved(info.Method, objectValue, []TinyValue{arg0, arg1, arg2})
+						}
+					default:
+						args := vm.popArgs(info.ArgCount)
+						objectValue := vm.popFast()
+						if stdVal, ok := objectValue.Value.(*StandardModuleValue); ok && stdVal.Name == cache.CachedModule {
+							popNative := vm.pushNativeFrame(stdVal.Name + "." + cache.Method)
+							cache.CachedFunc(vm, args)
+							popNative()
+							break
+						}
+						vm.callMethodResolved(info.Method, objectValue, args)
+					}
+				}
+				break
+			}
+
+			// Slow Path (First run)
 			if len(info.SpreadArgs) > 0 {
 				args := vm.popCallArgs(info.ArgCount, info.SpreadArgs)
 				objectValue := vm.popFast()
+				if stdVal, ok := objectValue.Value.(*StandardModuleValue); ok && cache != nil {
+					fn := vm.resolveStdModuleFunc(stdVal.Name, info.Method)
+					if fn != nil {
+						cache.Method = info.Method
+						cache.ArgCount = info.ArgCount
+						cache.SpreadArgs = info.SpreadArgs
+						cache.CachedFunc = fn
+						cache.CachedModule = stdVal.Name
+					}
+				}
 				vm.callMethodResolved(info.Method, objectValue, args)
 			} else {
+				objIdx := vm.top - info.ArgCount - 1
+				if objIdx >= 0 && objIdx < vm.top && cache != nil {
+					objectValue := vm.stack[objIdx]
+					if stdVal, ok := objectValue.Value.(*StandardModuleValue); ok {
+						fn := vm.resolveStdModuleFunc(stdVal.Name, info.Method)
+						if fn != nil {
+							cache.Method = info.Method
+							cache.ArgCount = info.ArgCount
+							cache.SpreadArgs = info.SpreadArgs
+							cache.CachedFunc = fn
+							cache.CachedModule = stdVal.Name
+						}
+					}
+				}
 				vm.callMethod(info.Method, info.ArgCount)
 			}
 
@@ -5728,11 +5909,19 @@ func (vm *VM) execute(targetDepth int) bool {
 				return true // Halt
 			}
 
+			// Fast path: no defers, no return type hint, no override
+			frame := vm.frames[len(vm.frames)-1]
+			if len(vm.deferHandlers) == 0 && frame.function.ReturnType.IsEmpty() && !frame.hasReturnOverride {
+				vm.frames = vm.frames[:len(vm.frames)-1]
+				vm.releaseFrame(frame)
+				vm.push(returnValue)
+				break
+			}
+
 			if len(vm.deferHandlers) > 0 {
 				vm.runDefersAboveDepth(len(vm.frames) - 1)
 			}
 
-			frame := vm.frames[len(vm.frames)-1]
 			vm.frames = vm.frames[:len(vm.frames)-1]
 
 			if !frame.function.ReturnType.IsEmpty() {
@@ -6470,6 +6659,10 @@ func (vm *VM) callMethodResolved(method string, objectValue TinyValue, args []Ti
 		vm.callRuntimeVMMethod(val, method, args)
 		return
 
+	case *NativeWasmModuleValue:
+		vm.callNativeWasmMethod(val, method, args)
+		return
+
 	case *NativeStringBuilderValue:
 		vm.callStringBuilderMethod(val, method, args)
 		return
@@ -6602,7 +6795,7 @@ func (vm *VM) callMethodResolved(method string, objectValue TinyValue, args []Ti
 
 			if fn.HasTypeHints && !param.TypeHint.IsEmpty() {
 				if ok, reason := vm.checkFunctionTypeHint(fn, arg, param.TypeHint); !ok {
-					vm.fatalError(
+					vm.runtimeError(
 						ErrorType,
 						"method %s parameter %s expected %s, got %s%s",
 						method,
@@ -6631,7 +6824,7 @@ func (vm *VM) callMethodResolved(method string, objectValue TinyValue, args []Ti
 
 			if fn.HasTypeHints && !restParam.TypeHint.IsEmpty() {
 				if ok, reason := vm.checkFunctionTypeHint(fn, arg, restParam.TypeHint); !ok {
-					vm.fatalError(
+					vm.runtimeError(
 						ErrorType,
 						"method %s rest parameter %s expected %s, got %s%s",
 						method,
@@ -6658,7 +6851,7 @@ func (vm *VM) callMethodResolved(method string, objectValue TinyValue, args []Ti
 
 			if fn.HasTypeHints && !param.TypeHint.IsEmpty() {
 				if ok, reason := vm.checkFunctionTypeHint(fn, arg, param.TypeHint); !ok {
-					vm.fatalError(
+					vm.runtimeError(
 						ErrorType,
 						"method %s parameter %s expected %s, got %s%s",
 						method,
@@ -6707,6 +6900,21 @@ func (vm *VM) callMethodResolved(method string, objectValue TinyValue, args []Ti
 
 func (vm *VM) callMethod(method string, argCount int) {
 	vm.callMethodFast(method, argCount)
+}
+
+type MethodCallCache struct {
+	Method       string
+	ArgCount     int
+	SpreadArgs   []bool
+	CachedFunc   StdModuleFunc
+	CachedModule string
+}
+
+func (vm *VM) resolveStdModuleFunc(module string, method string) StdModuleFunc {
+	if methods, ok := stdModuleMethods[module]; ok {
+		return methods[method]
+	}
+	return nil
 }
 
 func (vm *VM) runNativeApp(app *NativeAppValue) {
@@ -6769,7 +6977,7 @@ func (vm *VM) callFunction(name string, argCount int) {
 
 		if !param.TypeHint.IsEmpty() {
 			if ok, reason := vm.checkFunctionTypeHint(fn, arg, param.TypeHint); !ok {
-				vm.fatalError(
+				vm.runtimeError(
 					ErrorType,
 					"function %s parameter %s expected %s, got %s%s",
 					fn.Name,
@@ -6795,23 +7003,19 @@ func (vm *VM) callClass(class Class, argCount int) {
 }
 
 func (vm *VM) pushNativeFrame(name string) func() {
-	var instr Instruction
+	var dbg DebugInfo
 	if len(vm.frames) == 0 {
-		if vm.ip-1 >= 0 && vm.ip-1 < len(vm.mainInstructions) {
-			instr = vm.mainInstructions[vm.ip-1]
-		}
+		dbg = vm.mainDebugInfoAt(vm.ip - 1)
 	} else {
 		frame := vm.frames[len(vm.frames)-1]
-		if frame.ip-1 >= 0 && frame.ip-1 < len(frame.instructions) {
-			instr = frame.instructions[frame.ip-1]
-		}
+		dbg = frameDebugInfo(frame, frame.ip-1)
 	}
 
 	vm.nativeFrames = append(vm.nativeFrames, NativeCallFrame{
 		Name:   name,
-		File:   instr.File,
-		Line:   instr.Line,
-		Column: instr.Column,
+		File:   dbg.File,
+		Line:   dbg.Line,
+		Column: dbg.Column,
 	})
 
 	return func() {
@@ -6959,7 +7163,6 @@ func (vm *VM) popFast() TinyValue {
 
 	vm.top--
 	val := vm.stack[vm.top]
-	vm.stack[vm.top] = TinyValue{}
 	return val
 }
 

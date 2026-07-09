@@ -444,7 +444,7 @@ func doHTTPRequest(vm *VM, name string, method string, url string, body TinyValu
 	}
 
 	if objectBool(options, "bytes", false) {
-		result["body"] = NewNative(respBodyBytes)
+		result["body"] = NewBuffer(respBodyBytes)
 	} else {
 		result["body"] = NewNative(string(respBodyBytes))
 	}

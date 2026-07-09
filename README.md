@@ -464,7 +464,7 @@ let ts = time.parseUnix("2025-01-15T10:30:00Z", time.TimeUnit.Seconds);
 Native operations for array manipulation, including `find`, `filter`, `map`, `reduce`, `sort`, `flat`, and `findIndex`.
 
 ### `strings`, Native Strings, and `buffer`
-String helpers cover case conversion, trimming, replacement, splitting, containment checks, slicing, and string builders. The `buffer` module and native buffer values support byte-oriented data, hex conversion, indexed `u8` access, and string conversion.
+String helpers cover case conversion, trimming, replacement, splitting, containment checks, slicing, and string builders. The `buffer` module and native buffer values support byte-oriented data, hex conversion, indexed `u8` access, string conversion, and Base64 encoding/decoding (`buffer.fromBase64` and `buf.toBase64`).
 
 ---
 
@@ -499,7 +499,7 @@ const res = http.post("https://example.com/upload", {
 ```
 
 ### `websocket`, `net`, and `process`
-Network modules include WebSocket clients/servers and TCP servers/connections. The process module exposes CLI args, working directory helpers, environment variables, foreground/background process execution, and signals.
+Network modules include WebSocket clients/servers and TCP servers/connections, supporting both TCP listening and client dialing (`net.tcpClient`). The process module exposes CLI args, working directory helpers, environment variables, foreground/background process execution, and signals.
 
 ---
 
@@ -533,18 +533,25 @@ if path {
 ---
 
 ### `desktop` (OS Automation)
-Wraps native interfaces for automating keyboard, mouse, and clipboard interactions.
+Wraps native interfaces for automating keyboard, mouse, and clipboard interactions, including registering global keyboard hotkeys (`desktop.registerHotKey`).
 
 ```ts
 import std "desktop";
 
+// Global hotkey registration
+const hotkeyId = desktop.registerHotKey([desktop.Modifiers.Ctrl, desktop.Modifiers.Alt], "s", fn() {
+    io.println("Hotkey triggered!");
+});
+
 desktop.moveMouseSmooth(800, 600);
 desktop.click();
 desktop.type("Tiny Automation");
+
+desktop.unregisterHotKey(hotkeyId);
 ```
 
-### `app`, `tray`, `observer`, `sync`, `runtime`, `sqlite`, `crypto`, and `tests`
-Tiny includes app-command wiring, native tray support, live process telemetry, mutexes, runtime memory/GC/fatal-handler tools, child VM creation, source/bytecode compilation at runtime, embedded SQLite database access, cryptographic helpers, and a small test assertion module. The desktop application interface for process telemetry can be downloaded from the [Observer Tool Release](https://github.com/confh/Tiny/releases/tag/observer-tool).
+### `app`, `tray`, `observer`, `sync`, `runtime`, `sqlite`, `crypto`, `wasm`, and `tests`
+Tiny includes app-command wiring, native tray support, live process telemetry, mutexes, runtime memory/GC/fatal-handler tools, child VM creation, source/bytecode compilation at runtime, embedded SQLite database access, cryptographic helpers, WebAssembly module instantiation (`wasm.instantiate`), and a small test assertion module. The desktop application interface for process telemetry can be downloaded from the [Observer Tool Release](https://github.com/confh/Tiny/releases/tag/observer-tool).
 
 ***
 

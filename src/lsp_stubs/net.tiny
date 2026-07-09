@@ -22,3 +22,6 @@ export class TcpServer {
 
 // Creates a new TCP server bound to the specified host and port.
 export fn tcpServer(host: string, port: number): TcpServer
+
+// Creates a new TCP connection (client) to the specified host and port.
+export fn tcpClient(host: string, port: number): TcpConnection

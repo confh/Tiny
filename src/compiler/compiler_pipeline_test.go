@@ -37,16 +37,16 @@ func runTinyFile(t *testing.T, path string, args ...string) (res tinyRunResult) 
 		}
 	}()
 
-	mainInstructions, functions, classes, interfaces, globalIndex := compileTinyFile(t, path)
-	return runTinyBytecode(t, mainInstructions, functions, classes, interfaces, globalIndex, args...)
+	mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex := compileTinyFile(t, path)
+	return runTinyBytecode(t, mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex, args...)
 }
 
-func compileTinyFile(t *testing.T, path string) ([]vm.Instruction, map[string]vm.Function, map[string]vm.Class, map[string]vm.Interface, map[string]int) {
+func compileTinyFile(t *testing.T, path string) ([]vm.Instruction, []vm.DebugInfo, map[string]vm.Function, map[string]vm.Class, map[string]vm.Interface, map[string]int) {
 	t.Helper()
 
 	program := tinyloader.LoadProgram(path)
 	compiler := NewCompiler()
-	mainInstructions, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
+	mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
 
 	mainInstructions = vm.OptimizeBytecode(mainInstructions)
 	for name, fn := range functions {
@@ -54,14 +54,15 @@ func compileTinyFile(t *testing.T, path string) ([]vm.Instruction, map[string]vm
 		functions[name] = fn
 	}
 
-	return mainInstructions, functions, classes, interfaces, globalIndex
+	return mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex
 }
 
 func init() {
 	vm.SetRuntimeBytecodeLoader(func(data []byte) vm.RuntimeBytecodeProgram {
-		mainInstructions, functions, classes, interfaces, globalIndex := bytecode.LoadBytecodeFromBytes(data)
+		mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex := bytecode.LoadBytecodeFromBytes(data)
 		return vm.RuntimeBytecodeProgram{
 			MainInstructions: mainInstructions,
+			MainDebugInfo:    mainDebugInfo,
 			Functions:        functions,
 			Classes:          classes,
 			Interfaces:       interfaces,
@@ -76,7 +77,7 @@ func init() {
 
 		compiler := NewCompiler()
 		compiler.SetPreserveAllFunctions(true)
-		mainInstructions, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
+		mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
 
 		mainInstructions = vm.OptimizeBytecode(mainInstructions)
 		for name, fn := range functions {
@@ -86,6 +87,7 @@ func init() {
 
 		return vm.RuntimeBytecodeProgram{
 			MainInstructions: mainInstructions,
+			MainDebugInfo:    mainDebugInfo,
 			Functions:        functions,
 			Classes:          classes,
 			Interfaces:       interfaces,
@@ -100,7 +102,7 @@ func init() {
 
 		compiler := NewCompiler()
 		compiler.SetPreserveAllFunctions(true)
-		mainInstructions, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
+		mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
 
 		mainInstructions = vm.OptimizeBytecode(mainInstructions)
 		for name, fn := range functions {
@@ -108,7 +110,7 @@ func init() {
 			functions[name] = fn
 		}
 
-		return bytecode.SaveBytecodeToBytes(mainInstructions, functions, classes, interfaces, globalIndex, false, false)
+		return bytecode.SaveBytecodeToBytes(mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex, false, false)
 	})
 
 	vm.SetCompileFileFunc(func(path string) []byte {
@@ -116,7 +118,7 @@ func init() {
 
 		compiler := NewCompiler()
 		compiler.SetPreserveAllFunctions(true)
-		mainInstructions, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
+		mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
 
 		mainInstructions = vm.OptimizeBytecode(mainInstructions)
 		for name, fn := range functions {
@@ -124,15 +126,15 @@ func init() {
 			functions[name] = fn
 		}
 
-		return bytecode.SaveBytecodeToBytes(mainInstructions, functions, classes, interfaces, globalIndex, false, false)
+		return bytecode.SaveBytecodeToBytes(mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex, false, false)
 	})
 }
 
 func writeTinyBytecodeFile(t *testing.T, sourcePath string, outPath string) {
 	t.Helper()
 
-	mainInstructions, functions, classes, interfaces, globalIndex := compileTinyFile(t, sourcePath)
-	bytecodeBytes := bytecode.SaveBytecodeToBytes(mainInstructions, functions, classes, interfaces, globalIndex, false, false)
+	mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex := compileTinyFile(t, sourcePath)
+	bytecodeBytes := bytecode.SaveBytecodeToBytes(mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex, false, false)
 	if err := os.WriteFile(outPath, bytecodeBytes, 0644); err != nil {
 		t.Fatalf("write bytecode: %v", err)
 	}
@@ -141,6 +143,7 @@ func writeTinyBytecodeFile(t *testing.T, sourcePath string, outPath string) {
 func runTinyBytecode(
 	t *testing.T,
 	mainInstructions []vm.Instruction,
+	mainDebugInfo []vm.DebugInfo,
 	functions map[string]vm.Function,
 	classes map[string]vm.Class,
 	interfaces map[string]vm.Interface,
@@ -175,6 +178,7 @@ func runTinyBytecode(
 
 		tinyVM := vm.NewVM(vm.VMInfo{
 			MainInstructions: mainInstructions,
+			MainDebugInfo:    mainDebugInfo,
 			Functions:        functions,
 			Classes:          classes,
 			Interfaces:       interfaces,
@@ -692,11 +696,11 @@ func TestPrivateFieldAssignmentAllowedInsideClassMethodFromObfuscatedBytecode(t 
 		t.Fatalf("write main: %v", err)
 	}
 
-	mainInstructions, functions, classes, interfaces, globalIndex := compileTinyFile(t, mainPath)
-	data := bytecode.SaveBytecodeToBytes(mainInstructions, functions, classes, interfaces, globalIndex, false, true)
-	loadedMain, loadedFunctions, loadedClasses, loadedInterfaces, loadedGlobalIndex := bytecode.LoadBytecodeFromBytes(data)
+	mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex := compileTinyFile(t, mainPath)
+	data := bytecode.SaveBytecodeToBytes(mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex, false, true)
+	loadedMain, loadedMainDebugInfo, loadedFunctions, loadedClasses, loadedInterfaces, loadedGlobalIndex := bytecode.LoadBytecodeFromBytes(data)
 
-	result := runTinyBytecode(t, loadedMain, loadedFunctions, loadedClasses, loadedInterfaces, loadedGlobalIndex)
+	result := runTinyBytecode(t, loadedMain, loadedMainDebugInfo, loadedFunctions, loadedClasses, loadedInterfaces, loadedGlobalIndex)
 	if result.Panic != nil {
 		t.Fatalf("unexpected panic: %#v", result.Panic)
 	}
@@ -1111,7 +1115,7 @@ func TestTinyPipelineNamespaceMethodReturnsInterfaceObjectLiteral(t *testing.T) 
 	}
 
 	compiler := NewCompiler()
-	_, _, _, interfaces, _ := compiler.CompileProgram(program)
+	_, _, _, _, interfaces, _ := compiler.CompileProgram(program)
 
 	if _, ok := interfaces["TinyJWT.VerifyData"]; !ok {
 		t.Fatalf("expected namespaced interface to be compiled, got %#v", interfaces)
@@ -1418,7 +1422,7 @@ func TestTinyPipelineNamespacedLibraryImportsCollision(t *testing.T) {
 	}
 
 	compiler := NewCompiler()
-	mainInstructions, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
+	mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
 
 	mainInstructions = vm.OptimizeBytecode(mainInstructions)
 	for name, fn := range functions {
@@ -1426,7 +1430,7 @@ func TestTinyPipelineNamespacedLibraryImportsCollision(t *testing.T) {
 		functions[name] = fn
 	}
 
-	res := runTinyBytecode(t, mainInstructions, functions, classes, interfaces, globalIndex)
+	res := runTinyBytecode(t, mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex)
 	out := requireTinySuccess(t, res)
 
 	const want = "NS1.Dep\nNS2.Dep\n"
@@ -1436,12 +1440,12 @@ func TestTinyPipelineNamespacedLibraryImportsCollision(t *testing.T) {
 }
 
 func TestTinyPipelineBytecodeRoundTrip(t *testing.T) {
-	mainInstructions, functions, classes, interfaces, globalIndex := compileTinyFile(t, fixturePath("arithmetic.tiny"))
+	mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex := compileTinyFile(t, fixturePath("arithmetic.tiny"))
 
-	data := bytecode.SaveBytecodeToBytes(mainInstructions, functions, classes, interfaces, globalIndex, false, false)
-	loadedMain, loadedFunctions, loadedClasses, loadedInterfaces, _ := bytecode.LoadBytecodeFromBytes(data)
+	data := bytecode.SaveBytecodeToBytes(mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex, false, false)
+	loadedMain, loadedMainDebugInfo, loadedFunctions, loadedClasses, loadedInterfaces, _ := bytecode.LoadBytecodeFromBytes(data)
 
-	out := requireTinySuccess(t, runTinyBytecode(t, loadedMain, loadedFunctions, loadedClasses, loadedInterfaces, globalIndex))
+	out := requireTinySuccess(t, runTinyBytecode(t, loadedMain, loadedMainDebugInfo, loadedFunctions, loadedClasses, loadedInterfaces, globalIndex))
 
 	const want = "7\nhello Tiny v1\nstring\n"
 	if out != want {
@@ -1525,7 +1529,7 @@ func TestCompileNestedNamespaceInterfaceReturn(t *testing.T) {
 	// Compile should succeed without TypeError
 	program := tinyloader.LoadProgram(mainPath)
 	compiler := NewCompiler()
-	_, _, _, _, _ = compiler.CompileProgram(program)
+	_, _, _, _, _, _ = compiler.CompileProgram(program)
 }
 
 func TestTinyPipelineEnumValidation(t *testing.T) {
@@ -1659,10 +1663,10 @@ func TestTinyPipelineValidateNamespacedInterfaceValue(t *testing.T) {
 		t.Fatalf("failed to write main.tiny: %v", err)
 	}
 
-	mainInstructions, functions, classes, interfaces, globalIndex := compileTinyFile(t, mainPath)
-	data := bytecode.SaveBytecodeToBytes(mainInstructions, functions, classes, interfaces, globalIndex, false, false)
-	loadedMain, loadedFunctions, loadedClasses, loadedInterfaces, loadedGlobalIndex := bytecode.LoadBytecodeFromBytes(data)
-	out := requireTinySuccess(t, runTinyBytecode(t, loadedMain, loadedFunctions, loadedClasses, loadedInterfaces, loadedGlobalIndex))
+	mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex := compileTinyFile(t, mainPath)
+	data := bytecode.SaveBytecodeToBytes(mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex, false, false)
+	loadedMain, loadedMainDebugInfo, loadedFunctions, loadedClasses, loadedInterfaces, loadedGlobalIndex := bytecode.LoadBytecodeFromBytes(data)
+	out := requireTinySuccess(t, runTinyBytecode(t, loadedMain, loadedMainDebugInfo, loadedFunctions, loadedClasses, loadedInterfaces, loadedGlobalIndex))
 	const want = "true\nfalse\n"
 	if out != want {
 		t.Fatalf("unexpected output: want %q, got %q", want, out)
@@ -1877,7 +1881,7 @@ func TestTinyPipelineJitOutlinesUnsafeNumericWhileLoop(t *testing.T) {
 		t.Fatalf("failed to write main.tiny: %v", err)
 	}
 
-	mainInstructions, functions, classes, interfaces, globalIndex := compileTinyFile(t, mainPath)
+	mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex := compileTinyFile(t, mainPath)
 	helperName := ""
 	for name := range functions {
 		if strings.HasPrefix(name, "__jit_region_wrapper_") {
@@ -1891,6 +1895,7 @@ func TestTinyPipelineJitOutlinesUnsafeNumericWhileLoop(t *testing.T) {
 
 	tinyVM := vm.NewVM(vm.VMInfo{
 		MainInstructions: mainInstructions,
+		MainDebugInfo:    mainDebugInfo,
 		Functions:        functions,
 		Classes:          classes,
 		Interfaces:       interfaces,
@@ -1906,7 +1911,7 @@ func TestTinyPipelineJitOutlinesUnsafeNumericWhileLoop(t *testing.T) {
 		t.Fatalf("expected outlined helper %s to be JIT-compiled", helperName)
 	}
 
-	out := requireTinySuccess(t, runTinyBytecode(t, mainInstructions, functions, classes, interfaces, globalIndex))
+	out := requireTinySuccess(t, runTinyBytecode(t, mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex))
 	const want = "before\nafter\n13\n"
 	if out != want {
 		t.Fatalf("unexpected output: want %q, got %q", want, out)
@@ -1961,7 +1966,7 @@ func TestTinyPipelineJitOutliningRejectsUnsafeLoops(t *testing.T) {
 				t.Fatalf("failed to write main.tiny: %v", err)
 			}
 
-			_, functions, _, _, _ := compileTinyFile(t, mainPath)
+			_, _, functions, _, _, _ := compileTinyFile(t, mainPath)
 			for name := range functions {
 				if strings.HasPrefix(name, "__jit_region_wrapper_") {
 					t.Fatalf("expected loop to remain interpreted, but generated helper %s", name)
@@ -2015,7 +2020,7 @@ func TestTinyPipelineJitOutlinesNestedNumericForLoopWithStdlibPoisonPill(t *test
 		t.Fatalf("failed to write main.tiny: %v", err)
 	}
 
-	_, functions, _, _, _ := compileTinyFile(t, mainPath)
+	_, _, functions, _, _, _ := compileTinyFile(t, mainPath)
 	helperName := ""
 	for name := range functions {
 		if strings.HasPrefix(name, "__jit_region_run_mandelbrot_") {
@@ -2067,7 +2072,7 @@ func TestTinyPipelineJitOutlinesNumericLoopWithMathIntrinsics(t *testing.T) {
 		t.Fatalf("failed to write main.tiny: %v", err)
 	}
 
-	_, functions, _, _, _ := compileTinyFile(t, mainPath)
+	_, _, functions, _, _, _ := compileTinyFile(t, mainPath)
 	helperName := ""
 	for name := range functions {
 		if strings.HasPrefix(name, "__jit_region_hot_math_") {
@@ -2099,13 +2104,15 @@ func TestTinyPipelineJitOutlinesNumericLoopWithMathIntrinsics(t *testing.T) {
 
 func TestTinyPipelineJitOutlinesObjectArrayAndStringRegions(t *testing.T) {
 	tests := []struct {
-		name   string
-		prefix string
-		body   []string
+		name      string
+		prefix    string
+		wantJIT   bool
+		body      []string
 	}{
 		{
-			name:   "object field mutation",
-			prefix: "__jit_region_object_hot_",
+			name:    "object field mutation",
+			prefix:  "__jit_region_object_hot_",
+			wantJIT: true,
 			body: []string{
 				`fn object_hot(n: number): number {`,
 				`    http.server(3000)`,
@@ -2120,8 +2127,9 @@ func TestTinyPipelineJitOutlinesObjectArrayAndStringRegions(t *testing.T) {
 			},
 		},
 		{
-			name:   "array index and length",
-			prefix: "__jit_region_array_hot_",
+			name:    "array index and length",
+			prefix:  "__jit_region_array_hot_",
+			wantJIT: true,
 			body: []string{
 				`fn array_hot(n: number): number {`,
 				`    http.server(3000)`,
@@ -2136,8 +2144,9 @@ func TestTinyPipelineJitOutlinesObjectArrayAndStringRegions(t *testing.T) {
 			},
 		},
 		{
-			name:   "string concat and length",
-			prefix: "__jit_region_string_hot_",
+			name:    "string concat and length",
+			prefix:  "__jit_region_string_hot_",
+			wantJIT: false,
 			body: []string{
 				`fn string_hot(n: number): number {`,
 				`    http.server(3000)`,
@@ -2161,7 +2170,7 @@ func TestTinyPipelineJitOutlinesObjectArrayAndStringRegions(t *testing.T) {
 				t.Fatalf("failed to write main.tiny: %v", err)
 			}
 
-			_, functions, _, _, _ := compileTinyFile(t, mainPath)
+			_, _, functions, _, _, _ := compileTinyFile(t, mainPath)
 			helperName := ""
 			for name := range functions {
 				if strings.HasPrefix(name, tt.prefix) {
@@ -2186,8 +2195,12 @@ func TestTinyPipelineJitOutlinesObjectArrayAndStringRegions(t *testing.T) {
 				t.Fatalf("jitFunctions field not found on VM")
 			}
 			jitFn := jitFuncs.MapIndex(reflect.ValueOf(helperName))
-			if !jitFn.IsValid() || jitFn.IsNil() {
+			compiled := jitFn.IsValid() && !jitFn.IsNil()
+			if tt.wantJIT && !compiled {
 				t.Fatalf("expected outlined helper %s to be JIT-compiled", helperName)
+			}
+			if !tt.wantJIT && compiled {
+				t.Fatalf("expected outlined helper %s not to be JIT-compiled", helperName)
 			}
 		})
 	}
@@ -2298,7 +2311,7 @@ func TestTinyPipelineJitOutliningRejectsDynamicStringMethods(t *testing.T) {
 		t.Fatalf("failed to write main.tiny: %v", err)
 	}
 
-	_, functions, _, _, _ := compileTinyFile(t, mainPath)
+	_, _, functions, _, _, _ := compileTinyFile(t, mainPath)
 	for name := range functions {
 		if strings.HasPrefix(name, "__jit_region_string_hot_") {
 			t.Fatalf("expected dynamic string method loop to remain interpreted, but generated helper %s", name)
@@ -2339,7 +2352,7 @@ func TestTinyPipelineJitOutlinesMultipleEscapingSetupValues(t *testing.T) {
 		t.Fatalf("failed to write main.tiny: %v", err)
 	}
 
-	_, functions, _, _, _ := compileTinyFile(t, mainPath)
+	_, _, functions, _, _, _ := compileTinyFile(t, mainPath)
 	helperName := ""
 	for name := range functions {
 		if strings.HasPrefix(name, "__jit_region_mutate_stress_") {
@@ -2476,9 +2489,10 @@ func TestTinyPipelineJitComprehensiveEdgeCases(t *testing.T) {
 		t.Fatalf("failed to write main.tiny: %v", err)
 	}
 
-	mainInstructions, functions, classes, interfaces, globalIndex := compileTinyFile(t, mainPath)
+	mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex := compileTinyFile(t, mainPath)
 	tinyVM := vm.NewVM(vm.VMInfo{
 		MainInstructions: mainInstructions,
+		MainDebugInfo:    mainDebugInfo,
 		Functions:        functions,
 		Classes:          classes,
 		Interfaces:       interfaces,
@@ -2505,7 +2519,7 @@ func TestTinyPipelineJitComprehensiveEdgeCases(t *testing.T) {
 		t.Fatalf("expected outlined helper %s to be JIT-compiled", compiledName)
 	}
 
-	result := runTinyBytecode(t, mainInstructions, functions, classes, interfaces, globalIndex)
+	result := runTinyBytecode(t, mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex)
 	out := requireTinySuccess(t, result)
 	if strings.Contains(result.Stderr, "[JIT ERROR]") {
 		t.Fatalf("unexpected JIT error:\n%s", result.Stderr)
@@ -2776,9 +2790,9 @@ import std "io"
 fn joinWords(words: array): string {
     let result = ""
     let i = 0
-    while i < words.length {
-        result = result + words[i]
-        if i < words.length - 1 {
+	while i < words.length() {
+		result = result + words[i]
+		if i < words.length() - 1 {
             result = result + " "
         }
         i = i + 1
@@ -2822,10 +2836,11 @@ func TestJitDefaultParameters(t *testing.T) {
 
 	program := tinyloader.LoadProgram(filePath)
 	compiler := NewCompiler()
-	mainBytecode, functions, classes, interfaces, _ := compiler.CompileProgram(program)
+	mainBytecode, mainDebugInfo, functions, classes, interfaces, _ := compiler.CompileProgram(program)
 
 	tinyVM := vm.NewVM(vm.VMInfo{
 		MainInstructions: mainBytecode,
+		MainDebugInfo:    mainDebugInfo,
 		Functions:        functions,
 		Classes:          classes,
 		Interfaces:       interfaces,

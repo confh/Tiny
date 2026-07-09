@@ -3,27 +3,38 @@ import std "json" as json
 import std "io" as io
 import std "buffer" as buffer
 import std "runtime" as runtime
+import std "time" as time
 import "./parser.tiny" as parser
 
 // 1. Write the Python source program to compile
+const pySource = `def run_loop():
+    i = 0
+    sum = 0
+    while i < 10000000:
+        sum = sum + i
+        i = i + 1
+    print(sum)
 
-const pySource = `
-def sum(a, b):
-    return a + b
-    
-print(sum(1, 2))`
+run_loop()
+`
 
 io.println("--- Python Source Code ---");
 io.println(pySource);
 io.println("--------------------------\n");
 
 io.println("Compiling Python code to Tiny bytecode...");
-
-// 2. Instantiate Parser and Compile
 let p = parser.Parser(pySource);
 p.compile();
 
-// 3. Construct Bytecode Object
+io.println("--- Compiled Functions ---");
+io.println(json.stringify(p.functions));
+io.println("--------------------------\n");
+
+io.println("--- Compiled Main Instructions ---");
+io.println(json.stringify(p.instructions));
+io.println("----------------------------------\n");
+
+// Construct Bytecode Object
 let bytecode = {
     "version": 1,
     "main": p.instructions,
@@ -34,15 +45,20 @@ let bytecode = {
 };
 
 let jsonText = json.stringify(bytecode);
+let bytecodeBuf = buffer.fromString(jsonText);
 
-io.println("\nExecuting bytecode dynamically in nested Tiny VM...");
+io.println("\nExecuting bytecode inside nested Tiny VM...");
 
-// 4. Load and execute bytecode inside a sub-VM
-let testVM = runtime.newVM({
-    disableJIT: true,
+let t2 = time.nowMs();
+let jitVM = runtime.newVM({
+    disableJIT: false,
     runMainOnLoad: true
 });
 
-testVM.loadBytecode(buffer.fromString(jsonText));
+jitVM.loadBytecode(bytecodeBuf);
+let t3 = time.nowMs();
 
-io.println("\nNested execution finished successfully!");
+let jitTime = t3 - t2;
+io.println(`JIT-enabled execution finished in: ${jitTime} ms`);
+
+io.println("\nBenchmarking complete!");

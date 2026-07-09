@@ -6,20 +6,20 @@ func init() {
 	standardInterfaceHints["http.RequestObject"] = Interface{
 		Name: "http.RequestObject",
 		Fields: map[string]TypeHint{
+			"formAll": stdTypeHint("object"),
+			"multipart": stdTypeHint("bool"),
+			"contentLength": stdTypeHint("number"),
+			"remoteAddr": stdTypeHint("string"),
+			"form": stdTypeHint("object"),
+			"files": stdTypeHint("object"),
 			"path": stdTypeHint("string"),
 			"body": stdTypeHint("string"),
-			"formAll": stdTypeHint("object"),
-			"method": stdTypeHint("string"),
-			"query": stdTypeHint("object"),
-			"remoteAddr": stdTypeHint("string"),
 			"params": stdTypeHint("object"),
-			"headers": stdTypeHint("object"),
-			"files": stdTypeHint("object"),
-			"multipart": stdTypeHint("bool"),
+			"query": stdTypeHint("object"),
 			"url": stdTypeHint("string"),
+			"method": stdTypeHint("string"),
 			"bodyBytes": TypeHint{Name: "buffer | null", Types: []string{"buffer", "null"}},
-			"form": stdTypeHint("object"),
-			"contentLength": stdTypeHint("number"),
+			"headers": stdTypeHint("object"),
 		},
 	}
 
@@ -38,54 +38,54 @@ func init() {
 	standardInterfaceHints["http.HttpResponse"] = Interface{
 		Name: "http.HttpResponse",
 		Fields: map[string]TypeHint{
-			"statusText": stdTypeHint("string"),
 			"body": stdTypeHint("string"),
 			"headers": stdTypeHint("object"),
 			"status": stdTypeHint("number"),
+			"statusText": stdTypeHint("string"),
 		},
 	}
 
 	standardInterfaceHints["http.ServerOptions"] = Interface{
 		Name: "http.ServerOptions",
 		Fields: map[string]TypeHint{
+			"writeTimeoutMs": TypeHint{Name: "number | null", Types: []string{"number", "null"}},
+			"maxBodySize": TypeHint{Name: "number | null", Types: []string{"number", "null"}},
 			"port": stdTypeHint("number"),
 			"host": TypeHint{Name: "string | null", Types: []string{"string", "null"}},
 			"readTimeoutMs": TypeHint{Name: "number | null", Types: []string{"number", "null"}},
-			"writeTimeoutMs": TypeHint{Name: "number | null", Types: []string{"number", "null"}},
-			"maxBodySize": TypeHint{Name: "number | null", Types: []string{"number", "null"}},
 		},
 	}
 
 	standardInterfaceHints["http.RequestOptions"] = Interface{
 		Name: "http.RequestOptions",
 		Fields: map[string]TypeHint{
+			"bytes": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
 			"headers": TypeHint{Name: "object | null", Types: []string{"object", "null"}},
 			"timeoutMs": TypeHint{Name: "number | null", Types: []string{"number", "null"}},
-			"bytes": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
 		},
 	}
 
 	standardInterfaceHints["http.FullRequestOptions"] = Interface{
 		Name: "http.FullRequestOptions",
 		Fields: map[string]TypeHint{
-			"method": TypeHint{Name: "string | null", Types: []string{"string", "null"}},
 			"url": stdTypeHint("string"),
 			"headers": TypeHint{Name: "object | null", Types: []string{"object", "null"}},
 			"body": TypeHint{Name: "any | null", Types: []string{"any", "null"}},
 			"timeoutMs": TypeHint{Name: "number | null", Types: []string{"number", "null"}},
 			"bytes": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
+			"method": TypeHint{Name: "string | null", Types: []string{"string", "null"}},
 		},
 	}
 
 	standardInterfaceHints["http.MultipartFile"] = Interface{
 		Name: "http.MultipartFile",
 		Fields: map[string]TypeHint{
-			"field": TypeHint{Name: "string | null", Types: []string{"string", "null"}},
 			"filename": TypeHint{Name: "string | null", Types: []string{"string", "null"}},
 			"contentType": TypeHint{Name: "string | null", Types: []string{"string", "null"}},
 			"path": TypeHint{Name: "string | null", Types: []string{"string", "null"}},
 			"bytes": TypeHint{Name: "buffer | null", Types: []string{"buffer", "null"}},
 			"text": TypeHint{Name: "string | null", Types: []string{"string", "null"}},
+			"field": TypeHint{Name: "string | null", Types: []string{"string", "null"}},
 		},
 	}
 
@@ -109,24 +109,24 @@ func init() {
 	standardInterfaceHints["math.Matrix"] = Interface{
 		Name: "math.Matrix",
 		Fields: map[string]TypeHint{
-			"rows": stdTypeHint("number"),
 			"cols": stdTypeHint("number"),
 			"rawData": stdTypeHint("buffer"),
+			"rows": stdTypeHint("number"),
 		},
 	}
 
 	standardInterfaceHints["observer.ObserverMemoryStats"] = Interface{
 		Name: "observer.ObserverMemoryStats",
 		Fields: map[string]TypeHint{
-			"totalAlloc": stdTypeHint("number"),
-			"heapSys": stdTypeHint("number"),
-			"nextGC": stdTypeHint("number"),
-			"alloc": stdTypeHint("number"),
-			"numGC": stdTypeHint("number"),
 			"sys": stdTypeHint("number"),
 			"heapAlloc": stdTypeHint("number"),
-			"heapObjects": stdTypeHint("number"),
 			"pauseTotal": stdTypeHint("number"),
+			"totalAlloc": stdTypeHint("number"),
+			"nextGC": stdTypeHint("number"),
+			"alloc": stdTypeHint("number"),
+			"heapObjects": stdTypeHint("number"),
+			"heapSys": stdTypeHint("number"),
+			"numGC": stdTypeHint("number"),
 		},
 	}
 
@@ -144,11 +144,11 @@ func init() {
 	standardInterfaceHints["observer.ObserverTaskStats"] = Interface{
 		Name: "observer.ObserverTaskStats",
 		Fields: map[string]TypeHint{
-			"started": stdTypeHint("number"),
 			"active": stdTypeHint("number"),
 			"completed": stdTypeHint("number"),
 			"failed": stdTypeHint("number"),
 			"calls": stdTypeHint("number"),
+			"started": stdTypeHint("number"),
 		},
 	}
 
@@ -163,8 +163,8 @@ func init() {
 	standardInterfaceHints["observer.ObserverControlStats"] = Interface{
 		Name: "observer.ObserverControlStats",
 		Fields: map[string]TypeHint{
-			"gomaxprocs": stdTypeHint("number"),
 			"gcPercent": stdTypeHint("number"),
+			"gomaxprocs": stdTypeHint("number"),
 		},
 	}
 
@@ -188,42 +188,42 @@ func init() {
 	standardInterfaceHints["observer.ObserverMessage"] = Interface{
 		Name: "observer.ObserverMessage",
 		Fields: map[string]TypeHint{
+			"time": stdTypeHint("string"),
 			"from": stdTypeHint("string"),
 			"text": stdTypeHint("string"),
 			"data": TypeHint{Name: "any | null", Types: []string{"any", "null"}},
-			"time": stdTypeHint("string"),
 		},
 	}
 
 	standardInterfaceHints["observer.ObserverSnapshot"] = Interface{
 		Name: "observer.ObserverSnapshot",
 		Fields: map[string]TypeHint{
-			"executable": stdTypeHint("string"),
-			"cwd": stdTypeHint("string"),
-			"controls": stdTypeHint("ObserverControlStats"),
-			"stackDepth": stdTypeHint("number"),
-			"goarch": stdTypeHint("string"),
-			"taskPool": stdTypeHint("ObserverTaskPoolStats"),
-			"events": stdTypeHint("array:ObserverEvent"),
-			"globalCount": stdTypeHint("number"),
-			"uptimeMs": stdTypeHint("number"),
-			"pid": stdTypeHint("number"),
-			"gomaxprocs": stdTypeHint("number"),
 			"frameDepth": stdTypeHint("number"),
-			"memory": stdTypeHint("ObserverMemoryStats"),
-			"functionCount": stdTypeHint("number"),
-			"interfaceCount": stdTypeHint("number"),
-			"messages": stdTypeHint("array:ObserverMessage"),
-			"functionNames": stdTypeHint("array:string"),
-			"classCount": stdTypeHint("number"),
-			"classNames": stdTypeHint("array:string"),
-			"functionCalls": stdTypeHint("array:ObserverFunctionCall"),
-			"commands": stdTypeHint("array:ObserverNamedItem"),
-			"goroutines": stdTypeHint("number"),
+			"pid": stdTypeHint("number"),
 			"tasks": stdTypeHint("ObserverTaskStats"),
-			"exposed": stdTypeHint("array:ObserverNamedItem"),
+			"commands": stdTypeHint("array:ObserverNamedItem"),
+			"goarch": stdTypeHint("string"),
+			"classCount": stdTypeHint("number"),
+			"functionCount": stdTypeHint("number"),
+			"events": stdTypeHint("array:ObserverEvent"),
 			"goos": stdTypeHint("string"),
+			"interfaceCount": stdTypeHint("number"),
+			"stackDepth": stdTypeHint("number"),
+			"messages": stdTypeHint("array:ObserverMessage"),
+			"uptimeMs": stdTypeHint("number"),
+			"taskPool": stdTypeHint("ObserverTaskPoolStats"),
+			"classNames": stdTypeHint("array:string"),
+			"exposed": stdTypeHint("array:ObserverNamedItem"),
+			"cwd": stdTypeHint("string"),
+			"globalCount": stdTypeHint("number"),
+			"goroutines": stdTypeHint("number"),
+			"memory": stdTypeHint("ObserverMemoryStats"),
+			"gomaxprocs": stdTypeHint("number"),
 			"globalNames": stdTypeHint("array:string"),
+			"functionNames": stdTypeHint("array:string"),
+			"controls": stdTypeHint("ObserverControlStats"),
+			"executable": stdTypeHint("string"),
+			"functionCalls": stdTypeHint("array:ObserverFunctionCall"),
 			"status": stdTypeHint("string"),
 		},
 	}
@@ -231,9 +231,9 @@ func init() {
 	standardInterfaceHints["observer.ObserverServer"] = Interface{
 		Name: "observer.ObserverServer",
 		Fields: map[string]TypeHint{
-			"url": stdTypeHint("string"),
 			"host": stdTypeHint("string"),
 			"port": stdTypeHint("number"),
+			"url": stdTypeHint("string"),
 		},
 	}
 
@@ -249,93 +249,93 @@ func init() {
 	standardInterfaceHints["process.ProcessOptions"] = Interface{
 		Name: "process.ProcessOptions",
 		Fields: map[string]TypeHint{
+			"stderr": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
 			"cwd": TypeHint{Name: "string | null", Types: []string{"string", "null"}},
 			"stdout": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
-			"stderr": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
 		},
 	}
 
 	standardInterfaceHints["process.ProcessResult"] = Interface{
 		Name: "process.ProcessResult",
 		Fields: map[string]TypeHint{
+			"exitCode": stdTypeHint("number"),
 			"stdout": TypeHint{Name: "string | null", Types: []string{"string", "null"}},
 			"stderr": TypeHint{Name: "string | null", Types: []string{"string", "null"}},
 			"success": stdTypeHint("bool"),
-			"exitCode": stdTypeHint("number"),
 		},
 	}
 
 	standardInterfaceHints["runtime.MemoryStats"] = Interface{
 		Name: "runtime.MemoryStats",
 		Fields: map[string]TypeHint{
+			"sys": stdTypeHint("number"),
 			"numGC": stdTypeHint("number"),
 			"alloc": stdTypeHint("number"),
 			"totalAlloc": stdTypeHint("number"),
-			"sys": stdTypeHint("number"),
 		},
 	}
 
 	standardInterfaceHints["runtime.VMStdlibOptions"] = Interface{
 		Name: "runtime.VMStdlibOptions",
 		Fields: map[string]TypeHint{
-			"json": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
-			"buffer": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
-			"regex": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
-			"http": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
 			"observer": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
-			"desktop": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
-			"runtime": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
-			"array": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
-			"net": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
-			"time": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
-			"object": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
 			"error": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
-			"sync": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
 			"ui": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
-			"path": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
+			"math": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
 			"tests": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
-			"tray": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
-			"url": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
-			"app": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
-			"os": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
+			"buffer": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
+			"io": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
+			"object": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
+			"array": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
+			"time": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
 			"websocket": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
 			"validate": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
+			"app": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
+			"net": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
+			"path": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
+			"desktop": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
+			"tray": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
 			"strings": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
 			"fs": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
-			"io": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
 			"process": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
-			"math": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
+			"http": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
+			"json": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
+			"regex": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
+			"os": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
+			"runtime": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
+			"sync": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
+			"url": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
 		},
 	}
 
 	standardInterfaceHints["runtime.VMOptions"] = Interface{
 		Name: "runtime.VMOptions",
 		Fields: map[string]TypeHint{
+			"allowedStdlib": TypeHint{Name: "VMStdlibOptions | null", Types: []string{"VMStdlibOptions", "null"}},
+			"cliArgs": TypeHint{Name: "array | null", Types: []string{"array", "null"}},
 			"globals": TypeHint{Name: "object | null", Types: []string{"object", "null"}},
 			"disableJIT": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
 			"runMainOnLoad": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
 			"isolated": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
-			"allowedStdlib": TypeHint{Name: "VMStdlibOptions | null", Types: []string{"VMStdlibOptions", "null"}},
-			"cliArgs": TypeHint{Name: "array | null", Types: []string{"array", "null"}},
 		},
 	}
 
 	standardInterfaceHints["tray.Bounds"] = Interface{
 		Name: "tray.Bounds",
 		Fields: map[string]TypeHint{
+			"x": stdTypeHint("number"),
 			"y": stdTypeHint("number"),
 			"width": stdTypeHint("number"),
 			"height": stdTypeHint("number"),
-			"x": stdTypeHint("number"),
 		},
 	}
 
 	standardInterfaceHints["ui.WebViewOptions"] = Interface{
 		Name: "ui.WebViewOptions",
 		Fields: map[string]TypeHint{
-			"debug": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
 			"hidden": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
 			"frameless": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
+			"debug": TypeHint{Name: "bool | null", Types: []string{"bool", "null"}},
 		},
 	}
 
@@ -343,9 +343,9 @@ func init() {
 		Name: "validate.SafeParseResult",
 		TypeParameters: []string{"T"},
 		Fields: map[string]TypeHint{
+			"error": stdTypeHint("any"),
 			"success": stdTypeHint("bool"),
 			"data": stdTypeHint("T"),
-			"error": stdTypeHint("any"),
 		},
 	}
 
@@ -360,30 +360,30 @@ func init() {
 	standardInterfaceHints["websocket.ClientOptions"] = Interface{
 		Name: "websocket.ClientOptions",
 		Fields: map[string]TypeHint{
-			"timeoutMs": TypeHint{Name: "number | null", Types: []string{"number", "null"}},
 			"maxMessageSize": TypeHint{Name: "number | null", Types: []string{"number", "null"}},
 			"headers": TypeHint{Name: "object | null", Types: []string{"object", "null"}},
+			"timeoutMs": TypeHint{Name: "number | null", Types: []string{"number", "null"}},
 		},
 	}
 
 	standardInterfaceHints["websocket.ServerOptions"] = Interface{
 		Name: "websocket.ServerOptions",
 		Fields: map[string]TypeHint{
-			"maxMessageSize": TypeHint{Name: "number | null", Types: []string{"number", "null"}},
-			"port": stdTypeHint("number"),
 			"host": TypeHint{Name: "string | null", Types: []string{"string", "null"}},
 			"path": TypeHint{Name: "string | null", Types: []string{"string", "null"}},
 			"readTimeoutMs": TypeHint{Name: "number | null", Types: []string{"number", "null"}},
 			"writeTimeoutMs": TypeHint{Name: "number | null", Types: []string{"number", "null"}},
+			"maxMessageSize": TypeHint{Name: "number | null", Types: []string{"number", "null"}},
+			"port": stdTypeHint("number"),
 		},
 	}
 
 	standardInterfaceHints["websocket.CloseEvent"] = Interface{
 		Name: "websocket.CloseEvent",
 		Fields: map[string]TypeHint{
+			"reason": stdTypeHint("string"),
 			"wasClean": stdTypeHint("bool"),
 			"code": stdTypeHint("number"),
-			"reason": stdTypeHint("string"),
 		},
 	}
 

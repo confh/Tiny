@@ -56,8 +56,12 @@ func formatTinyDocument(text string) string {
 		stringState = updateFormatterStringState(line, stringState)
 
 		leadingClosings := countLeadingClosingBraces(line)
+		effectiveClosings := leadingClosings
+		if effectiveClosings > 1 {
+			effectiveClosings = 1
+		}
 
-		indent -= leadingClosings
+		indent -= effectiveClosings
 		if indent < 0 {
 			indent = 0
 		}
@@ -71,7 +75,14 @@ func formatTinyDocument(text string) string {
 			closes = 0
 		}
 
-		indent += opens - closes
+		change := opens - closes
+		if change > 1 {
+			change = 1
+		} else if change < -1 {
+			change = -1
+		}
+
+		indent += change
 		if indent < 0 {
 			indent = 0
 		}
@@ -141,7 +152,7 @@ func countLeadingClosingBraces(line string) int {
 	count := 0
 
 	for _, ch := range line {
-		if ch == '}' {
+		if ch == '}' || ch == ']' || ch == ')' {
 			count++
 			continue
 		}
@@ -188,9 +199,9 @@ func countBracesOutsideStrings(line string) (int, int) {
 		}
 
 		switch ch {
-		case '{':
+		case '{', '[', '(':
 			opens++
-		case '}':
+		case '}', ']', ')':
 			closes++
 		}
 	}

@@ -7,9 +7,10 @@ import (
 
 func init() {
 	SetRuntimeBytecodeLoader(func(data []byte) RuntimeBytecodeProgram {
-		mainInstructions, functions, classes, interfaces, globalIndex := LoadBytecodeFromBytes(data)
+		mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex := LoadBytecodeFromBytes(data)
 		return RuntimeBytecodeProgram{
 			MainInstructions: mainInstructions,
+			MainDebugInfo:    mainDebugInfo,
 			Functions:        functions,
 			Classes:          classes,
 			Interfaces:       interfaces,

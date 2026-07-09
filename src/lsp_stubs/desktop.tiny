@@ -1,3 +1,9 @@
+export enum Modifiers {
+    Alt = "alt",
+    Ctrl = "ctrl",
+    Shift = "shift"
+}
+
 // Moves the mouse pointer instantly to the specified x and y coordinates.
 export fn moveMouse(x: number, y: number): null
 
@@ -42,3 +48,9 @@ export fn getClipboard(): string
 
 // Sets the system clipboard text to the specified string.
 export fn setClipboard(text: string): null
+
+// Registers a global hotkey with a list of modifiers (e.g. ["ctrl", "shift"]), a key (e.g. "k"), and a callback function. Returns a unique hotkey ID.
+export fn registerHotKey(modifiers: array:Modifiers, key: string, callback: function): number
+
+// Unregisters a global hotkey by its unique ID. Returns true if successful.
+export fn unregisterHotKey(id: number): bool

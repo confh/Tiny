@@ -9,9 +9,15 @@ import (
 
 func init() {
 	SetRuntimeBytecodeLoader(func(data []byte) RuntimeBytecodeProgram {
-		mainInstructions, functions, classes, interfaces, globalIndex := LoadBytecodeFromBytes(data)
+		mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex := LoadBytecodeFromBytes(data)
+		mainInstructions = OptimizeBytecode(mainInstructions)
+		for name, fn := range functions {
+			fn.Instructions = OptimizeBytecode(fn.Instructions)
+			functions[name] = fn
+		}
 		return RuntimeBytecodeProgram{
 			MainInstructions: mainInstructions,
+			MainDebugInfo:    mainDebugInfo,
 			Functions:        functions,
 			Classes:          classes,
 			Interfaces:       interfaces,
@@ -26,7 +32,7 @@ func init() {
 
 		compiler := tinycompiler.NewCompiler()
 		compiler.SetPreserveAllFunctions(true)
-		mainInstructions, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
+		mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
 
 		mainInstructions = OptimizeBytecode(mainInstructions)
 		for name, fn := range functions {
@@ -36,6 +42,7 @@ func init() {
 
 		return RuntimeBytecodeProgram{
 			MainInstructions: mainInstructions,
+			MainDebugInfo:    mainDebugInfo,
 			Functions:        functions,
 			Classes:          classes,
 			Interfaces:       interfaces,
@@ -50,7 +57,7 @@ func init() {
 
 		compiler := tinycompiler.NewCompiler()
 		compiler.SetPreserveAllFunctions(true)
-		mainInstructions, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
+		mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
 
 		mainInstructions = OptimizeBytecode(mainInstructions)
 		for name, fn := range functions {
@@ -58,7 +65,7 @@ func init() {
 			functions[name] = fn
 		}
 
-		return SaveBytecodeToBytes(mainInstructions, functions, classes, interfaces, globalIndex, false, false)
+		return SaveBytecodeToBytes(mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex, false, false)
 	})
 
 	SetCompileFileFunc(func(path string) []byte {
@@ -66,7 +73,7 @@ func init() {
 
 		compiler := tinycompiler.NewCompiler()
 		compiler.SetPreserveAllFunctions(true)
-		mainInstructions, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
+		mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
 
 		mainInstructions = OptimizeBytecode(mainInstructions)
 		for name, fn := range functions {
@@ -74,6 +81,6 @@ func init() {
 			functions[name] = fn
 		}
 
-		return SaveBytecodeToBytes(mainInstructions, functions, classes, interfaces, globalIndex, false, false)
+		return SaveBytecodeToBytes(mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex, false, false)
 	})
 }

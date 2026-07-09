@@ -3,6 +3,7 @@ package vm
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"database/sql"
 	"fmt"
 	"net"
@@ -17,6 +18,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/tetratelabs/wazero"
+	"github.com/tetratelabs/wazero/api"
 
 	. "language.com/src/tinyerrors"
 )
@@ -107,10 +110,17 @@ type ErrorValue struct {
 }
 
 type FunctionValue struct {
-	ID       int
-	Name     string
-	Captures map[int]*Cell
-	Async    bool
+	ID          int
+	Name        string
+	Captures    map[int]*Cell
+	Async       bool
+	MethodClass string
+}
+
+type NativeWasmModuleValue struct {
+	Ctx     context.Context
+	Runtime wazero.Runtime
+	Module  api.Module
 }
 
 type NativeServerValue struct {
@@ -387,6 +397,64 @@ type TinyValue struct {
 	AsInt int
 }
 
+func (v *TinyValue) isObject() bool {
+	if _, ok := v.Value.(WasmObjectValue); ok {
+		return ok
+	} else if _, ok := v.Value.(ObjectValue); ok {
+		return ok
+	}
+
+	return false
+}
+
+func (v *TinyValue) asObject(vm *VM) (ObjectValue, bool) {
+	if v.IsInt {
+		return nil, false
+	}
+
+	switch obj := v.Value.(type) {
+	case *InstanceValue:
+		if obj == nil {
+			return nil, false
+		}
+		return obj.Fields, true
+
+	case ObjectValue:
+		return obj, true
+
+	case *ObjectValue:
+		if obj == nil {
+			return nil, false
+		}
+		return *obj, true
+
+	case WasmObjectValue:
+		source := vm
+		if source == nil {
+			source = obj.VM
+		}
+		if source == nil {
+			return nil, false
+		}
+		return source.wasmObjectToObjectValue(obj)
+
+	case *WasmObjectValue:
+		if obj == nil {
+			return nil, false
+		}
+		source := vm
+		if source == nil {
+			source = obj.VM
+		}
+		if source == nil {
+			return nil, false
+		}
+		return source.wasmObjectToObjectValue(*obj)
+	}
+
+	return nil, false
+}
+
 func (vm *VM) asInt(value TinyValue) int {
 	if value.IsInt {
 		return value.AsInt
@@ -564,8 +632,6 @@ func TypeNameStandard(value TinyValue) string {
 		return "<function " + v.Name + ">"
 	case *FunctionValue:
 		return "<function " + v.Name + ">"
-	case NativeServerValue:
-		return "server"
 	case *NativeValidateTop:
 		return "schema"
 	case *NativeValidateType:
@@ -774,11 +840,31 @@ func ToValue(value any) TinyValue {
 		return NewInt(int(v))
 	case int32:
 		return NewInt(int(v))
+	case int16:
+		return NewInt(int(v))
+	case int8:
+		return NewInt(int(v))
+	case uint:
+		return NewInt(int(v))
+	case uint64:
+		return NewInt(int(v))
+	case uint32:
+		return NewInt(int(v))
+	case uint16:
+		return NewInt(int(v))
+	case uint8:
+		return NewInt(int(v))
 	case float64:
 		if v == float64(int(v)) {
 			return NewInt(int(v))
 		}
 		return NewNative(v)
+	case float32:
+		v64 := float64(v)
+		if v64 == float64(int(v64)) {
+			return NewInt(int(v64))
+		}
+		return NewNative(v64)
 
 	case []any:
 		elements := make([]TinyValue, len(v))
@@ -1038,8 +1124,6 @@ func valueToString(value TinyValue, forPrint ...bool) string {
 
 	case FunctionValue:
 		return "<function " + v.Name + ">"
-	case NativeServerValue:
-		return "<server :" + strconv.Itoa(v.Port) + ">"
 	case *NativeServerValue:
 		return "<server :" + strconv.Itoa(v.Port) + ">"
 	case *NativeSqliteValue:
@@ -1228,6 +1312,16 @@ func NewArray(arr []TinyValue) TinyValue {
 	return TinyValue{
 		Value: &ArrayValue{
 			Elements: arr,
+		},
+		IsInt: false,
+		AsInt: 0,
+	}
+}
+
+func NewBuffer(arr []byte) TinyValue {
+	return TinyValue{
+		Value: &BufferValue{
+			Bytes: arr,
 		},
 		IsInt: false,
 		AsInt: 0,

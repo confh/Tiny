@@ -22,8 +22,11 @@ func SetPluginSearchPaths(paths []string) {
 }
 
 type loadedNativePluginFuncs struct {
-	call func(method string, argsJSON string) *byte
-	free func(ptr *byte)
+	callJSON func(method string, argsJSON string) *byte
+	freeJSON func(ptr *byte)
+
+	callMsgPack func(bytes *byte, length int) *byte
+	freeMsgPack func(ptr *byte)
 }
 
 var nativePluginFuncs = struct {
@@ -74,42 +77,63 @@ func (vm *VM) callPluginModule(method string, argCount int) {
 			vm.fatalError(ErrorRuntime, "failed to load plugin %s: %v", path, err)
 		}
 
-		callPtr, err := purego.Dlsym(handle, "TinyPluginCall")
+		// 1. Try to find MsgPack functions
+		callPtr, err := purego.Dlsym(handle, "TinyPluginCallMsgPack")
+		isMsgPack := true
+		var freePtr uintptr
+
+		// 2. Fall back to JSON if MsgPack is missing
 		if err != nil || callPtr == 0 {
-			_ = purego.Dlclose(handle)
-			if err != nil {
-				vm.fatalError(ErrorRuntime, "plugin missing TinyPluginCall: %v", err)
+			isMsgPack = false
+			callPtr, err = purego.Dlsym(handle, "TinyPluginCall")
+			if err != nil || callPtr == 0 {
+				_ = purego.Dlclose(handle)
+				vm.fatalError(ErrorRuntime, "plugin missing both TinyPluginCallMsgPack and TinyPluginCall")
 			}
-			vm.fatalError(ErrorRuntime, "plugin missing TinyPluginCall")
+			freePtr, err = purego.Dlsym(handle, "TinyPluginFree")
+			if err != nil || freePtr == 0 {
+				_ = purego.Dlclose(handle)
+				vm.fatalError(ErrorRuntime, "plugin missing TinyPluginFree")
+			}
+		} else {
+			// Found MsgPack call, find the corresponding free function
+			freePtr, err = purego.Dlsym(handle, "TinyPluginFreeMsgPack")
+			if err != nil || freePtr == 0 {
+				_ = purego.Dlclose(handle)
+				vm.fatalError(ErrorRuntime, "plugin missing TinyPluginFreeMsgPack")
+			}
 		}
 
-		freePtr, err := purego.Dlsym(handle, "TinyPluginFree")
-		if err != nil || freePtr == 0 {
-			_ = purego.Dlclose(handle)
-			if err != nil {
-				vm.fatalError(ErrorRuntime, "plugin missing TinyPluginFree: %v", err)
-			}
-			vm.fatalError(ErrorRuntime, "plugin missing TinyPluginFree")
+		// 3. Register the appropriate Go function wrapper
+		var fns loadedNativePluginFuncs
+		if isMsgPack {
+			var callFn func(bytes *byte, length int) *byte
+			var freeFn func(ptr *byte)
+			purego.RegisterFunc(&callFn, callPtr)
+			purego.RegisterFunc(&freeFn, freePtr)
+			fns.callMsgPack = callFn
+			fns.freeMsgPack = freeFn
+		} else {
+			var callFn func(method string, argsJSON string) *byte
+			var freeFn func(ptr *byte)
+			purego.RegisterFunc(&callFn, callPtr)
+			purego.RegisterFunc(&freeFn, freePtr)
+			fns.callJSON = callFn
+			fns.freeJSON = freeFn
 		}
 
-		var callFn func(method string, argsJSON string) *byte
-		var freeFn func(ptr *byte)
-
-		purego.RegisterFunc(&callFn, callPtr)
-		purego.RegisterFunc(&freeFn, freePtr)
-
+		// Store wrappers in map
 		nativePluginFuncs.Lock()
-		nativePluginFuncs.byCallPtr[callPtr] = loadedNativePluginFuncs{
-			call: callFn,
-			free: freeFn,
-		}
+		nativePluginFuncs.byCallPtr[callPtr] = fns
 		nativePluginFuncs.Unlock()
 
+		// 4. Push the unified struct
 		vm.push(NewNative(&NativePluginValue{
-			Path:   path,
-			Handle: unsafe.Pointer(handle),
-			Call:   callPtr,
-			Free:   freePtr,
+			Path:      path,
+			Handle:    unsafe.Pointer(handle),
+			Call:      callPtr,
+			Free:      freePtr,
+			IsMsgPack: isMsgPack,
 		}))
 
 	default:
@@ -160,59 +184,85 @@ func (vm *VM) callNativePlugin(plugin *NativePluginValue, method string, args []
 	fns, ok := nativePluginFuncs.byCallPtr[plugin.Call]
 	nativePluginFuncs.RUnlock()
 
-	if !ok || fns.call == nil || fns.free == nil {
+	if !ok {
 		vm.fatalError(ErrorRuntime, "plugin %s is not loaded correctly", plugin.Path)
 	}
 
-	jsonArgs := make([]any, len(args))
-	for i, arg := range args {
-		jsonArgs[i] = valueToJSONCompatible(arg)
-	}
+	if plugin.IsMsgPack {
+		if fns.callMsgPack == nil || fns.freeMsgPack == nil {
+			vm.fatalError(ErrorRuntime, "plugin MsgPack functions not loaded correctly")
+		}
 
-	payload := map[string]any{
-		"method": method,
-		"args":   jsonArgs,
-	}
+		// 1. Encode parameters to MessagePack
+		msgpackBytes := vm.encodeToMsgPack(method, args)
 
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
-		vm.fatalError(ErrorRuntime, "failed to encode plugin call: %v", err)
-	}
+		// 2. Call the native function
+		resultPtr := fns.callMsgPack(&msgpackBytes[0], len(msgpackBytes))
+		if resultPtr == nil {
+			vm.fatalError(ErrorRuntime, "plugin returned null")
+		}
 
-	resultPtr := fns.call(method, string(payloadBytes))
-	if resultPtr == nil {
-		vm.fatalError(ErrorRuntime, "plugin returned null")
-	}
+		// 3. Convert C byte pointer to Go slice and free C memory
+		resultBytes := cBytesToGo(uintptr(unsafe.Pointer(resultPtr)))
+		fns.freeMsgPack(resultPtr)
 
-	resultText := cStringToGo(resultPtr)
-	fns.free(resultPtr)
+		// 4. Decode the result and push to stack
+		vm.push(vm.decodeFromMsgPack(resultBytes))
+	} else {
+		// Legacy JSON path
+		if fns.callJSON == nil || fns.freeJSON == nil {
+			vm.fatalError(ErrorRuntime, "plugin JSON functions not loaded correctly")
+		}
 
-	var result any
-	err = json.Unmarshal([]byte(resultText), &result)
-	if err != nil {
-		vm.fatalError(ErrorRuntime, "plugin returned invalid JSON: %v", err)
-	}
+		jsonArgs := make([]any, len(args))
+		for i, arg := range args {
+			jsonArgs[i] = valueToJSONCompatible(arg)
+		}
 
-	if obj, ok := result.(map[string]any); ok {
-		if errValue, exists := obj["error"]; exists {
-			if errObj, ok := errValue.(map[string]any); ok {
-				kind, _ := errObj["kind"].(string)
-				message, _ := errObj["message"].(string)
+		payload := map[string]any{
+			"method": method,
+			"args":   jsonArgs,
+		}
 
-				if kind == "" {
-					kind = string(ErrorRuntime)
+		payloadBytes, err := json.Marshal(payload)
+		if err != nil {
+			vm.fatalError(ErrorRuntime, "failed to encode plugin call: %v", err)
+		}
+
+		resultPtr := fns.callJSON(method, string(payloadBytes))
+		if resultPtr == nil {
+			vm.fatalError(ErrorRuntime, "plugin returned null")
+		}
+
+		resultText := cStringToGo(resultPtr)
+		fns.freeJSON(resultPtr)
+
+		var result any
+		err = json.Unmarshal([]byte(resultText), &result)
+		if err != nil {
+			vm.fatalError(ErrorRuntime, "plugin returned invalid JSON: %v", err)
+		}
+
+		if obj, ok := result.(map[string]any); ok {
+			if errValue, exists := obj["error"]; exists {
+				if errObj, ok := errValue.(map[string]any); ok {
+					kind, _ := errObj["kind"].(string)
+					message, _ := errObj["message"].(string)
+
+					if kind == "" {
+						kind = string(ErrorRuntime)
+					}
+					if message == "" {
+						message = "plugin returned an error"
+					}
+
+					vm.fatalError(ErrorKind(kind), "%s", message)
 				}
-
-				if message == "" {
-					message = "plugin returned an error"
-				}
-
-				vm.fatalError(ErrorKind(kind), "%s", message)
 			}
 		}
-	}
 
-	vm.push(jsonToTinyValue(result))
+		vm.push(jsonToTinyValue(result))
+	}
 }
 
 func cStringToGo(ptr *byte) string {

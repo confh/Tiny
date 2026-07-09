@@ -1,6 +1,7 @@
 package vm
 
 import (
+	"encoding/base64"
 	"encoding/hex"
 
 	. "language.com/src/tinyerrors"
@@ -42,6 +43,14 @@ var bufferNativeMetadata = NativeTypeInfo{
 			Returns:     "string",
 			Description: "Turns the bytes into a string and returns it.",
 		},
+		"toBase64": {
+			Name: "toBase64",
+			Args: []StdArg{
+				{Name: "urlSafe", Type: "bool", Optional: true},
+			},
+			Returns:     "string",
+			Description: "Converts buffer to Base64 and returns it.",
+		},
 	},
 }
 
@@ -54,6 +63,7 @@ func init() {
 		"getU8":     bufferGetU8,
 		"setU8":     bufferSetU8,
 		"stringify": bufferString,
+		"toBase64":  bufferToBase64,
 	}
 
 	registerNativeType(bufferNativeMetadata)
@@ -133,4 +143,22 @@ func bufferString(vm *VM, buffer *BufferValue, args []TinyValue) {
 	dontExpectArgs(vm, "buffer.stringify", args)
 
 	vm.push(NewNative(string(buffer.Bytes)))
+}
+
+func bufferToBase64(vm *VM, buffer *BufferValue, args []TinyValue) {
+	expectArgsRange(vm, "buffer.toBase64", args, 0, 1)
+
+	urlSafe := false
+	if len(args) > 0 {
+		urlSafe = argBool(vm, "buffer.toBase64", args, 0)
+	}
+
+	var encoded string
+	if urlSafe {
+		encoded = base64.URLEncoding.EncodeToString(buffer.Bytes)
+	} else {
+		encoded = base64.StdEncoding.EncodeToString(buffer.Bytes)
+	}
+
+	vm.push(NewNative(encoded))
 }

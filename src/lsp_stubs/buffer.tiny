@@ -4,3 +4,5 @@ export fn alloc(size: number, fill: number): buffer
 export fn fromString(text: string): buffer
 // Creates a new buffer from the specified array.
 export fn fromArray(bytes: array:number): buffer
+// Creates a new buffer from the specified base64 string.
+export fn fromBase64(str: string): buffer

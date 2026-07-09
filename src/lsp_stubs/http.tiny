@@ -53,7 +53,7 @@ export interface HttpResponse {
 // The status line text.
     statusText: string,
 // The response body content.
-    body: string,
+    body: string | buffer,
 // HTTP headers associated with the response.
     headers: object,
 }

@@ -919,7 +919,7 @@ const html = assets["index.html"]</code></pre>
           </div>
           <div role="row">
             <strong role="cell">`buffer`</strong>
-            <span role="cell">Byte buffers with length, hex conversion, indexed `u8` reads/writes, and string conversion.</span>
+            <span role="cell">Byte buffers with length, hex conversion, indexed `u8` reads/writes, string conversion, and Base64 encoding/decoding (`buffer.fromBase64` / `buf.toBase64`).</span>
           </div>
           <div role="row">
             <strong role="cell">`math`</strong>
@@ -943,11 +943,11 @@ const html = assets["index.html"]</code></pre>
           </div>
           <div role="row">
             <strong role="cell">`desktop`</strong>
-            <span role="cell">Mouse, keyboard, clipboard, screenshots, and screen-size automation.</span>
+            <span role="cell">Mouse, keyboard, clipboard, screenshots, screen-size automation, and global hotkeys (`registerHotKey`).</span>
           </div>
           <div role="row">
             <strong role="cell">`net`</strong>
-            <span role="cell">TCP servers and connections with line reads, binary/string writes, and addresses.</span>
+            <span role="cell">TCP servers, connections, and client connections (`tcpClient`) with line reads, binary/string writes, and addresses.</span>
           </div>
           <div role="row">
             <strong role="cell">`object`</strong>
@@ -984,6 +984,10 @@ const html = assets["index.html"]</code></pre>
           <div role="row">
             <strong role="cell">`crypto`</strong>
             <span role="cell">Cryptographic helpers for hashing and encoding.</span>
+          </div>
+          <div role="row">
+            <strong role="cell">`wasm`</strong>
+            <span role="cell">WebAssembly module instantiation (`wasm.instantiate`) and execution via the wazero runtime.</span>
           </div>
           <div role="row">
             <strong role="cell">`error`</strong>
@@ -1092,14 +1096,15 @@ const html = assets["index.html"]</code></pre>
 
           <article>
             <h3>Required exports</h3>
-            <p>The native library must export exactly the functions Tiny looks for: `TinyPluginCall` and
-              `TinyPluginFree`.</p>
-            <pre><code>// Tiny calls this with a method name and JSON payload.
-TinyPluginCall(method, argsJSON) -> char*
+            <p>The native library must export functions for JSON or MessagePack protocols. Tiny looks for MessagePack exports (<code>TinyPluginCallMsgPack</code> and <code>TinyPluginFreeMsgPack</code>) first, falling back to JSON exports (<code>TinyPluginCall</code> and <code>TinyPluginFree</code>).</p>
+            <pre><code>// MessagePack protocol (preferred)
+TinyPluginCallMsgPack(data, size) -> char*
+TinyPluginFreeMsgPack(ptr)
 
-// Tiny calls this after reading the returned string.
+// JSON protocol (legacy fallback)
+TinyPluginCall(method, argsJSON) -> char*
 TinyPluginFree(ptr)</code></pre>
-            <p>If either symbol is missing, plugin loading fails before any method is called.</p>
+            <p>If appropriate symbols are missing, plugin loading fails before any method is called.</p>
           </article>
 
           <article>
@@ -1130,12 +1135,12 @@ TinyPluginFree(ptr)</code></pre>
         </div>
 
         <h3>Native Go plugin shape</h3>
-        <p>A Go plugin can use the repository's `tinyplugin` helper package to register named handlers and handle the
-          JSON request/response protocol.</p>
+        <p>A Go plugin can use the repository's `tinyplugin` helper package to register named handlers and handle either the
+          JSON or MessagePack request/response protocol. MessagePack is preferred for binary-safe and high-performance serialization.</p>
         <pre><code>package main
 
 /*
-#include <stdlib.h>
+#include &lt;stdlib.h&gt;
 */
 import "C"
 
@@ -1145,15 +1150,27 @@ import (
 )
 
 func init() {
-    tinyplugin.Register("hash", func(args tinyplugin.Args) (any, error) {
+    tinyplugin.Register("hash", func(args tinyplugin.Args) (map[any]any, error) {
         config := args.Object(0)
         text := config["text"].(string)
 
-        return map[string]any{
+        return map[any]any{
             "success": true,
             "input": text,
         }, nil
     })
+}
+
+//export TinyPluginCallMsgPack
+func TinyPluginCallMsgPack(dataC *C.char, size C.int) *C.char {
+    data := C.GoBytes(unsafe.Pointer(dataC), size)
+    resBytes := tinyplugin.HandleCallMsgPack(data)
+    return (*C.char)(unsafe.Pointer(&amp;resBytes[0]))
+}
+
+//export TinyPluginFreeMsgPack
+func TinyPluginFreeMsgPack(ptr *C.char) {
+    // Free C-allocated memory if required
 }
 
 //export TinyPluginCall

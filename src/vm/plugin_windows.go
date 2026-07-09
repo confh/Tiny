@@ -55,25 +55,36 @@ func (vm *VM) callPluginModule(method string, argCount int) {
 
 		dll := syscall.NewLazyDLL(path)
 
-		callProc := dll.NewProc("TinyPluginCall")
-		freeProc := dll.NewProc("TinyPluginFree")
+		callProc := dll.NewProc("TinyPluginCallMsgPack")
+		freeProc := dll.NewProc("TinyPluginFreeMsgPack")
+		isMsgPack := true
 
 		if err := dll.Load(); err != nil {
 			vm.fatalError(ErrorRuntime, "failed to load plugin %s: %v", path, err)
 		}
 
 		if err := callProc.Find(); err != nil {
-			vm.fatalError(ErrorRuntime, "plugin missing TinyPluginCall: %v", err)
-		}
+			callProc = dll.NewProc("TinyPluginCall")
+			freeProc = dll.NewProc("TinyPluginFree")
+			isMsgPack = false
 
-		if err := freeProc.Find(); err != nil {
-			vm.fatalError(ErrorRuntime, "plugin missing TinyPluginFree: %v", err)
+			if err := callProc.Find(); err != nil {
+				vm.fatalError(ErrorRuntime, "plugin missing both TinyPluginCallMsgPack and TinyPluginCall: %v", err)
+			}
+			if err := freeProc.Find(); err != nil {
+				vm.fatalError(ErrorRuntime, "plugin missing TinyPluginFree: %v", err)
+			}
+		} else {
+			if err := freeProc.Find(); err != nil {
+				vm.fatalError(ErrorRuntime, "plugin missing TinyPluginFreeMsgPack: %v", err)
+			}
 		}
 
 		vm.push(NewNative(&NativePluginValue{
-			Path: path,
-			Call: callProc.Addr(),
-			Free: freeProc.Addr(),
+			Path:      path,
+			Call:      callProc.Addr(),
+			Free:      freeProc.Addr(),
+			IsMsgPack: isMsgPack,
 		}))
 
 	default:
@@ -123,70 +134,92 @@ func fileExists(path string) bool {
 }
 
 func (vm *VM) callNativePlugin(plugin *NativePluginValue, method string, args []TinyValue) {
-	jsonArgs := make([]any, len(args))
+	if plugin.IsMsgPack {
+		// 1. Encode parameters to MessagePack
+		msgpackBytes := vm.encodeToMsgPack(method, args)
 
-	for i, arg := range args {
-		jsonArgs[i] = valueToJSONCompatible(arg)
-	}
+		// 2. Make the binary DLL call (passing buffer pointer and length)
+		resultPtr, _, _ := syscall.SyscallN(
+			plugin.Call,
+			uintptr(unsafe.Pointer(&msgpackBytes[0])),
+			uintptr(len(msgpackBytes)),
+		)
 
-	payload := map[string]any{
-		"method": method,
-		"args":   jsonArgs,
-	}
+		if resultPtr == 0 {
+			vm.fatalError(ErrorRuntime, "plugin returned null")
+		}
 
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
-		vm.fatalError(ErrorRuntime, "failed to encode plugin call: %v", err)
-	}
+		// 3. Read the returned MsgPack buffer and free it
+		resultBytes := cBytesToGo(resultPtr)
+		syscall.SyscallN(plugin.Free, resultPtr)
 
-	methodPtr, err := syscall.BytePtrFromString(method)
-	if err != nil {
-		vm.fatalError(ErrorRuntime, "invalid plugin method: %v", err)
-	}
+		// 4. Decode the result and push it to the stack
+		vm.push(vm.decodeFromMsgPack(resultBytes))
+	} else {
+		// Legacy JSON path
+		jsonArgs := make([]any, len(args))
+		for i, arg := range args {
+			jsonArgs[i] = valueToJSONCompatible(arg)
+		}
 
-	argsPtr, err := syscall.BytePtrFromString(string(payloadBytes))
-	if err != nil {
-		vm.fatalError(ErrorRuntime, "invalid plugin args: %v", err)
-	}
+		payload := map[string]any{
+			"method": method,
+			"args":   jsonArgs,
+		}
 
-	resultPtr, _, _ := syscall.SyscallN(
-		plugin.Call,
-		uintptr(unsafe.Pointer(methodPtr)),
-		uintptr(unsafe.Pointer(argsPtr)),
-	)
+		payloadBytes, err := json.Marshal(payload)
+		if err != nil {
+			vm.fatalError(ErrorRuntime, "failed to encode plugin call: %v", err)
+		}
 
-	if resultPtr == 0 {
-		vm.fatalError(ErrorRuntime, "plugin returned null")
-	}
+		methodPtr, err := syscall.BytePtrFromString(method)
+		if err != nil {
+			vm.fatalError(ErrorRuntime, "invalid plugin method: %v", err)
+		}
 
-	resultText := cStringToGoString(resultPtr)
+		argsPtr, err := syscall.BytePtrFromString(string(payloadBytes))
+		if err != nil {
+			vm.fatalError(ErrorRuntime, "invalid plugin args: %v", err)
+		}
 
-	syscall.SyscallN(plugin.Free, resultPtr)
+		resultPtr, _, _ := syscall.SyscallN(
+			plugin.Call,
+			uintptr(unsafe.Pointer(methodPtr)),
+			uintptr(unsafe.Pointer(argsPtr)),
+		)
 
-	result, err := parseTinyJSONDirect(resultText)
-	if err != nil {
-		vm.fatalError(ErrorRuntime, "plugin returned invalid JSON: %v", err)
-	}
+		if resultPtr == 0 {
+			vm.fatalError(ErrorRuntime, "plugin returned null")
+		}
 
-	if obj, ok := result.Value.(ObjectValue); ok {
-		if errValue, exists := obj["error"]; exists {
-			errObj, ok := errValue.Value.(ObjectValue)
-			if ok {
-				kind, ok1 := errObj["kind"].Value.(string)
-				message, ok2 := errObj["message"].Value.(string)
+		resultText := cStringToGoString(resultPtr)
+		syscall.SyscallN(plugin.Free, resultPtr)
 
-				if ok1 && ok2 {
-					if kind == "" {
-						kind = "PluginError"
+		result, err := parseTinyJSONDirect(resultText)
+		if err != nil {
+			vm.fatalError(ErrorRuntime, "plugin returned invalid JSON: %v", err)
+		}
+
+		if obj, ok := result.Value.(ObjectValue); ok {
+			if errValue, exists := obj["error"]; exists {
+				errObj, ok := errValue.Value.(ObjectValue)
+				if ok {
+					kind, ok1 := errObj["kind"].Value.(string)
+					message, ok2 := errObj["message"].Value.(string)
+
+					if ok1 && ok2 {
+						if kind == "" {
+							kind = "PluginError"
+						}
+
+						vm.fatalError(ErrorKind(kind), "%s", message)
 					}
-
-					vm.fatalError(ErrorKind(kind), "%s", message)
 				}
 			}
 		}
-	}
 
-	vm.push(jsonToTinyValue(result))
+		vm.push(jsonToTinyValue(result))
+	}
 }
 
 func cStringToGoString(ptr uintptr) string {

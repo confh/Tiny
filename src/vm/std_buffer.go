@@ -1,6 +1,7 @@
 package vm
 
 import (
+	"encoding/base64"
 	"unsafe"
 
 	. "language.com/src/tinyerrors"
@@ -17,6 +18,7 @@ func init() {
 		"fromString": bufferFromString,
 		"fromArray":  bufferFromArray,
 		"alloc":      bufferAlloc,
+		"fromBase64": bufferFromBase64,
 	}
 	registerStdModule(stdBufferMetadata)
 }
@@ -75,4 +77,32 @@ func bufferAlloc(vm *VM, args []TinyValue) {
 	vm.push(NewNative(&BufferValue{
 		Bytes: unsafe.Slice((*byte)(unsafe.Pointer(&data[0])), len(data)*8),
 	}))
+}
+
+func bufferFromBase64(vm *VM, args []TinyValue) {
+	expectArgs(vm, "buffer.fromBase64", args, 1)
+
+	str := argString(vm, "buffer.fromBase64", args, 0)
+
+	if data, err := base64.StdEncoding.DecodeString(str); err == nil {
+		vm.push(NewBuffer(data))
+		return
+	}
+
+	if data, err := base64.URLEncoding.DecodeString(str); err == nil {
+		vm.push(NewBuffer(data))
+		return
+	}
+
+	if data, err := base64.RawStdEncoding.DecodeString(str); err == nil {
+		vm.push(NewBuffer(data))
+		return
+	}
+
+	if data, err := base64.RawURLEncoding.DecodeString(str); err == nil {
+		vm.push(NewBuffer(data))
+		return
+	}
+
+	vm.runtimeError(ErrorRuntime, "failed to decode base64 string")
 }

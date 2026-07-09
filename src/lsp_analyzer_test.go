@@ -7399,3 +7399,377 @@ func TestLSPThisFieldGoToDefinitionAcrossFiles(t *testing.T) {
 		t.Fatalf("expected this.currentToken.value type to be 'any', got %q", memberType)
 	}
 }
+
+func TestLSPDiscordBotDiagnosticsBug(t *testing.T) {
+	lspImportExportCache = map[string]lspImportCacheEntry{}
+
+	uri := "file:///C:/Users/confis/Desktop/Programming/Tiny/twitter-downloader-tiny/src/main.tiny"
+	textBytes, err := os.ReadFile("C:/Users/confis/Desktop/Programming/Tiny/twitter-downloader-tiny/src/main.tiny")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	diagnostics := semanticDiagnostics(uri, string(textBytes))
+	t.Logf("DIAGNOSTICS COUNT: %d", len(diagnostics))
+	for _, d := range diagnostics {
+		t.Logf("DIAGNOSTIC: %s", d["message"])
+	}
+
+	compDiag := compilerDiagnostics(uri, string(textBytes))
+	t.Logf("COMPILER DIAGNOSTICS COUNT: %d", len(compDiag))
+	for _, d := range compDiag {
+		t.Logf("COMPILER DIAGNOSTIC: %s", d["message"])
+	}
+}
+
+func TestLSPFunctionReturnTypeInferenceMultiStatement(t *testing.T) {
+	uri := "file:///return_type_multi.tiny"
+	text := strings.Join([]string{
+		`fn test(): string {`,
+		`    const data = ""`,
+		`    return data`,
+		`}`,
+		`const result = test()`,
+	}, "\n")
+
+	hover := getHover(uri, text, Position{Line: 4, Character: 15})
+	if hover == nil {
+		t.Fatal("expected hover on test()")
+	}
+	h, ok := hover.(HoverResult)
+	if !ok {
+		t.Fatalf("expected HoverResult, got %T", hover)
+	}
+	if !strings.Contains(h.Contents.Value, "test(): string") {
+		t.Fatalf("expected hover to show test(): string, got %q", h.Contents.Value)
+	}
+}
+
+func TestLSPFunctionReturnTypeInferenceFromLastReturn(t *testing.T) {
+	uri := "file:///return_type_last.tiny"
+	text := strings.Join([]string{
+		`fn getData() {`,
+		`    const x = 1`,
+		`    const msg = "hello"`,
+		`    return msg`,
+		`}`,
+		`const val = getData()`,
+	}, "\n")
+
+	hover := getHover(uri, text, Position{Line: 5, Character: 14})
+	if hover == nil {
+		t.Fatal("expected hover on getData()")
+	}
+	h, ok := hover.(HoverResult)
+	if !ok {
+		t.Fatalf("expected HoverResult, got %T", hover)
+	}
+	if !strings.Contains(h.Contents.Value, "getData(): string") {
+		t.Fatalf("expected hover to show getData(): string, got %q", h.Contents.Value)
+	}
+}
+
+func TestLSPFunctionReturnTypeInferenceFromTypedVariable(t *testing.T) {
+	uri := "file:///return_type_typed.tiny"
+	text := strings.Join([]string{
+		`interface Client {`,
+		`    token: string`,
+		`}`,
+		`fn createClient(): Client {`,
+		`    const client: Client = {token: "abc"}`,
+		`    return client`,
+		`}`,
+	}, "\n")
+
+	hover := getHover(uri, text, Position{Line: 3, Character: 8})
+	if hover == nil {
+		t.Fatal("expected hover on createClient()")
+	}
+	h, ok := hover.(HoverResult)
+	if !ok {
+		t.Fatalf("expected HoverResult, got %T", hover)
+	}
+	if !strings.Contains(h.Contents.Value, "createClient(): interface:Client") {
+		t.Fatalf("expected hover to show createClient(): interface:Client, got %q", h.Contents.Value)
+	}
+}
+
+func TestLSPConstVariableHoverShowsConstKeyword(t *testing.T) {
+	uri := "file:///const_hover.tiny"
+	text := strings.Join([]string{
+		`fn test() {`,
+		`    const name = "hello"`,
+		`    const x = name`,
+		`}`,
+	}, "\n")
+
+	hover := getHover(uri, text, Position{Line: 2, Character: 14})
+	if hover == nil {
+		t.Fatal("expected hover on name")
+	}
+	h, ok := hover.(HoverResult)
+	if !ok {
+		t.Fatalf("expected HoverResult, got %T", hover)
+	}
+	if !strings.Contains(h.Contents.Value, "const name") {
+		t.Fatalf("expected hover to show const, got %q", h.Contents.Value)
+	}
+}
+
+func TestLSPCompletionOnLocalConstString(t *testing.T) {
+	uri := "file:///local_const_completion.tiny"
+	text := strings.Join([]string{
+		`fn test() {`,
+		`    const name = "hello"`,
+		`    name.`,
+		`}`,
+	}, "\n")
+
+	items := getCompletions(uri, text, Position{Line: 2, Character: 9})
+	if len(items) == 0 {
+		t.Fatal("expected completions after name.")
+	}
+	labels := completionLabels(items)
+	hasStringMethod := false
+	for _, l := range labels {
+		if l == "substring" || l == "indexOf" || l == "length" || l == "split" || l == "trim" {
+			hasStringMethod = true
+			break
+		}
+	}
+	if !hasStringMethod {
+		t.Fatalf("expected string method completions, got %v", labels)
+	}
+}
+
+func TestLSPCompletionInsideAnonymousFunction(t *testing.T) {
+	uri := "file:///anon_fn_completion.tiny"
+	text := strings.Join([]string{
+		`fn test() {`,
+		`    const items = ["a", "b", "c"]`,
+		`    items.forEach(fn(item) {`,
+		`        const name = item`,
+		`        name.`,
+		`    })`,
+		`}`,
+	}, "\n")
+
+	scope := scopeAtPosition(uri, text, Position{Line: 4, Character: 13})
+	sym, ok := scope.Resolve("name")
+	t.Logf("resolve 'name' inside anon fn body: ok=%v, type=%q", ok, sym.Type)
+	if !ok {
+		t.Fatal("expected 'name' to be in scope inside anonymous function body")
+	}
+	sym2, ok2 := scope.Resolve("item")
+	t.Logf("resolve 'item' inside anon fn body: ok=%v, type=%q", ok2, sym2.Type)
+	if !ok2 {
+		t.Fatal("expected 'item' to be in scope inside anonymous function body")
+	}
+}
+
+func TestLSPCompletionInsideMethodCallback(t *testing.T) {
+	uri := "file:///method_callback_completion.tiny"
+	text := strings.Join([]string{
+		`fn test(obj) {`,
+		`    obj.onEvent(fn(data) {`,
+		`        const name = data`,
+		`        name.`,
+		`    })`,
+		`}`,
+	}, "\n")
+
+	scope := scopeAtPosition(uri, text, Position{Line: 3, Character: 9})
+	sym, ok := scope.Resolve("name")
+	t.Logf("resolve 'name' inside anon fn body: ok=%v, type=%q", ok, sym.Type)
+	if !ok {
+		t.Fatal("expected 'name' to be in scope inside anonymous function body")
+	}
+}
+
+func TestLSPClassMethodGenericWithoutTypeArgs(t *testing.T) {
+	text := strings.Join([]string{
+		`class Box {`,
+		`    fn callFunction:T(name: string, ...args: any): T {`,
+		`        return`,
+		`    }`,
+		`}`,
+		`const box = Box()`,
+		`const result = box.callFunction("test")`,
+	}, "\n")
+
+	scope := scopeAtPosition("file:///class_method_generic.tiny", text, Position{
+		Line:      6,
+		Character: len("    const result = box"),
+	})
+	sym, ok := scope.Resolve("result")
+	if !ok {
+		t.Fatal("expected 'result' in scope")
+	}
+	t.Logf("result type: %q", sym.Type)
+	if sym.Type == "T" {
+		t.Fatalf("expected result type to not be literal 'T', got %q", sym.Type)
+	}
+}
+
+func TestLSPClassMethodGenericWithTypeArgs(t *testing.T) {
+	text := strings.Join([]string{
+		`class Box {`,
+		`    fn callFunction:T(name: string, ...args: any): T {`,
+		`        return`,
+		`    }`,
+		`}`,
+		`const box = Box()`,
+		`const result = box.callFunction:string("test")`,
+	}, "\n")
+
+	items := getCompletions("file:///class_method_generic_args.tiny", text, Position{
+		Line:      6,
+		Character: len("    const result = box."),
+	})
+	if !completionLabelsContain(items, "callFunction") {
+		t.Fatalf("expected callFunction in completions, got %#v", completionLabels(items))
+	}
+
+	diags := semanticDiagnostics("file:///class_method_generic_args.tiny", text)
+	t.Logf("diagnostics: %v", diags)
+	for _, d := range diags {
+		if msg, ok := d["message"].(string); ok && strings.Contains(msg, "cannot call non-function") {
+			t.Fatalf("box.callFunction:string('test') should not produce 'cannot call non-function' error, got: %s", msg)
+		}
+	}
+}
+
+func TestLSPLocalVarVisibleInsideFunctionCall(t *testing.T) {
+	lspLineScopeCache = map[string]lspLineScopeCacheEntry{}
+	lspBlockCache = map[string]lspBlockCacheEntry{}
+
+	text := strings.Join([]string{
+		`import std "io"`,
+		`import std "os"`,
+		`import std "path"`,
+		``,
+		`fn compileEmbeddedDir(files: object, filePath: string) {`,
+		`    const tempDir = os.tempDir()`,
+		`    const fullPath = path.join(tempDir, )`,
+		`}`,
+	}, "\n")
+
+	cursorLine := 6
+	cursorChar := len("    const fullPath = path.join(tempDir, ")
+	pos := Position{Line: cursorLine, Character: cursorChar}
+
+	scope := scopeAtPosition("file:///test_local_var_unique.tiny", text, pos)
+	items := scopeCompletions(scope, "file:///test_local_var_unique.tiny", text, false)
+
+	var localTempDir *CompletionItem
+	for i := range items {
+		if items[i].Label == "tempDir" && strings.Contains(items[i].Detail, "constant") {
+			localTempDir = &items[i]
+			break
+		}
+	}
+
+	if localTempDir == nil {
+		t.Fatalf("local variable 'tempDir' not found in completions")
+	}
+	if localTempDir.Kind != 6 {
+		t.Fatalf("expected local tempDir kind=6 (variable), got kind=%d", localTempDir.Kind)
+	}
+	if !strings.Contains(localTempDir.SortText, "01_") {
+		t.Fatalf("expected local tempDir rank 01_ (top priority), got sort=%q", localTempDir.SortText)
+	}
+}
+
+func TestLSPForInLoopVarShadowsOuter(t *testing.T) {
+	text := strings.Join([]string{
+		`const link = "outer"`,
+		`const links = ["a", "b"]`,
+		`for item in links {`,
+		`    const cb = fn() {`,
+		`        const x = item`,
+		`    }`,
+		`}`,
+	}, "\n")
+
+	// Cursor on "item" inside the anonymous function body (line 4, "const x = item")
+	pos := Position{Line: 4, Character: 18}
+	scope := scopeAtPosition("file:///test_for_in.tiny", text, pos)
+
+	sym, ok := scope.Resolve("item")
+	if !ok {
+		t.Fatalf("item not found in scope")
+	}
+	t.Logf("item resolved: kind=%v detail=%q line=%d", sym.Kind, sym.Detail, sym.Line)
+
+	// The loop variable should be at line 3 (0-indexed), not some earlier line
+	if sym.Line != 3 {
+		t.Fatalf("expected item at line 3 (for-in loop), got line=%d detail=%q", sym.Line, sym.Detail)
+	}
+}
+
+func TestLSPForInLoopVarShadowsOuterGoToDef(t *testing.T) {
+	text := strings.Join([]string{
+		`const link = "outer"`,
+		`const links = ["a", "b"]`,
+		`for link in links {`,
+		`    const cb = fn() {`,
+		`        doSomething(link)`,
+		`    }`,
+		`}`,
+	}, "\n")
+
+	// Cursor on "link" in "doSomething(link)" on line 4
+	pos := Position{Line: 4, Character: 20}
+	def := getDefinition("file:///test_for_in2.tiny", text, pos)
+	if def == nil {
+		t.Fatalf("go-to-definition returned nil for link")
+	}
+	loc, ok := def.(Location)
+	if !ok {
+		t.Fatalf("expected Location, got %T", def)
+	}
+	t.Logf("link go-to-def: line=%d", loc.Range.Start.Line)
+
+	// Should point to the for-in loop (line 2, 0-indexed), not the const (line 0)
+	if loc.Range.Start.Line != 2 {
+		t.Fatalf("expected link to go to for-in loop at line 2, got line %d", loc.Range.Start.Line)
+	}
+}
+
+func TestLSPScopeIncludesLocalConstInsideFunction(t *testing.T) {
+	text := strings.Join([]string{
+		`import std "io"`,
+		`import std "os"`,
+		`import std "path"`,
+		``,
+		`fn compileEmbeddedDir(files: object, filePath: string) {`,
+		`    const tempDir = os.tempDir()`,
+		`    const fullPath = path.join(tempDir, )`,
+		`}`,
+	}, "\n")
+
+	cursorLine := 6
+	cursorChar := len("    const fullPath = path.join(tempDir, ")
+	pos := Position{Line: cursorLine, Character: cursorChar}
+	scope := scopeAtPosition("file:///test_local_var.tiny", text, pos)
+
+	syms := map[string]SymbolInfo{}
+	for s := scope; s != nil; s = s.Parent {
+		for k, v := range s.Symbols {
+			if _, ok := syms[k]; !ok {
+				syms[k] = v
+			}
+		}
+	}
+	t.Logf("scope symbols: %d", len(syms))
+	for name, sym := range syms {
+		t.Logf("  %q: kind=%v type=%q detail=%q", name, sym.Kind, sym.Type, sym.Detail)
+	}
+
+	if _, ok := syms["tempDir"]; !ok {
+		t.Fatalf("tempDir not found in scope at all")
+	}
+	if _, ok := syms["files"]; !ok {
+		t.Fatalf("files param not found in scope at all")
+	}
+}

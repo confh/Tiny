@@ -148,9 +148,6 @@ func optimizeLocalConstOpStore(instructions []Instruction) []Instruction {
 						Const: instructions[i+1].Value,
 						Op:    instructions[i+2].Op,
 					},
-					File:   instructions[i].File,
-					Line:   instructions[i].Line,
-					Column: instructions[i].Column,
 				})
 
 				oldToNew[i] = newIndex
@@ -194,9 +191,6 @@ func optimizeLocalConstOp(instructions []Instruction) []Instruction {
 						Const: instructions[i+1].Value,
 						Op:    instructions[i+2].Op,
 					},
-					File:   instructions[i].File,
-					Line:   instructions[i].Line,
-					Column: instructions[i].Column,
 				})
 
 				oldToNew[i] = newIndex
@@ -243,9 +237,6 @@ func optimizeAddLocalArrayIndexStore(instructions []Instruction) []Instruction {
 						ArraySlot: arraySlot,
 						IndexSlot: indexSlot,
 					},
-					File:   instructions[i].File,
-					Line:   instructions[i].Line,
-					Column: instructions[i].Column,
 				})
 
 				for j := 0; j < 6; j++ {
@@ -297,9 +288,6 @@ func optimizeArrayIndexConstOpStore(instructions []Instruction) []Instruction {
 						Const:     instructions[i+5].Value,
 						Op:        instructions[i+6].Op,
 					},
-					File:   instructions[i].File,
-					Line:   instructions[i].Line,
-					Column: instructions[i].Column,
 				})
 
 				for j := 0; j < 8; j++ {
@@ -346,9 +334,6 @@ func optimizeAddLocalGlobalGlobalStore(instructions []Instruction) []Instruction
 						GlobalSlotA: globalSlotA,
 						GlobalSlotB: globalSlotB,
 					},
-					File:   instructions[i].File,
-					Line:   instructions[i].Line,
-					Column: instructions[i].Column,
 				})
 
 				for j := 0; j < 6; j++ {
@@ -414,9 +399,6 @@ func optimizeLoopCondition(instructions []Instruction) []Instruction {
 						SlotB:  slotB,
 						Target: target,
 					},
-					File:   instructions[i].File,
-					Line:   instructions[i].Line,
-					Column: instructions[i].Column,
 				})
 
 				oldToNew[i] = newIndex
@@ -496,9 +478,6 @@ func optimizeAddPropertyLocalLocal(instructions []Instruction) []Instruction {
 						SourceSlot: sourceSlot,
 						Name:       setName,
 					},
-					File:   instructions[i].File,
-					Line:   instructions[i].Line,
-					Column: instructions[i].Column,
 				})
 
 				oldToNew[i] = newIndex
@@ -552,9 +531,6 @@ func optimizeAddPropertyLocalConst(instructions []Instruction) []Instruction {
 						Const:      instructions[i+2].Value,
 						Op:         instructions[i+3].Op,
 					},
-					File:   instructions[i].File,
-					Line:   instructions[i].Line,
-					Column: instructions[i].Column,
 				})
 
 				for j := 0; j < 5; j++ {
@@ -605,9 +581,6 @@ func optimizeAddPropertyLocalProperty(instructions []Instruction) []Instruction 
 						SourceName: sourceInfo.Name,
 						Op:         instructions[i+3].Op,
 					},
-					File:   instructions[i].File,
-					Line:   instructions[i].Line,
-					Column: instructions[i].Column,
 				})
 
 				for j := 0; j < 5; j++ {
@@ -674,9 +647,6 @@ func optimizeJumpPropertyLocal(instructions []Instruction) []Instruction {
 						Name:   info.Name,
 						Target: target,
 					},
-					File:   instructions[i].File,
-					Line:   instructions[i].Line,
-					Column: instructions[i].Column,
 				})
 
 				oldToNew[i] = newIndex
@@ -717,9 +687,6 @@ func optimizeArrayIndexLocalStore(instructions []Instruction) []Instruction {
 						DestSlot:  storeInfo.Slot,
 						Store:     storeInfo,
 					},
-					File:   instructions[i].File,
-					Line:   instructions[i].Line,
-					Column: instructions[i].Column,
 				})
 
 				for j := 0; j < 4; j++ {
@@ -783,9 +750,6 @@ func optimizeAddLocalPropertiesStore(instructions []Instruction) []Instruction {
 					ObjectSlot: objectSlot,
 					Names:      append([]string(nil), names...),
 				},
-				File:   instructions[i].File,
-				Line:   instructions[i].Line,
-				Column: instructions[i].Column,
 			})
 
 			for k := i; k <= j; k++ {
@@ -827,9 +791,6 @@ func optimizeMulLocalConst(instructions []Instruction) []Instruction {
 						Slot:  slot,
 						Value: value,
 					},
-					File:   instructions[i].File,
-					Line:   instructions[i].Line,
-					Column: instructions[i].Column,
 				})
 
 				oldToNew[i] = newIndex
@@ -872,9 +833,6 @@ func optimizeGetPropertyLocal(instructions []Instruction) []Instruction {
 						Slot: slot,
 						Name: name,
 					},
-					File:   instructions[i].File,
-					Line:   instructions[i].Line,
-					Column: instructions[i].Column,
 				})
 
 				oldToNew[i] = newIndex
@@ -933,9 +891,6 @@ func optimizeJumpLocalGTConst(instructions []Instruction) []Instruction {
 						Value:  constValue,
 						Target: target,
 					},
-					File:   instructions[i].File,
-					Line:   instructions[i].Line,
-					Column: instructions[i].Column,
 				})
 
 				oldToNew[i] = newIndex
@@ -979,9 +934,6 @@ func optimizeArrayLocalMethodCalls(instructions []Instruction) []Instruction {
 					Value: ArrayLocalCallInfo{
 						ArraySlot: arraySlot,
 					},
-					File:   instructions[i].File,
-					Line:   instructions[i].Line,
-					Column: instructions[i].Column,
 				})
 
 				oldToNew[i] = newIndex
@@ -1018,9 +970,6 @@ func optimizeArrayLocalMethodCalls(instructions []Instruction) []Instruction {
 							ArraySlot: arraySlot,
 							ArgSlot:   argSlot,
 						},
-						File:   instructions[i].File,
-						Line:   instructions[i].Line,
-						Column: instructions[i].Column,
 					})
 
 					oldToNew[i] = newIndex
@@ -1052,9 +1001,6 @@ func optimizeArrayLocalMethodCalls(instructions []Instruction) []Instruction {
 						ArgSlot:   argSlot,
 						Factor:    factor,
 					},
-					File:   instructions[i].File,
-					Line:   instructions[i].Line,
-					Column: instructions[i].Column,
 				})
 
 				oldToNew[i] = newIndex
@@ -1100,9 +1046,6 @@ func optimizeLocalMethodCalls(instructions []Instruction) []Instruction {
 							Method:       info.Method,
 							ReceiverSlot: receiverSlot,
 						},
-						File:   instructions[i].File,
-						Line:   instructions[i].Line,
-						Column: instructions[i].Column,
 					})
 
 					oldToNew[i] = newIndex
@@ -1131,9 +1074,6 @@ func optimizeLocalMethodCalls(instructions []Instruction) []Instruction {
 							ReceiverSlot: receiverSlot,
 							ArgSlot:      argSlot,
 						},
-						File:   instructions[i].File,
-						Line:   instructions[i].Line,
-						Column: instructions[i].Column,
 					})
 
 					oldToNew[i] = newIndex
@@ -1184,9 +1124,6 @@ func optimizeJumpModLocalConstNotZero(instructions []Instruction) []Instruction 
 						Right:    right,
 						Target:   target,
 					},
-					File:   instructions[i].File,
-					Line:   instructions[i].Line,
-					Column: instructions[i].Column,
 				})
 
 				oldToNew[i] = newIndex
@@ -1247,9 +1184,6 @@ func optimizeJumpModLocalLocalNotZero(instructions []Instruction) []Instruction 
 						RightSlot: rightSlot,
 						Target:    target,
 					},
-					File:   instructions[i].File,
-					Line:   instructions[i].Line,
-					Column: instructions[i].Column,
 				})
 
 				oldToNew[i] = newIndex
@@ -1306,9 +1240,6 @@ func optimizeAddAssignLocal(instructions []Instruction) []Instruction {
 						TargetSlot: targetLoadSlot,
 						SourceSlot: sourceSlot,
 					},
-					File:   instructions[i].File,
-					Line:   instructions[i].Line,
-					Column: instructions[i].Column,
 				})
 
 				oldToNew[i] = newIndex
@@ -1363,9 +1294,6 @@ func optimizeSubtractAssignLocal(instructions []Instruction) []Instruction {
 						TargetSlot: targetLoadSlot,
 						SourceSlot: sourceSlot,
 					},
-					File:   instructions[i].File,
-					Line:   instructions[i].Line,
-					Column: instructions[i].Column,
 				})
 
 				oldToNew[i] = newIndex
@@ -1422,9 +1350,6 @@ func optimizeJumpLocalGEConst(instructions []Instruction) []Instruction {
 						Value:  constValue,
 						Target: target, // old target for now, remapped below
 					},
-					File:   instructions[i].File,
-					Line:   instructions[i].Line,
-					Column: instructions[i].Column,
 				})
 
 				oldToNew[i] = newIndex
@@ -1474,9 +1399,6 @@ func optimizeJumpLocalGELocal(instructions []Instruction) []Instruction {
 						RightSlot: rightSlot,
 						Target:    target,
 					},
-					File:   instructions[i].File,
-					Line:   instructions[i].Line,
-					Column: instructions[i].Column,
 				})
 
 				oldToNew[i] = newIndex
@@ -1594,9 +1516,6 @@ func optimizeAddLocalLocalStore(instructions []Instruction) []Instruction {
 						SlotB:    slotB,
 						DestSlot: destSlot,
 					},
-					File:   instructions[i].File,
-					Line:   instructions[i].Line,
-					Column: instructions[i].Column,
 				})
 
 				oldToNew[i] = newIndex
@@ -1737,9 +1656,6 @@ func optimizeIncLocal(instructions []Instruction) []Instruction {
 						FloatAmount: float64(amount),
 						IsFloat:     false,
 					},
-					File:   instructions[i].File,
-					Line:   instructions[i].Line,
-					Column: instructions[i].Column,
 				})
 
 				oldToNew[i] = newIndex

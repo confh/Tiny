@@ -1,6 +1,8 @@
 package vm
 
 import (
+	"sync"
+
 	. "language.com/src/tinyerrors"
 )
 
@@ -97,7 +99,50 @@ func (vm *VM) callStandardModule(module string, method string, args []TinyValue)
 	case "sqlite":
 		vm.callStdSqlite(method, args)
 
+	case "wasm":
+		vm.callStdWasm(method, args)
+
 	default:
 		vm.fatalError(ErrorName, "unknown standard module: %s", module)
 	}
+}
+
+var stdModuleMethods map[string]map[string]StdModuleFunc
+var stdModuleMethodsOnce sync.Once
+
+func EnsureStdModuleMethods() {
+	stdModuleMethodsOnce.Do(func() {
+		stdModuleMethods = map[string]map[string]StdModuleFunc{
+			"app":       stdAppMethods,
+			"array":     stdArrayMethods,
+			"buffer":    stdBufferMethods,
+			"crypto":    stdCryptoMethods,
+			"desktop":   stdDesktopMethods,
+			"error":     stdErrorMethods,
+			"fs":        stdFsMethods,
+			"http":      stdHttpMethods,
+			"io":        stdIOMethods,
+			"json":      stdJsonMethods,
+			"math":      stdMathMethods,
+			"net":       stdNetMethods,
+			"object":    stdObjectMethods,
+			"observer":  stdObserverMethods,
+			"os":        stdOSMethods,
+			"path":      stdPathMethods,
+			"process":   stdProcessMethods,
+			"regex":     stdRegexMethods,
+			"runtime":   stdRuntimeMethods,
+			"sqlite":    stdSqliteMethods,
+			"strings":   stdStringMethods,
+			"sync":      stdSyncMethods,
+			"tests":     stdTestMethods,
+			"time":      stdTimeMethods,
+			"tray":      stdTrayMethods,
+			"ui":        stdUiMethods,
+			"url":       stdUrlMethods,
+			"validate":  stdValidateMethods,
+			"wasm":      stdWasmMethods,
+			"websocket": stdWebsocketMethods,
+		}
+	})
 }

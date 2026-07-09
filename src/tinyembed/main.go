@@ -43,9 +43,10 @@ var lastError string
 
 func init() {
 	vm.SetRuntimeBytecodeLoader(func(data []byte) vm.RuntimeBytecodeProgram {
-		mainInstructions, functions, classes, interfaces, globalIndex := bytecode.LoadBytecodeFromBytes(data)
+		mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex := bytecode.LoadBytecodeFromBytes(data)
 		return vm.RuntimeBytecodeProgram{
 			MainInstructions: mainInstructions,
+			MainDebugInfo:    mainDebugInfo,
 			Functions:        functions,
 			Classes:          classes,
 			Interfaces:       interfaces,
@@ -59,13 +60,13 @@ func init() {
 
 	vm.SetCompileSourceFunc(func(source string, file string) []byte {
 		program := compileRuntimeProgram(source, file)
-		return bytecode.SaveBytecodeToBytes(program.MainInstructions, program.Functions, program.Classes, program.Interfaces, program.GlobalIndex, false, false)
+		return bytecode.SaveBytecodeToBytes(program.MainInstructions, program.MainDebugInfo, program.Functions, program.Classes, program.Interfaces, program.GlobalIndex, false, false)
 	})
 
 	vm.SetCompileFileFunc(func(path string) []byte {
 		program := tinyloader.LoadProgram(path)
 		compiled := compileProgram(program)
-		return bytecode.SaveBytecodeToBytes(compiled.MainInstructions, compiled.Functions, compiled.Classes, compiled.Interfaces, compiled.GlobalIndex, false, false)
+		return bytecode.SaveBytecodeToBytes(compiled.MainInstructions, compiled.MainDebugInfo, compiled.Functions, compiled.Classes, compiled.Interfaces, compiled.GlobalIndex, false, false)
 	})
 }
 
@@ -114,10 +115,11 @@ func makeTinyBuffer(data []byte) C.TinyBuffer {
 }
 
 func loadBytecode(data []byte) C.uint64_t {
-	mainInstructions, functions, classes, interfaces, globalIndex := bytecode.LoadBytecodeFromBytes(data)
+	mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex := bytecode.LoadBytecodeFromBytes(data)
 
 	tinyVM := vm.NewVM(vm.VMInfo{
 		MainInstructions: mainInstructions,
+		MainDebugInfo:    mainDebugInfo,
 		Functions:        functions,
 		Classes:          classes,
 		Interfaces:       interfaces,
@@ -137,7 +139,7 @@ func loadBytecode(data []byte) C.uint64_t {
 func compileProgram(program vm.Program) vm.RuntimeBytecodeProgram {
 	compiler := tinycompiler.NewCompiler()
 	compiler.SetPreserveAllFunctions(true)
-	mainInstructions, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
+	mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
 
 	mainInstructions = vm.OptimizeBytecode(mainInstructions)
 	for name, fn := range functions {
@@ -147,6 +149,7 @@ func compileProgram(program vm.Program) vm.RuntimeBytecodeProgram {
 
 	return vm.RuntimeBytecodeProgram{
 		MainInstructions: mainInstructions,
+		MainDebugInfo:    mainDebugInfo,
 		Functions:        functions,
 		Classes:          classes,
 		Interfaces:       interfaces,
@@ -163,13 +166,13 @@ func compileRuntimeProgram(source string, file string) vm.RuntimeBytecodeProgram
 
 func compileSourceBytes(source string, file string) []byte {
 	program := compileRuntimeProgram(source, file)
-	return bytecode.SaveBytecodeToBytes(program.MainInstructions, program.Functions, program.Classes, program.Interfaces, program.GlobalIndex, false, false)
+	return bytecode.SaveBytecodeToBytes(program.MainInstructions, program.MainDebugInfo, program.Functions, program.Classes, program.Interfaces, program.GlobalIndex, false, false)
 }
 
 func compileFileBytes(path string) []byte {
 	program := tinyloader.LoadProgram(path)
 	compiled := compileProgram(program)
-	return bytecode.SaveBytecodeToBytes(compiled.MainInstructions, compiled.Functions, compiled.Classes, compiled.Interfaces, compiled.GlobalIndex, false, false)
+	return bytecode.SaveBytecodeToBytes(compiled.MainInstructions, compiled.MainDebugInfo, compiled.Functions, compiled.Classes, compiled.Interfaces, compiled.GlobalIndex, false, false)
 }
 
 func loadSource(source string, file string) C.uint64_t {
@@ -177,6 +180,7 @@ func loadSource(source string, file string) C.uint64_t {
 
 	tinyVM := vm.NewVM(vm.VMInfo{
 		MainInstructions: program.MainInstructions,
+		MainDebugInfo:    program.MainDebugInfo,
 		Functions:        program.Functions,
 		Classes:          program.Classes,
 		Interfaces:       program.Interfaces,
@@ -242,6 +246,7 @@ func TinyLoadFile(path *C.char) C.uint64_t {
 	compiled := compileProgram(program)
 	tinyVM := vm.NewVM(vm.VMInfo{
 		MainInstructions: compiled.MainInstructions,
+		MainDebugInfo:    compiled.MainDebugInfo,
 		Functions:        compiled.Functions,
 		Classes:          compiled.Classes,
 		Interfaces:       compiled.Interfaces,

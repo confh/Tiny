@@ -5,19 +5,22 @@ package tinyplugin
 */
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
 	"sync"
+
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 type Request struct {
-	Method string `json:"method"`
-	Args   []any  `json:"args"`
+	Method string `json:"method" msgpack:"method"`
+	Args   []any  `json:"args" msgpack:"args"`
 }
 
-type Handler func(args Args) (any, error)
+type Handler func(args Args) (map[any]any, error)
 
 var handlers = map[string]Handler{}
 
@@ -220,4 +223,56 @@ func (s *HandleStore[T]) Delete(handle string) {
 	defer s.mu.Unlock()
 
 	delete(s.items, handle)
+}
+
+func HandleCallMsgPack(data []byte) []byte {
+	var req Request
+
+	if err := msgpack.Unmarshal(data, &req); err != nil {
+		return MsgPackErrorResult("PluginError", err.Error())
+	}
+
+	handler, exists := handlers[req.Method]
+	if !exists {
+		return MsgPackErrorResult("PluginError", "unknown method: "+req.Method)
+	}
+
+	result, err := safeCall(handler, Args{values: req.Args})
+	if err != nil {
+		var pluginErr *PluginError
+		if errors.As(err, &pluginErr) {
+			return MsgPackErrorResult(pluginErr.Kind, pluginErr.Message)
+		}
+
+		return MsgPackErrorResult("PluginError", err.Error())
+	}
+
+	return MsgPackResult(result)
+}
+
+func MsgPackResult(value any) []byte {
+	bytes, err := msgpack.Marshal(value)
+	if err != nil {
+		return MsgPackErrorResult("PluginError", "failed to encode response: "+err.Error())
+	}
+
+	return prefixWithLength(bytes)
+}
+
+func MsgPackErrorResult(kind string, message string) []byte {
+	bytes, _ := msgpack.Marshal(map[string]any{
+		"error": map[string]any{
+			"kind":    kind,
+			"message": message,
+		},
+	})
+
+	return prefixWithLength(bytes)
+}
+
+func prefixWithLength(bytes []byte) []byte {
+	result := make([]byte, 4+len(bytes))
+	binary.LittleEndian.PutUint32(result[0:4], uint32(len(bytes)))
+	copy(result[4:], bytes)
+	return result
 }

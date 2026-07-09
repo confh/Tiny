@@ -222,7 +222,7 @@ func packProgramToOutput(program Program, outFile string, target string, windowe
 	target = normalizeTarget(target)
 
 	compiler := tinycompiler.NewCompiler()
-	mainInstructions, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
+	mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex := compiler.CompileProgram(program)
 	mainInstructions = OptimizeBytecode(mainInstructions)
 
 	for name, fn := range functions {
@@ -230,7 +230,7 @@ func packProgramToOutput(program Program, outFile string, target string, windowe
 		functions[name] = fn
 	}
 
-	bytecodeBytes := SaveBytecodeToBytes(mainInstructions, functions, classes, interfaces, globalIndex, false, true)
+	bytecodeBytes := SaveBytecodeToBytes(mainInstructions, mainDebugInfo, functions, classes, interfaces, globalIndex, false, true)
 
 	runtimeBytes := getRuntimeBytesForTarget(target)
 

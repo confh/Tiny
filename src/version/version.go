@@ -2,7 +2,7 @@ package version
 
 import "fmt"
 
-const TinyVersion = "0.3.0"
+const TinyVersion = "0.3.1"
 const BytecodeCacheVersion = 30
 
 func VersionCommand() {
