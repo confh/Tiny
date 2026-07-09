@@ -7400,28 +7400,6 @@ func TestLSPThisFieldGoToDefinitionAcrossFiles(t *testing.T) {
 	}
 }
 
-func TestLSPDiscordBotDiagnosticsBug(t *testing.T) {
-	lspImportExportCache = map[string]lspImportCacheEntry{}
-
-	uri := "file:///C:/Users/confis/Desktop/Programming/Tiny/twitter-downloader-tiny/src/main.tiny"
-	textBytes, err := os.ReadFile("C:/Users/confis/Desktop/Programming/Tiny/twitter-downloader-tiny/src/main.tiny")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	diagnostics := semanticDiagnostics(uri, string(textBytes))
-	t.Logf("DIAGNOSTICS COUNT: %d", len(diagnostics))
-	for _, d := range diagnostics {
-		t.Logf("DIAGNOSTIC: %s", d["message"])
-	}
-
-	compDiag := compilerDiagnostics(uri, string(textBytes))
-	t.Logf("COMPILER DIAGNOSTICS COUNT: %d", len(compDiag))
-	for _, d := range compDiag {
-		t.Logf("COMPILER DIAGNOSTIC: %s", d["message"])
-	}
-}
-
 func TestLSPFunctionReturnTypeInferenceMultiStatement(t *testing.T) {
 	uri := "file:///return_type_multi.tiny"
 	text := strings.Join([]string{
